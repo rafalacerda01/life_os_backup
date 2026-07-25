@@ -5,7 +5,8 @@ class UserEntity extends Equatable {
   final String email;
   final String displayName;
   final bool isPremium;
-  final String? photoUrl; // <-- Adicionado aqui
+  final String? token; // <-- Garantido aqui
+  final String? photoUrl;
   final int xp;
   final int level;
   final int streak;
@@ -15,7 +16,8 @@ class UserEntity extends Equatable {
     required this.email,
     required this.displayName,
     required this.isPremium,
-    this.photoUrl, // <-- Adicionado aqui (opcional)
+    this.token, // <-- Adicionado no construtor
+    this.photoUrl,
     required this.xp,
     required this.level,
     required this.streak,
@@ -26,7 +28,8 @@ class UserEntity extends Equatable {
     String? email,
     String? displayName,
     bool? isPremium,
-    String? photoUrl, // <-- Adicionado aqui
+    String? token, // <-- Adicionado no copyWith
+    String? photoUrl,
     int? xp,
     int? level,
     int? streak,
@@ -36,7 +39,8 @@ class UserEntity extends Equatable {
       email: email ?? this.email,
       displayName: displayName ?? this.displayName,
       isPremium: isPremium ?? this.isPremium,
-      photoUrl: photoUrl ?? this.photoUrl, // <-- Adicionado aqui
+      token: token ?? this.token, // <-- Adicionado no copyWith
+      photoUrl: photoUrl ?? this.photoUrl,
       xp: xp ?? this.xp,
       level: level ?? this.level,
       streak: streak ?? this.streak,
@@ -49,9 +53,10 @@ class UserEntity extends Equatable {
     email,
     displayName,
     isPremium,
+    token, // <-- Adicionado no Equatable
     photoUrl,
     xp,
     level,
     streak,
-  ]; // <-- Adicionado aqui
+  ];
 }
