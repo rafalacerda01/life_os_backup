@@ -1,0 +1,11 @@
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'app_database.dart';
+
+final databaseProvider = Provider<AppDatabase>((ref) {
+  final database = AppDatabase();
+  
+  // Fecha o banco de dados quando o provider não for mais usado
+  ref.onDispose(() => database.close());
+  
+  return database;
+});
