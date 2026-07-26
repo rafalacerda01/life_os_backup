@@ -1,12 +1,47 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
-import 'providers/finance_provider.dart';
+import 'package:life_os/features/finance/presentation/providers/finance_provider.dart';
 import 'package:life_os/core/security/input_sanitizer.dart';
 import 'package:life_os/core/database/app_database.dart';
 
-class FinanceScreen extends ConsumerWidget {
+class FinanceScreen extends ConsumerStatefulWidget {
   const FinanceScreen({super.key});
+
+  @override
+  ConsumerState<FinanceScreen> createState() => _FinanceScreenState();
+}
+
+class _FinanceScreenState extends ConsumerState<FinanceScreen> {
+  final ScrollController _scrollController = ScrollController();
+  bool _isLoadingMore = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _scrollController.addListener(_onScroll);
+  }
+
+  @override
+  void dispose() {
+    _scrollController.removeListener(_onScroll);
+    _scrollController.dispose();
+    super.dispose();
+  }
+
+  void _onScroll() {
+    if (_scrollController.position.pixels >=
+        _scrollController.position.maxScrollExtent - 200) {
+      if (!_isLoadingMore) {
+        setState(() => _isLoadingMore = true);
+        ref.read(transactionLimitProvider.notifier).increment(15);
+
+        Future.delayed(const Duration(milliseconds: 600), () {
+          if (mounted) setState(() => _isLoadingMore = false);
+        });
+      }
+    }
+  }
 
   Future<void> _showDeleteConfirmation(
     BuildContext context,
@@ -48,10 +83,11 @@ class FinanceScreen extends ConsumerWidget {
       await ref
           .read(financeRepositoryProvider)
           .deleteTransaction(tx.id, tx.firestoreId);
-      if (context.mounted)
+      if (context.mounted) {
         ScaffoldMessenger.of(
           context,
         ).showSnackBar(const SnackBar(content: Text("Transação excluída.")));
+      }
     }
   }
 
@@ -166,7 +202,7 @@ class FinanceScreen extends ConsumerWidget {
   );
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  Widget build(BuildContext context) {
     final transactionsAsync = ref.watch(financeStreamProvider);
 
     return Scaffold(
@@ -184,102 +220,27 @@ class FinanceScreen extends ConsumerWidget {
             double income = 0;
             double expense = 0;
             for (var t in transactions) {
-              if (t.type == 'income')
+              if (t.type == 'income') {
                 income += t.amount;
-              else
+              } else {
                 expense += t.amount;
+              }
             }
             final balance = income - expense;
 
             return CustomScrollView(
+              controller: _scrollController,
+              cacheExtent:
+                  500, // 👈 Pré-renderiza itens fora da tela, evitando piscar no scroll rápido
               slivers: [
-                SliverPadding(
-                  padding: const EdgeInsets.all(20),
-                  sliver: SliverList(
-                    delegate: SliverChildListDelegate([
-                      const Text(
-                        "Minhas Finanças",
-                        style: TextStyle(
-                          color: Colors.white,
-                          fontSize: 26,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                      const SizedBox(height: 20),
-                      // Cards de Entradas e Gastos
-                      Row(
-                        children: [
-                          Expanded(
-                            child: _MiniCardFinance(
-                              title: "Entradas",
-                              value: "R\$ ${income.toStringAsFixed(2)}",
-                              color: Colors.greenAccent,
-                            ),
-                          ),
-                          const SizedBox(width: 12),
-                          Expanded(
-                            child: _MiniCardFinance(
-                              title: "Gastos",
-                              value: "R\$ ${expense.toStringAsFixed(2)}",
-                              color: Colors.redAccent,
-                            ),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 12),
-                      // NOVO CARD DE SALDO
-                      _BalanceCard(balance: balance),
-                      const SizedBox(height: 25),
-                    ]),
-                  ),
+                _FinanceSummary(
+                  income: income,
+                  expense: expense,
+                  balance: balance,
                 ),
-                SliverPadding(
-                  padding: const EdgeInsets.symmetric(horizontal: 20),
-                  sliver: SliverList(
-                    delegate: SliverChildBuilderDelegate((context, index) {
-                      final tx = transactions[index];
-                      final isIncome = tx.type == 'income';
-                      return Container(
-                        margin: const EdgeInsets.only(bottom: 12),
-                        decoration: BoxDecoration(
-                          color: const Color(0xFF11182E),
-                          borderRadius: BorderRadius.circular(16),
-                        ),
-                        child: ListTile(
-                          title: Text(
-                            tx.title,
-                            style: const TextStyle(color: Colors.white),
-                          ),
-                          subtitle: Text(
-                            DateFormat('dd/MM/yyyy').format(tx.date),
-                          ),
-                          trailing: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Text(
-                                "${isIncome ? '+ ' : '- '}R\$ ${tx.amount.toStringAsFixed(2)}",
-                                style: TextStyle(
-                                  // Se for renda, verde. Se for gasto, vermelho.
-                                  color: isIncome
-                                      ? Colors.greenAccent
-                                      : Colors.redAccent,
-                                  fontWeight: FontWeight.bold,
-                                ),
-                              ),
-                              IconButton(
-                                icon: const Icon(
-                                  Icons.delete_outline,
-                                  color: Colors.white54,
-                                ),
-                                onPressed: () =>
-                                    _showDeleteConfirmation(context, ref, tx),
-                              ),
-                            ],
-                          ),
-                        ),
-                      );
-                    }, childCount: transactions.length),
-                  ),
+                _TransactionList(
+                  transactions: transactions,
+                  onDelete: (tx) => _showDeleteConfirmation(context, ref, tx),
                 ),
               ],
             );
@@ -290,7 +251,118 @@ class FinanceScreen extends ConsumerWidget {
   }
 }
 
-// Widget de Card de Saldo
+// 📦 Bloco isolado de Resumo Financeiro
+class _FinanceSummary extends StatelessWidget {
+  final double income;
+  final double expense;
+  final double balance;
+
+  const _FinanceSummary({
+    required this.income,
+    required this.expense,
+    required this.balance,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return SliverPadding(
+      padding: const EdgeInsets.all(20),
+      sliver: SliverList(
+        delegate: SliverChildListDelegate([
+          const Text(
+            "Minhas Finanças",
+            style: TextStyle(
+              color: Colors.white,
+              fontSize: 26,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          const SizedBox(height: 20),
+          Row(
+            children: [
+              Expanded(
+                child: _MiniCardFinance(
+                  title: "Entradas",
+                  value: "R\$ ${income.toStringAsFixed(2)}",
+                  color: Colors.greenAccent,
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: _MiniCardFinance(
+                  title: "Gastos",
+                  value: "R\$ ${expense.toStringAsFixed(2)}",
+                  color: Colors.redAccent,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          _BalanceCard(balance: balance),
+          const SizedBox(height: 25),
+        ]),
+      ),
+    );
+  }
+}
+
+// 📦 Bloco isolado da Listagem de Transações com RepaintBoundary otimizado
+class _TransactionList extends StatelessWidget {
+  final List<Transaction> transactions;
+  final Function(Transaction) onDelete;
+
+  const _TransactionList({required this.transactions, required this.onDelete});
+
+  @override
+  Widget build(BuildContext context) {
+    return SliverPadding(
+      padding: const EdgeInsets.symmetric(horizontal: 20),
+      sliver: SliverList(
+        delegate: SliverChildBuilderDelegate((context, index) {
+          final tx = transactions[index];
+          final isIncome = tx.type == 'income';
+
+          return RepaintBoundary(
+            child: Container(
+              margin: const EdgeInsets.only(bottom: 12),
+              decoration: BoxDecoration(
+                color: const Color(0xFF11182E),
+                borderRadius: BorderRadius.circular(16),
+              ),
+              child: ListTile(
+                title: Text(
+                  tx.title,
+                  style: const TextStyle(color: Colors.white),
+                ),
+                subtitle: Text(DateFormat('dd/MM/yyyy').format(tx.date)),
+                trailing: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      "${isIncome ? '+ ' : '- '}R\$ ${tx.amount.toStringAsFixed(2)}",
+                      style: TextStyle(
+                        color: isIncome ? Colors.greenAccent : Colors.redAccent,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    IconButton(
+                      icon: const Icon(
+                        Icons.delete_outline,
+                        color: Colors.white54,
+                      ),
+                      onPressed: () => onDelete(tx),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          );
+        }, childCount: transactions.length),
+      ),
+    );
+  }
+}
+
 class _BalanceCard extends StatelessWidget {
   final double balance;
   const _BalanceCard({required this.balance});
@@ -325,7 +397,6 @@ class _BalanceCard extends StatelessWidget {
   }
 }
 
-// Widget original de Mini Cards
 class _MiniCardFinance extends StatelessWidget {
   final String title;
   final String value;

@@ -1,7 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_app_check/firebase_app_check.dart'; // 👈 1. Adicione este import
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:intl/date_symbol_data_local.dart'; // Import necessário
+import 'package:intl/date_symbol_data_local.dart';
 import 'package:life_os/core/router/router.dart';
 import 'package:life_os/firebase_options.dart';
 
@@ -12,6 +13,12 @@ void main() async {
   await initializeDateFormatting('pt_BR', null);
 
   await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
+
+  // 👈 2. Adicione esta linha para ativar o App Check
+  await FirebaseAppCheck.instance.activate(
+    androidProvider: AndroidProvider.playIntegrity,
+    appleProvider: AppleProvider.deviceCheck,
+  );
 
   runApp(const ProviderScope(child: LifeOSApp()));
 }
