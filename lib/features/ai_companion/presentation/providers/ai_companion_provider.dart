@@ -4,6 +4,8 @@ import 'package:http/http.dart' as http;
 import 'package:life_os/features/ai_companion/data/models/chat_message.dart';
 // Importação necessária para verificar o status premium
 import 'package:life_os/features/premium/presentation/premium_provider.dart';
+// Importação necessária para buscar os dados de analytics dinamicamente se o contexto vier vazio
+import 'package:life_os/features/analytics/presentation/analytics_provider.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 
 class AICompanionState {
@@ -25,11 +27,18 @@ class AICompanionNotifier extends Notifier<AICompanionState> {
   // O estado inicial agora é definido no método build()
   @override
   AICompanionState build() {
+    // Pega o nome do usuário logado no Firebase (ou 'Operador' caso venha nulo/vazio)
+    final user = FirebaseAuth.instance.currentUser;
+    final userName =
+        (user?.displayName != null && user!.displayName!.trim().isNotEmpty)
+        ? user.displayName!
+        : "Operador";
+
     return AICompanionState(
       messages: [
         ChatMessage(
           text:
-              "Saudações, Operador. Sistema de IA do Life OS ativado. Como posso otimizar sua rotina, hábitos ou performance hoje? ⚡",
+              "Saudações, $userName. Sistema de IA do Life OS ativado. Como posso otimizar sua rotina, hábitos ou performance hoje? ⚡",
           isUser: false,
           timestamp: DateTime.now(),
         ),
@@ -38,7 +47,7 @@ class AICompanionNotifier extends Notifier<AICompanionState> {
     );
   }
 
-  // 🚀 ATUALIZADO: Protegido por Guard Clause Premium
+  // 🚀 ATUALIZADO: Protegido por Guard Clause Premium com suporte a Analytics dinâmico
   Future<void> sendMessage(
     String text,
     Map<String, dynamic> contextData,
@@ -51,6 +60,26 @@ class AICompanionNotifier extends Notifier<AICompanionState> {
       throw Exception("PREMIUM_REQUIRED");
     }
     // ---------------------------------------------
+
+    // Se o contextData vier vazio, populamos automaticamente com o analyticsProvider atual
+    Map<String, dynamic> finalContext = contextData;
+    if (finalContext.isEmpty) {
+      final analytics = ref.read(analyticsProvider);
+      finalContext = {
+        "productivityIndex": analytics.productivityIndex,
+        "healthIndex": analytics.healthIndex,
+        "financeIndex": analytics.financeIndex,
+        "habitConsistency": analytics.habitConsistency,
+        "weeklyEvolution": analytics.weeklyEvolution
+            .map(
+              (e) => {
+                "dayName": e.dayName,
+                "scorePercentage": e.scorePercentage,
+              },
+            )
+            .toList(),
+      };
+    }
 
     final userMessage = ChatMessage(
       text: text,
@@ -79,7 +108,7 @@ class AICompanionNotifier extends Notifier<AICompanionState> {
           // ✅ 2. Envia o Token no cabeçalho de Autorização
           'Authorization': 'Bearer $token',
         },
-        body: jsonEncode({"message": text, "context": contextData}),
+        body: jsonEncode({"message": text, "context": finalContext}),
       );
 
       if (response.statusCode == 200) {
