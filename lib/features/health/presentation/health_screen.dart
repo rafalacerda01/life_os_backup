@@ -1,13 +1,13 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:intl/intl.dart';
 
 // 🔑 IMPORTS
 import 'package:life_os/features/health/data/models/health_model.dart';
 import 'package:life_os/features/health/presentation/providers/health_provider.dart';
-import 'package:life_os/core/security/input_sanitizer.dart'; // Import de Segurança
+import 'package:life_os/core/security/input_sanitizer.dart';
+import 'package:life_os/features/checkin/presentation/checkin_screen.dart'; // Import da tela de check-in profunda
 
 class HealthScreen extends ConsumerWidget {
   const HealthScreen({super.key});
@@ -112,7 +112,7 @@ class HealthScreen extends ConsumerWidget {
     );
   }
 
-  // 2. Modal de Confirmação de Exclusão (Item essencial preservado)
+  // 2. Modal de Confirmação de Exclusão
   void _showDeleteConfirmation(
     BuildContext context,
     WidgetRef ref,
@@ -142,7 +142,6 @@ class HealthScreen extends ConsumerWidget {
           ElevatedButton(
             style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent),
             onPressed: () async {
-              // Agora deleta tanto no Firebase (docId) quanto no Drift (localId)
               await ref
                   .read(healthRepositoryProvider)
                   .deleteMedication(docId, localId);
@@ -191,17 +190,37 @@ class HealthScreen extends ConsumerWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  const Text(
-                    "Bio-Monitoramento & Saúde",
-                    style: TextStyle(
-                      color: Colors.white,
-                      fontSize: 26,
-                      fontWeight: FontWeight.bold,
-                    ),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      const Text(
+                        "Bio-Monitoramento & Saúde",
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 24,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      IconButton(
+                        onPressed: () {
+                          Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                              builder: (context) => const CheckInScreen(),
+                            ),
+                          );
+                        },
+                        icon: const Icon(
+                          Icons.tune_rounded,
+                          color: Colors.greenAccent,
+                        ),
+                        tooltip: "Check-in Profundo de Estado",
+                      ),
+                    ],
                   ),
                   const SizedBox(height: 25),
 
-                  // ================= SELETOR DE HUMOR =================
+                  // ================= SELETOR DE HUMOR (INTEGRADO AO AI COMPANION E HOME) =================
                   const Text(
                     "Como está o seu estado mental hoje?",
                     style: TextStyle(color: Colors.white70, fontSize: 14),
@@ -411,8 +430,7 @@ class HealthScreen extends ConsumerWidget {
                                   physics: const NeverScrollableScrollPhysics(),
                                   itemCount: medications.length,
                                   itemBuilder: (context, index) {
-                                    final med =
-                                        medications[index]; // 'med' é um objeto do seu modelo Drift
+                                    final med = medications[index];
 
                                     return ListTile(
                                       contentPadding: EdgeInsets.zero,
@@ -435,7 +453,6 @@ class HealthScreen extends ConsumerWidget {
                                           color: Colors.redAccent,
                                           size: 18,
                                         ),
-                                        // ATENÇÃO: Passamos o ID local (int) e o firestoreId (String)
                                         onPressed: () =>
                                             _showDeleteConfirmation(
                                               context,
@@ -462,24 +479,20 @@ class HealthScreen extends ConsumerWidget {
   }
 }
 
-// 🩸 ================= WIDGET COMPONENTE: MATRIZ DE CICLO MENSTRUAL (OFFLINE-FIRST) =================
+// 🩸 ================= WIDGET COMPONENTE: MATRIZ DE CICLO MENSTRUAL =================
 class _MenstrualCycleWidget extends ConsumerWidget {
   final HealthModel health;
   const _MenstrualCycleWidget({required this.health});
 
-  // MÉTODO NOVO: Adicionado para rastrear os dias da semana
   Widget _buildWeekTracker() {
     final now = DateTime.now();
-    // Calcula a segunda-feira desta semana para ter uma base fixa
     final monday = now.subtract(Duration(days: now.weekday - 1));
     final dayNames = ['Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb', 'Dom'];
 
     return Row(
       mainAxisAlignment: MainAxisAlignment.spaceBetween,
       children: List.generate(7, (index) {
-        // Calcula a data de cada dia da semana
         final date = monday.add(Duration(days: index));
-        // Verifica se é o dia de hoje
         final isToday =
             date.day == now.day &&
             date.month == now.month &&
@@ -501,7 +514,6 @@ class _MenstrualCycleWidget extends ConsumerWidget {
               height: 30,
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
-                // O círculo fica mais destacado se for hoje
                 color: isToday
                     ? Colors.pinkAccent.withOpacity(0.2)
                     : Colors.transparent,
@@ -512,7 +524,7 @@ class _MenstrualCycleWidget extends ConsumerWidget {
               ),
               child: Center(
                 child: Text(
-                  "${date.day}", // AQUI: Agora exibe o número do dia (ex: 13, 14...)
+                  "${date.day}",
                   style: TextStyle(
                     fontSize: 10,
                     color: isToday ? Colors.white : Colors.white38,
@@ -533,7 +545,6 @@ class _MenstrualCycleWidget extends ConsumerWidget {
     String uid,
     Map<String, dynamic>? currentData,
   ) {
-    // ... [MANTIDO IGUAL]
     final String initialDateStr =
         currentData?['lastPeriodStart'] ?? DateTime.now().toIso8601String();
     DateTime tempDate = DateTime.parse(initialDateStr);
@@ -722,7 +733,6 @@ class _MenstrualCycleWidget extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    // ... [MANTIDO IGUAL]
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) return const SizedBox.shrink();
 
@@ -799,7 +809,6 @@ class _MenstrualCycleWidget extends ConsumerWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // CABEÇALHO DO CARD
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
@@ -842,15 +851,9 @@ class _MenstrualCycleWidget extends ConsumerWidget {
               ),
             ],
           ),
-
           const SizedBox(height: 12),
-
-          // CHAMADA DO TRACKER DE SEMANA AQUI
           _buildWeekTracker(),
-
           const SizedBox(height: 18),
-
-          // DADOS DO CICLO
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [

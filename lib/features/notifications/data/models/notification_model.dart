@@ -4,11 +4,11 @@ class NotificationModel {
   final String id;
   final String title;
   final String desc;
-  final String iconCode; // Armazenamos o nome do ícone como string
+  final String iconCode;
   final DateTime createdAt;
   final bool isRead;
 
-  NotificationModel({
+  const NotificationModel({
     required this.id,
     required this.title,
     required this.desc,
@@ -18,14 +18,34 @@ class NotificationModel {
   });
 
   factory NotificationModel.fromFirestore(DocumentSnapshot doc) {
-    final data = doc.data() as Map<String, dynamic>;
+    final data = doc.data() as Map<String, dynamic>? ?? {};
+
+    // Tratamento defensivo para evitar crashes de tipagem em produção
+    DateTime parsedDate;
+    final rawDate = data['createdAt'];
+    if (rawDate is Timestamp) {
+      parsedDate = rawDate.toDate();
+    } else {
+      parsedDate = DateTime.now();
+    }
+
     return NotificationModel(
       id: doc.id,
-      title: data['title'] ?? '',
-      desc: data['desc'] ?? '',
-      iconCode: data['iconCode'] ?? 'notifications',
-      createdAt: (data['createdAt'] as Timestamp).toDate(),
-      isRead: data['isRead'] ?? false,
+      title: data['title'] as String? ?? '',
+      desc: data['desc'] as String? ?? '',
+      iconCode: data['iconCode'] as String? ?? 'notifications',
+      createdAt: parsedDate,
+      isRead: data['isRead'] as bool? ?? false,
     );
+  }
+
+  Map<String, dynamic> toFirestore() {
+    return {
+      'title': title,
+      'desc': desc,
+      'iconCode': iconCode,
+      'createdAt': Timestamp.fromDate(createdAt),
+      'isRead': isRead,
+    };
   }
 }

@@ -3963,6 +3963,415 @@ class FocusLogsCompanion extends UpdateCompanion<FocusLog> {
   }
 }
 
+class $CheckInTableTable extends CheckInTable
+    with TableInfo<$CheckInTableTable, CheckInEntry> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  $CheckInTableTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _idMeta = const VerificationMeta('id');
+  @override
+  late final GeneratedColumn<String> id = GeneratedColumn<String>(
+    'id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _energyMeta = const VerificationMeta('energy');
+  @override
+  late final GeneratedColumn<double> energy = GeneratedColumn<double>(
+    'energy',
+    aliasedName,
+    false,
+    type: DriftSqlType.double,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _focusMeta = const VerificationMeta('focus');
+  @override
+  late final GeneratedColumn<double> focus = GeneratedColumn<double>(
+    'focus',
+    aliasedName,
+    false,
+    type: DriftSqlType.double,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _motivationMeta = const VerificationMeta(
+    'motivation',
+  );
+  @override
+  late final GeneratedColumn<double> motivation = GeneratedColumn<double>(
+    'motivation',
+    aliasedName,
+    false,
+    type: DriftSqlType.double,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _createdAtMeta = const VerificationMeta(
+    'createdAt',
+  );
+  @override
+  late final GeneratedColumn<DateTime> createdAt = GeneratedColumn<DateTime>(
+    'created_at',
+    aliasedName,
+    false,
+    type: DriftSqlType.dateTime,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _isSyncedMeta = const VerificationMeta(
+    'isSynced',
+  );
+  @override
+  late final GeneratedColumn<bool> isSynced = GeneratedColumn<bool>(
+    'is_synced',
+    aliasedName,
+    false,
+    type: DriftSqlType.bool,
+    requiredDuringInsert: false,
+    defaultConstraints: GeneratedColumn.constraintIsAlways(
+      'CHECK ("is_synced" IN (0, 1))',
+    ),
+    defaultValue: const Constant(false),
+  );
+  @override
+  List<GeneratedColumn> get $columns => [
+    id,
+    energy,
+    focus,
+    motivation,
+    createdAt,
+    isSynced,
+  ];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'check_in_table';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<CheckInEntry> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('id')) {
+      context.handle(_idMeta, id.isAcceptableOrUnknown(data['id']!, _idMeta));
+    } else if (isInserting) {
+      context.missing(_idMeta);
+    }
+    if (data.containsKey('energy')) {
+      context.handle(
+        _energyMeta,
+        energy.isAcceptableOrUnknown(data['energy']!, _energyMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_energyMeta);
+    }
+    if (data.containsKey('focus')) {
+      context.handle(
+        _focusMeta,
+        focus.isAcceptableOrUnknown(data['focus']!, _focusMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_focusMeta);
+    }
+    if (data.containsKey('motivation')) {
+      context.handle(
+        _motivationMeta,
+        motivation.isAcceptableOrUnknown(data['motivation']!, _motivationMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_motivationMeta);
+    }
+    if (data.containsKey('created_at')) {
+      context.handle(
+        _createdAtMeta,
+        createdAt.isAcceptableOrUnknown(data['created_at']!, _createdAtMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_createdAtMeta);
+    }
+    if (data.containsKey('is_synced')) {
+      context.handle(
+        _isSyncedMeta,
+        isSynced.isAcceptableOrUnknown(data['is_synced']!, _isSyncedMeta),
+      );
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {id};
+  @override
+  CheckInEntry map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return CheckInEntry(
+      id: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}id'],
+      )!,
+      energy: attachedDatabase.typeMapping.read(
+        DriftSqlType.double,
+        data['${effectivePrefix}energy'],
+      )!,
+      focus: attachedDatabase.typeMapping.read(
+        DriftSqlType.double,
+        data['${effectivePrefix}focus'],
+      )!,
+      motivation: attachedDatabase.typeMapping.read(
+        DriftSqlType.double,
+        data['${effectivePrefix}motivation'],
+      )!,
+      createdAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.dateTime,
+        data['${effectivePrefix}created_at'],
+      )!,
+      isSynced: attachedDatabase.typeMapping.read(
+        DriftSqlType.bool,
+        data['${effectivePrefix}is_synced'],
+      )!,
+    );
+  }
+
+  @override
+  $CheckInTableTable createAlias(String alias) {
+    return $CheckInTableTable(attachedDatabase, alias);
+  }
+}
+
+class CheckInEntry extends DataClass implements Insertable<CheckInEntry> {
+  final String id;
+  final double energy;
+  final double focus;
+  final double motivation;
+  final DateTime createdAt;
+  final bool isSynced;
+  const CheckInEntry({
+    required this.id,
+    required this.energy,
+    required this.focus,
+    required this.motivation,
+    required this.createdAt,
+    required this.isSynced,
+  });
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['id'] = Variable<String>(id);
+    map['energy'] = Variable<double>(energy);
+    map['focus'] = Variable<double>(focus);
+    map['motivation'] = Variable<double>(motivation);
+    map['created_at'] = Variable<DateTime>(createdAt);
+    map['is_synced'] = Variable<bool>(isSynced);
+    return map;
+  }
+
+  CheckInTableCompanion toCompanion(bool nullToAbsent) {
+    return CheckInTableCompanion(
+      id: Value(id),
+      energy: Value(energy),
+      focus: Value(focus),
+      motivation: Value(motivation),
+      createdAt: Value(createdAt),
+      isSynced: Value(isSynced),
+    );
+  }
+
+  factory CheckInEntry.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return CheckInEntry(
+      id: serializer.fromJson<String>(json['id']),
+      energy: serializer.fromJson<double>(json['energy']),
+      focus: serializer.fromJson<double>(json['focus']),
+      motivation: serializer.fromJson<double>(json['motivation']),
+      createdAt: serializer.fromJson<DateTime>(json['createdAt']),
+      isSynced: serializer.fromJson<bool>(json['isSynced']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'id': serializer.toJson<String>(id),
+      'energy': serializer.toJson<double>(energy),
+      'focus': serializer.toJson<double>(focus),
+      'motivation': serializer.toJson<double>(motivation),
+      'createdAt': serializer.toJson<DateTime>(createdAt),
+      'isSynced': serializer.toJson<bool>(isSynced),
+    };
+  }
+
+  CheckInEntry copyWith({
+    String? id,
+    double? energy,
+    double? focus,
+    double? motivation,
+    DateTime? createdAt,
+    bool? isSynced,
+  }) => CheckInEntry(
+    id: id ?? this.id,
+    energy: energy ?? this.energy,
+    focus: focus ?? this.focus,
+    motivation: motivation ?? this.motivation,
+    createdAt: createdAt ?? this.createdAt,
+    isSynced: isSynced ?? this.isSynced,
+  );
+  CheckInEntry copyWithCompanion(CheckInTableCompanion data) {
+    return CheckInEntry(
+      id: data.id.present ? data.id.value : this.id,
+      energy: data.energy.present ? data.energy.value : this.energy,
+      focus: data.focus.present ? data.focus.value : this.focus,
+      motivation: data.motivation.present
+          ? data.motivation.value
+          : this.motivation,
+      createdAt: data.createdAt.present ? data.createdAt.value : this.createdAt,
+      isSynced: data.isSynced.present ? data.isSynced.value : this.isSynced,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('CheckInEntry(')
+          ..write('id: $id, ')
+          ..write('energy: $energy, ')
+          ..write('focus: $focus, ')
+          ..write('motivation: $motivation, ')
+          ..write('createdAt: $createdAt, ')
+          ..write('isSynced: $isSynced')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode =>
+      Object.hash(id, energy, focus, motivation, createdAt, isSynced);
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is CheckInEntry &&
+          other.id == this.id &&
+          other.energy == this.energy &&
+          other.focus == this.focus &&
+          other.motivation == this.motivation &&
+          other.createdAt == this.createdAt &&
+          other.isSynced == this.isSynced);
+}
+
+class CheckInTableCompanion extends UpdateCompanion<CheckInEntry> {
+  final Value<String> id;
+  final Value<double> energy;
+  final Value<double> focus;
+  final Value<double> motivation;
+  final Value<DateTime> createdAt;
+  final Value<bool> isSynced;
+  final Value<int> rowid;
+  const CheckInTableCompanion({
+    this.id = const Value.absent(),
+    this.energy = const Value.absent(),
+    this.focus = const Value.absent(),
+    this.motivation = const Value.absent(),
+    this.createdAt = const Value.absent(),
+    this.isSynced = const Value.absent(),
+    this.rowid = const Value.absent(),
+  });
+  CheckInTableCompanion.insert({
+    required String id,
+    required double energy,
+    required double focus,
+    required double motivation,
+    required DateTime createdAt,
+    this.isSynced = const Value.absent(),
+    this.rowid = const Value.absent(),
+  }) : id = Value(id),
+       energy = Value(energy),
+       focus = Value(focus),
+       motivation = Value(motivation),
+       createdAt = Value(createdAt);
+  static Insertable<CheckInEntry> custom({
+    Expression<String>? id,
+    Expression<double>? energy,
+    Expression<double>? focus,
+    Expression<double>? motivation,
+    Expression<DateTime>? createdAt,
+    Expression<bool>? isSynced,
+    Expression<int>? rowid,
+  }) {
+    return RawValuesInsertable({
+      if (id != null) 'id': id,
+      if (energy != null) 'energy': energy,
+      if (focus != null) 'focus': focus,
+      if (motivation != null) 'motivation': motivation,
+      if (createdAt != null) 'created_at': createdAt,
+      if (isSynced != null) 'is_synced': isSynced,
+      if (rowid != null) 'rowid': rowid,
+    });
+  }
+
+  CheckInTableCompanion copyWith({
+    Value<String>? id,
+    Value<double>? energy,
+    Value<double>? focus,
+    Value<double>? motivation,
+    Value<DateTime>? createdAt,
+    Value<bool>? isSynced,
+    Value<int>? rowid,
+  }) {
+    return CheckInTableCompanion(
+      id: id ?? this.id,
+      energy: energy ?? this.energy,
+      focus: focus ?? this.focus,
+      motivation: motivation ?? this.motivation,
+      createdAt: createdAt ?? this.createdAt,
+      isSynced: isSynced ?? this.isSynced,
+      rowid: rowid ?? this.rowid,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (id.present) {
+      map['id'] = Variable<String>(id.value);
+    }
+    if (energy.present) {
+      map['energy'] = Variable<double>(energy.value);
+    }
+    if (focus.present) {
+      map['focus'] = Variable<double>(focus.value);
+    }
+    if (motivation.present) {
+      map['motivation'] = Variable<double>(motivation.value);
+    }
+    if (createdAt.present) {
+      map['created_at'] = Variable<DateTime>(createdAt.value);
+    }
+    if (isSynced.present) {
+      map['is_synced'] = Variable<bool>(isSynced.value);
+    }
+    if (rowid.present) {
+      map['rowid'] = Variable<int>(rowid.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('CheckInTableCompanion(')
+          ..write('id: $id, ')
+          ..write('energy: $energy, ')
+          ..write('focus: $focus, ')
+          ..write('motivation: $motivation, ')
+          ..write('createdAt: $createdAt, ')
+          ..write('isSynced: $isSynced, ')
+          ..write('rowid: $rowid')
+          ..write(')'))
+        .toString();
+  }
+}
+
 abstract class _$AppDatabase extends GeneratedDatabase {
   _$AppDatabase(QueryExecutor e) : super(e);
   $AppDatabaseManager get managers => $AppDatabaseManager(this);
@@ -3976,6 +4385,7 @@ abstract class _$AppDatabase extends GeneratedDatabase {
   late final $FlashcardsTable flashcards = $FlashcardsTable(this);
   late final $GoalsTable goals = $GoalsTable(this);
   late final $FocusLogsTable focusLogs = $FocusLogsTable(this);
+  late final $CheckInTableTable checkInTable = $CheckInTableTable(this);
   @override
   Iterable<TableInfo<Table, Object?>> get allTables =>
       allSchemaEntities.whereType<TableInfo<Table, Object?>>();
@@ -3991,6 +4401,7 @@ abstract class _$AppDatabase extends GeneratedDatabase {
     flashcards,
     goals,
     focusLogs,
+    checkInTable,
   ];
   @override
   StreamQueryUpdateRules get streamUpdateRules => const StreamQueryUpdateRules([
@@ -6329,6 +6740,227 @@ typedef $$FocusLogsTableProcessedTableManager =
       FocusLog,
       PrefetchHooks Function()
     >;
+typedef $$CheckInTableTableCreateCompanionBuilder =
+    CheckInTableCompanion Function({
+      required String id,
+      required double energy,
+      required double focus,
+      required double motivation,
+      required DateTime createdAt,
+      Value<bool> isSynced,
+      Value<int> rowid,
+    });
+typedef $$CheckInTableTableUpdateCompanionBuilder =
+    CheckInTableCompanion Function({
+      Value<String> id,
+      Value<double> energy,
+      Value<double> focus,
+      Value<double> motivation,
+      Value<DateTime> createdAt,
+      Value<bool> isSynced,
+      Value<int> rowid,
+    });
+
+class $$CheckInTableTableFilterComposer
+    extends Composer<_$AppDatabase, $CheckInTableTable> {
+  $$CheckInTableTableFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<String> get id => $composableBuilder(
+    column: $table.id,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<double> get energy => $composableBuilder(
+    column: $table.energy,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<double> get focus => $composableBuilder(
+    column: $table.focus,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<double> get motivation => $composableBuilder(
+    column: $table.motivation,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<DateTime> get createdAt => $composableBuilder(
+    column: $table.createdAt,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<bool> get isSynced => $composableBuilder(
+    column: $table.isSynced,
+    builder: (column) => ColumnFilters(column),
+  );
+}
+
+class $$CheckInTableTableOrderingComposer
+    extends Composer<_$AppDatabase, $CheckInTableTable> {
+  $$CheckInTableTableOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<String> get id => $composableBuilder(
+    column: $table.id,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<double> get energy => $composableBuilder(
+    column: $table.energy,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<double> get focus => $composableBuilder(
+    column: $table.focus,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<double> get motivation => $composableBuilder(
+    column: $table.motivation,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<DateTime> get createdAt => $composableBuilder(
+    column: $table.createdAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<bool> get isSynced => $composableBuilder(
+    column: $table.isSynced,
+    builder: (column) => ColumnOrderings(column),
+  );
+}
+
+class $$CheckInTableTableAnnotationComposer
+    extends Composer<_$AppDatabase, $CheckInTableTable> {
+  $$CheckInTableTableAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<String> get id =>
+      $composableBuilder(column: $table.id, builder: (column) => column);
+
+  GeneratedColumn<double> get energy =>
+      $composableBuilder(column: $table.energy, builder: (column) => column);
+
+  GeneratedColumn<double> get focus =>
+      $composableBuilder(column: $table.focus, builder: (column) => column);
+
+  GeneratedColumn<double> get motivation => $composableBuilder(
+    column: $table.motivation,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<DateTime> get createdAt =>
+      $composableBuilder(column: $table.createdAt, builder: (column) => column);
+
+  GeneratedColumn<bool> get isSynced =>
+      $composableBuilder(column: $table.isSynced, builder: (column) => column);
+}
+
+class $$CheckInTableTableTableManager
+    extends
+        RootTableManager<
+          _$AppDatabase,
+          $CheckInTableTable,
+          CheckInEntry,
+          $$CheckInTableTableFilterComposer,
+          $$CheckInTableTableOrderingComposer,
+          $$CheckInTableTableAnnotationComposer,
+          $$CheckInTableTableCreateCompanionBuilder,
+          $$CheckInTableTableUpdateCompanionBuilder,
+          (
+            CheckInEntry,
+            BaseReferences<_$AppDatabase, $CheckInTableTable, CheckInEntry>,
+          ),
+          CheckInEntry,
+          PrefetchHooks Function()
+        > {
+  $$CheckInTableTableTableManager(_$AppDatabase db, $CheckInTableTable table)
+    : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $$CheckInTableTableFilterComposer($db: db, $table: table),
+          createOrderingComposer: () =>
+              $$CheckInTableTableOrderingComposer($db: db, $table: table),
+          createComputedFieldComposer: () =>
+              $$CheckInTableTableAnnotationComposer($db: db, $table: table),
+          updateCompanionCallback:
+              ({
+                Value<String> id = const Value.absent(),
+                Value<double> energy = const Value.absent(),
+                Value<double> focus = const Value.absent(),
+                Value<double> motivation = const Value.absent(),
+                Value<DateTime> createdAt = const Value.absent(),
+                Value<bool> isSynced = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => CheckInTableCompanion(
+                id: id,
+                energy: energy,
+                focus: focus,
+                motivation: motivation,
+                createdAt: createdAt,
+                isSynced: isSynced,
+                rowid: rowid,
+              ),
+          createCompanionCallback:
+              ({
+                required String id,
+                required double energy,
+                required double focus,
+                required double motivation,
+                required DateTime createdAt,
+                Value<bool> isSynced = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => CheckInTableCompanion.insert(
+                id: id,
+                energy: energy,
+                focus: focus,
+                motivation: motivation,
+                createdAt: createdAt,
+                isSynced: isSynced,
+                rowid: rowid,
+              ),
+          withReferenceMapper: (p0) => p0
+              .map((e) => (e.readTable(table), BaseReferences(db, table, e)))
+              .toList(),
+          prefetchHooksCallback: null,
+        ),
+      );
+}
+
+typedef $$CheckInTableTableProcessedTableManager =
+    ProcessedTableManager<
+      _$AppDatabase,
+      $CheckInTableTable,
+      CheckInEntry,
+      $$CheckInTableTableFilterComposer,
+      $$CheckInTableTableOrderingComposer,
+      $$CheckInTableTableAnnotationComposer,
+      $$CheckInTableTableCreateCompanionBuilder,
+      $$CheckInTableTableUpdateCompanionBuilder,
+      (
+        CheckInEntry,
+        BaseReferences<_$AppDatabase, $CheckInTableTable, CheckInEntry>,
+      ),
+      CheckInEntry,
+      PrefetchHooks Function()
+    >;
 
 class $AppDatabaseManager {
   final _$AppDatabase _db;
@@ -6353,4 +6985,6 @@ class $AppDatabaseManager {
       $$GoalsTableTableManager(_db, _db.goals);
   $$FocusLogsTableTableManager get focusLogs =>
       $$FocusLogsTableTableManager(_db, _db.focusLogs);
+  $$CheckInTableTableTableManager get checkInTable =>
+      $$CheckInTableTableTableManager(_db, _db.checkInTable);
 }

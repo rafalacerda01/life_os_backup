@@ -8,7 +8,7 @@ class MainNavigationScreen extends ConsumerWidget {
 
   const MainNavigationScreen({super.key, required this.child});
 
-  // Função de logout movida para cá para ficar acessível globalmente
+  // Função de logout global
   void _showLogoutConfirmation(BuildContext context, WidgetRef ref) {
     showDialog(
       context: context,
@@ -135,9 +135,9 @@ class MainNavigationScreen extends ConsumerWidget {
                   title: Text("Metas", style: TextStyle(color: Colors.white)),
                 ),
               ),
-              // 3. CÍRCULOS (INTEGRADO AQUI)
+              // 3. CÍRCULOS
               const PopupMenuItem(
-                value: '/circles', // Rota para sua CirclesScreen
+                value: '/circles',
                 child: ListTile(
                   leading: Icon(
                     Icons.groups_outlined,
@@ -149,7 +149,18 @@ class MainNavigationScreen extends ConsumerWidget {
                   ),
                 ),
               ),
-              // 4. AJUSTES
+              // 4. INTELIGÊNCIA ANALÍTICA (ADICIONADO AQUI)
+              const PopupMenuItem(
+                value: '/analytics',
+                child: ListTile(
+                  leading: Icon(Icons.insights, color: Color(0xFFB026FF)),
+                  title: Text(
+                    "Analytics",
+                    style: TextStyle(color: Colors.white),
+                  ),
+                ),
+              ),
+              // 5. AJUSTES
               const PopupMenuItem(
                 value: '/settings',
                 child: ListTile(
@@ -158,7 +169,7 @@ class MainNavigationScreen extends ConsumerWidget {
                 ),
               ),
               const PopupMenuDivider(),
-              // 5. SAIR
+              // 6. SAIR
               const PopupMenuItem(
                 value: 'logout',
                 child: ListTile(
@@ -174,7 +185,6 @@ class MainNavigationScreen extends ConsumerWidget {
         ],
       ),
       body: child,
-      // ... (BottomNavigationBar mantido exatamente como está)
       bottomNavigationBar: Theme(
         data: Theme.of(context).copyWith(canvasColor: const Color(0xFF11182E)),
         child: BottomNavigationBar(
