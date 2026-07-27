@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:life_os/features/analytics/presentation/analytics_provider.dart';
 import 'package:life_os/features/premium/presentation/premium_provider.dart';
+import 'package:life_os/features/ai_companion/presentation/providers/ai_companion_provider.dart';
+import 'package:life_os/features/ai_companion/presentation/ai_companion_screen.dart';
 
 class AnalyticsScreen extends ConsumerWidget {
   const AnalyticsScreen({super.key});
@@ -161,6 +163,62 @@ class AnalyticsScreen extends ConsumerWidget {
               analyticsData.habitConsistency,
               Colors.amberAccent,
             ),
+
+            const SizedBox(height: 25),
+
+            // BOTÃO DO AI COACH INTEGRADO PARA USUÁRIOS PREMIUM
+            if (isPremium) ...[
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton.icon(
+                  onPressed: () async {
+                    final analyticsContext = {
+                      "productivityIndex": analyticsData.productivityIndex,
+                      "healthIndex": analyticsData.healthIndex,
+                      "financeIndex": analyticsData.financeIndex,
+                      "habitConsistency": analyticsData.habitConsistency,
+                      "weeklyEvolution": analyticsData.weeklyEvolution
+                          .map(
+                            (e) => {
+                              "dayName": e.dayName,
+                              "scorePercentage": e.scorePercentage,
+                            },
+                          )
+                          .toList(),
+                    };
+
+                    await ref
+                        .read(aiCompanionProvider.notifier)
+                        .sendMessage(
+                          "Faça uma análise detalhada da minha performance semanal com base nestes dados atuais do sistema.",
+                          analyticsContext,
+                        );
+
+                    if (context.mounted) {
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (context) => const AICompanionScreen(),
+                        ),
+                      );
+                    }
+                  },
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF5D0EFF),
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(vertical: 16),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(16),
+                    ),
+                  ),
+                  icon: const Icon(Icons.auto_awesome),
+                  label: const Text(
+                    "Consultar AI Coach sobre Analytics",
+                    style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
+                  ),
+                ),
+              ),
+            ],
           ],
         ),
       ),
@@ -204,7 +262,7 @@ class AnalyticsScreen extends ConsumerWidget {
             ClipRRect(
               borderRadius: BorderRadius.circular(4),
               child: LinearProgressIndicator(
-                value: value / 100,
+                value: (value / 100).clamp(0.0, 1.0),
                 backgroundColor: Colors.white10,
                 valueColor: AlwaysStoppedAnimation<Color>(barColor),
                 minHeight: 6,
