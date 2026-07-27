@@ -19,6 +19,7 @@ import 'package:life_os/features/health/presentation/health_screen.dart';
 import 'package:life_os/features/finance/presentation/finance_screen.dart';
 import 'package:life_os/features/habits/presentation/habits_screen.dart';
 import 'package:life_os/features/tasks/presentation/tasks_screen.dart';
+import 'package:life_os/features/analytics/presentation/analytics_screen.dart';
 // ✅ Importação adicionada para a tela de Notificações
 import 'package:life_os/features/settings/presentation/screens/notifications_screen.dart';
 
@@ -120,6 +121,10 @@ final routerProvider = Provider<GoRouter>((ref) {
           GoRoute(
             path: '/circles',
             builder: (context, state) => const CirclesScreen(),
+          ),
+          GoRoute(
+            path: '/analytics',
+            builder: (context, state) => const AnalyticsScreen(),
           ),
         ],
       ),

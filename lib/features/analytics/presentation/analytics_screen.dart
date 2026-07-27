@@ -16,7 +16,10 @@ class AnalyticsScreen extends ConsumerWidget {
       appBar: AppBar(
         backgroundColor: Colors.transparent,
         elevation: 0,
-        title: const Text("Inteligência Analítica", style: TextStyle(fontWeight: FontWeight.bold)),
+        title: const Text(
+          "Inteligência Analítica",
+          style: TextStyle(fontWeight: FontWeight.bold, color: Colors.white),
+        ),
       ),
       body: SingleChildScrollView(
         padding: const EdgeInsets.all(20),
@@ -35,7 +38,11 @@ class AnalyticsScreen extends ConsumerWidget {
                 children: [
                   const Text(
                     "Consistência Geral da Semana",
-                    style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 16),
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.bold,
+                      fontSize: 16,
+                    ),
                   ),
                   const SizedBox(height: 24),
                   Stack(
@@ -57,19 +64,28 @@ class AnalyticsScreen extends ConsumerWidget {
                                     gradient: const LinearGradient(
                                       begin: Alignment.bottomCenter,
                                       end: Alignment.topCenter,
-                                      colors: [Color(0xFF5D0EFF), Color(0xFFB026FF)],
+                                      colors: [
+                                        Color(0xFF5D0EFF),
+                                        Color(0xFFB026FF),
+                                      ],
                                     ),
                                     borderRadius: BorderRadius.circular(4),
                                   ),
                                 ),
                                 const SizedBox(height: 8),
-                                Text(day.dayName, style: const TextStyle(color: Colors.white54, fontSize: 11)),
+                                Text(
+                                  day.dayName,
+                                  style: const TextStyle(
+                                    color: Colors.white54,
+                                    fontSize: 11,
+                                  ),
+                                ),
                               ],
                             );
                           }).toList(),
                         ),
                       ),
-                      
+
                       // Proteção Server-Side Visual (Blur/Overlay se for Free)
                       if (!isPremium)
                         Positioned.fill(
@@ -81,16 +97,27 @@ class AnalyticsScreen extends ConsumerWidget {
                             child: Column(
                               mainAxisAlignment: MainAxisAlignment.center,
                               children: [
-                                const Icon(Icons.lock_outline, color: Color(0xFFB026FF), size: 28),
+                                const Icon(
+                                  Icons.lock_outline,
+                                  color: Color(0xFFB026FF),
+                                  size: 28,
+                                ),
                                 const SizedBox(height: 8),
                                 const Text(
                                   "Gráfico Semanal Premium",
-                                  style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 14),
+                                  style: TextStyle(
+                                    color: Colors.white,
+                                    fontWeight: FontWeight.bold,
+                                    fontSize: 14,
+                                  ),
                                 ),
                                 const SizedBox(height: 2),
                                 Text(
                                   "Desbloqueie o acesso na aba Premium.",
-                                  style: TextStyle(color: Colors.white.withOpacity(0.4), fontSize: 11),
+                                  style: TextStyle(
+                                    color: Colors.white.withOpacity(0.4),
+                                    fontSize: 11,
+                                  ),
                                 ),
                               ],
                             ),
@@ -103,14 +130,37 @@ class AnalyticsScreen extends ConsumerWidget {
             ),
 
             const SizedBox(height: 25),
-            const Text("Índices de Consistência", style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold)),
+            const Text(
+              "Índices de Consistência",
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 18,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
             const SizedBox(height: 16),
 
             // SEÇÃO DE PROGRESSO DOS ÍNDICES INDIVIDUAIS
-            _buildMetricProgressRow("Produtividade Continuada", analyticsData.productivityIndex, Colors.purpleAccent),
-            _buildMetricProgressRow("Equilíbrio Biométrico (Saúde)", analyticsData.healthIndex, Colors.greenAccent),
-            _buildMetricProgressRow("Eficiência de Aporte Financeiro", analyticsData.financeIndex, Colors.blueAccent),
-            _buildMetricProgressRow("Retenção de Hábitos Criados", analyticsData.habitConsistency, Colors.amberAccent),
+            _buildMetricProgressRow(
+              "Produtividade Continuada",
+              analyticsData.productivityIndex,
+              Colors.purpleAccent,
+            ),
+            _buildMetricProgressRow(
+              "Equilíbrio Biométrico (Saúde)",
+              analyticsData.healthIndex,
+              Colors.greenAccent,
+            ),
+            _buildMetricProgressRow(
+              "Eficiência de Aporte Financeiro",
+              analyticsData.financeIndex,
+              Colors.blueAccent,
+            ),
+            _buildMetricProgressRow(
+              "Retenção de Hábitos Criados",
+              analyticsData.habitConsistency,
+              Colors.amberAccent,
+            ),
           ],
         ),
       ),
@@ -132,8 +182,22 @@ class AnalyticsScreen extends ConsumerWidget {
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                Text(label, style: const TextStyle(color: Colors.white70, fontSize: 14, fontWeight: FontWeight.w500)),
-                Text("${value.toStringAsFixed(1)}%", style: TextStyle(color: barColor, fontWeight: FontWeight.bold, fontSize: 14)),
+                Text(
+                  label,
+                  style: const TextStyle(
+                    color: Colors.white70,
+                    fontSize: 14,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+                Text(
+                  "${value.toStringAsFixed(1)}%",
+                  style: TextStyle(
+                    color: barColor,
+                    fontWeight: FontWeight.bold,
+                    fontSize: 14,
+                  ),
+                ),
               ],
             ),
             const SizedBox(height: 12),
