@@ -4,7 +4,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/services.dart';
 import 'package:share_plus/share_plus.dart';
 
-import 'package:life_os/core/theme/app_colors.dart'; // <-- IMPORT DO SEU TEMA
+import 'package:life_os/core/theme/app_colors.dart';
 import 'package:life_os/features/circles/data/repositories/circles_repository.dart';
 import 'package:life_os/features/circles/domain/entities/circle_entity.dart';
 import 'package:life_os/features/circles/domain/entities/challenge_entity.dart';
@@ -33,7 +33,6 @@ class CircleDetailScreen extends ConsumerWidget {
           );
         }
 
-        // 👉 Usando o Getter inteligente que criamos na Entidade!
         final bool isAdmin = circle.isAdmin(currentUserId);
 
         return Scaffold(
@@ -59,7 +58,6 @@ class CircleDetailScreen extends ConsumerWidget {
                   );
                 },
               ),
-              // LÓGICA DO BOTÃO: Lixeira se for Admin, Porta de saída se for Membro
               if (isAdmin)
                 IconButton(
                   icon: const Icon(Icons.delete, color: Colors.redAccent),
@@ -160,6 +158,83 @@ class CircleDetailScreen extends ConsumerWidget {
                   ),
                 ),
                 const SizedBox(height: 30),
+                // --- SEÇÃO DO QUADRO DE LÍDERES (LEADERBOARD) COM PROTEÇÃO CONTRA RANGE ERROR ---
+                const Text(
+                  "Quadro de Líderes (Leaderboard)",
+                  style: TextStyle(
+                    color: AppColors.textMain,
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                const SizedBox(height: 12),
+                circle.ranking.isEmpty
+                    ? Container(
+                        padding: const EdgeInsets.all(20),
+                        width: double.infinity,
+                        decoration: BoxDecoration(
+                          color: AppColors.cardBackground,
+                          borderRadius: BorderRadius.circular(16),
+                          border: Border.all(color: Colors.white10),
+                        ),
+                        child: const Center(
+                          child: Text(
+                            "Nenhum membro no ranking ainda.",
+                            style: TextStyle(color: AppColors.textHint),
+                          ),
+                        ),
+                      )
+                    : ListView.builder(
+                        shrinkWrap: true,
+                        physics: const NeverScrollableScrollPhysics(),
+                        itemCount: circle.ranking.length,
+                        itemBuilder: (context, index) {
+                          final member = circle.ranking[index];
+                          return Container(
+                            margin: const EdgeInsets.only(bottom: 8),
+                            padding: const EdgeInsets.all(12),
+                            decoration: BoxDecoration(
+                              color: AppColors.cardBackground,
+                              borderRadius: BorderRadius.circular(12),
+                              border: Border.all(color: Colors.white10),
+                            ),
+                            child: Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                              children: [
+                                Row(
+                                  children: [
+                                    Text(
+                                      "#${member.rankPosition}",
+                                      style: const TextStyle(
+                                        color: AppColors.secondary,
+                                        fontWeight: FontWeight.bold,
+                                      ),
+                                    ),
+                                    const SizedBox(width: 12),
+                                    Text(
+                                      member.name.isEmpty
+                                          ? 'Usuário'
+                                          : member.name,
+                                      style: const TextStyle(
+                                        color: AppColors.textMain,
+                                        fontWeight: FontWeight.w500,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                                Text(
+                                  "${member.totalXp} XP",
+                                  style: const TextStyle(
+                                    color: AppColors.primary,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          );
+                        },
+                      ),
+                const SizedBox(height: 30),
                 Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
@@ -229,10 +304,16 @@ class CircleDetailScreen extends ConsumerWidget {
           ),
           TextButton(
             onPressed: () async {
+              // 1. Fecha apenas o diálogo de confirmação primeiro
               Navigator.pop(dialogContext);
-              if (context.mounted) Navigator.pop(context);
-              // O Riverpod vai escutar a deleção e atualizar a tela inicial automaticamente
-              await ref.read(circlesRepositoryProvider).deleteCircle(circleId);
+
+              // 2. Aguarda o Notifier limpar o estado e deletar do Firebase
+              await ref.read(circlesProvider.notifier).deleteCircle(circleId);
+
+              // 3. Só depois que tudo foi limpo com sucesso, sai da tela de detalhes
+              if (context.mounted) {
+                Navigator.pop(context);
+              }
             },
             child: const Text(
               "Excluir",
@@ -282,7 +363,6 @@ class CircleDetailScreen extends ConsumerWidget {
   }
 
   Widget _buildChallengeCard(WidgetRef ref, ChallengeEntity challenge) {
-    // 👉 Código reduzido graças aos getters inteligentes de ChallengeEntity!
     final bool isCompleted = challenge.isCompleted;
     final double progress = challenge.progressRatio;
 

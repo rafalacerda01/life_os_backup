@@ -45,10 +45,10 @@ class CirclesRepository {
 
         return RankingMemberEntity(
           userId: d.id,
-          name: r['name'] ?? '',
+          name: r['name'] ?? 'Usuário',
           totalXp: r['totalXp'] ?? 0,
-          rankPosition: index + 1, // Posição calculada dinamicamente
-          isCurrentUser: d.id == currentUserUid, // Checagem local, nunca no DB
+          rankPosition: index + 1,
+          isCurrentUser: d.id == currentUserUid,
           photoUrl: r['photoUrl'],
         );
       }).toList();
@@ -107,7 +107,6 @@ class CirclesRepository {
       'createdAt': FieldValue.serverTimestamp(),
     });
 
-    // Força o Stream principal a atualizar a tela
     batch.update(circleRef, {'updatedAt': FieldValue.serverTimestamp()});
 
     await batch.commit();
@@ -121,25 +120,27 @@ class CirclesRepository {
     final user = _auth.currentUser;
     if (user == null) return;
 
+    // Busca o nome real na coleção de usuários para garantir que não fique vazio
+    final userDoc = await _firestore.collection('users').doc(user.uid).get();
+    final userName =
+        userDoc.data()?['displayName'] ?? user.displayName ?? 'Usuário';
+
     final batch = _firestore.batch();
 
     final circleRef = _firestore.collection('circles').doc(circleId);
     final rankingRef = circleRef.collection('ranking').doc(user.uid);
     final challengeRef = circleRef.collection('challenges').doc(challengeId);
 
-    // Merge garante que se for a primeira vez do usuário doando XP (doc não existe), ele não apague o name/photo
     batch.set(rankingRef, {
       'totalXp': FieldValue.increment(xpAmount),
-      'name': user.displayName ?? 'Usuário',
+      'name': userName,
       'photoUrl': user.photoURL,
-      // Removido: isCurrentUser (calculado localmente agora)
     }, SetOptions(merge: true));
 
     batch.set(challengeRef, {
       'currentXpContributed': FieldValue.increment(xpAmount),
     }, SetOptions(merge: true));
 
-    // Força o Stream principal a recarregar para animar as barras de progresso da UI
     batch.update(circleRef, {'updatedAt': FieldValue.serverTimestamp()});
 
     await batch.commit();
@@ -148,6 +149,11 @@ class CirclesRepository {
   Future<String> createCircle(String name, String description) async {
     final user = _auth.currentUser;
     if (user == null) throw Exception("Usuário não autenticado");
+
+    // Busca o nome real do usuário no Firestore para evitar salvar vazio
+    final userDoc = await _firestore.collection('users').doc(user.uid).get();
+    final userName =
+        userDoc.data()?['displayName'] ?? user.displayName ?? 'Usuário';
 
     final batch = _firestore.batch();
     final circleRef = _firestore.collection('circles').doc();
@@ -163,10 +169,9 @@ class CirclesRepository {
     });
 
     batch.set(circleRef.collection('ranking').doc(user.uid), {
-      'name': user.displayName ?? 'Usuário',
+      'name': userName,
       'totalXp': 0,
       'photoUrl': user.photoURL,
-      // Removidos: rankPosition e isCurrentUser (são dinâmicos)
     });
 
     batch.set(userRef, {
@@ -192,7 +197,7 @@ class CirclesRepository {
     final user = _auth.currentUser;
     if (user != null) {
       final userRef = _firestore.collection('users').doc(user.uid);
-      batch.update(userRef, {'activeCircleId': null});
+      batch.set(userRef, {'activeCircleId': null}, SetOptions(merge: true));
     }
 
     await batch.commit();
@@ -209,7 +214,6 @@ class CirclesRepository {
 
     batch.delete(rankingRef);
 
-    // Atualiza a contagem e força o stream a re-renderizar para os membros que ficaram
     batch.update(circleRef, {
       'memberCount': FieldValue.increment(-1),
       'updatedAt': FieldValue.serverTimestamp(),
@@ -228,6 +232,8 @@ class CirclesRepository {
 
     final userDoc = await _firestore.collection('users').doc(user.uid).get();
     final bool isPremium = userDoc.data()?['isPremium'] ?? false;
+    final userName =
+        userDoc.data()?['displayName'] ?? user.displayName ?? 'Usuário';
 
     final circleRef = _firestore.collection('circles').doc(cleanCircleId);
     final circleSnap = await circleRef.get();
@@ -238,7 +244,6 @@ class CirclesRepository {
 
     final data = circleSnap.data() as Map<String, dynamic>;
     final int currentMemberCount = data['memberCount'] ?? 0;
-
     final int limit = isPremium ? 10 : 3;
 
     if (currentMemberCount >= limit) {
@@ -254,10 +259,9 @@ class CirclesRepository {
     final userRef = _firestore.collection('users').doc(user.uid);
 
     batch.set(rankingRef, {
-      'name': user.displayName ?? 'Usuário',
+      'name': userName,
       'totalXp': 0,
       'photoUrl': user.photoURL,
-      // Removidos: rankPosition e isCurrentUser
     });
 
     batch.update(circleRef, {

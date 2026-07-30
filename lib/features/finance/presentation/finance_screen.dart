@@ -80,9 +80,7 @@ class _FinanceScreenState extends ConsumerState<FinanceScreen> {
     );
 
     if (confirmed == true) {
-      await ref
-          .read(financeRepositoryProvider)
-          .deleteTransaction(tx.id, tx.firestoreId);
+      await ref.read(financeRepositoryProvider).deleteTransaction(tx.id);
       if (context.mounted) {
         ScaffoldMessenger.of(
           context,

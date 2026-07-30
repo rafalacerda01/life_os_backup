@@ -1,46 +1,16 @@
 import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:life_os/features/auth/domain/entities/user_entity.dart';
 import 'package:life_os/features/auth/presentation/providers/auth_provider.dart';
 import 'package:life_os/features/settings/presentation/screens/edit_profile_screen.dart';
-import 'package:life_os/core/services/sync_service.dart';
 
 class AccountManagementScreen extends ConsumerWidget {
   const AccountManagementScreen({super.key});
 
-  Future<void> _handleSync(WidgetRef ref, BuildContext context) async {
-    final navigator = Navigator.of(context, rootNavigator: true);
-    final scaffoldMessenger = ScaffoldMessenger.of(context);
-
-    try {
-      showDialog(
-        context: context,
-        barrierDismissible: false,
-        builder: (_) => const Center(
-          child: CircularProgressIndicator(color: Colors.purpleAccent),
-        ),
-      );
-
-      await ref.read(syncServiceProviderProvider).synchronizeData();
-
-      navigator.pop();
-
-      scaffoldMessenger.showSnackBar(
-        const SnackBar(content: Text("Sincronização realizada com sucesso!")),
-      );
-    } catch (e) {
-      navigator.pop();
-      scaffoldMessenger.showSnackBar(
-        SnackBar(content: Text("Erro na sincronização: $e")),
-      );
-    }
-  }
-
-  // Recurso estruturado como Futuro / Premium
   void _handleExportHistory(BuildContext context, UserEntity user) {
     if (!user.isPremium) {
-      // Se for usuário FREE, exibe um modal convidativo para o plano Premium
       showDialog(
         context: context,
         builder: (dialogContext) => AlertDialog(
@@ -52,32 +22,34 @@ class AccountManagementScreen extends ConsumerWidget {
             children: [
               Icon(Icons.workspace_premium, color: Colors.amberAccent),
               SizedBox(width: 8),
-              Text("Recurso Premium", style: TextStyle(color: Colors.white)),
+              Text('Recurso Premium', style: TextStyle(color: Colors.white)),
             ],
           ),
           content: const Text(
-            "A exportação avançada de histórico e backups em formato universal estará disponível em breve exclusivamente para assinantes Premium.",
+            'A exportação avançada de histórico e backups em formato '
+            'universal estará disponível em breve exclusivamente para '
+            'assinantes Premium.',
             style: TextStyle(color: Colors.white70),
           ),
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(dialogContext),
               child: const Text(
-                "Entendi",
+                'Entendi',
                 style: TextStyle(color: Colors.purpleAccent),
               ),
             ),
           ],
         ),
       );
-    } else {
-      // Espaço reservado para a lógica de exportação real quando você decidir implementar
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text("Exportação de histórico em desenvolvimento."),
-        ),
-      );
+      return;
     }
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Exportação de histórico em desenvolvimento.'),
+      ),
+    );
   }
 
   @override
@@ -90,7 +62,7 @@ class AccountManagementScreen extends ConsumerWidget {
         backgroundColor: Colors.transparent,
         elevation: 0,
         title: const Text(
-          "Configurações",
+          'Configurações',
           style: TextStyle(color: Colors.white),
         ),
         iconTheme: const IconThemeData(color: Colors.white),
@@ -101,25 +73,20 @@ class AccountManagementScreen extends ConsumerWidget {
           children: [
             _buildProfileCard(user),
             const SizedBox(height: 32),
-            _buildSectionHeader("GERAL"),
+            _buildSectionHeader('GERAL'),
             _buildSettingsTile(
               icon: Icons.edit_outlined,
-              title: "Editar Perfil",
+              title: 'Editar Perfil',
               onTap: () => Navigator.push(
                 context,
                 MaterialPageRoute(builder: (_) => const EditProfileScreen()),
               ),
             ),
             const SizedBox(height: 24),
-            _buildSectionHeader("DADOS E BACKUP"),
-            _buildSettingsTile(
-              icon: Icons.cloud_upload_outlined,
-              title: "Sincronizar Dados",
-              onTap: () => _handleSync(ref, context),
-            ),
+            _buildSectionHeader('DADOS E BACKUP'),
             _buildSettingsTile(
               icon: Icons.history,
-              title: "Exportar Histórico",
+              title: 'Exportar Histórico',
               trailingWidget: user.isPremium
                   ? const Icon(Icons.chevron_right, color: Colors.white24)
                   : const Icon(
@@ -130,17 +97,17 @@ class AccountManagementScreen extends ConsumerWidget {
               onTap: () => _handleExportHistory(context, user),
             ),
             const SizedBox(height: 24),
-            _buildSectionHeader("SEGURANÇA"),
+            _buildSectionHeader('SEGURANÇA'),
             _buildSettingsTile(
               icon: Icons.logout_rounded,
-              title: "Encerrar Sessão",
+              title: 'Encerrar Sessão',
               textColor: Colors.redAccent,
               iconColor: Colors.redAccent,
               onTap: () => _showLogoutDialog(context, ref),
             ),
             _buildSettingsTile(
               icon: Icons.delete_forever_outlined,
-              title: "Excluir Conta",
+              title: 'Excluir Conta',
               textColor: Colors.redAccent,
               iconColor: Colors.redAccent,
               onTap: () => _showDeleteAccountDialog(context, ref),
@@ -152,7 +119,7 @@ class AccountManagementScreen extends ConsumerWidget {
         ),
         error: (message) => Center(
           child: Text(
-            "Erro: $message",
+            'Erro: $message',
             style: const TextStyle(color: Colors.red),
           ),
         ),
@@ -210,9 +177,9 @@ class AccountManagementScreen extends ConsumerWidget {
 
   Widget _buildProfileCard(UserEntity user) {
     final photoUrl = user.photoUrl;
-    bool hasPhoto = photoUrl != null && photoUrl.isNotEmpty;
+    final hasPhoto = photoUrl != null && photoUrl.isNotEmpty;
 
-    Widget avatarChild;
+    final Widget avatarChild;
     if (!hasPhoto) {
       avatarChild = const Icon(
         Icons.person,
@@ -223,14 +190,14 @@ class AccountManagementScreen extends ConsumerWidget {
       avatarChild = Image.network(
         photoUrl,
         fit: BoxFit.cover,
-        errorBuilder: (context, error, stackTrace) =>
+        errorBuilder: (_, _, _) =>
             const Icon(Icons.person, size: 40, color: Colors.purpleAccent),
       );
     } else if (photoUrl.startsWith('/')) {
       avatarChild = Image.file(
         File(photoUrl),
         fit: BoxFit.cover,
-        errorBuilder: (context, error, stackTrace) =>
+        errorBuilder: (_, _, _) =>
             const Icon(Icons.person, size: 40, color: Colors.purpleAccent),
       );
     } else {
@@ -263,7 +230,7 @@ class AccountManagementScreen extends ConsumerWidget {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  user.displayName ?? "Usuário",
+                  user.displayName ?? 'Usuário',
                   style: const TextStyle(
                     color: Colors.white,
                     fontSize: 20,
@@ -271,7 +238,7 @@ class AccountManagementScreen extends ConsumerWidget {
                   ),
                 ),
                 Text(
-                  user.email ?? "",
+                  user.email ?? '',
                   style: const TextStyle(color: Colors.white54, fontSize: 14),
                 ),
                 const SizedBox(height: 8),
@@ -287,7 +254,7 @@ class AccountManagementScreen extends ConsumerWidget {
                     borderRadius: BorderRadius.circular(8),
                   ),
                   child: Text(
-                    user.isPremium ? "PREMIUM" : "FREE",
+                    user.isPremium ? 'PREMIUM' : 'FREE',
                     style: TextStyle(
                       fontSize: 10,
                       fontWeight: FontWeight.bold,
@@ -306,32 +273,116 @@ class AccountManagementScreen extends ConsumerWidget {
   }
 
   void _showDeleteAccountDialog(BuildContext context, WidgetRef ref) {
+    final TextEditingController passwordController = TextEditingController();
+    bool obscureText = true;
+
     showDialog(
       context: context,
-      builder: (dialogContext) => AlertDialog(
-        backgroundColor: const Color(0xFF11182E),
-        title: const Text(
-          "Excluir Conta",
-          style: TextStyle(color: Colors.redAccent),
-        ),
-        content: const Text(
-          "Esta ação é irreversível. Todos os seus dados locais e na nuvem serão permanentemente removidos. Deseja continuar?",
-          style: TextStyle(color: Colors.white70),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(dialogContext),
-            child: const Text("Cancelar"),
-          ),
-          ElevatedButton(
-            onPressed: () {
-              Navigator.pop(dialogContext);
-              ref.read(authNotifierProvider.notifier).deleteAccount();
-            },
-            style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent),
-            child: const Text("Deletar Permanentemente"),
-          ),
-        ],
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (context, setState) {
+          return AlertDialog(
+            backgroundColor: const Color(0xFF11182E),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(16),
+            ),
+            title: const Text(
+              'Excluir Conta',
+              style: TextStyle(
+                color: Colors.redAccent,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Esta ação é irreversível. Todos os seus dados locais e na nuvem '
+                  'serão permanentemente removidos.',
+                  style: TextStyle(color: Colors.white70),
+                ),
+                const SizedBox(height: 20),
+                const Text(
+                  'Para sua segurança, digite sua senha:',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                TextField(
+                  controller: passwordController,
+                  obscureText: obscureText,
+                  style: const TextStyle(color: Colors.white),
+                  decoration: InputDecoration(
+                    hintText: 'Sua senha',
+                    hintStyle: const TextStyle(color: Colors.white38),
+                    filled: true,
+                    fillColor: Colors.black26,
+                    contentPadding: const EdgeInsets.symmetric(
+                      horizontal: 16,
+                      vertical: 14,
+                    ),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      borderSide: BorderSide.none,
+                    ),
+                    suffixIcon: IconButton(
+                      icon: Icon(
+                        obscureText ? Icons.visibility_off : Icons.visibility,
+                        color: Colors.white54,
+                      ),
+                      onPressed: () {
+                        setState(() {
+                          obscureText = !obscureText;
+                        });
+                      },
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(dialogContext),
+                child: const Text(
+                  'Cancelar',
+                  style: TextStyle(color: Colors.white70),
+                ),
+              ),
+              ElevatedButton(
+                onPressed: () {
+                  final password = passwordController.text.trim();
+
+                  if (password.isEmpty) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text(
+                          'A senha é obrigatória para excluir a conta.',
+                        ),
+                        backgroundColor: Colors.redAccent,
+                      ),
+                    );
+                    return;
+                  }
+
+                  Navigator.pop(dialogContext);
+                  ref
+                      .read(authNotifierProvider.notifier)
+                      .deleteAccount(password: password);
+                },
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.redAccent,
+                  foregroundColor: Colors.white,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                ),
+                child: const Text('Deletar Permanentemente'),
+              ),
+            ],
+          );
+        },
       ),
     );
   }
@@ -343,31 +394,31 @@ class AccountManagementScreen extends ConsumerWidget {
         backgroundColor: const Color(0xFF11182E),
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
         title: const Text(
-          "Encerrar Sessão",
+          'Encerrar Sessão',
           style: TextStyle(color: Colors.white),
         ),
         content: const Text(
-          "Você tem certeza que deseja sair da sua conta?",
+          'Você tem certeza que deseja sair da sua conta?',
           style: TextStyle(color: Colors.white70),
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(dialogContext),
             child: const Text(
-              "Cancelar",
+              'Cancelar',
               style: TextStyle(color: Colors.white70),
             ),
           ),
           ElevatedButton(
-            onPressed: () => {
-              Navigator.pop(dialogContext),
-              ref.read(authNotifierProvider.notifier).logout(),
+            onPressed: () {
+              Navigator.pop(dialogContext);
+              ref.read(authNotifierProvider.notifier).logout();
             },
             style: ElevatedButton.styleFrom(
               backgroundColor: Colors.redAccent,
               foregroundColor: Colors.white,
             ),
-            child: const Text("Sair"),
+            child: const Text('Sair'),
           ),
         ],
       ),
