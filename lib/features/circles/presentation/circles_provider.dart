@@ -9,6 +9,8 @@ final circlesProvider = NotifierProvider<CirclesNotifier, CirclesState>(
   CirclesNotifier.new,
 );
 
+const _sentinel = Object();
+
 class CirclesState {
   final List<CircleEntity> availableCircles;
   final CircleEntity? joinedCircle;
@@ -22,12 +24,14 @@ class CirclesState {
 
   CirclesState copyWith({
     List<CircleEntity>? availableCircles,
-    CircleEntity? joinedCircle,
+    Object? joinedCircle = _sentinel,
     bool? isLoading,
   }) {
     return CirclesState(
       availableCircles: availableCircles ?? this.availableCircles,
-      joinedCircle: joinedCircle ?? this.joinedCircle,
+      joinedCircle: joinedCircle == _sentinel
+          ? this.joinedCircle
+          : joinedCircle as CircleEntity?,
       isLoading: isLoading ?? this.isLoading,
     );
   }
@@ -176,21 +180,31 @@ class CirclesNotifier extends Notifier<CirclesState> {
   Future<void> deleteCircle(String circleId) async {
     final previousState = state;
 
+    // Se o círculo deletado for o que está aberto, cancela a stream ativa imediatamente
+    if (state.joinedCircle?.id == circleId) {
+      await _subscription?.cancel();
+      _subscription = null;
+    }
+
     final updatedAvailable = state.availableCircles
         .where((c) => c.id != circleId)
         .toList();
+
     final clearedJoined = state.joinedCircle?.id == circleId
         ? null
         : state.joinedCircle;
 
+    // Atualiza o estado de forma otimista
     state = state.copyWith(
       availableCircles: updatedAvailable,
       joinedCircle: clearedJoined,
+      isLoading: false,
     );
 
     try {
       await ref.read(circlesRepositoryProvider).deleteCircle(circleId);
     } catch (e) {
+      // Reverte o estado caso ocorra erro no Firebase
       state = previousState;
       print("Erro ao deletar círculo: $e");
       rethrow;

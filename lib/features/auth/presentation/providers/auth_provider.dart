@@ -182,20 +182,54 @@ class AuthNotifier extends Notifier<AuthState> {
     );
   }
 
-  Future<void> deleteAccount() async {
+  // --- Função Delete Account Atualizada com Reautenticação ---
+  Future<void> deleteAccount({String? password}) async {
     state = AuthState.loading();
 
-    final result = await _repository.deleteAccount();
+    try {
+      final user = ref.read(firebaseAuthProvider).currentUser;
 
-    result.when(
-      (success) async {
-        await _clearLocalData();
-        state = AuthState.unauthenticated();
-      },
-      (failure) async {
-        state = AuthState.error(failure.message);
-      },
-    );
+      if (user != null) {
+        // Reautenticação: Necessário se for conta via E-mail/Senha
+        if (password != null && password.isNotEmpty && user.email != null) {
+          AuthCredential credential = EmailAuthProvider.credential(
+            email: user.email!,
+            password: password,
+          );
+          // Renova o token da sessão para permitir operações sensíveis
+          await user.reauthenticateWithCredential(credential);
+        }
+      }
+
+      // Após a reautenticação (ou se for Google Sign In, que muitas vezes delega para o AuthRepository),
+      // disparamos o método do repositório para deletar Auth e Firestore.
+      final result = await _repository.deleteAccount();
+
+      result.when(
+        (success) async {
+          await _clearLocalData();
+          state = AuthState.unauthenticated();
+        },
+        (failure) async {
+          state = AuthState.error(failure.message);
+        },
+      );
+    } on FirebaseAuthException catch (e) {
+      // Tratamento específico de erros do Firebase durante a reautenticação
+      if (e.code == 'wrong-password') {
+        state = AuthState.error('Senha incorreta. Tente novamente.');
+      } else if (e.code == 'requires-recent-login') {
+        state = AuthState.error(
+          'Por segurança, faça login novamente antes de excluir a conta.',
+        );
+      } else {
+        state = AuthState.error(
+          e.message ?? 'Ocorreu um erro de autenticação.',
+        );
+      }
+    } catch (e) {
+      state = AuthState.error('Erro ao deletar conta: $e');
+    }
   }
 
   Future<void> _clearLocalData() async {

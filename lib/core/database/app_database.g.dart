@@ -924,6 +924,21 @@ class $TransactionsTable extends Transactions
     type: DriftSqlType.dateTime,
     requiredDuringInsert: true,
   );
+  static const VerificationMeta _isDeletedMeta = const VerificationMeta(
+    'isDeleted',
+  );
+  @override
+  late final GeneratedColumn<bool> isDeleted = GeneratedColumn<bool>(
+    'is_deleted',
+    aliasedName,
+    false,
+    type: DriftSqlType.bool,
+    requiredDuringInsert: false,
+    defaultConstraints: GeneratedColumn.constraintIsAlways(
+      'CHECK ("is_deleted" IN (0, 1))',
+    ),
+    defaultValue: const Constant(false),
+  );
   @override
   List<GeneratedColumn> get $columns => [
     id,
@@ -933,6 +948,7 @@ class $TransactionsTable extends Transactions
     type,
     category,
     date,
+    isDeleted,
   ];
   @override
   String get aliasedName => _alias ?? actualTableName;
@@ -998,6 +1014,12 @@ class $TransactionsTable extends Transactions
     } else if (isInserting) {
       context.missing(_dateMeta);
     }
+    if (data.containsKey('is_deleted')) {
+      context.handle(
+        _isDeletedMeta,
+        isDeleted.isAcceptableOrUnknown(data['is_deleted']!, _isDeletedMeta),
+      );
+    }
     return context;
   }
 
@@ -1035,6 +1057,10 @@ class $TransactionsTable extends Transactions
         DriftSqlType.dateTime,
         data['${effectivePrefix}date'],
       )!,
+      isDeleted: attachedDatabase.typeMapping.read(
+        DriftSqlType.bool,
+        data['${effectivePrefix}is_deleted'],
+      )!,
     );
   }
 
@@ -1052,6 +1078,7 @@ class Transaction extends DataClass implements Insertable<Transaction> {
   final String type;
   final String category;
   final DateTime date;
+  final bool isDeleted;
   const Transaction({
     required this.id,
     this.firestoreId,
@@ -1060,6 +1087,7 @@ class Transaction extends DataClass implements Insertable<Transaction> {
     required this.type,
     required this.category,
     required this.date,
+    required this.isDeleted,
   });
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
@@ -1073,6 +1101,7 @@ class Transaction extends DataClass implements Insertable<Transaction> {
     map['type'] = Variable<String>(type);
     map['category'] = Variable<String>(category);
     map['date'] = Variable<DateTime>(date);
+    map['is_deleted'] = Variable<bool>(isDeleted);
     return map;
   }
 
@@ -1087,6 +1116,7 @@ class Transaction extends DataClass implements Insertable<Transaction> {
       type: Value(type),
       category: Value(category),
       date: Value(date),
+      isDeleted: Value(isDeleted),
     );
   }
 
@@ -1103,6 +1133,7 @@ class Transaction extends DataClass implements Insertable<Transaction> {
       type: serializer.fromJson<String>(json['type']),
       category: serializer.fromJson<String>(json['category']),
       date: serializer.fromJson<DateTime>(json['date']),
+      isDeleted: serializer.fromJson<bool>(json['isDeleted']),
     );
   }
   @override
@@ -1116,6 +1147,7 @@ class Transaction extends DataClass implements Insertable<Transaction> {
       'type': serializer.toJson<String>(type),
       'category': serializer.toJson<String>(category),
       'date': serializer.toJson<DateTime>(date),
+      'isDeleted': serializer.toJson<bool>(isDeleted),
     };
   }
 
@@ -1127,6 +1159,7 @@ class Transaction extends DataClass implements Insertable<Transaction> {
     String? type,
     String? category,
     DateTime? date,
+    bool? isDeleted,
   }) => Transaction(
     id: id ?? this.id,
     firestoreId: firestoreId.present ? firestoreId.value : this.firestoreId,
@@ -1135,6 +1168,7 @@ class Transaction extends DataClass implements Insertable<Transaction> {
     type: type ?? this.type,
     category: category ?? this.category,
     date: date ?? this.date,
+    isDeleted: isDeleted ?? this.isDeleted,
   );
   Transaction copyWithCompanion(TransactionsCompanion data) {
     return Transaction(
@@ -1147,6 +1181,7 @@ class Transaction extends DataClass implements Insertable<Transaction> {
       type: data.type.present ? data.type.value : this.type,
       category: data.category.present ? data.category.value : this.category,
       date: data.date.present ? data.date.value : this.date,
+      isDeleted: data.isDeleted.present ? data.isDeleted.value : this.isDeleted,
     );
   }
 
@@ -1159,14 +1194,23 @@ class Transaction extends DataClass implements Insertable<Transaction> {
           ..write('amount: $amount, ')
           ..write('type: $type, ')
           ..write('category: $category, ')
-          ..write('date: $date')
+          ..write('date: $date, ')
+          ..write('isDeleted: $isDeleted')
           ..write(')'))
         .toString();
   }
 
   @override
-  int get hashCode =>
-      Object.hash(id, firestoreId, title, amount, type, category, date);
+  int get hashCode => Object.hash(
+    id,
+    firestoreId,
+    title,
+    amount,
+    type,
+    category,
+    date,
+    isDeleted,
+  );
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
@@ -1177,7 +1221,8 @@ class Transaction extends DataClass implements Insertable<Transaction> {
           other.amount == this.amount &&
           other.type == this.type &&
           other.category == this.category &&
-          other.date == this.date);
+          other.date == this.date &&
+          other.isDeleted == this.isDeleted);
 }
 
 class TransactionsCompanion extends UpdateCompanion<Transaction> {
@@ -1188,6 +1233,7 @@ class TransactionsCompanion extends UpdateCompanion<Transaction> {
   final Value<String> type;
   final Value<String> category;
   final Value<DateTime> date;
+  final Value<bool> isDeleted;
   const TransactionsCompanion({
     this.id = const Value.absent(),
     this.firestoreId = const Value.absent(),
@@ -1196,6 +1242,7 @@ class TransactionsCompanion extends UpdateCompanion<Transaction> {
     this.type = const Value.absent(),
     this.category = const Value.absent(),
     this.date = const Value.absent(),
+    this.isDeleted = const Value.absent(),
   });
   TransactionsCompanion.insert({
     this.id = const Value.absent(),
@@ -1205,6 +1252,7 @@ class TransactionsCompanion extends UpdateCompanion<Transaction> {
     required String type,
     required String category,
     required DateTime date,
+    this.isDeleted = const Value.absent(),
   }) : title = Value(title),
        amount = Value(amount),
        type = Value(type),
@@ -1218,6 +1266,7 @@ class TransactionsCompanion extends UpdateCompanion<Transaction> {
     Expression<String>? type,
     Expression<String>? category,
     Expression<DateTime>? date,
+    Expression<bool>? isDeleted,
   }) {
     return RawValuesInsertable({
       if (id != null) 'id': id,
@@ -1227,6 +1276,7 @@ class TransactionsCompanion extends UpdateCompanion<Transaction> {
       if (type != null) 'type': type,
       if (category != null) 'category': category,
       if (date != null) 'date': date,
+      if (isDeleted != null) 'is_deleted': isDeleted,
     });
   }
 
@@ -1238,6 +1288,7 @@ class TransactionsCompanion extends UpdateCompanion<Transaction> {
     Value<String>? type,
     Value<String>? category,
     Value<DateTime>? date,
+    Value<bool>? isDeleted,
   }) {
     return TransactionsCompanion(
       id: id ?? this.id,
@@ -1247,6 +1298,7 @@ class TransactionsCompanion extends UpdateCompanion<Transaction> {
       type: type ?? this.type,
       category: category ?? this.category,
       date: date ?? this.date,
+      isDeleted: isDeleted ?? this.isDeleted,
     );
   }
 
@@ -1274,6 +1326,9 @@ class TransactionsCompanion extends UpdateCompanion<Transaction> {
     if (date.present) {
       map['date'] = Variable<DateTime>(date.value);
     }
+    if (isDeleted.present) {
+      map['is_deleted'] = Variable<bool>(isDeleted.value);
+    }
     return map;
   }
 
@@ -1286,7 +1341,8 @@ class TransactionsCompanion extends UpdateCompanion<Transaction> {
           ..write('amount: $amount, ')
           ..write('type: $type, ')
           ..write('category: $category, ')
-          ..write('date: $date')
+          ..write('date: $date, ')
+          ..write('isDeleted: $isDeleted')
           ..write(')'))
         .toString();
   }
@@ -4866,6 +4922,7 @@ typedef $$TransactionsTableCreateCompanionBuilder =
       required String type,
       required String category,
       required DateTime date,
+      Value<bool> isDeleted,
     });
 typedef $$TransactionsTableUpdateCompanionBuilder =
     TransactionsCompanion Function({
@@ -4876,6 +4933,7 @@ typedef $$TransactionsTableUpdateCompanionBuilder =
       Value<String> type,
       Value<String> category,
       Value<DateTime> date,
+      Value<bool> isDeleted,
     });
 
 class $$TransactionsTableFilterComposer
@@ -4919,6 +4977,11 @@ class $$TransactionsTableFilterComposer
 
   ColumnFilters<DateTime> get date => $composableBuilder(
     column: $table.date,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<bool> get isDeleted => $composableBuilder(
+    column: $table.isDeleted,
     builder: (column) => ColumnFilters(column),
   );
 }
@@ -4966,6 +5029,11 @@ class $$TransactionsTableOrderingComposer
     column: $table.date,
     builder: (column) => ColumnOrderings(column),
   );
+
+  ColumnOrderings<bool> get isDeleted => $composableBuilder(
+    column: $table.isDeleted,
+    builder: (column) => ColumnOrderings(column),
+  );
 }
 
 class $$TransactionsTableAnnotationComposer
@@ -4999,6 +5067,9 @@ class $$TransactionsTableAnnotationComposer
 
   GeneratedColumn<DateTime> get date =>
       $composableBuilder(column: $table.date, builder: (column) => column);
+
+  GeneratedColumn<bool> get isDeleted =>
+      $composableBuilder(column: $table.isDeleted, builder: (column) => column);
 }
 
 class $$TransactionsTableTableManager
@@ -5039,6 +5110,7 @@ class $$TransactionsTableTableManager
                 Value<String> type = const Value.absent(),
                 Value<String> category = const Value.absent(),
                 Value<DateTime> date = const Value.absent(),
+                Value<bool> isDeleted = const Value.absent(),
               }) => TransactionsCompanion(
                 id: id,
                 firestoreId: firestoreId,
@@ -5047,6 +5119,7 @@ class $$TransactionsTableTableManager
                 type: type,
                 category: category,
                 date: date,
+                isDeleted: isDeleted,
               ),
           createCompanionCallback:
               ({
@@ -5057,6 +5130,7 @@ class $$TransactionsTableTableManager
                 required String type,
                 required String category,
                 required DateTime date,
+                Value<bool> isDeleted = const Value.absent(),
               }) => TransactionsCompanion.insert(
                 id: id,
                 firestoreId: firestoreId,
@@ -5065,6 +5139,7 @@ class $$TransactionsTableTableManager
                 type: type,
                 category: category,
                 date: date,
+                isDeleted: isDeleted,
               ),
           withReferenceMapper: (p0) => p0
               .map((e) => (e.readTable(table), BaseReferences(db, table, e)))
