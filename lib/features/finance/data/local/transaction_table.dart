@@ -1,5 +1,8 @@
 import 'package:drift/drift.dart';
 
+@TableIndex(name: 'idx_transactions_date', columns: {#date})
+@TableIndex(name: 'idx_transactions_category', columns: {#category})
+@TableIndex(name: 'idx_transactions_type', columns: {#type})
 class Transactions extends Table {
   IntColumn get id => integer().autoIncrement()();
   TextColumn get firestoreId =>

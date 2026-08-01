@@ -33,7 +33,7 @@ part 'app_database.g.dart';
   ],
 )
 class AppDatabase extends _$AppDatabase {
-  AppDatabase() : super(_openConnection());
+  AppDatabase({QueryExecutor? executor}) : super(executor ?? _openConnection());
 
   @override
   int get schemaVersion => 5; // 🚀 3. Subido para 5 para criar a tabela de CheckIn
@@ -103,15 +103,23 @@ LazyDatabase _openConnection() {
   return LazyDatabase(() async {
     final dbFolder = await getApplicationDocumentsDirectory();
     final file = File(p.join(dbFolder.path, 'life_os.sqlite'));
+
+    // Obtém a chave segura via DbKeyManager (Secure Storage)
     final key = await DbKeyManager.getEncryptionKey();
 
+    // Sanitiza a chave para evitar problemas de sintaxe no PRAGMA do SQLite
     final sanitizedKey = key.replaceAll("'", "''");
 
     return NativeDatabase.createInBackground(
       file,
       setup: (database) {
+        // 🔐 PRAGMA key DEVE ser estritamente o primeiro comando executado
         database.execute("PRAGMA key = '$sanitizedKey';");
+
+        // 🚀 Otimizações de performance recomendadas para SQLCipher e Drift
+        database.execute("PRAGMA cipher_page_size = 4096;");
         database.execute("PRAGMA journal_mode = WAL;");
+        database.execute("PRAGMA synchronous = NORMAL;");
         database.execute("PRAGMA foreign_keys = ON;");
       },
     );

@@ -4442,6 +4442,34 @@ abstract class _$AppDatabase extends GeneratedDatabase {
   late final $GoalsTable goals = $GoalsTable(this);
   late final $FocusLogsTable focusLogs = $FocusLogsTable(this);
   late final $CheckInTableTable checkInTable = $CheckInTableTable(this);
+  late final Index idxTransactionsDate = Index(
+    'idx_transactions_date',
+    'CREATE INDEX idx_transactions_date ON transactions (date)',
+  );
+  late final Index idxTransactionsCategory = Index(
+    'idx_transactions_category',
+    'CREATE INDEX idx_transactions_category ON transactions (category)',
+  );
+  late final Index idxTransactionsType = Index(
+    'idx_transactions_type',
+    'CREATE INDEX idx_transactions_type ON transactions (type)',
+  );
+  late final Index idxTasksDate = Index(
+    'idx_tasks_date',
+    'CREATE INDEX idx_tasks_date ON task_table (date)',
+  );
+  late final Index idxTasksCompleted = Index(
+    'idx_tasks_completed',
+    'CREATE INDEX idx_tasks_completed ON task_table (is_completed)',
+  );
+  late final Index idxCheckinCreatedAt = Index(
+    'idx_checkin_created_at',
+    'CREATE INDEX idx_checkin_created_at ON check_in_table (created_at)',
+  );
+  late final Index idxCheckinIsSynced = Index(
+    'idx_checkin_is_synced',
+    'CREATE INDEX idx_checkin_is_synced ON check_in_table (is_synced)',
+  );
   @override
   Iterable<TableInfo<Table, Object?>> get allTables =>
       allSchemaEntities.whereType<TableInfo<Table, Object?>>();
@@ -4458,6 +4486,13 @@ abstract class _$AppDatabase extends GeneratedDatabase {
     goals,
     focusLogs,
     checkInTable,
+    idxTransactionsDate,
+    idxTransactionsCategory,
+    idxTransactionsType,
+    idxTasksDate,
+    idxTasksCompleted,
+    idxCheckinCreatedAt,
+    idxCheckinIsSynced,
   ];
   @override
   StreamQueryUpdateRules get streamUpdateRules => const StreamQueryUpdateRules([
