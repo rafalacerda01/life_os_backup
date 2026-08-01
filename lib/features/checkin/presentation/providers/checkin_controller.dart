@@ -1,8 +1,10 @@
 import 'package:riverpod_annotation/riverpod_annotation.dart';
-import 'package:life_os/core/database/app_database.dart';
-import '../../data/repositories/checkin_repository.dart';
-import 'checkin_state.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:life_os/core/database/app_database.dart';
+import 'package:life_os/features/checkin/presentation/providers/check_in_provider.dart';
+import 'package:life_os/core/utils/app_logger.dart'; // 🚀 Nosso Logger injetado
+import 'checkin_state.dart';
+
 part 'checkin_controller.g.dart';
 
 // ===========================================================================
@@ -24,7 +26,6 @@ class CheckInController extends _$CheckInController {
   CheckInState build() {
     // Gatilho de sincronização em background ao abrir a tela
     _triggerBackgroundSync();
-
     return const CheckInState();
   }
 
@@ -33,8 +34,13 @@ class CheckInController extends _$CheckInController {
     try {
       final repository = ref.read(checkInRepositoryProvider);
       await repository.syncPendingCheckIns();
-    } catch (e) {
-      // Falha silenciosa: modo offline mantido com sucesso
+    } catch (error, stackTrace) {
+      // 🚀 Falha silenciosa para o usuário, mas registrada para o desenvolvedor!
+      AppLogger.e(
+        'Falha silenciosa no background sync de check-ins',
+        error,
+        stackTrace,
+      );
     }
   }
 
@@ -61,8 +67,10 @@ class CheckInController extends _$CheckInController {
       );
 
       onSuccess();
-    } catch (e) {
-      onError(e.toString());
+    } catch (error, stackTrace) {
+      // 🚀 Registra o erro no sistema antes de repassar para a UI mostrar o Toast/Snackbar
+      AppLogger.e('Erro ao submeter check-in', error, stackTrace);
+      onError(error.toString());
     } finally {
       state = state.copyWith(isLoading: false);
     }

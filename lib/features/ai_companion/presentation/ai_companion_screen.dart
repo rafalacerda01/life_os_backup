@@ -1,10 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:firebase_auth/firebase_auth.dart';
 import 'package:life_os/features/premium/presentation/premium_screen.dart';
 import 'package:life_os/features/ai_companion/presentation/providers/ai_companion_provider.dart';
-import 'package:life_os/features/premium/presentation/premium_provider.dart'; // ✅ Import adicionado
+import 'package:life_os/features/premium/presentation/premium_provider.dart';
 import 'package:life_os/features/health/presentation/providers/health_provider.dart';
 
 class AICompanionScreen extends ConsumerStatefulWidget {
@@ -30,81 +28,6 @@ class _AICompanionScreenState extends ConsumerState<AICompanionScreen> {
     });
   }
 
-  Future<Map<String, dynamic>> _getCurrentHealthContext() async {
-    await ref.read(healthRepositoryProvider).syncHealthFromFirebase();
-
-    final healthAsyncValue = ref.read(healthStreamProvider);
-    final medicationsAsyncValue = ref.read(medicationsStreamProvider);
-
-    // Agora, após o await do sync, o stream de medicamentos deve estar populado
-    final Map<String, dynamic> healthContext = healthAsyncValue.maybeWhen(
-      data: (health) => {
-        "humor": health.mood.isNotEmpty ? health.mood : "Ainda não registrado",
-        "hidratacao": "${health.waterIntakeMl}ml",
-        "medicamentos": medicationsAsyncValue.maybeWhen(
-          data: (meds) => meds.isNotEmpty
-              ? meds.map((m) => m.name).join(', ')
-              : "Nenhum medicamento ativo",
-          orElse: () => "Nenhum medicamento registrado",
-        ),
-      },
-      orElse: () => {
-        "humor": "Dados indisponíveis",
-        "hidratacao": "0ml",
-        "medicamentos": "Dados indisponíveis",
-      },
-    );
-
-    // ... restante do seu código (Firestore userDoc e financeDoc)
-
-    try {
-      final user = FirebaseAuth.instance.currentUser;
-      if (user != null) {
-        // 1. Ciclo menstrual
-        final userDoc = await FirebaseFirestore.instance
-            .collection('users')
-            .doc(user.uid)
-            .get();
-
-        if (userDoc.exists) {
-          healthContext["ciclo_menstrual"] =
-              userDoc.data()?['menstrualCycle'] ?? "Não rastreado";
-        }
-
-        // 2. Finanças
-        final financeDoc = await FirebaseFirestore.instance
-            .collection('users')
-            .doc(user.uid)
-            .collection('finance')
-            .doc('main')
-            .get();
-
-        if (financeDoc.exists) {
-          final data = financeDoc.data();
-          final income = (data?['totalIncome'] ?? 0.0).toDouble();
-          final expense = (data?['totalExpense'] ?? 0.0).toDouble();
-
-          healthContext["financas"] = {
-            "entradas": income,
-            "saidas": expense,
-            "saldo": income - expense,
-          };
-        } else {
-          healthContext["financas"] = "Dados indisponíveis";
-        }
-      }
-    } catch (e) {
-      debugPrint("Erro ao buscar contexto para IA: $e");
-      healthContext["ciclo_menstrual"] = "Erro ao carregar";
-      healthContext["financas"] = "Erro ao carregar";
-    }
-
-    healthContext["data_coleta"] = DateTime.now().toIso8601String();
-    healthContext["status"] = "Online";
-
-    return healthContext;
-  }
-
   @override
   void dispose() {
     _controller.dispose();
@@ -114,7 +37,6 @@ class _AICompanionScreenState extends ConsumerState<AICompanionScreen> {
 
   @override
   Widget build(BuildContext context) {
-    // ✅ CORREÇÃO 1: Usando o provider correto (que ouve o Firebase em tempo real)
     final premiumStatus = ref.watch(premiumProvider);
     final isPremium = premiumStatus.isPremium;
 
@@ -260,10 +182,8 @@ class _AICompanionScreenState extends ConsumerState<AICompanionScreen> {
                   borderRadius: BorderRadius.circular(12),
                   borderSide: BorderSide.none,
                 ),
-                counterText:
-                    "", // Esconde o contador de caracteres para um visual mais limpo
+                counterText: "",
               ),
-              // Permite enviar apertando "Enter" no teclado
               onSubmitted: (_) => _handleSendMessage(),
             ),
           ),
@@ -279,7 +199,6 @@ class _AICompanionScreenState extends ConsumerState<AICompanionScreen> {
                 color: Colors.white,
                 size: 20,
               ),
-              // ✅ O botão de envio fica desativado se já estiver carregando
               onPressed: aiState.isLoading ? null : _handleSendMessage,
             ),
           ),
@@ -288,25 +207,33 @@ class _AICompanionScreenState extends ConsumerState<AICompanionScreen> {
     );
   }
 
-  // ✅ CORREÇÃO 3: UX aprimorada - Limpa o campo imediatamente e previne múltiplos cliques
   Future<void> _handleSendMessage() async {
     final text = _controller.text.trim();
     if (text.isEmpty) return;
 
-    // Limpa o campo instantaneamente, antes do processamento assíncrono começar
     _controller.clear();
 
-    // Opcional: Se quiser que o teclado feche após enviar
-    // FocusScope.of(context).unfocus();
-
-    final contextData = await _getCurrentHealthContext();
-
     try {
+      // Sincroniza dados de saúde e obtém os estados atuais
+      await ref.read(healthRepositoryProvider).syncHealthFromFirebase();
+      final healthAsyncValue = ref.read(healthStreamProvider);
+      final medicationsAsyncValue = ref.read(medicationsStreamProvider);
+
+      final health = healthAsyncValue.asData?.value;
+      final medications = medicationsAsyncValue.asData?.value ?? [];
+
+      // Delega a montagem do contexto para o repositório de IA
+      final repository = ref.read(aiCompanionRepositoryProvider);
+      final contextData = await repository.getSystemContext(
+        health: health,
+        medications: medications,
+      );
+
       await ref
           .read(aiCompanionProvider.notifier)
           .sendMessage(text, contextData);
     } catch (e) {
-      if (!mounted) return; // Proteção contra widget desmontado
+      if (!mounted) return;
 
       if (e.toString().contains("PREMIUM_REQUIRED")) {
         Navigator.push(

@@ -1,5 +1,7 @@
 import 'package:drift/drift.dart';
 
+@TableIndex(name: 'idx_checkin_created_at', columns: {#createdAt})
+@TableIndex(name: 'idx_checkin_is_synced', columns: {#isSynced})
 @DataClassName('CheckInEntry')
 class CheckInTable extends Table {
   // Usamos TextColumn para suportar o formato UUID v4 e manter compatibilidade com o Firestore

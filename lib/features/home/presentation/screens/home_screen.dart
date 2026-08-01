@@ -4,43 +4,21 @@ import 'package:intl/intl.dart';
 import 'package:go_router/go_router.dart';
 import 'package:life_os/core/theme/app_colors.dart';
 import 'package:life_os/core/widgets/dashboard_components.dart';
-import 'package:life_os/features/health/presentation/providers/health_provider.dart';
-import 'package:life_os/features/habits/presentation/providers/habits_provider.dart';
-import 'package:life_os/features/dashboard/presentation/providers/dashboard_provider.dart';
-import 'package:life_os/features/dashboard/data/models/dashboard_model.dart';
+import 'package:life_os/features/home/presentation/providers/home_provider.dart';
 import 'package:life_os/features/auth/presentation/providers/auth_provider.dart';
-import 'package:life_os/features/study/presentation/providers/study_provider.dart';
+import 'package:life_os/features/dashboard/data/models/dashboard_model.dart';
 
-class HomeScreen extends ConsumerStatefulWidget {
+class HomeScreen extends ConsumerWidget {
   const HomeScreen({super.key});
 
   @override
-  ConsumerState<HomeScreen> createState() => _HomeScreenState();
-}
-
-class _HomeScreenState extends ConsumerState<HomeScreen> {
-  @override
-  void initState() {
-    super.initState();
-    // ✅ Sincronização movida para o ciclo de vida correto (fora do build)
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      // Idealmente, mover isso para um provider de inicialização global,
-      // mas mantido aqui de forma segura sem disparar a cada rebuild.
-    });
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final dashboard = ref.watch(dashboardStateProvider);
+  Widget build(BuildContext context, WidgetRef ref) {
+    final homeState = ref.watch(homeStateProvider);
     final authState = ref.watch(authNotifierProvider);
-    final habitsAsync = ref.watch(habitsStreamProvider);
-    final medicationsAsync = ref.watch(medicationsStreamProvider);
-    final subjectsAsync = ref.watch(subjectsStreamProvider);
 
     final now = DateTime.now();
     final formattedDate = DateFormat("dd/MM/yyyy - EEEE", "pt_BR").format(now);
 
-    // Dados processados do usuário
     final isPremium = authState.maybeWhen(
       authenticated: (user) => user.isPremium,
       orElse: () => false,
@@ -55,33 +33,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         ? "Bom dia"
         : (now.hour < 18 ? "Boa tarde" : "Boa noite");
 
-    // Tratamento seguro de Medicamentos
-    final medCount = medicationsAsync.when(
-      data: (meds) => meds.length.toString(),
-      loading: () => "...",
-      error: (_, _) => "0",
-    );
-
-    // Processamento otimizado de Provas
-    final subjects = subjectsAsync.value ?? [];
-    final nextExam = subjects
-        .where(
-          (s) => s.hasExam && s.examDate != null && s.examDate!.isAfter(now),
-        )
-        .fold<dynamic>(null, (earliest, current) {
-          if (earliest == null ||
-              current.examDate!.compareTo(earliest.examDate!) < 0) {
-            return current;
-          }
-          return earliest;
-        });
-
-    // Processamento de Hábitos
-    final habits = habitsAsync.value ?? [];
-    final formattedToday = DateFormat('yyyy-MM-dd').format(now);
-    final completedToday = habits
-        .where((h) => h.completedDates.contains(formattedToday))
-        .length;
+    final dashboard = homeState.dashboard;
+    final nextExam = homeState.nextExam;
 
     return Container(
       color: AppColors.scaffoldBackground,
@@ -209,7 +162,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
               _InsightCard(dashboard: dashboard),
               const SizedBox(height: 20),
 
-              // Mini Cards de Acesso Rápido (Usando push para manter histórico de navegação)
+              // Mini Cards de Acesso Rápido
               Row(
                 children: [
                   Expanded(
@@ -260,7 +213,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
               InfoCard(
                 title: "Estado geral",
                 subtitle:
-                    "Medicamentos ativos: $medCount • Humor: ${dashboard.mood ?? "—"}",
+                    "Medicamentos ativos: ${homeState.medicationCount} • Humor: ${dashboard.mood}",
                 value: "${dashboard.healthScore.toInt()}%",
                 color: AppColors.health,
                 icon: Icons.favorite_rounded,
@@ -284,9 +237,10 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
               const SizedBox(height: 12),
               InfoCard(
                 title: "Rotina Diária",
-                subtitle: "Concluídos: $completedToday de ${habits.length}",
-                value: habits.isNotEmpty
-                    ? "${((completedToday / habits.length) * 100).toInt()}%"
+                subtitle:
+                    "Concluídos: ${homeState.completedHabitsToday} de ${homeState.totalHabits}",
+                value: homeState.totalHabits > 0
+                    ? "${((homeState.completedHabitsToday / homeState.totalHabits) * 100).toInt()}%"
                     : "0%",
                 color: AppColors.habits,
                 icon: Icons.local_fire_department_rounded,

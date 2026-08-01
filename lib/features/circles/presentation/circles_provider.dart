@@ -4,6 +4,7 @@ import 'package:life_os/features/circles/domain/entities/circle_entity.dart';
 import 'package:life_os/features/circles/domain/entities/challenge_entity.dart';
 import 'package:life_os/features/circles/data/repositories/circles_repository.dart';
 import 'dart:async';
+import 'package:life_os/core/utils/app_logger.dart';
 
 final circlesProvider = NotifierProvider<CirclesNotifier, CirclesState>(
   CirclesNotifier.new,

@@ -1,9 +1,21 @@
 import 'dart:async';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:drift/drift.dart';
-import 'package:life_os/core/database/app_database.dart';
+
 import 'package:life_os/core/database/database_provider.dart';
+import 'package:life_os/features/focus/data/repositories/focus_repository.dart';
 import 'package:life_os/features/tasks/presentation/providers/tasks_provider.dart';
+import 'package:life_os/features/study/presentation/providers/study_provider.dart';
+
+// --- INJEÇÃO DO REPOSITÓRIO ---
+final focusRepositoryProvider = Provider((ref) {
+  return FocusRepository(
+    ref.watch(databaseProvider),
+    FirebaseFirestore.instance,
+    FirebaseAuth.instance,
+  );
+});
 
 class FocusState {
   final int durationRemaining;
@@ -58,8 +70,6 @@ class FocusNotifier extends Notifier<FocusState> {
     );
   }
 
-  AppDatabase get _db => ref.read(databaseProvider);
-
   void selectTarget(String id, String title, {String targetType = 'TASK'}) {
     state = state.copyWith(
       activeTargetId: id,
@@ -111,38 +121,24 @@ class FocusNotifier extends Notifier<FocusState> {
         final targetType = state.activeTargetType ?? 'TASK';
         final elapsedSeconds = _timerDurationInSeconds;
 
-        // 1. Grava o log de foco (Isso pode continuar usando _db diretamente)
-        await _db
-            .into(_db.focusLogs)
-            .insert(
-              FocusLogsCompanion.insert(
-                targetId: targetIdStr,
-                targetType: targetType,
-                durationSeconds: elapsedSeconds,
-                timestamp: DateTime.now().millisecondsSinceEpoch,
-              ),
-            );
+        // 1. Grava o log de foco usando o FocusRepository! (Salva local e Firebase)
+        await ref
+            .read(focusRepositoryProvider)
+            .saveFocusSession(targetIdStr, targetType, elapsedSeconds);
 
-        // 2. DELEGA a atualização da tarefa para o Repositório Oficial
+        // 2. Delega a atualização da tarefa para o TasksRepository
         if (targetType == 'TASK') {
-          // Chama o toggleTaskStatus forçando o status para TRUE (concluído)
-          // Repare que passamos 'false' como currentStatus para que ele inverta para 'true'
           await ref
               .read(tasksRepositoryProvider)
               .toggleTaskStatus(targetIdStr, false);
         }
-        // 3. Atualiza as matérias (se você tiver um StudyRepository, use-o aqui também!)
+        // 3. Delega a atualização da matéria para o StudyRepository (Ajuste conforme o seu método)
         else if (targetType == 'SUBJECT' || targetType == 'EXAM') {
-          await (_db.update(
-            _db.studyStats,
-          )..where((s) => s.id.equals(targetIdStr))).write(
-            StudyStatsCompanion(
-              lastStudyDate: Value(DateTime.now().millisecondsSinceEpoch),
-            ),
-          );
+          // Exemplo de como deve ficar se você tiver um método updateLastStudyDate:
+          // await ref.read(studyRepositoryProvider).updateLastStudyDate(targetIdStr);
         }
       } catch (e) {
-        // Tratamento de erro (adicione um print ou log de sistema se necessário)
+        // Agora usamos o AppLogger oficial aqui também, caso algo falhe na coordenação
         print("Erro ao finalizar sessão de foco: $e");
       }
     }

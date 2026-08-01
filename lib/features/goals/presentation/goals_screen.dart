@@ -15,7 +15,7 @@ class _GoalsScreenState extends ConsumerState<GoalsScreen> {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      ref.read(goalsActionProvider).syncGoalsFromFirebaseToLocal();
+      ref.read(goalRepositoryProvider).syncGoalsFromFirebaseToLocal();
     });
   }
 
@@ -56,7 +56,7 @@ class _GoalsScreenState extends ConsumerState<GoalsScreen> {
                 backgroundColor: Colors.redAccent,
               ),
               onPressed: () {
-                ref.read(goalsActionProvider).removeGoal(goalId);
+                ref.read(goalRepositoryProvider).removeGoal(goalId);
                 Navigator.pop(context);
               },
               child: const Text(
@@ -152,7 +152,7 @@ class _GoalsScreenState extends ConsumerState<GoalsScreen> {
                       final target = int.tryParse(targetController.text) ?? 1;
                       if (title.isNotEmpty) {
                         await ref
-                            .read(goalsActionProvider)
+                            .read(goalRepositoryProvider)
                             .createGoal(title, selectedTimeframe, target);
                         if (context.mounted) Navigator.pop(context);
                       }
@@ -232,7 +232,8 @@ class _GoalsScreenState extends ConsumerState<GoalsScreen> {
               }
               if (precisaResetar && goal.currentValue != 0) {
                 Future.microtask(
-                  () => ref.read(goalsActionProvider).resetGoalCycle(goal.id),
+                  () =>
+                      ref.read(goalRepositoryProvider).resetGoalCycle(goal.id),
                 );
               }
             }
@@ -314,7 +315,7 @@ class _GoalsScreenState extends ConsumerState<GoalsScreen> {
                                 ),
                                 onPressed: goal.currentValue > 0
                                     ? () => ref
-                                          .read(goalsActionProvider)
+                                          .read(goalRepositoryProvider)
                                           .updateGoalProgress(
                                             goal.id,
                                             goal.currentValue - 1,
@@ -328,7 +329,7 @@ class _GoalsScreenState extends ConsumerState<GoalsScreen> {
                                 ),
                                 onPressed: goal.currentValue < goal.targetValue
                                     ? () => ref
-                                          .read(goalsActionProvider)
+                                          .read(goalRepositoryProvider)
                                           .updateGoalProgress(
                                             goal.id,
                                             goal.currentValue + 1,
