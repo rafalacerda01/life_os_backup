@@ -2,7 +2,8 @@ import 'dart:async';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-
+import 'package:flutter/foundation.dart';
+import 'package:life_os/core/utils/app_logger.dart';
 import 'package:life_os/core/database/database_provider.dart';
 import 'package:life_os/features/focus/data/repositories/focus_repository.dart';
 import 'package:life_os/features/tasks/presentation/providers/tasks_provider.dart';
@@ -121,25 +122,26 @@ class FocusNotifier extends Notifier<FocusState> {
         final targetType = state.activeTargetType ?? 'TASK';
         final elapsedSeconds = _timerDurationInSeconds;
 
-        // 1. Grava o log de foco usando o FocusRepository! (Salva local e Firebase)
+        // 1. Grava o log de foco bruto
         await ref
             .read(focusRepositoryProvider)
             .saveFocusSession(targetIdStr, targetType, elapsedSeconds);
 
-        // 2. Delega a atualização da tarefa para o TasksRepository
+        // 2. Atualiza Tarefa se for do tipo TASK
         if (targetType == 'TASK') {
           await ref
               .read(tasksRepositoryProvider)
               .toggleTaskStatus(targetIdStr, false);
         }
-        // 3. Delega a atualização da matéria para o StudyRepository (Ajuste conforme o seu método)
+        // 3. Atualiza Matéria/Estudo se for do tipo SUBJECT ou EXAM
         else if (targetType == 'SUBJECT' || targetType == 'EXAM') {
-          // Exemplo de como deve ficar se você tiver um método updateLastStudyDate:
-          // await ref.read(studyRepositoryProvider).updateLastStudyDate(targetIdStr);
+          await ref
+              .read(studyRepositoryProvider)
+              .addStudyTime(targetIdStr, elapsedSeconds);
         }
-      } catch (e) {
-        // Agora usamos o AppLogger oficial aqui também, caso algo falhe na coordenação
-        print("Erro ao finalizar sessão de foco: $e");
+      } catch (e, stack) {
+        // 🚀 AQUI: O 'stack' foi adicionado no catch e passado para o AppLogger
+        AppLogger.e("Erro ao finalizar sessão de foco", e, stack);
       }
     }
     toggleSessionType();

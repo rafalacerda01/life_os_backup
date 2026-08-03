@@ -1,8 +1,8 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
-import 'package:flutter/foundation.dart';
 import 'package:drift/drift.dart';
+import 'package:life_os/core/utils/app_logger.dart'; // 🚀 Nosso Logger
 import 'package:life_os/features/tasks/data/models/task_model.dart';
 import 'package:life_os/core/database/app_database.dart';
 import 'package:life_os/core/database/database_provider.dart';
@@ -65,12 +65,15 @@ class TasksRepository {
                 title: data['title'] ?? '',
                 priority: data['priority'] ?? 'medium',
                 isCompleted: Value(data['isCompleted'] ?? false),
-                date: (data['date'] as Timestamp).toDate(),
+                // 🚀 BLINDAGEM: Se a data for nula no Firebase, assume o momento atual!
+                date: data['date'] != null
+                    ? (data['date'] as Timestamp).toDate()
+                    : DateTime.now(),
               ),
             );
       }
-    } catch (e) {
-      debugPrint("Erro ao sincronizar tarefas: $e");
+    } catch (e, stack) {
+      AppLogger.e("Erro ao sincronizar tarefas", e, stack);
     }
   }
 
@@ -105,7 +108,7 @@ class TasksRepository {
           'priority': priority,
           'isCompleted': false,
           'date': Timestamp.now(),
-        });
+        }, SetOptions(merge: true)); // 🚀 Adicionado merge: true por segurança
   }
 
   // ALTERNAR STATUS (Offline-First)
@@ -118,13 +121,20 @@ class TasksRepository {
       TaskTableCompanion(isCompleted: Value(!currentStatus)),
     );
 
-    // 2. Sync Firebase
-    await _firestore
-        .collection('users')
-        .doc(user.uid)
-        .collection('tasks')
-        .doc(taskId)
-        .update({'isCompleted': !currentStatus});
+    // 2. Sync Firebase (🚀 BLINDADO COM UPSERT)
+    try {
+      await _firestore
+          .collection('users')
+          .doc(user.uid)
+          .collection('tasks')
+          .doc(taskId)
+          .set(
+            {'isCompleted': !currentStatus},
+            SetOptions(merge: true), // 🚀 Aqui matamos o erro de NOT_FOUND!
+          );
+    } catch (e, stack) {
+      AppLogger.e("Erro no sync do Firebase ao alternar status", e, stack);
+    }
   }
 
   // EXCLUIR TAREFA (Offline-First)
@@ -136,11 +146,15 @@ class TasksRepository {
     await (_db.delete(_db.taskTable)..where((t) => t.id.equals(taskId))).go();
 
     // 2. Deleta Firebase
-    await _firestore
-        .collection('users')
-        .doc(user.uid)
-        .collection('tasks')
-        .doc(taskId)
-        .delete();
+    try {
+      await _firestore
+          .collection('users')
+          .doc(user.uid)
+          .collection('tasks')
+          .doc(taskId)
+          .delete();
+    } catch (e, stack) {
+      AppLogger.e("Falha no sync com Firebase ao deletar tarefa", e, stack);
+    }
   }
 }

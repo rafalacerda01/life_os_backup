@@ -61,7 +61,60 @@ class FocusRepository {
   }
 
   // ===========================================================================
-  // 2. SINCRONIZAÇÃO EM BACKGROUND
+  // 2. SINCRONIZAÇÃO EM BACKGROUND (SYNC-DOWN / HIDRATAÇÃO)
+  // ===========================================================================
+
+  Future<void> syncFocusFromFirebaseToLocal() async {
+    final user = _auth.currentUser;
+    if (user == null) return;
+
+    try {
+      AppLogger.i("SYNC Focus: Iniciando...");
+      final snapshot = await _firestore
+          .collection('users')
+          .doc(user.uid)
+          .collection('focus_logs')
+          .get();
+
+      for (var doc in snapshot.docs) {
+        final data = doc.data();
+
+        final timestampStr = data['timestamp'];
+        if (timestampStr == null) continue;
+
+        final timestamp = (timestampStr as Timestamp)
+            .toDate()
+            .millisecondsSinceEpoch;
+        final targetId = data['targetId'] as String? ?? '';
+
+        // Prevenção de duplicatas: Verifica se esse exato log já existe localmente
+        final existing =
+            await (_db.select(_db.focusLogs)
+                  ..where((t) => t.timestamp.equals(timestamp))
+                  ..where((t) => t.targetId.equals(targetId)))
+                .get();
+
+        if (existing.isEmpty) {
+          await _db
+              .into(_db.focusLogs)
+              .insert(
+                FocusLogsCompanion.insert(
+                  targetId: targetId,
+                  targetType: data['targetType'] as String? ?? 'unknown',
+                  durationSeconds: data['durationSeconds'] as int? ?? 0,
+                  timestamp: timestamp,
+                ),
+              );
+        }
+      }
+      AppLogger.i("SYNC Focus: Concluído com sucesso.");
+    } catch (e, stack) {
+      AppLogger.e("SYNC Focus: ERRO CRÍTICO", e, stack);
+    }
+  }
+
+  // ===========================================================================
+  // 3. SINCRONIZAÇÃO EM BACKGROUND (SYNC-UP)
   // ===========================================================================
 
   Future<void> _saveFocusSessionToFirestore(

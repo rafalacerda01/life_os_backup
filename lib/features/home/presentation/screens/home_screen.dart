@@ -7,6 +7,8 @@ import 'package:life_os/core/widgets/dashboard_components.dart';
 import 'package:life_os/features/home/presentation/providers/home_provider.dart';
 import 'package:life_os/features/auth/presentation/providers/auth_provider.dart';
 import 'package:life_os/features/dashboard/data/models/dashboard_model.dart';
+import 'package:life_os/features/dashboard/domain/entities/models/insight_model.dart';
+import 'package:life_os/features/home/presentation/providers/insight_provider.dart';
 
 class HomeScreen extends ConsumerWidget {
   const HomeScreen({super.key});
@@ -159,7 +161,10 @@ class HomeScreen extends ConsumerWidget {
               const SizedBox(height: 25),
               _MainScoreCard(dashboard: dashboard),
               const SizedBox(height: 20),
-              _InsightCard(dashboard: dashboard),
+
+              // Correção aplicada: Substituído o _InsightCard antigo pelo novo motor escalável
+              const PremiumInsightCard(),
+
               const SizedBox(height: 20),
 
               // Mini Cards de Acesso Rápido
@@ -304,31 +309,133 @@ class _MainScoreCard extends StatelessWidget {
   }
 }
 
-class _InsightCard extends StatelessWidget {
-  final DashboardModel dashboard;
-  const _InsightCard({required this.dashboard});
+class PremiumInsightCard extends ConsumerWidget {
+  const PremiumInsightCard({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final insight = ref.watch(currentInsightProvider);
+
+    return Semantics(
+      label: 'Insight do dia: ${insight.title}. ${insight.message}',
+      child: AnimatedSwitcher(
+        duration: const Duration(milliseconds: 600),
+        switchInCurve: Curves.easeOutExpo,
+        switchOutCurve: Curves.easeInExpo,
+        transitionBuilder: (Widget child, Animation<double> animation) {
+          return FadeTransition(
+            opacity: animation,
+            child: SlideTransition(
+              position: Tween<Offset>(
+                begin: const Offset(0.0, 0.1),
+                end: Offset.zero,
+              ).animate(animation),
+              child: child,
+            ),
+          );
+        },
+        child: _InsightCardContent(key: ValueKey(insight.id), insight: insight),
+      ),
+    );
+  }
+}
+
+class _InsightCardContent extends StatelessWidget {
+  final InsightModel insight;
+
+  const _InsightCardContent({required super.key, required this.insight});
 
   @override
   Widget build(BuildContext context) {
-    String text = dashboard.productivityScore > 70
-        ? "Você está em alta produtividade hoje 🚀"
-        : (dashboard.healthScore < 50
-              ? "Sua saúde precisa de atenção hoje ❤️"
-              : "Você está em equilíbrio hoje ⚖️");
+    final textTheme = Theme.of(context).textTheme;
+    final primaryColor = insight.category.gradientColors.first;
+
     return Container(
-      padding: const EdgeInsets.all(18),
+      padding: const EdgeInsets.all(20),
       decoration: BoxDecoration(
         color: AppColors.cardBackground,
-        borderRadius: BorderRadius.circular(20),
+        borderRadius: BorderRadius.circular(24),
+        border: Border.all(color: primaryColor.withOpacity(0.15), width: 1.5),
+        // boxShadow removido daqui para eliminar a sombra/glow
       ),
       child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Icon(Icons.auto_graph, color: Colors.purpleAccent),
-          const SizedBox(width: 12),
+          Container(
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                colors: insight.category.gradientColors,
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+              ),
+              shape: BoxShape.circle,
+              boxShadow: [
+                BoxShadow(
+                  color: primaryColor.withOpacity(0.4),
+                  blurRadius: 12,
+                  offset: const Offset(0, 4),
+                ),
+              ],
+            ),
+            child: Icon(insight.category.icon, color: Colors.white, size: 24),
+          ),
+          const SizedBox(width: 16),
           Expanded(
-            child: Text(
-              text,
-              style: const TextStyle(color: AppColors.textSecondary),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        insight.title,
+                        style: textTheme.titleMedium?.copyWith(
+                          color: AppColors.textMain,
+                          fontWeight: FontWeight.bold,
+                          letterSpacing: 0.2,
+                        ),
+                      ),
+                    ),
+                    if (insight.priority == InsightPriority.critical)
+                      _buildCriticalBadge(),
+                  ],
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  insight.message,
+                  style: textTheme.bodyMedium?.copyWith(
+                    color: AppColors.textSecondary,
+                    height: 1.4,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildCriticalBadge() {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color: Colors.redAccent.withOpacity(0.15),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: const Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.crisis_alert_rounded, color: Colors.redAccent, size: 12),
+          SizedBox(width: 4),
+          Text(
+            "ALERTA",
+            style: TextStyle(
+              color: Colors.redAccent,
+              fontSize: 10,
+              fontWeight: FontWeight.bold,
             ),
           ),
         ],

@@ -88,6 +88,28 @@ class AppDatabase extends _$AppDatabase {
       const CheckInTableCompanion(isSynced: Value(true)),
     );
   }
+
+  // ===========================================================================
+  // POLÍTICA DE LOGOUT E LIMPEZA DE DADOS
+  // ===========================================================================
+
+  /// 🚀 Limpa todos os dados de todas as tabelas (Usado no Logout)
+  Future<void> clearAllData() async {
+    // Desativar temporariamente as chaves estrangeiras para evitar erros de restrição de FK ao deletar
+    await customStatement('PRAGMA foreign_keys = OFF');
+    try {
+      // Usar transaction garante que, se der erro no meio, nada será apagado (Atomicidade)
+      await transaction(() async {
+        // allTables é uma lista gerada automaticamente pelo Drift contendo todas as tabelas do seu @DriftDatabase
+        for (final table in allTables) {
+          await delete(table).go();
+        }
+      });
+    } finally {
+      // Reativar as chaves estrangeiras
+      await customStatement('PRAGMA foreign_keys = ON');
+    }
+  }
 }
 
 // Definição da tabela FocusLogs

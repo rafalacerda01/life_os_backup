@@ -1,11 +1,10 @@
 import 'dart:convert';
 import 'dart:math';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
-import 'package:flutter/foundation.dart'; // Para debug
+import 'package:flutter/foundation.dart';
 
 class DbKeyManager {
   static const _storage = FlutterSecureStorage(
-    // Configuração robusta para Android: usa EncryptedSharedPreferences
     aOptions: AndroidOptions(encryptedSharedPreferences: true),
     iOptions: IOSOptions(accessibility: KeychainAccessibility.first_unlock),
   );
@@ -14,7 +13,6 @@ class DbKeyManager {
   static String? _cachedKey;
 
   static Future<String> getEncryptionKey() async {
-    // Retorna o cache em memória para evitar leituras repetidas e lentas do SecureStorage
     if (_cachedKey != null) return _cachedKey!;
 
     try {
@@ -30,9 +28,12 @@ class DbKeyManager {
       _cachedKey = key;
       return key;
     } catch (e) {
-      // Falha crítica de segurança ou armazenamento:
-      // Não podemos continuar se não conseguirmos acessar a chave.
       throw Exception('Falha crítica ao recuperar chave de criptografia: $e');
     }
+  }
+
+  // 🚀 CÓDIGO INSERIDO: Limpa a chave da memória RAM durante o logout
+  static void clearCache() {
+    _cachedKey = null;
   }
 }

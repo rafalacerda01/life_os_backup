@@ -292,6 +292,106 @@ class StudyRepository {
     }
   }
 
+  // 🚀 NOVO MÉTODO: Adiciona o tempo de estudo processado pelo Timer de Foco
+  Future<void> addStudyTime(String subjectId, int elapsedSeconds) async {
+    if (_auth.currentUser == null) return;
+
+    // 🚨 CORREÇÃO 1: Se o timer chegou a zero, assumimos o tempo padrão de 1 pomodoro (25 min = 1500s).
+    final safeElapsed = elapsedSeconds <= 0 ? 1500 : elapsedSeconds;
+
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final nowEpoch = now.millisecondsSinceEpoch;
+
+    try {
+      final currentStats = await _db.select(_db.studyStats).getSingleOrNull();
+      int newStreak = currentStats?.streak ?? 0;
+      final lastStudyMillis = currentStats?.lastStudyDate;
+
+      // Cálculo de Streak
+      if (lastStudyMillis != null) {
+        final last = DateTime.fromMillisecondsSinceEpoch(lastStudyMillis);
+        final lastDate = DateTime(last.year, last.month, last.day);
+        final difference = today.difference(lastDate).inDays;
+        if (difference == 1) {
+          newStreak++;
+        } else if (difference > 1) {
+          newStreak = 1;
+        }
+      } else {
+        newStreak = 1;
+      }
+
+      final currentProgress = currentStats?.progress ?? 0.0;
+
+      // 🚨 CORREÇÃO 2: Cálculo Proporcional com Bônus Mínimo de Teste
+      double sessionProgressBonus = (safeElapsed / 1500) * 0.25;
+
+      // Se você está testando com tempos de 10s, garante um ganho visível de 5% na barra!
+      if (sessionProgressBonus < 0.05) {
+        sessionProgressBonus = 0.05;
+      }
+
+      final newProgress = (currentProgress + sessionProgressBonus).clamp(
+        0.0,
+        1.0,
+      );
+
+      // 🚨 CORREÇÃO 3: Usar insertOnConflictUpdate garante que a estatística seja criada se não existir!
+      await _db
+          .into(_db.studyStats)
+          .insertOnConflictUpdate(
+            StudyStatsCompanion(
+              id: const Value('main'),
+              streak: Value(newStreak),
+              progress: Value(newProgress),
+              reviewQueue: Value(currentStats?.reviewQueue ?? 0),
+              lastStudyDate: Value(nowEpoch),
+            ),
+          );
+
+      // Atualiza o progresso específico da Disciplina selecionada
+      final subjectData = await (_db.select(
+        _db.subjects,
+      )..where((t) => t.id.equals(subjectId))).getSingleOrNull();
+      double subProgress = 0.0;
+
+      if (subjectData != null) {
+        subProgress = (subjectData.progress + sessionProgressBonus).clamp(
+          0.0,
+          1.0,
+        );
+        await (_db.update(
+          _db.subjects,
+        )..where((t) => t.id.equals(subjectId))).write(
+          SubjectsCompanion(
+            progress: Value(subProgress),
+            streakDays: Value(newStreak),
+          ),
+        );
+      }
+
+      // Adicionamos um Log para você ver magicamente a porcentagem subindo no console
+      AppLogger.i(
+        "🔥 Foco Concluído! Bônus: +${(sessionProgressBonus * 100).toStringAsFixed(1)}% | Progresso Total: ${(newProgress * 100).toStringAsFixed(1)}%",
+      );
+
+      // Sincroniza com o Firebase
+      unawaited(
+        _syncStudyTimeInFirestore(
+          subjectId,
+          newStreak,
+          newProgress,
+          subProgress,
+          now,
+        ),
+      );
+    } catch (e, stack) {
+      AppLogger.e('Erro ao processar tempo de estudo', e, stack);
+      rethrow;
+    }
+  }
+
   Future<void> completeReview(StudyModel currentStatus) async {
     if (_auth.currentUser == null || currentStatus.reviewQueue <= 0) return;
     final safeNewQueue = (currentStatus.reviewQueue - 1).clamp(0, 99999);
@@ -399,8 +499,6 @@ class StudyRepository {
       AppLogger.e('Erro ao sincronizar Área de Estudos do Firebase', e, stack);
     }
   }
-
-  // --- Métodos privados Fire-and-Forget ---
 
   // --- Métodos privados Fire-and-Forget ---
 
@@ -610,6 +708,50 @@ class StudyRepository {
           .set({'progress': 0.0}, SetOptions(merge: true));
     } catch (e, stack) {
       AppLogger.e('Sync Error: Reset de progresso', e, stack);
+    }
+  }
+
+  // 🚀 NOVO MÉTODO PRIVADO: Sincroniza informações de progresso do foco usando Batch atômico
+  Future<void> _syncStudyTimeInFirestore(
+    String subjectId,
+    int streak,
+    double progress,
+    double subjectProgress,
+    DateTime now,
+  ) async {
+    try {
+      final uid = _auth.currentUser!.uid;
+      final batch = _firestore.batch();
+
+      // 1. Atualiza dados globais
+      batch.set(
+        _firestore
+            .collection('users')
+            .doc(uid)
+            .collection('study_info')
+            .doc('main'),
+        {
+          'streak': streak,
+          'progress': progress,
+          'lastStudyDate': Timestamp.fromDate(now),
+        },
+        SetOptions(merge: true),
+      );
+
+      // 2. Atualiza dados específicos da matéria
+      batch.set(
+        _firestore
+            .collection('users')
+            .doc(uid)
+            .collection('subjects')
+            .doc(subjectId),
+        {'progress': subjectProgress, 'streakDays': streak},
+        SetOptions(merge: true),
+      );
+
+      await batch.commit();
+    } catch (e, stack) {
+      AppLogger.e('Sync Error: Sincronizar Tempo de Estudo do Foco', e, stack);
     }
   }
 }

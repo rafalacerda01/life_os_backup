@@ -2,10 +2,9 @@ import 'package:drift/drift.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart';
-import 'package:uuid/uuid.dart'; // ✅ Import adicionado para geração segura de IDs
+import 'package:uuid/uuid.dart';
 
 import 'package:life_os/core/database/app_database.dart';
-// ✅ Import da Entidade em vez do Model para manter a Clean Architecture
 import 'package:life_os/features/tasks/domain/entities/task_entity.dart';
 
 class TasksRepository {
@@ -16,7 +15,6 @@ class TasksRepository {
   TasksRepository(this._db, this._firestore, this._auth);
 
   // 1. Stream que escuta o banco LOCAL (Offline-First)
-  // ✅ Retorna TaskEntity para a UI/Provider não conhecer detalhes do Banco
   Stream<List<TaskEntity>> getTasksStream() {
     return _db.select(_db.taskTable).watch().map((rows) {
       return rows
@@ -86,7 +84,6 @@ class TasksRepository {
         );
 
     // B. Sync com Firebase
-    // ✅ Protegido com try/catch para não quebrar se o app estiver offline
     try {
       await _firestore
           .collection('users')
@@ -98,7 +95,7 @@ class TasksRepository {
             'priority': priority,
             'isCompleted': false,
             'date': Timestamp.now(),
-          });
+          }, SetOptions(merge: true));
     } catch (e) {
       debugPrint(
         "Tarefa salva localmente. Falha no sync com Firebase (addTask): $e",
@@ -106,7 +103,7 @@ class TasksRepository {
     }
   }
 
-  // 4. Toggle Status
+  // 4. Toggle Status (Blindado com upsert completo)
   Future<void> toggleTaskStatus(String id, bool currentStatus) async {
     final user = _auth.currentUser;
     if (user == null) return;
@@ -116,14 +113,19 @@ class TasksRepository {
       TaskTableCompanion(isCompleted: Value(!currentStatus)),
     );
 
-    // 2. Sync Firebase em segundo plano
+    // 2. Sync Firebase em segundo plano garantindo a existência do documento
     try {
-      await _firestore
+      final docRef = _firestore
           .collection('users')
           .doc(user.uid)
           .collection('tasks')
-          .doc(id)
-          .update({'isCompleted': !currentStatus});
+          .doc(id);
+
+      // Garante que o documento existe ou aplica o merge do novo status
+      await docRef.set({
+        'isCompleted': !currentStatus,
+        'updatedAt': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
     } catch (e) {
       debugPrint("Erro no sync do Firebase ao alternar status: $e");
     }
@@ -138,7 +140,6 @@ class TasksRepository {
     await (_db.delete(_db.taskTable)..where((t) => t.id.equals(id))).go();
 
     // B. Deletar Firebase
-    // ✅ Protegido com try/catch
     try {
       await _firestore
           .collection('users')
