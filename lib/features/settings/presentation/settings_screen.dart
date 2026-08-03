@@ -4,7 +4,9 @@ import 'package:life_os/features/settings/presentation/screens/security_privacy_
 import 'package:life_os/features/settings/presentation/screens/subscription_screen.dart';
 import 'package:life_os/features/settings/presentation/screens/notifications_screen.dart';
 import 'package:life_os/features/settings/presentation/screens/appearance_screen.dart';
-// Import da tela que mostra os planos e valores
+import 'package:life_os/features/settings/presentation/screens/privacy_policy_screen.dart';
+// 🚀 Import da nova tela de Contato e Reportes
+import 'package:life_os/features/settings/presentation/screens/contact_screen.dart';
 import 'package:life_os/features/premium/presentation/premium_screen.dart';
 
 class SettingsScreen extends StatelessWidget {
@@ -19,7 +21,7 @@ class SettingsScreen extends StatelessWidget {
         elevation: 0,
         title: const Text(
           "Painel Operacional",
-          style: TextStyle(fontWeight: FontWeight.bold),
+          style: TextStyle(fontWeight: FontWeight.bold, color: Colors.white),
         ),
       ),
       body: ListView(
@@ -64,7 +66,7 @@ class SettingsScreen extends StatelessWidget {
             ),
           ),
 
-          // 4. NOVO: Planos Premium e Valores (A Loja)
+          // 4. Planos Premium e Valores (A Loja)
           _buildSettingsTile(
             Icons.workspace_premium_outlined,
             "Planos Premium e Valores",
@@ -99,6 +101,34 @@ class SettingsScreen extends StatelessWidget {
                 MaterialPageRoute(
                   builder: (context) => const AppearanceScreen(),
                 ),
+              );
+            },
+          ),
+
+          // 7. Política de Privacidade
+          _buildSettingsTile(
+            Icons.privacy_tip_outlined,
+            "Política de Privacidade",
+            "Termos, diretrizes e tratamento de dados",
+            onTap: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (context) => const PrivacyPolicyScreen(),
+                ),
+              );
+            },
+          ),
+
+          // 8. NOVO: Suporte e Contato
+          _buildSettingsTile(
+            Icons.support_agent_rounded,
+            "Suporte & Reporte de Bugs",
+            "Fale conosco via e-mail oficial",
+            onTap: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (context) => const ContactScreen()),
               );
             },
           ),

@@ -66,7 +66,53 @@ class CheckInRepository {
   }
 
   // ===========================================================================
-  // 3. SINCRONIZAÇÃO EM BACKGROUND
+  // 3. SINCRONIZAÇÃO EM BACKGROUND (SYNC-DOWN / HIDRATAÇÃO)
+  // ===========================================================================
+
+  Future<void> syncCheckinsFromFirebaseToLocal() async {
+    final userId = _auth.currentUser?.uid;
+    if (userId == null) return;
+
+    try {
+      AppLogger.i('SYNC Check-ins: Iniciando...');
+      final snapshot = await _firestore
+          .collection('users')
+          .doc(userId)
+          .collection('checkins')
+          .get();
+
+      for (var doc in snapshot.docs) {
+        final data = doc.data();
+
+        // Verifica se a tabela se chama checkInTable.
+        // Caso seu AppDatabase use um nome diferente para a tabela (ex: checkIns), ajuste abaixo!
+        await _db
+            .into(_db.checkInTable)
+            .insertOnConflictUpdate(
+              CheckInTableCompanion(
+                id: Value(doc.id),
+                energy: Value((data['energy'] as num?)?.toDouble() ?? 0.0),
+                focus: Value((data['focus'] as num?)?.toDouble() ?? 0.0),
+                motivation: Value(
+                  (data['motivation'] as num?)?.toDouble() ?? 0.0,
+                ),
+                createdAt: Value(
+                  (data['updatedAt'] as Timestamp?)?.toDate() ?? DateTime.now(),
+                ),
+                isSynced: const Value(
+                  true,
+                ), // Chegou da nuvem, então já tá sincronizado!
+              ),
+            );
+      }
+      AppLogger.i('SYNC Check-ins: Concluído com sucesso.');
+    } catch (error, stackTrace) {
+      AppLogger.e('SYNC Check-ins: ERRO CRÍTICO', error, stackTrace);
+    }
+  }
+
+  // ===========================================================================
+  // 4. SINCRONIZAÇÃO EM BACKGROUND (SYNC-UP PENDENTES)
   // ===========================================================================
 
   Future<void> _syncWithFirebase({

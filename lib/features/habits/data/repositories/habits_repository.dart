@@ -105,6 +105,45 @@ class HabitsRepository {
     }
   }
 
+  // ===========================================================================
+  // 🚀 SINCRONIZAÇÃO EM BACKGROUND (SYNC-DOWN / HIDRATAÇÃO)
+  // ===========================================================================
+
+  Future<void> syncHabitsFromFirebaseToLocal() async {
+    final userId = _auth.currentUser?.uid;
+    if (userId == null) return;
+
+    try {
+      AppLogger.i('SYNC Hábitos: Iniciando...');
+      final snapshot = await _firestore
+          .collection('users')
+          .doc(userId)
+          .collection('habits')
+          .get();
+
+      for (var doc in snapshot.docs) {
+        final data = doc.data();
+
+        // Converte a lista dinâmica que vem do Firestore de volta para List<String>
+        final rawDates = data['completedDates'] as List<dynamic>? ?? [];
+        final dates = rawDates.map((e) => e.toString()).toList();
+
+        await _db
+            .into(_db.habits)
+            .insertOnConflictUpdate(
+              HabitsCompanion.insert(
+                id: doc.id,
+                title: data['title'] ?? 'Sem título',
+                completedDates: jsonEncode(dates),
+              ),
+            );
+      }
+      AppLogger.i('SYNC Hábitos: Concluído com sucesso.');
+    } catch (error, stackTrace) {
+      AppLogger.e('SYNC Hábitos: ERRO CRÍTICO', error, stackTrace);
+    }
+  }
+
   // --- Métodos Privados para Sincronização com o Firestore ---
 
   Future<void> _saveHabitToFirestore(

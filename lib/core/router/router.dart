@@ -20,6 +20,8 @@ import 'package:life_os/features/finance/presentation/finance_screen.dart';
 import 'package:life_os/features/habits/presentation/habits_screen.dart';
 import 'package:life_os/features/tasks/presentation/tasks_screen.dart';
 import 'package:life_os/features/analytics/presentation/analytics_screen.dart';
+import 'package:life_os/features/settings/presentation/screens/privacy_policy_screen.dart';
+import 'package:life_os/features/settings/presentation/screens/contact_screen.dart';
 // ✅ Importação adicionada para a tela de Notificações
 import 'package:life_os/features/settings/presentation/screens/notifications_screen.dart';
 
@@ -125,6 +127,14 @@ final routerProvider = Provider<GoRouter>((ref) {
           GoRoute(
             path: '/analytics',
             builder: (context, state) => const AnalyticsScreen(),
+          ),
+          GoRoute(
+            path: '/privacy-policy',
+            builder: (context, state) => const PrivacyPolicyScreen(),
+          ),
+          GoRoute(
+            path: '/contact',
+            builder: (context, state) => const ContactScreen(),
           ),
         ],
       ),

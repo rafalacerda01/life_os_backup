@@ -33,6 +33,8 @@
 <string>O Life OS precisa de acesso à galeria para você selecionar sua foto de perfil.</string>
 <key>NSCameraUsageDescription</key>
 <string>O Life OS precisa de acesso à câmera para você tirar sua foto de perfil.</string>
+<key>NSLocalNotificationUsageDescription</key>
+<string>Precisamos enviar lembretes para ajudar você a manter seus hábitos e horários de medicação em dia.</string>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
 		<false/>

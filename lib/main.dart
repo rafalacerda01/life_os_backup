@@ -16,6 +16,10 @@ void main() async {
   // 1. Inicialização síncrona obrigatória do núcleo do Firebase
   await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
 
+  // 🚀 CÓDIGO ALTERADO: App Check agora é aguardado ANTES de construir a UI.
+  // Isso garante que nenhuma requisição do Riverpod bata no Firebase sem o token de segurança.
+  await _initAppCheckInBackground();
+
   // 2. Configuração de coleta do Crashlytics
   await FirebaseCrashlytics.instance
       .setCrashlyticsCollectionEnabled(!kDebugMode)
@@ -44,13 +48,8 @@ void main() async {
         return true;
       };
 
-      // Inicia a interface imediatamente (sem travar na logo)
+      // Inicia a interface de forma segura, com o App Check já ativo e validado
       runApp(const ProviderScope(child: LifeOSApp()));
-
-      // 4. Inicializa o App Check APÓS o app renderizar a primeira tela
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        _initAppCheckInBackground();
-      });
     },
     (error, stack) {
       if (kDebugMode) {

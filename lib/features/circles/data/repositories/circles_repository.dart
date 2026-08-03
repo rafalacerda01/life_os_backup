@@ -230,49 +230,54 @@ class CirclesRepository {
 
     final cleanCircleId = circleId.trim();
 
+    // 1. Buscamos as informações do usuário atual (Fora da transação para otimizar velocidade)
     final userDoc = await _firestore.collection('users').doc(user.uid).get();
     final bool isPremium = userDoc.data()?['isPremium'] ?? false;
     final userName =
         userDoc.data()?['displayName'] ?? user.displayName ?? 'Usuário';
 
     final circleRef = _firestore.collection('circles').doc(cleanCircleId);
-    final circleSnap = await circleRef.get();
-
-    if (!circleSnap.exists) {
-      throw Exception("Círculo não encontrado! Verifique o código.");
-    }
-
-    final data = circleSnap.data() as Map<String, dynamic>;
-    final int currentMemberCount = data['memberCount'] ?? 0;
-    final int limit = isPremium ? 10 : 3;
-
-    if (currentMemberCount >= limit) {
-      throw Exception(
-        isPremium
-            ? "Este círculo atingiu o limite de 10 membros."
-            : "Limite de 3 membros atingido. Assine o Premium para expandir para 10!",
-      );
-    }
-
-    final batch = _firestore.batch();
     final rankingRef = circleRef.collection('ranking').doc(user.uid);
     final userRef = _firestore.collection('users').doc(user.uid);
 
-    batch.set(rankingRef, {
-      'name': userName,
-      'totalXp': 0,
-      'photoUrl': user.photoURL,
+    // 🚀 CÓDIGO ALTERADO: Executando dentro de uma Transação Atômica do Firestore
+    await _firestore.runTransaction((transaction) async {
+      // 2. Lê o círculo DE DENTRO da transação (Garante que estamos vendo o dado mais recente)
+      final circleSnap = await transaction.get(circleRef);
+
+      if (!circleSnap.exists) {
+        throw Exception("Círculo não encontrado! Verifique o código.");
+      }
+
+      final data = circleSnap.data() as Map<String, dynamic>;
+      final int currentMemberCount = data['memberCount'] ?? 0;
+      final int limit = isPremium ? 10 : 3;
+
+      // 3. Validação de bloqueio. Se a regra quebrar, a transação é cancelada.
+      if (currentMemberCount >= limit) {
+        throw Exception(
+          isPremium
+              ? "Este círculo atingiu o limite de 10 membros."
+              : "Limite de 3 membros atingido. Assine o Premium para expandir para 10!",
+        );
+      }
+
+      // 4. Executamos as escritas garantindo a integridade dos dados
+      transaction.set(rankingRef, {
+        'name': userName,
+        'totalXp': 0,
+        'photoUrl': user.photoURL,
+      });
+
+      // Como estamos numa transação, podemos somar matematicamente com precisão
+      transaction.update(circleRef, {
+        'memberCount': currentMemberCount + 1,
+        'updatedAt': FieldValue.serverTimestamp(),
+      });
+
+      transaction.set(userRef, {
+        'activeCircleId': cleanCircleId,
+      }, SetOptions(merge: true));
     });
-
-    batch.update(circleRef, {
-      'memberCount': FieldValue.increment(1),
-      'updatedAt': FieldValue.serverTimestamp(),
-    });
-
-    batch.set(userRef, {
-      'activeCircleId': cleanCircleId,
-    }, SetOptions(merge: true));
-
-    await batch.commit();
   }
 }

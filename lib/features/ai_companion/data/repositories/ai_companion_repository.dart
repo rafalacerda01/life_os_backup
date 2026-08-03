@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
@@ -6,6 +7,9 @@ import 'package:life_os/core/utils/app_logger.dart';
 
 class AICompanionRepository {
   final http.Client client;
+
+  // 🚀 Timeout de segurança global para operações de rede e nuvem
+  static const Duration _networkTimeout = Duration(seconds: 15);
 
   AICompanionRepository({http.Client? client})
     : client = client ?? http.Client();
@@ -33,24 +37,36 @@ class AICompanionRepository {
     try {
       final user = FirebaseAuth.instance.currentUser;
       if (user != null) {
-        // 1. Ciclo menstrual
+        // 1. Ciclo menstrual com timeout de segurança
         final userDoc = await FirebaseFirestore.instance
             .collection('users')
             .doc(user.uid)
-            .get();
+            .get()
+            .timeout(
+              _networkTimeout,
+              onTimeout: () => throw TimeoutException(
+                'Timeout ao buscar dados de usuário para a IA.',
+              ),
+            );
 
         if (userDoc.exists) {
           healthContext["ciclo_menstrual"] =
               userDoc.data()?['menstrualCycle'] ?? "Não rastreado";
         }
 
-        // 2. Finanças
+        // 2. Finanças com timeout de segurança
         final financeDoc = await FirebaseFirestore.instance
             .collection('users')
             .doc(user.uid)
             .collection('finance')
             .doc('main')
-            .get();
+            .get()
+            .timeout(
+              _networkTimeout,
+              onTimeout: () => throw TimeoutException(
+                'Timeout ao buscar dados financeiros para a IA.',
+              ),
+            );
 
         if (financeDoc.exists) {
           final data = financeDoc.data();
@@ -88,14 +104,24 @@ class AICompanionRepository {
 
       final url = Uri.parse('https://life-os-backend-gray.vercel.app/api/chat');
 
-      final response = await client.post(
-        url,
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': 'Bearer $token',
-        },
-        body: jsonEncode({"message": text, "context": contextData}),
-      );
+      // 🚀 Requisição HTTP blindada com timeout explícito
+      final response = await client
+          .post(
+            url,
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': 'Bearer $token',
+            },
+            body: jsonEncode({"message": text, "context": contextData}),
+          )
+          .timeout(
+            _networkTimeout,
+            onTimeout: () {
+              throw TimeoutException(
+                "O servidor demorou muito para responder. Verifique sua conexão e tente novamente.",
+              );
+            },
+          );
 
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);

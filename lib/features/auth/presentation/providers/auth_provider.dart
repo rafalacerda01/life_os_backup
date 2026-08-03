@@ -1,14 +1,23 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+
+// Imports dos providers de todos os módulos
+import 'package:life_os/features/finance/presentation/providers/finance_provider.dart';
+import 'package:life_os/features/tasks/presentation/providers/tasks_provider.dart';
+import 'package:life_os/features/habits/presentation/providers/habits_provider.dart';
+import 'package:life_os/features/goals/presentation/goals_provider.dart';
+import 'package:life_os/features/checkin/presentation/providers/check_in_provider.dart';
+import 'package:life_os/features/health/presentation/providers/health_provider.dart';
+import 'package:life_os/features/focus/presentation/providers/providers/focus_provider.dart';
+
+import 'package:life_os/features/dashboard/presentation/providers/dashboard_provider.dart';
 import 'package:life_os/features/auth/data/repositories/auth_repository_impl.dart';
 import 'package:life_os/features/auth/domain/repositories/auth_repository.dart';
 import 'package:life_os/features/auth/presentation/providers/auth_state.dart';
 import 'package:life_os/core/storage/secure_storage_service.dart';
-import 'dart:io';
-import 'package:path/path.dart' as p;
-import 'package:path_provider/path_provider.dart';
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:life_os/core/database/database_provider.dart';
 
 // Providers de infraestrutura
 final firebaseAuthProvider = Provider((ref) => FirebaseAuth.instance);
@@ -51,7 +60,6 @@ class AuthNotifier extends Notifier<AuthState> {
 
     final subscription = auth.authStateChanges().listen((firebaseUser) async {
       if (firebaseUser == null) {
-        // Remove o token do armazenamento seguro ao detectar perda de sessão
         await _secureStorage.deleteToken();
 
         state.maybeWhen(
@@ -59,7 +67,6 @@ class AuthNotifier extends Notifier<AuthState> {
           orElse: () => state = AuthState.unauthenticated(),
         );
       } else {
-        // Garante que o token atualizado seja persistido com segurança
         final token = await firebaseUser.getIdToken();
         if (token != null) {
           await _secureStorage.saveToken(token);
@@ -70,6 +77,23 @@ class AuthNotifier extends Notifier<AuthState> {
     ref.onDispose(() {
       subscription.cancel();
     });
+  }
+
+  // --- Função Helper para centralizar a Hidratação de todos os módulos ---
+  void _hydrateAllOfflineData() {
+    try {
+      ref.read(financeRepositoryProvider).syncTransactionsFromFirestore();
+      ref.read(tasksRepositoryProvider).syncTasksFromFirebaseToLocal();
+      ref.read(habitsRepositoryProvider).syncHabitsFromFirebaseToLocal();
+      ref.read(goalRepositoryProvider).syncGoalsFromFirebaseToLocal();
+      ref
+          .read(checkInRepositoryProvider)
+          .syncCheckinsFromFirebaseToLocal(); // Corrigido para CheckIn (I maiúsculo)
+      ref.read(healthRepositoryProvider).syncHealthFromFirebase();
+      ref.read(focusRepositoryProvider).syncFocusFromFirebaseToLocal();
+    } catch (e) {
+      print("Erro ao tentar hidratar dados na inicialização: $e");
+    }
   }
 
   // --- Métodos de Autenticação e Perfil ---
@@ -85,6 +109,7 @@ class AuthNotifier extends Notifier<AuthState> {
           }
         }
         state = AuthState.authenticated(user);
+        _hydrateAllOfflineData();
       },
       (failure) async {
         await _secureStorage.deleteToken();
@@ -106,6 +131,7 @@ class AuthNotifier extends Notifier<AuthState> {
         await _secureStorage.saveToken(token);
       }
       state = AuthState.authenticated(user);
+      _hydrateAllOfflineData();
     }, (failure) => state = AuthState.error(failure.message));
   }
 
@@ -123,6 +149,7 @@ class AuthNotifier extends Notifier<AuthState> {
         await _secureStorage.saveToken(token);
       }
       state = AuthState.authenticated(user);
+      _hydrateAllOfflineData();
     }, (failure) => state = AuthState.error(failure.message));
   }
 
@@ -136,6 +163,7 @@ class AuthNotifier extends Notifier<AuthState> {
         await _secureStorage.saveToken(token);
       }
       state = AuthState.authenticated(user);
+      _hydrateAllOfflineData();
     }, (failure) => state = AuthState.error(failure.message));
   }
 
@@ -162,8 +190,16 @@ class AuthNotifier extends Notifier<AuthState> {
   Future<void> logout() async {
     state = AuthState.loading();
     final result = await _repository.signOut();
+
     result.when((_) async {
       await _clearLocalData();
+
+      ref.invalidate(financeStreamProvider);
+      ref.invalidate(tasksStreamProvider);
+      ref.invalidate(habitsStreamProvider);
+      ref.invalidate(dashboardStateProvider);
+      ref.invalidate(checkInStreamProvider);
+
       state = AuthState.unauthenticated();
     }, (failure) => state = AuthState.error(failure.message));
   }
@@ -182,7 +218,6 @@ class AuthNotifier extends Notifier<AuthState> {
     );
   }
 
-  // --- Função Delete Account Atualizada com Reautenticação ---
   Future<void> deleteAccount({String? password}) async {
     state = AuthState.loading();
 
@@ -190,19 +225,33 @@ class AuthNotifier extends Notifier<AuthState> {
       final user = ref.read(firebaseAuthProvider).currentUser;
 
       if (user != null) {
-        // Reautenticação: Necessário se for conta via E-mail/Senha
-        if (password != null && password.isNotEmpty && user.email != null) {
-          AuthCredential credential = EmailAuthProvider.credential(
-            email: user.email!,
-            password: password,
-          );
-          // Renova o token da sessão para permitir operações sensíveis
-          await user.reauthenticateWithCredential(credential);
+        // 🚀 1. Mapeamos de quais provedores este usuário depende (ex: 'password', 'google.com')
+        final providerIds = user.providerData.map((e) => e.providerId).toList();
+
+        // 🚀 2. Roteamento de Segurança baseado no Provedor
+        if (providerIds.contains('password')) {
+          // Fluxo para usuários tradicionais (E-mail e Senha)
+          if (password != null && password.isNotEmpty && user.email != null) {
+            AuthCredential credential = EmailAuthProvider.credential(
+              email: user.email!,
+              password: password,
+            );
+            await user.reauthenticateWithCredential(credential);
+          } else {
+            // Falha rápida se o usuário não enviou a senha obrigatória
+            state = AuthState.error(
+              'A senha atual é obrigatória para confirmar a exclusão.',
+            );
+            return;
+          }
+        } else if (providerIds.contains('google.com')) {
+          // Fluxo para usuários Google (Ignora a variável password e reautentica via OAuth)
+          final googleProvider = GoogleAuthProvider();
+          await user.reauthenticateWithProvider(googleProvider);
         }
       }
 
-      // Após a reautenticação (ou se for Google Sign In, que muitas vezes delega para o AuthRepository),
-      // disparamos o método do repositório para deletar Auth e Firestore.
+      // 3. Após garantir a sessão fresca, prosseguimos para a deleção no Firestore
       final result = await _repository.deleteAccount();
 
       result.when(
@@ -215,16 +264,15 @@ class AuthNotifier extends Notifier<AuthState> {
         },
       );
     } on FirebaseAuthException catch (e) {
-      // Tratamento específico de erros do Firebase durante a reautenticação
       if (e.code == 'wrong-password') {
         state = AuthState.error('Senha incorreta. Tente novamente.');
       } else if (e.code == 'requires-recent-login') {
         state = AuthState.error(
-          'Por segurança, faça login novamente antes de excluir a conta.',
+          'Sessão expirada. Por segurança, faça logout, entre novamente e repita a operação.',
         );
       } else {
         state = AuthState.error(
-          e.message ?? 'Ocorreu um erro de autenticação.',
+          e.message ?? 'Ocorreu um erro de reautenticação.',
         );
       }
     } catch (e) {
@@ -235,13 +283,8 @@ class AuthNotifier extends Notifier<AuthState> {
   Future<void> _clearLocalData() async {
     try {
       await _secureStorage.deleteAll();
-
-      final dbFolder = await getApplicationDocumentsDirectory();
-      final file = File(p.join(dbFolder.path, 'life_os.sqlite'));
-
-      if (await file.exists()) {
-        await file.delete();
-      }
+      final db = ref.read(databaseProvider);
+      await db.clearAllData();
     } catch (e) {
       print("Erro ao limpar dados locais: $e");
     }

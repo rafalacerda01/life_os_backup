@@ -25,10 +25,16 @@ class AuthRepositoryImpl implements AuthRepository {
 
       final uid = user.uid;
       final userDocRef = _firestore.collection('users').doc(uid);
+
+      // 🚀 CÓDIGO INSERIDO: Lê o documento do usuário antes de deletar
+      // para verificar se ele está participando de algum Círculo.
+      final userDocSnap = await userDocRef.get();
+      final activeCircleId = userDocSnap.data()?['activeCircleId'] as String?;
+
       final batch = _firestore.batch();
 
-      // 1. Identificamos as subcoleções que possuem dados do usuário
-      final subcollections = ['finance', 'health_info'];
+      // 1. 🚀 CÓDIGO ALTERADO: Identificamos todas as subcoleções (Adicionado 'checkins')
+      final subcollections = ['finance', 'health_info', 'checkins'];
 
       // 2. Adicionamos todos os documentos dessas subcoleções ao batch de deleção
       for (final sub in subcollections) {
@@ -38,13 +44,27 @@ class AuthRepositoryImpl implements AuthRepository {
         }
       }
 
-      // 3. Adicionamos o documento principal do usuário ao batch
+      // 3. 🚀 CÓDIGO INSERIDO: Se o usuário estiver num círculo, removemos ele do ranking
+      if (activeCircleId != null && activeCircleId.isNotEmpty) {
+        final circleRef = _firestore.collection('circles').doc(activeCircleId);
+        final rankingRef = circleRef.collection('ranking').doc(uid);
+
+        batch.delete(rankingRef);
+
+        // Remove 1 membro do contador do círculo para liberar vaga
+        batch.update(circleRef, {
+          'memberCount': FieldValue.increment(-1),
+          'updatedAt': FieldValue.serverTimestamp(),
+        });
+      }
+
+      // 4. Adicionamos o documento principal do usuário ao batch
       batch.delete(userDocRef);
 
-      // 4. Executamos todas as deleções de uma vez no Firestore
+      // 5. Executamos todas as deleções de uma vez no Firestore de forma atômica
       await batch.commit();
 
-      // 5. Por fim, deletamos o usuário da Autenticação do Firebase
+      // 6. Por fim, deletamos o usuário da Autenticação do Firebase
       await user.delete();
 
       return const Success(null);

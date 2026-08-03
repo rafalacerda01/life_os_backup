@@ -98,6 +98,64 @@ class FinanceRepository {
     }
   }
 
+  // 🚀 NOVO: Puxa os dados da nuvem (Firebase) e reconstrói o banco local (SQLite)
+  Future<void> syncTransactionsFromFirestore() async {
+    final userId = _auth.currentUser?.uid;
+
+    if (userId == null) {
+      AppLogger.i('Sincronização abortada: usuário não autenticado.');
+      return;
+    }
+
+    try {
+      AppLogger.i('Iniciando Sync-Down das transações do Firebase...');
+
+      // 1. Busca todos os documentos do usuário na nuvem
+      final snapshot = await _firestore
+          .collection('users')
+          .doc(userId)
+          .collection('transactions')
+          .get();
+
+      // 2. Percorre cada transação da nuvem
+      for (var doc in snapshot.docs) {
+        final data = doc.data();
+        final firestoreId = doc.id;
+
+        // 3. Verifica se a transação já existe no SQLite local
+        final existingTransaction =
+            await (_db.select(_db.transactions)
+                  ..where((table) => table.firestoreId.equals(firestoreId)))
+                .getSingleOrNull();
+
+        // 4. Se não existir localmente, nós a inserimos no Drift!
+        if (existingTransaction == null) {
+          await _db
+              .into(_db.transactions)
+              .insert(
+                local_db.TransactionsCompanion.insert(
+                  firestoreId: Value(firestoreId),
+                  title: data['title'] as String? ?? 'Sem título',
+                  amount: (data['amount'] as num?)?.toDouble() ?? 0.0,
+                  type: data['type'] as String? ?? TransactionType.expense.name,
+                  category: data['category'] as String? ?? 'Outros',
+                  date:
+                      (data['date'] as Timestamp?)?.toDate() ?? DateTime.now(),
+                ),
+              );
+        }
+      }
+
+      AppLogger.i('Sync-Down concluído! SQLite reconstruído com sucesso.');
+    } catch (error, stackTrace) {
+      AppLogger.e(
+        'Erro ao sincronizar transações do Firebase',
+        error,
+        stackTrace,
+      );
+    }
+  }
+
   Future<void> _saveTransactionToFirestore({
     required String firestoreId,
     required String title,
