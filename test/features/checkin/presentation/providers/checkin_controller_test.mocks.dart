@@ -57,6 +57,15 @@ class MockCheckInRepository extends _i1.Mock implements _i2.CheckInRepository {
           as _i3.Future<void>);
 
   @override
+  _i3.Future<void> syncCheckinsFromFirebaseToLocal() =>
+      (super.noSuchMethod(
+            Invocation.method(#syncCheckinsFromFirebaseToLocal, []),
+            returnValue: _i3.Future<void>.value(),
+            returnValueForMissingStub: _i3.Future<void>.value(),
+          )
+          as _i3.Future<void>);
+
+  @override
   _i3.Future<void> syncPendingCheckIns() =>
       (super.noSuchMethod(
             Invocation.method(#syncPendingCheckIns, []),

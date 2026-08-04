@@ -570,6 +570,8 @@ import 'package:life_os/features/finance/presentation/finance_screen.dart';
 import 'package:life_os/features/habits/presentation/habits_screen.dart';
 import 'package:life_os/features/tasks/presentation/tasks_screen.dart';
 import 'package:life_os/features/analytics/presentation/analytics_screen.dart';
+import 'package:life_os/features/settings/presentation/screens/privacy_policy_screen.dart';
+import 'package:life_os/features/settings/presentation/screens/contact_screen.dart';
 // ✅ Importação adicionada para a tela de Notificações
 import 'package:life_os/features/settings/presentation/screens/notifications_screen.dart';
 
@@ -675,6 +677,14 @@ final routerProvider = Provider<GoRouter>((ref) {
           GoRoute(
             path: '/analytics',
             builder: (context, state) => const AnalyticsScreen(),
+          ),
+          GoRoute(
+            path: '/privacy-policy',
+            builder: (context, state) => const PrivacyPolicyScreen(),
+          ),
+          GoRoute(
+            path: '/contact',
+            builder: (context, state) => const ContactScreen(),
           ),
         ],
       ),
@@ -12958,7 +12968,9 @@ import 'package:life_os/features/settings/presentation/screens/security_privacy_
 import 'package:life_os/features/settings/presentation/screens/subscription_screen.dart';
 import 'package:life_os/features/settings/presentation/screens/notifications_screen.dart';
 import 'package:life_os/features/settings/presentation/screens/appearance_screen.dart';
-// Import da tela que mostra os planos e valores
+import 'package:life_os/features/settings/presentation/screens/privacy_policy_screen.dart';
+// 🚀 Import da nova tela de Contato e Reportes
+import 'package:life_os/features/settings/presentation/screens/contact_screen.dart';
 import 'package:life_os/features/premium/presentation/premium_screen.dart';
 
 class SettingsScreen extends StatelessWidget {
@@ -12973,7 +12985,7 @@ class SettingsScreen extends StatelessWidget {
         elevation: 0,
         title: const Text(
           "Painel Operacional",
-          style: TextStyle(fontWeight: FontWeight.bold),
+          style: TextStyle(fontWeight: FontWeight.bold, color: Colors.white),
         ),
       ),
       body: ListView(
@@ -13018,7 +13030,7 @@ class SettingsScreen extends StatelessWidget {
             ),
           ),
 
-          // 4. NOVO: Planos Premium e Valores (A Loja)
+          // 4. Planos Premium e Valores (A Loja)
           _buildSettingsTile(
             Icons.workspace_premium_outlined,
             "Planos Premium e Valores",
@@ -13053,6 +13065,34 @@ class SettingsScreen extends StatelessWidget {
                 MaterialPageRoute(
                   builder: (context) => const AppearanceScreen(),
                 ),
+              );
+            },
+          ),
+
+          // 7. Política de Privacidade
+          _buildSettingsTile(
+            Icons.privacy_tip_outlined,
+            "Política de Privacidade",
+            "Termos, diretrizes e tratamento de dados",
+            onTap: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (context) => const PrivacyPolicyScreen(),
+                ),
+              );
+            },
+          ),
+
+          // 8. NOVO: Suporte e Contato
+          _buildSettingsTile(
+            Icons.support_agent_rounded,
+            "Suporte & Reporte de Bugs",
+            "Fale conosco via e-mail oficial",
+            onTap: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (context) => const ContactScreen()),
               );
             },
           ),
@@ -13847,6 +13887,192 @@ class AppearanceScreen extends ConsumerWidget {
 
 
 // ==========================================
+// ARQUIVO: C:\life_os\lib\features\settings\presentation\screens\contact_screen.dart
+// ==========================================
+
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:life_os/core/theme/app_colors.dart';
+
+class ContactScreen extends StatelessWidget {
+  const ContactScreen({super.key});
+
+  final String _supportEmail = "suporte@lifeos.app";
+
+  void _copyEmailToClipboard(BuildContext context) {
+    Clipboard.setData(ClipboardData(text: _supportEmail));
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text(
+          "E-mail de suporte copiado para a área de transferência!",
+        ),
+        backgroundColor: AppColors.primary,
+        duration: Duration(seconds: 2),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: AppColors.scaffoldBackground,
+      appBar: AppBar(
+        backgroundColor: Colors.transparent,
+        elevation: 0,
+        title: const Text(
+          "Suporte & Reporte de Bugs",
+          style: TextStyle(
+            color: AppColors.textMain,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+        iconTheme: const IconThemeData(color: AppColors.textMain),
+      ),
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.all(24.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              "Central de Atendimento ao Operador",
+              style: TextStyle(
+                color: AppColors.textMain,
+                fontSize: 20,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const SizedBox(height: 8),
+            const Text(
+              "Encontrou algum comportamento inesperado, bug ou deseja enviar sugestões para a evolução do Life OS? Nossa equipe de engenharia está pronta para analisar.",
+              style: TextStyle(
+                color: AppColors.textSecondary,
+                fontSize: 14,
+                height: 1.5,
+              ),
+            ),
+            const SizedBox(height: 32),
+
+            // Card Principal com o E-mail de Contato
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(20),
+              decoration: BoxDecoration(
+                color: AppColors.cardBackground,
+                borderRadius: BorderRadius.circular(20),
+                border: Border.all(color: AppColors.primary.withOpacity(0.2)),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Row(
+                    children: [
+                      Icon(Icons.email_outlined, color: AppColors.primary),
+                      SizedBox(width: 12),
+                      Text(
+                        "E-mail Oficial",
+                        style: TextStyle(
+                          color: AppColors.textMain,
+                          fontWeight: FontWeight.bold,
+                          fontSize: 16,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  SelectableText(
+                    _supportEmail,
+                    style: const TextStyle(
+                      color: AppColors.textSecondary,
+                      fontSize: 15,
+                      fontFamily: 'monospace',
+                    ),
+                  ),
+                  const SizedBox(height: 20),
+                  SizedBox(
+                    width: double.infinity,
+                    height: 48,
+                    child: ElevatedButton(
+                      onPressed: () => _copyEmailToClipboard(context),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: AppColors.secondary,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        elevation: 0,
+                      ),
+                      child: const Text(
+                        "Copiar E-mail",
+                        style: TextStyle(
+                          color: AppColors.textMain,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+
+            const SizedBox(height: 32),
+            const Text(
+              "O que incluir no seu reporte de bug?",
+              style: TextStyle(
+                color: AppColors.textMain,
+                fontSize: 16,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const SizedBox(height: 12),
+            _buildGuidelineItem(
+              "1. Descrição clara do problema:",
+              "Explique o que você estava fazendo no momento em que o erro ocorreu.",
+            ),
+            _buildGuidelineItem(
+              "2. Passos para reprodução:",
+              "Informe o caminho nas telas que levou ao comportamento indesejado.",
+            ),
+            _buildGuidelineItem(
+              "3. Informações do dispositivo:",
+              "Modelo do celular e versão do sistema operacional (Android / iOS).",
+            ),
+            const SizedBox(height: 40),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildGuidelineItem(String title, String description) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 16.0),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            title,
+            style: const TextStyle(
+              color: AppColors.textMain,
+              fontWeight: FontWeight.w600,
+              fontSize: 14,
+            ),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            description,
+            style: const TextStyle(
+              color: AppColors.textHint,
+              fontSize: 13,
+              height: 1.4,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+
+// ==========================================
 // ARQUIVO: C:\life_os\lib\features\settings\presentation\screens\edit_profile_screen.dart
 // ==========================================
 
@@ -14273,6 +14499,111 @@ class NotificationsScreen extends ConsumerWidget {
             value: state.medicationReminders,
             enabled: state.allNotifications,
             onChanged: (val) => notifier.toggleMedication(val),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+
+// ==========================================
+// ARQUIVO: C:\life_os\lib\features\settings\presentation\screens\privacy_policy_screen.dart
+// ==========================================
+
+import 'package:flutter/material.dart';
+import 'package:life_os/core/theme/app_colors.dart';
+
+class PrivacyPolicyScreen extends StatelessWidget {
+  const PrivacyPolicyScreen({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: AppColors.scaffoldBackground,
+      appBar: AppBar(
+        backgroundColor: Colors.transparent,
+        elevation: 0,
+        title: const Text(
+          "Política de Privacidade",
+          style: TextStyle(
+            color: AppColors.textMain,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+        iconTheme: const IconThemeData(color: AppColors.textMain),
+      ),
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.all(24.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              "Última atualização: Agosto de 2026",
+              style: TextStyle(
+                color: AppColors.textHint,
+                fontSize: 12,
+                fontStyle: FontStyle.italic,
+              ),
+            ),
+            const SizedBox(height: 20),
+            _buildSection(
+              "1. Visão Geral",
+              "O Life OS foi construído sob uma arquitetura de privacidade em primeiro lugar (Privacy-First). Seus dados de rotina, finanças, saúde, hábitos e estudos são tratados com rigor técnico de segurança, combinando armazenamento local criptografado e sincronização opcional em nuvem.",
+            ),
+            _buildSection(
+              "2. Dados Coletados",
+              "• **Dados de Autenticação:** E-mail e nome fornecidos no cadastro via Firebase Auth ou Google Sign-In.\n"
+                  "• **Dados de Produtividade e Hábitos:** Tarefas, metas, registros de foco e histórico de hábitos.\n"
+                  "• **Dados Financeiros:** Transações (entradas e saídas) inseridas manualmente no módulo financeiro.\n"
+                  "• **Dados de Saúde e Bem-Estar:** Registro de humor, hidratação, medicamentos ativos e matriz de ciclo menstrual (quando ativada pelo usuário).\n"
+                  "• **Contexto para IA (Companion):** Informações resumidas de performance enviadas de forma temporária e segura via token criptografado para processamento do assistente de inteligência artificial.",
+            ),
+            _buildSection(
+              "3. Armazenamento e Criptografia Local",
+              "Os dados do aplicativo são salvos localmente no dispositivo utilizando o banco de dados Drift protegido por **SQLCipher**. A chave de criptografia é gerada de forma única e isolada no Hardware Secure Storage do seu smartphone (`FlutterSecureStorage`), impedindo o acesso não autorizado por terceiros ou root.",
+            ),
+            _buildSection(
+              "4. Sincronização em Nuvem (Firebase)",
+              "Para garantir a portabilidade entre dispositivos (Offline-First), o Life OS sincroniza cópias criptografadas dos registros com o ecossistema Firebase (Firestore). Todas as regras de segurança do banco de dados isolam estritamente os documentos por ID de usuário (`uid`), garantindo que nenhum outro usuário tenha acesso às suas informações.",
+            ),
+            _buildSection(
+              "5. Exclusão de Conta e Dados",
+              "Você possui controle total sobre suas informações. Ao acionar a opção de deletar a conta nas configurações do aplicativo, o Life OS executa uma limpeza atômica em lote (*Batch Commit*), removendo permanentemente todas as suas subcoleções na nuvem (finanças, saúde, check-ins, círculos) e apagando integralmente o banco de dados local do dispositivo.",
+            ),
+            _buildSection(
+              "6. Contato",
+              "Se tiver dúvidas sobre esta Política de Privacidade ou sobre o tratamento de seus dados, entre em contato com a equipe de engenharia e suporte do Life OS através do painel de configurações.",
+            ),
+            const SizedBox(height: 40),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildSection(String title, String content) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 24.0),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            title,
+            style: const TextStyle(
+              color: AppColors.textMain,
+              fontSize: 16,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            content,
+            style: const TextStyle(
+              color: AppColors.textSecondary,
+              fontSize: 14,
+              height: 1.5,
+            ),
           ),
         ],
       ),
