@@ -2480,7 +2480,7 @@ import '../../../../core/errors/failure.dart';
 import '../../domain/entities/user_entity.dart';
 import '../../domain/repositories/auth_repository.dart';
 import '../models/user_model.dart';
-
+import 'package:google_sign_in/google_sign_in.dart';
 // Importação de Segurança
 import '../../../../core/security/input_sanitizer.dart';
 
@@ -2501,17 +2501,13 @@ class AuthRepositoryImpl implements AuthRepository {
       final uid = user.uid;
       final userDocRef = _firestore.collection('users').doc(uid);
 
-      // 🚀 CÓDIGO INSERIDO: Lê o documento do usuário antes de deletar
-      // para verificar se ele está participando de algum Círculo.
       final userDocSnap = await userDocRef.get();
       final activeCircleId = userDocSnap.data()?['activeCircleId'] as String?;
 
       final batch = _firestore.batch();
 
-      // 1. 🚀 CÓDIGO ALTERADO: Identificamos todas as subcoleções (Adicionado 'checkins')
       final subcollections = ['finance', 'health_info', 'checkins'];
 
-      // 2. Adicionamos todos os documentos dessas subcoleções ao batch de deleção
       for (final sub in subcollections) {
         final snapshot = await userDocRef.collection(sub).get();
         for (final doc in snapshot.docs) {
@@ -2519,27 +2515,22 @@ class AuthRepositoryImpl implements AuthRepository {
         }
       }
 
-      // 3. 🚀 CÓDIGO INSERIDO: Se o usuário estiver num círculo, removemos ele do ranking
       if (activeCircleId != null && activeCircleId.isNotEmpty) {
         final circleRef = _firestore.collection('circles').doc(activeCircleId);
         final rankingRef = circleRef.collection('ranking').doc(uid);
 
         batch.delete(rankingRef);
 
-        // Remove 1 membro do contador do círculo para liberar vaga
         batch.update(circleRef, {
           'memberCount': FieldValue.increment(-1),
           'updatedAt': FieldValue.serverTimestamp(),
         });
       }
 
-      // 4. Adicionamos o documento principal do usuário ao batch
       batch.delete(userDocRef);
 
-      // 5. Executamos todas as deleções de uma vez no Firestore de forma atômica
       await batch.commit();
 
-      // 6. Por fim, deletamos o usuário da Autenticação do Firebase
       await user.delete();
 
       return const Success(null);
@@ -2637,16 +2628,33 @@ class AuthRepositoryImpl implements AuthRepository {
   @override
   Future<Result<UserEntity, Failure>> signInWithGoogle() async {
     try {
-      final googleProvider = fb.GoogleAuthProvider();
-      final userCredential = await _firebaseAuth.signInWithPopup(
-        googleProvider,
+      // Instância singleton
+      final googleSignIn = GoogleSignIn.instance;
+
+      // Executa a autenticação. Retorna Non-Nullable ou lança exceção em cancelamentos.
+      final googleUser = await googleSignIn.authenticate();
+
+      // Extração direta e síncrona dos tokens (sem await)
+      final googleAuth = googleUser.authentication;
+
+      // Credencial configurada apenas com o idToken (fluxo moderno)
+      final credential = fb.GoogleAuthProvider.credential(
+        idToken: googleAuth.idToken,
+      );
+
+      // Conexão ao Firebase Auth
+      final userCredential = await _firebaseAuth.signInWithCredential(
+        credential,
       );
       final fbUser = userCredential.user;
 
       if (fbUser == null) {
-        return const Error(AuthFailure('Falha ao autenticar com Google.'));
+        return const Error(
+          AuthFailure('Falha ao autenticar com Google no Firebase.'),
+        );
       }
 
+      // Validação ou criação de registro no Firestore
       final doc = await _firestore.collection('users').doc(fbUser.uid).get();
       if (!doc.exists) {
         final newUser = UserModel(
@@ -2668,7 +2676,15 @@ class AuthRepositoryImpl implements AuthRepository {
         return Success(newUser);
       }
       return _getUserFromFirestore(fbUser.uid);
+    } on fb.FirebaseAuthException catch (e) {
+      return Error(
+        AuthFailure(
+          e.message ?? 'Erro na autenticação com Google',
+          code: e.code,
+        ),
+      );
     } catch (e) {
+      // Captura de exceções nativas (ex: cancelamento pelo usuário ou erro no Google Play Services)
       return Error(ServerFailure(e.toString()));
     }
   }
@@ -2685,11 +2701,9 @@ class AuthRepositoryImpl implements AuthRepository {
       final cleanName = InputSanitizer.sanitize(newName);
       await user.updateDisplayName(cleanName);
 
-      // Prepara o payload de atualização para o Firestore
       final Map<String, dynamic> updateData = {'displayName': cleanName};
 
       if (newPhotoUrl != null) {
-        // Se for um link http ou chave local, sanitizamos se necessário ou armazenamos direto
         updateData['photoUrl'] = newPhotoUrl;
       }
 
