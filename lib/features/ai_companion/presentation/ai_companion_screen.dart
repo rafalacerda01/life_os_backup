@@ -4,6 +4,8 @@ import 'package:life_os/features/premium/presentation/premium_screen.dart';
 import 'package:life_os/features/ai_companion/presentation/providers/ai_companion_provider.dart';
 import 'package:life_os/features/premium/presentation/premium_provider.dart';
 import 'package:life_os/features/health/presentation/providers/health_provider.dart';
+import 'package:life_os/features/ai_companion/presentation/providers/ai_consent_provider.dart';
+import 'package:life_os/features/ai_companion/presentation/screens/ai_consent_view.dart';
 
 class AICompanionScreen extends ConsumerStatefulWidget {
   const AICompanionScreen({super.key});
@@ -37,6 +39,7 @@ class _AICompanionScreenState extends ConsumerState<AICompanionScreen> {
 
   @override
   Widget build(BuildContext context) {
+    // 1. CHECAGEM DE STATUS PREMIUM
     final premiumStatus = ref.watch(premiumProvider);
     final isPremium = premiumStatus.isPremium;
 
@@ -44,6 +47,14 @@ class _AICompanionScreenState extends ConsumerState<AICompanionScreen> {
       return _buildPremiumLockScreen();
     }
 
+    // 2. CHECAGEM DE CONSENTIMENTO LGPD (OPT-IN)
+    // Se o usuário é Premium mas ainda não aceitou os termos, mostra a tela de aceite.
+    final hasConsented = ref.watch(aiConsentProvider);
+    if (!hasConsented) {
+      return const AiConsentView();
+    }
+
+    // 3. CARREGAMENTO DO CHAT (Se for premium e já tiver consentido)
     final aiState = ref.watch(aiCompanionProvider);
     _scrollToBottom();
 
