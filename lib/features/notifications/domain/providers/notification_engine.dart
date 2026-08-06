@@ -2,7 +2,7 @@ import 'package:riverpod_annotation/riverpod_annotation.dart';
 import 'package:life_os/features/notifications/data/repositories/notifications_repository.dart';
 import 'package:life_os/features/notifications/domain/models/notification_model.dart';
 import 'package:life_os/features/home/presentation/providers/home_provider.dart';
-import 'package:life_os/core/database/database_provider.dart'; // 👈 Necessário para acessar o banco local e a tabela de medicamentos
+import 'package:life_os/core/database/database_provider.dart';
 
 part 'notification_engine.g.dart';
 
@@ -12,19 +12,19 @@ class NotificationEngine extends _$NotificationEngine {
   Stream<List<NotificationModel>> build() {
     final repository = ref.watch(notificationsRepositoryProvider);
 
-    // Dispara a varredura dos módulos existentes em background ao iniciar
+    // Dispara a varredura dos módulos em background ao iniciar
     Future.microtask(() => syncExistingModules());
 
     return repository.watchLocalNotifications();
   }
 
-  /// 🚀 Motor Inteligente: Varre Estudos e Saúde (Medicamentos) do banco local
-  /// e consolida na tabela de notificações (Offline-First)
+  /// 🚀 Motor Inteligente: Varre Estudos, Saúde e Hábitos do banco local (Drift)
   Future<void> syncExistingModules() async {
     final repository = ref.read(notificationsRepositoryProvider);
+    final db = ref.read(databaseProvider);
 
     // ===================================================================
-    // 1. ESTUDOS (Provas cadastradas)
+    // 1. ESTUDOS (Provas)
     // ===================================================================
     try {
       final homeState = ref.read(homeStateProvider);
@@ -51,12 +51,10 @@ class NotificationEngine extends _$NotificationEngine {
     } catch (_) {}
 
     // ===================================================================
-    // 2. SAÚDE (Medicamentos ativos no Drift)
+    // 2. SAÚDE (Medicamentos)
     // ===================================================================
     try {
-      final db = ref.read(databaseProvider);
       final medications = await db.select(db.medications).get();
-
       for (var med in medications) {
         final medId = med.firestoreId ?? med.id.toString();
         final notificationId = 'health_med_$medId';
@@ -65,7 +63,7 @@ class NotificationEngine extends _$NotificationEngine {
           id: notificationId,
           title: 'Medicamento: ${med.name}',
           description: 'Lembrete de rotina de saúde e acompanhamento.',
-          priority: 'high', // Saúde tem alta prioridade
+          priority: 'high',
           moduleType: 'health',
           route: '/health',
           isRead: false,
@@ -75,6 +73,31 @@ class NotificationEngine extends _$NotificationEngine {
         );
 
         await repository.saveLocalNotification(medNotification);
+      }
+    } catch (_) {}
+
+    // ===================================================================
+    // 3. HÁBITOS (Rotinas ativas)
+    // ===================================================================
+    try {
+      final habits = await db.select(db.habits).get();
+      for (var habit in habits) {
+        final habitNotificationId = 'habit_${habit.id}';
+
+        final habitNotification = NotificationModel(
+          id: habitNotificationId,
+          title: 'Hábito: ${habit.title}',
+          description:
+              'Mantenha sua consistência! Registre seu progresso hoje.',
+          priority: 'today',
+          moduleType: 'habits',
+          route: '/habits',
+          isRead: false,
+          isCompleted: false,
+          createdAt: DateTime.now(),
+        );
+
+        await repository.saveLocalNotification(habitNotification);
       }
     } catch (_) {}
   }
