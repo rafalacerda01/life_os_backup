@@ -212,6 +212,11 @@ class StudyRepository {
           _db.flashcards,
         )..where((t) => t.subjectId.equals(id))).go();
         await (_db.delete(_db.subjects)..where((t) => t.id.equals(id))).go();
+
+        // 🚀 ADICIONE ESTAS DUAS LINHAS ABAIXO PARA APAGAR A NOTIFICAÇÃO DO DRIFT:
+        await (_db.delete(
+          _db.notificationsTable,
+        )..where((t) => t.id.equals('exam_$id'))).go();
       });
 
       // 4. Background sync

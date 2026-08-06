@@ -1,5 +1,5 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:life_os/features/notifications/data/models/notification_model.dart';
+import 'package:life_os/features/notifications/domain/models/notification_model.dart';
 import 'package:life_os/features/notifications/data/repositories/notifications_repository.dart';
 
 // --- INJEÇÃO DO REPOSITÓRIO ---

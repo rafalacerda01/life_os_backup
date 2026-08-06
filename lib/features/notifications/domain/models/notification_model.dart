@@ -27,7 +27,7 @@ class NotificationModel {
     required this.createdAt,
   });
 
-  // ☁️ 1. Seu construtor original do Firestore (MANTIDO)
+  // ☁️ Construtor do Firestore
   factory NotificationModel.fromFirestore(DocumentSnapshot doc) {
     final data = doc.data() as Map<String, dynamic>;
     return NotificationModel(
@@ -48,7 +48,7 @@ class NotificationModel {
     );
   }
 
-  // 📱 2. Novo construtor do Drift (Para Offline-First)
+  // 📱 Construtor do Drift (Offline-First)
   factory NotificationModel.fromDrift(NotificationsTableData data) {
     return NotificationModel(
       id: data.id,
@@ -64,7 +64,7 @@ class NotificationModel {
     );
   }
 
-  // 📱 3. Novo conversor para salvar no Drift
+  // 📱 Conversor para salvar no Drift
   static NotificationsTableCompanion toCompanion(NotificationModel model) {
     return NotificationsTableCompanion.insert(
       id: model.id,

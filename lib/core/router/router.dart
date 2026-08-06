@@ -22,6 +22,7 @@ import 'package:life_os/features/tasks/presentation/tasks_screen.dart';
 import 'package:life_os/features/analytics/presentation/analytics_screen.dart';
 import 'package:life_os/features/settings/presentation/screens/privacy_policy_screen.dart';
 import 'package:life_os/features/settings/presentation/screens/contact_screen.dart';
+import '../../features/notifications/presentation/screens/notification_screen.dart';
 // ✅ Importação adicionada para a tela de Notificações
 import 'package:life_os/features/settings/presentation/screens/notifications_screen.dart';
 
@@ -114,7 +115,13 @@ final routerProvider = Provider<GoRouter>((ref) {
           // ✅ Rota de notificações adicionada
           GoRoute(
             path: '/notifications',
-            builder: (context, state) => const NotificationsScreen(),
+            builder: (context, state) => const NotificationScreen(),
+          ),
+          // ✅ Rota para acessar a sua tela antiga de toggles (ajustes)
+          GoRoute(
+            path: '/notifications_insights',
+            builder: (context, state) =>
+                const NotificationsScreen(), // Mantém a classe antiga aqui
           ),
           GoRoute(
             path: '/focus',

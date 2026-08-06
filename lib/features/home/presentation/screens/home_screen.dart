@@ -10,6 +10,8 @@ import 'package:life_os/features/dashboard/data/models/dashboard_model.dart';
 import 'package:life_os/features/dashboard/domain/entities/models/insight_model.dart';
 import 'package:life_os/features/home/presentation/providers/insight_provider.dart';
 
+import 'package:life_os/features/notifications/domain/providers/notification_engine.dart';
+
 class HomeScreen extends ConsumerWidget {
   const HomeScreen({super.key});
 
@@ -36,9 +38,7 @@ class HomeScreen extends ConsumerWidget {
         : (now.hour < 18 ? "Boa tarde" : "Boa noite");
 
     final dashboard = homeState.dashboard;
-    final nextExam = homeState.nextExam;
 
-    // 🟢 MAGIA ACONTECENDO AQUI: Transição suave entre Carregamento e Interface Real
     Widget content = homeState.isLoading
         ? const _HomeScreenSkeleton()
         : SingleChildScrollView(
@@ -46,7 +46,6 @@ class HomeScreen extends ConsumerWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                // Header
                 Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
@@ -104,72 +103,39 @@ class HomeScreen extends ConsumerWidget {
                         ],
                       ),
                     ),
-                    IconButton(
-                      icon: const Icon(
-                        Icons.notifications_none,
-                        color: AppColors.textSecondary,
-                      ),
-                      onPressed: () => context.push('/notifications'),
+
+                    // 🚀 O SINO DE NOTIFICAÇÕES AQUI
+                    Consumer(
+                      builder: (context, ref, child) {
+                        final unreadCount = ref.watch(
+                          unreadNotificationsCountProvider,
+                        );
+
+                        return IconButton(
+                          icon: Badge(
+                            isLabelVisible: unreadCount > 0,
+                            label: Text('$unreadCount'),
+                            backgroundColor: AppColors.primary,
+                            child: const Icon(
+                              Icons.notifications_none,
+                              color: AppColors.textSecondary,
+                            ),
+                          ),
+                          onPressed: () => context.push('/notifications'),
+                        );
+                      },
                     ),
                   ],
                 ),
-
-                // Próxima Prova (Banner de Alerta)
-                if (nextExam != null) ...[
-                  const SizedBox(height: 20),
-                  Container(
-                    padding: const EdgeInsets.all(16),
-                    decoration: BoxDecoration(
-                      color: AppColors.warning.withOpacity(0.15),
-                      borderRadius: BorderRadius.circular(20),
-                      border: Border.all(
-                        color: AppColors.warning.withOpacity(0.3),
-                      ),
-                    ),
-                    child: Row(
-                      children: [
-                        const Icon(
-                          Icons.event_note,
-                          color: AppColors.warning,
-                          size: 32,
-                        ),
-                        const SizedBox(width: 12),
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                "Prova de ${nextExam.title}",
-                                style: const TextStyle(
-                                  color: AppColors.textMain,
-                                  fontWeight: FontWeight.bold,
-                                ),
-                              ),
-                              Text(
-                                "Faltam ${nextExam.examDate!.difference(now).inDays} dias",
-                                style: const TextStyle(
-                                  color: AppColors.textSecondary,
-                                  fontSize: 13,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ],
 
                 const SizedBox(height: 25),
                 _MainScoreCard(dashboard: dashboard),
                 const SizedBox(height: 20),
 
-                // Insight Card
                 const PremiumInsightCard(),
 
                 const SizedBox(height: 20),
 
-                // Mini Cards de Acesso Rápido
                 Row(
                   children: [
                     Expanded(
@@ -260,9 +226,7 @@ class HomeScreen extends ConsumerWidget {
 
     return Container(
       color: AppColors.scaffoldBackground,
-      child: SafeArea(
-        child: content, // 🟢 Renderiza o Skeleton OU a tela real aqui
-      ),
+      child: SafeArea(child: content),
     );
   }
 }
@@ -450,10 +414,6 @@ class _InsightCardContent extends StatelessWidget {
   }
 }
 
-// ============================================================================
-// 🟢 NOVOS COMPONENTES: ESTRUTURA DO SKELETON (TELA DE CARREGAMENTO)
-// ============================================================================
-
 class _HomeScreenSkeleton extends StatelessWidget {
   const _HomeScreenSkeleton();
 
@@ -461,12 +421,10 @@ class _HomeScreenSkeleton extends StatelessWidget {
   Widget build(BuildContext context) {
     return SingleChildScrollView(
       padding: const EdgeInsets.all(20),
-      physics:
-          const NeverScrollableScrollPhysics(), // Trava o scroll durante o carregamento
+      physics: const NeverScrollableScrollPhysics(),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // Header Skeleton
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
@@ -482,16 +440,10 @@ class _HomeScreenSkeleton extends StatelessWidget {
             ],
           ),
           const SizedBox(height: 25),
-
-          // Main Score Card Skeleton
           _SkeletonBox(width: double.infinity, height: 160, borderRadius: 24),
           const SizedBox(height: 20),
-
-          // Insight Card Skeleton
           _SkeletonBox(width: double.infinity, height: 110, borderRadius: 24),
           const SizedBox(height: 20),
-
-          // Mini Cards Skeleton
           Row(
             children: [
               Expanded(child: _SkeletonBox(height: 90, borderRadius: 16)),
@@ -501,24 +453,14 @@ class _HomeScreenSkeleton extends StatelessWidget {
               Expanded(child: _SkeletonBox(height: 90, borderRadius: 16)),
             ],
           ),
-
           const SizedBox(height: 25),
-          _SkeletonBox(width: 100, height: 20), // Título da Sessão ("Estudos")
+          _SkeletonBox(width: 100, height: 20),
           const SizedBox(height: 12),
-          _SkeletonBox(
-            width: double.infinity,
-            height: 80,
-            borderRadius: 16,
-          ), // InfoCard
-
+          _SkeletonBox(width: double.infinity, height: 80, borderRadius: 16),
           const SizedBox(height: 20),
-          _SkeletonBox(width: 90, height: 20), // Título da Sessão ("Saúde")
+          _SkeletonBox(width: 90, height: 20),
           const SizedBox(height: 12),
-          _SkeletonBox(
-            width: double.infinity,
-            height: 80,
-            borderRadius: 16,
-          ), // InfoCard
+          _SkeletonBox(width: double.infinity, height: 80, borderRadius: 16),
         ],
       ),
     );
@@ -540,7 +482,6 @@ class _SkeletonBox extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // Usando uma animação implícita suave (Fade) para simular o carregamento Triple A
     return TweenAnimationBuilder<double>(
       tween: Tween<double>(begin: 0.2, end: 0.6),
       duration: const Duration(milliseconds: 800),

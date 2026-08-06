@@ -4428,6 +4428,625 @@ class CheckInTableCompanion extends UpdateCompanion<CheckInEntry> {
   }
 }
 
+class $NotificationsTableTable extends NotificationsTable
+    with TableInfo<$NotificationsTableTable, NotificationsTableData> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  $NotificationsTableTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _idMeta = const VerificationMeta('id');
+  @override
+  late final GeneratedColumn<String> id = GeneratedColumn<String>(
+    'id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _titleMeta = const VerificationMeta('title');
+  @override
+  late final GeneratedColumn<String> title = GeneratedColumn<String>(
+    'title',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _descriptionMeta = const VerificationMeta(
+    'description',
+  );
+  @override
+  late final GeneratedColumn<String> description = GeneratedColumn<String>(
+    'description',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _priorityMeta = const VerificationMeta(
+    'priority',
+  );
+  @override
+  late final GeneratedColumn<String> priority = GeneratedColumn<String>(
+    'priority',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _moduleTypeMeta = const VerificationMeta(
+    'moduleType',
+  );
+  @override
+  late final GeneratedColumn<String> moduleType = GeneratedColumn<String>(
+    'module_type',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _routeMeta = const VerificationMeta('route');
+  @override
+  late final GeneratedColumn<String> route = GeneratedColumn<String>(
+    'route',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _isReadMeta = const VerificationMeta('isRead');
+  @override
+  late final GeneratedColumn<bool> isRead = GeneratedColumn<bool>(
+    'is_read',
+    aliasedName,
+    false,
+    type: DriftSqlType.bool,
+    requiredDuringInsert: false,
+    defaultConstraints: GeneratedColumn.constraintIsAlways(
+      'CHECK ("is_read" IN (0, 1))',
+    ),
+    defaultValue: const Constant(false),
+  );
+  static const VerificationMeta _isCompletedMeta = const VerificationMeta(
+    'isCompleted',
+  );
+  @override
+  late final GeneratedColumn<bool> isCompleted = GeneratedColumn<bool>(
+    'is_completed',
+    aliasedName,
+    false,
+    type: DriftSqlType.bool,
+    requiredDuringInsert: false,
+    defaultConstraints: GeneratedColumn.constraintIsAlways(
+      'CHECK ("is_completed" IN (0, 1))',
+    ),
+    defaultValue: const Constant(false),
+  );
+  static const VerificationMeta _dueDateMeta = const VerificationMeta(
+    'dueDate',
+  );
+  @override
+  late final GeneratedColumn<DateTime> dueDate = GeneratedColumn<DateTime>(
+    'due_date',
+    aliasedName,
+    true,
+    type: DriftSqlType.dateTime,
+    requiredDuringInsert: false,
+  );
+  static const VerificationMeta _createdAtMeta = const VerificationMeta(
+    'createdAt',
+  );
+  @override
+  late final GeneratedColumn<DateTime> createdAt = GeneratedColumn<DateTime>(
+    'created_at',
+    aliasedName,
+    false,
+    type: DriftSqlType.dateTime,
+    requiredDuringInsert: true,
+  );
+  @override
+  List<GeneratedColumn> get $columns => [
+    id,
+    title,
+    description,
+    priority,
+    moduleType,
+    route,
+    isRead,
+    isCompleted,
+    dueDate,
+    createdAt,
+  ];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'notifications_table';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<NotificationsTableData> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('id')) {
+      context.handle(_idMeta, id.isAcceptableOrUnknown(data['id']!, _idMeta));
+    } else if (isInserting) {
+      context.missing(_idMeta);
+    }
+    if (data.containsKey('title')) {
+      context.handle(
+        _titleMeta,
+        title.isAcceptableOrUnknown(data['title']!, _titleMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_titleMeta);
+    }
+    if (data.containsKey('description')) {
+      context.handle(
+        _descriptionMeta,
+        description.isAcceptableOrUnknown(
+          data['description']!,
+          _descriptionMeta,
+        ),
+      );
+    } else if (isInserting) {
+      context.missing(_descriptionMeta);
+    }
+    if (data.containsKey('priority')) {
+      context.handle(
+        _priorityMeta,
+        priority.isAcceptableOrUnknown(data['priority']!, _priorityMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_priorityMeta);
+    }
+    if (data.containsKey('module_type')) {
+      context.handle(
+        _moduleTypeMeta,
+        moduleType.isAcceptableOrUnknown(data['module_type']!, _moduleTypeMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_moduleTypeMeta);
+    }
+    if (data.containsKey('route')) {
+      context.handle(
+        _routeMeta,
+        route.isAcceptableOrUnknown(data['route']!, _routeMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_routeMeta);
+    }
+    if (data.containsKey('is_read')) {
+      context.handle(
+        _isReadMeta,
+        isRead.isAcceptableOrUnknown(data['is_read']!, _isReadMeta),
+      );
+    }
+    if (data.containsKey('is_completed')) {
+      context.handle(
+        _isCompletedMeta,
+        isCompleted.isAcceptableOrUnknown(
+          data['is_completed']!,
+          _isCompletedMeta,
+        ),
+      );
+    }
+    if (data.containsKey('due_date')) {
+      context.handle(
+        _dueDateMeta,
+        dueDate.isAcceptableOrUnknown(data['due_date']!, _dueDateMeta),
+      );
+    }
+    if (data.containsKey('created_at')) {
+      context.handle(
+        _createdAtMeta,
+        createdAt.isAcceptableOrUnknown(data['created_at']!, _createdAtMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_createdAtMeta);
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {id};
+  @override
+  NotificationsTableData map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return NotificationsTableData(
+      id: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}id'],
+      )!,
+      title: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}title'],
+      )!,
+      description: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}description'],
+      )!,
+      priority: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}priority'],
+      )!,
+      moduleType: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}module_type'],
+      )!,
+      route: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}route'],
+      )!,
+      isRead: attachedDatabase.typeMapping.read(
+        DriftSqlType.bool,
+        data['${effectivePrefix}is_read'],
+      )!,
+      isCompleted: attachedDatabase.typeMapping.read(
+        DriftSqlType.bool,
+        data['${effectivePrefix}is_completed'],
+      )!,
+      dueDate: attachedDatabase.typeMapping.read(
+        DriftSqlType.dateTime,
+        data['${effectivePrefix}due_date'],
+      ),
+      createdAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.dateTime,
+        data['${effectivePrefix}created_at'],
+      )!,
+    );
+  }
+
+  @override
+  $NotificationsTableTable createAlias(String alias) {
+    return $NotificationsTableTable(attachedDatabase, alias);
+  }
+}
+
+class NotificationsTableData extends DataClass
+    implements Insertable<NotificationsTableData> {
+  final String id;
+  final String title;
+  final String description;
+  final String priority;
+  final String moduleType;
+  final String route;
+  final bool isRead;
+  final bool isCompleted;
+  final DateTime? dueDate;
+  final DateTime createdAt;
+  const NotificationsTableData({
+    required this.id,
+    required this.title,
+    required this.description,
+    required this.priority,
+    required this.moduleType,
+    required this.route,
+    required this.isRead,
+    required this.isCompleted,
+    this.dueDate,
+    required this.createdAt,
+  });
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['id'] = Variable<String>(id);
+    map['title'] = Variable<String>(title);
+    map['description'] = Variable<String>(description);
+    map['priority'] = Variable<String>(priority);
+    map['module_type'] = Variable<String>(moduleType);
+    map['route'] = Variable<String>(route);
+    map['is_read'] = Variable<bool>(isRead);
+    map['is_completed'] = Variable<bool>(isCompleted);
+    if (!nullToAbsent || dueDate != null) {
+      map['due_date'] = Variable<DateTime>(dueDate);
+    }
+    map['created_at'] = Variable<DateTime>(createdAt);
+    return map;
+  }
+
+  NotificationsTableCompanion toCompanion(bool nullToAbsent) {
+    return NotificationsTableCompanion(
+      id: Value(id),
+      title: Value(title),
+      description: Value(description),
+      priority: Value(priority),
+      moduleType: Value(moduleType),
+      route: Value(route),
+      isRead: Value(isRead),
+      isCompleted: Value(isCompleted),
+      dueDate: dueDate == null && nullToAbsent
+          ? const Value.absent()
+          : Value(dueDate),
+      createdAt: Value(createdAt),
+    );
+  }
+
+  factory NotificationsTableData.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return NotificationsTableData(
+      id: serializer.fromJson<String>(json['id']),
+      title: serializer.fromJson<String>(json['title']),
+      description: serializer.fromJson<String>(json['description']),
+      priority: serializer.fromJson<String>(json['priority']),
+      moduleType: serializer.fromJson<String>(json['moduleType']),
+      route: serializer.fromJson<String>(json['route']),
+      isRead: serializer.fromJson<bool>(json['isRead']),
+      isCompleted: serializer.fromJson<bool>(json['isCompleted']),
+      dueDate: serializer.fromJson<DateTime?>(json['dueDate']),
+      createdAt: serializer.fromJson<DateTime>(json['createdAt']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'id': serializer.toJson<String>(id),
+      'title': serializer.toJson<String>(title),
+      'description': serializer.toJson<String>(description),
+      'priority': serializer.toJson<String>(priority),
+      'moduleType': serializer.toJson<String>(moduleType),
+      'route': serializer.toJson<String>(route),
+      'isRead': serializer.toJson<bool>(isRead),
+      'isCompleted': serializer.toJson<bool>(isCompleted),
+      'dueDate': serializer.toJson<DateTime?>(dueDate),
+      'createdAt': serializer.toJson<DateTime>(createdAt),
+    };
+  }
+
+  NotificationsTableData copyWith({
+    String? id,
+    String? title,
+    String? description,
+    String? priority,
+    String? moduleType,
+    String? route,
+    bool? isRead,
+    bool? isCompleted,
+    Value<DateTime?> dueDate = const Value.absent(),
+    DateTime? createdAt,
+  }) => NotificationsTableData(
+    id: id ?? this.id,
+    title: title ?? this.title,
+    description: description ?? this.description,
+    priority: priority ?? this.priority,
+    moduleType: moduleType ?? this.moduleType,
+    route: route ?? this.route,
+    isRead: isRead ?? this.isRead,
+    isCompleted: isCompleted ?? this.isCompleted,
+    dueDate: dueDate.present ? dueDate.value : this.dueDate,
+    createdAt: createdAt ?? this.createdAt,
+  );
+  NotificationsTableData copyWithCompanion(NotificationsTableCompanion data) {
+    return NotificationsTableData(
+      id: data.id.present ? data.id.value : this.id,
+      title: data.title.present ? data.title.value : this.title,
+      description: data.description.present
+          ? data.description.value
+          : this.description,
+      priority: data.priority.present ? data.priority.value : this.priority,
+      moduleType: data.moduleType.present
+          ? data.moduleType.value
+          : this.moduleType,
+      route: data.route.present ? data.route.value : this.route,
+      isRead: data.isRead.present ? data.isRead.value : this.isRead,
+      isCompleted: data.isCompleted.present
+          ? data.isCompleted.value
+          : this.isCompleted,
+      dueDate: data.dueDate.present ? data.dueDate.value : this.dueDate,
+      createdAt: data.createdAt.present ? data.createdAt.value : this.createdAt,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('NotificationsTableData(')
+          ..write('id: $id, ')
+          ..write('title: $title, ')
+          ..write('description: $description, ')
+          ..write('priority: $priority, ')
+          ..write('moduleType: $moduleType, ')
+          ..write('route: $route, ')
+          ..write('isRead: $isRead, ')
+          ..write('isCompleted: $isCompleted, ')
+          ..write('dueDate: $dueDate, ')
+          ..write('createdAt: $createdAt')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hash(
+    id,
+    title,
+    description,
+    priority,
+    moduleType,
+    route,
+    isRead,
+    isCompleted,
+    dueDate,
+    createdAt,
+  );
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is NotificationsTableData &&
+          other.id == this.id &&
+          other.title == this.title &&
+          other.description == this.description &&
+          other.priority == this.priority &&
+          other.moduleType == this.moduleType &&
+          other.route == this.route &&
+          other.isRead == this.isRead &&
+          other.isCompleted == this.isCompleted &&
+          other.dueDate == this.dueDate &&
+          other.createdAt == this.createdAt);
+}
+
+class NotificationsTableCompanion
+    extends UpdateCompanion<NotificationsTableData> {
+  final Value<String> id;
+  final Value<String> title;
+  final Value<String> description;
+  final Value<String> priority;
+  final Value<String> moduleType;
+  final Value<String> route;
+  final Value<bool> isRead;
+  final Value<bool> isCompleted;
+  final Value<DateTime?> dueDate;
+  final Value<DateTime> createdAt;
+  final Value<int> rowid;
+  const NotificationsTableCompanion({
+    this.id = const Value.absent(),
+    this.title = const Value.absent(),
+    this.description = const Value.absent(),
+    this.priority = const Value.absent(),
+    this.moduleType = const Value.absent(),
+    this.route = const Value.absent(),
+    this.isRead = const Value.absent(),
+    this.isCompleted = const Value.absent(),
+    this.dueDate = const Value.absent(),
+    this.createdAt = const Value.absent(),
+    this.rowid = const Value.absent(),
+  });
+  NotificationsTableCompanion.insert({
+    required String id,
+    required String title,
+    required String description,
+    required String priority,
+    required String moduleType,
+    required String route,
+    this.isRead = const Value.absent(),
+    this.isCompleted = const Value.absent(),
+    this.dueDate = const Value.absent(),
+    required DateTime createdAt,
+    this.rowid = const Value.absent(),
+  }) : id = Value(id),
+       title = Value(title),
+       description = Value(description),
+       priority = Value(priority),
+       moduleType = Value(moduleType),
+       route = Value(route),
+       createdAt = Value(createdAt);
+  static Insertable<NotificationsTableData> custom({
+    Expression<String>? id,
+    Expression<String>? title,
+    Expression<String>? description,
+    Expression<String>? priority,
+    Expression<String>? moduleType,
+    Expression<String>? route,
+    Expression<bool>? isRead,
+    Expression<bool>? isCompleted,
+    Expression<DateTime>? dueDate,
+    Expression<DateTime>? createdAt,
+    Expression<int>? rowid,
+  }) {
+    return RawValuesInsertable({
+      if (id != null) 'id': id,
+      if (title != null) 'title': title,
+      if (description != null) 'description': description,
+      if (priority != null) 'priority': priority,
+      if (moduleType != null) 'module_type': moduleType,
+      if (route != null) 'route': route,
+      if (isRead != null) 'is_read': isRead,
+      if (isCompleted != null) 'is_completed': isCompleted,
+      if (dueDate != null) 'due_date': dueDate,
+      if (createdAt != null) 'created_at': createdAt,
+      if (rowid != null) 'rowid': rowid,
+    });
+  }
+
+  NotificationsTableCompanion copyWith({
+    Value<String>? id,
+    Value<String>? title,
+    Value<String>? description,
+    Value<String>? priority,
+    Value<String>? moduleType,
+    Value<String>? route,
+    Value<bool>? isRead,
+    Value<bool>? isCompleted,
+    Value<DateTime?>? dueDate,
+    Value<DateTime>? createdAt,
+    Value<int>? rowid,
+  }) {
+    return NotificationsTableCompanion(
+      id: id ?? this.id,
+      title: title ?? this.title,
+      description: description ?? this.description,
+      priority: priority ?? this.priority,
+      moduleType: moduleType ?? this.moduleType,
+      route: route ?? this.route,
+      isRead: isRead ?? this.isRead,
+      isCompleted: isCompleted ?? this.isCompleted,
+      dueDate: dueDate ?? this.dueDate,
+      createdAt: createdAt ?? this.createdAt,
+      rowid: rowid ?? this.rowid,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (id.present) {
+      map['id'] = Variable<String>(id.value);
+    }
+    if (title.present) {
+      map['title'] = Variable<String>(title.value);
+    }
+    if (description.present) {
+      map['description'] = Variable<String>(description.value);
+    }
+    if (priority.present) {
+      map['priority'] = Variable<String>(priority.value);
+    }
+    if (moduleType.present) {
+      map['module_type'] = Variable<String>(moduleType.value);
+    }
+    if (route.present) {
+      map['route'] = Variable<String>(route.value);
+    }
+    if (isRead.present) {
+      map['is_read'] = Variable<bool>(isRead.value);
+    }
+    if (isCompleted.present) {
+      map['is_completed'] = Variable<bool>(isCompleted.value);
+    }
+    if (dueDate.present) {
+      map['due_date'] = Variable<DateTime>(dueDate.value);
+    }
+    if (createdAt.present) {
+      map['created_at'] = Variable<DateTime>(createdAt.value);
+    }
+    if (rowid.present) {
+      map['rowid'] = Variable<int>(rowid.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('NotificationsTableCompanion(')
+          ..write('id: $id, ')
+          ..write('title: $title, ')
+          ..write('description: $description, ')
+          ..write('priority: $priority, ')
+          ..write('moduleType: $moduleType, ')
+          ..write('route: $route, ')
+          ..write('isRead: $isRead, ')
+          ..write('isCompleted: $isCompleted, ')
+          ..write('dueDate: $dueDate, ')
+          ..write('createdAt: $createdAt, ')
+          ..write('rowid: $rowid')
+          ..write(')'))
+        .toString();
+  }
+}
+
 abstract class _$AppDatabase extends GeneratedDatabase {
   _$AppDatabase(QueryExecutor e) : super(e);
   $AppDatabaseManager get managers => $AppDatabaseManager(this);
@@ -4442,6 +5061,8 @@ abstract class _$AppDatabase extends GeneratedDatabase {
   late final $GoalsTable goals = $GoalsTable(this);
   late final $FocusLogsTable focusLogs = $FocusLogsTable(this);
   late final $CheckInTableTable checkInTable = $CheckInTableTable(this);
+  late final $NotificationsTableTable notificationsTable =
+      $NotificationsTableTable(this);
   late final Index idxTransactionsDate = Index(
     'idx_transactions_date',
     'CREATE INDEX idx_transactions_date ON transactions (date)',
@@ -4470,6 +5091,9 @@ abstract class _$AppDatabase extends GeneratedDatabase {
     'idx_checkin_is_synced',
     'CREATE INDEX idx_checkin_is_synced ON check_in_table (is_synced)',
   );
+  late final NotificationDao notificationDao = NotificationDao(
+    this as AppDatabase,
+  );
   @override
   Iterable<TableInfo<Table, Object?>> get allTables =>
       allSchemaEntities.whereType<TableInfo<Table, Object?>>();
@@ -4486,6 +5110,7 @@ abstract class _$AppDatabase extends GeneratedDatabase {
     goals,
     focusLogs,
     checkInTable,
+    notificationsTable,
     idxTransactionsDate,
     idxTransactionsCategory,
     idxTransactionsType,
@@ -7071,6 +7696,320 @@ typedef $$CheckInTableTableProcessedTableManager =
       CheckInEntry,
       PrefetchHooks Function()
     >;
+typedef $$NotificationsTableTableCreateCompanionBuilder =
+    NotificationsTableCompanion Function({
+      required String id,
+      required String title,
+      required String description,
+      required String priority,
+      required String moduleType,
+      required String route,
+      Value<bool> isRead,
+      Value<bool> isCompleted,
+      Value<DateTime?> dueDate,
+      required DateTime createdAt,
+      Value<int> rowid,
+    });
+typedef $$NotificationsTableTableUpdateCompanionBuilder =
+    NotificationsTableCompanion Function({
+      Value<String> id,
+      Value<String> title,
+      Value<String> description,
+      Value<String> priority,
+      Value<String> moduleType,
+      Value<String> route,
+      Value<bool> isRead,
+      Value<bool> isCompleted,
+      Value<DateTime?> dueDate,
+      Value<DateTime> createdAt,
+      Value<int> rowid,
+    });
+
+class $$NotificationsTableTableFilterComposer
+    extends Composer<_$AppDatabase, $NotificationsTableTable> {
+  $$NotificationsTableTableFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<String> get id => $composableBuilder(
+    column: $table.id,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get title => $composableBuilder(
+    column: $table.title,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get description => $composableBuilder(
+    column: $table.description,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get priority => $composableBuilder(
+    column: $table.priority,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get moduleType => $composableBuilder(
+    column: $table.moduleType,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get route => $composableBuilder(
+    column: $table.route,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<bool> get isRead => $composableBuilder(
+    column: $table.isRead,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<bool> get isCompleted => $composableBuilder(
+    column: $table.isCompleted,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<DateTime> get dueDate => $composableBuilder(
+    column: $table.dueDate,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<DateTime> get createdAt => $composableBuilder(
+    column: $table.createdAt,
+    builder: (column) => ColumnFilters(column),
+  );
+}
+
+class $$NotificationsTableTableOrderingComposer
+    extends Composer<_$AppDatabase, $NotificationsTableTable> {
+  $$NotificationsTableTableOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<String> get id => $composableBuilder(
+    column: $table.id,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get title => $composableBuilder(
+    column: $table.title,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get description => $composableBuilder(
+    column: $table.description,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get priority => $composableBuilder(
+    column: $table.priority,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get moduleType => $composableBuilder(
+    column: $table.moduleType,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get route => $composableBuilder(
+    column: $table.route,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<bool> get isRead => $composableBuilder(
+    column: $table.isRead,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<bool> get isCompleted => $composableBuilder(
+    column: $table.isCompleted,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<DateTime> get dueDate => $composableBuilder(
+    column: $table.dueDate,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<DateTime> get createdAt => $composableBuilder(
+    column: $table.createdAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+}
+
+class $$NotificationsTableTableAnnotationComposer
+    extends Composer<_$AppDatabase, $NotificationsTableTable> {
+  $$NotificationsTableTableAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<String> get id =>
+      $composableBuilder(column: $table.id, builder: (column) => column);
+
+  GeneratedColumn<String> get title =>
+      $composableBuilder(column: $table.title, builder: (column) => column);
+
+  GeneratedColumn<String> get description => $composableBuilder(
+    column: $table.description,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get priority =>
+      $composableBuilder(column: $table.priority, builder: (column) => column);
+
+  GeneratedColumn<String> get moduleType => $composableBuilder(
+    column: $table.moduleType,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get route =>
+      $composableBuilder(column: $table.route, builder: (column) => column);
+
+  GeneratedColumn<bool> get isRead =>
+      $composableBuilder(column: $table.isRead, builder: (column) => column);
+
+  GeneratedColumn<bool> get isCompleted => $composableBuilder(
+    column: $table.isCompleted,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<DateTime> get dueDate =>
+      $composableBuilder(column: $table.dueDate, builder: (column) => column);
+
+  GeneratedColumn<DateTime> get createdAt =>
+      $composableBuilder(column: $table.createdAt, builder: (column) => column);
+}
+
+class $$NotificationsTableTableTableManager
+    extends
+        RootTableManager<
+          _$AppDatabase,
+          $NotificationsTableTable,
+          NotificationsTableData,
+          $$NotificationsTableTableFilterComposer,
+          $$NotificationsTableTableOrderingComposer,
+          $$NotificationsTableTableAnnotationComposer,
+          $$NotificationsTableTableCreateCompanionBuilder,
+          $$NotificationsTableTableUpdateCompanionBuilder,
+          (
+            NotificationsTableData,
+            BaseReferences<
+              _$AppDatabase,
+              $NotificationsTableTable,
+              NotificationsTableData
+            >,
+          ),
+          NotificationsTableData,
+          PrefetchHooks Function()
+        > {
+  $$NotificationsTableTableTableManager(
+    _$AppDatabase db,
+    $NotificationsTableTable table,
+  ) : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $$NotificationsTableTableFilterComposer($db: db, $table: table),
+          createOrderingComposer: () =>
+              $$NotificationsTableTableOrderingComposer($db: db, $table: table),
+          createComputedFieldComposer: () =>
+              $$NotificationsTableTableAnnotationComposer(
+                $db: db,
+                $table: table,
+              ),
+          updateCompanionCallback:
+              ({
+                Value<String> id = const Value.absent(),
+                Value<String> title = const Value.absent(),
+                Value<String> description = const Value.absent(),
+                Value<String> priority = const Value.absent(),
+                Value<String> moduleType = const Value.absent(),
+                Value<String> route = const Value.absent(),
+                Value<bool> isRead = const Value.absent(),
+                Value<bool> isCompleted = const Value.absent(),
+                Value<DateTime?> dueDate = const Value.absent(),
+                Value<DateTime> createdAt = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => NotificationsTableCompanion(
+                id: id,
+                title: title,
+                description: description,
+                priority: priority,
+                moduleType: moduleType,
+                route: route,
+                isRead: isRead,
+                isCompleted: isCompleted,
+                dueDate: dueDate,
+                createdAt: createdAt,
+                rowid: rowid,
+              ),
+          createCompanionCallback:
+              ({
+                required String id,
+                required String title,
+                required String description,
+                required String priority,
+                required String moduleType,
+                required String route,
+                Value<bool> isRead = const Value.absent(),
+                Value<bool> isCompleted = const Value.absent(),
+                Value<DateTime?> dueDate = const Value.absent(),
+                required DateTime createdAt,
+                Value<int> rowid = const Value.absent(),
+              }) => NotificationsTableCompanion.insert(
+                id: id,
+                title: title,
+                description: description,
+                priority: priority,
+                moduleType: moduleType,
+                route: route,
+                isRead: isRead,
+                isCompleted: isCompleted,
+                dueDate: dueDate,
+                createdAt: createdAt,
+                rowid: rowid,
+              ),
+          withReferenceMapper: (p0) => p0
+              .map((e) => (e.readTable(table), BaseReferences(db, table, e)))
+              .toList(),
+          prefetchHooksCallback: null,
+        ),
+      );
+}
+
+typedef $$NotificationsTableTableProcessedTableManager =
+    ProcessedTableManager<
+      _$AppDatabase,
+      $NotificationsTableTable,
+      NotificationsTableData,
+      $$NotificationsTableTableFilterComposer,
+      $$NotificationsTableTableOrderingComposer,
+      $$NotificationsTableTableAnnotationComposer,
+      $$NotificationsTableTableCreateCompanionBuilder,
+      $$NotificationsTableTableUpdateCompanionBuilder,
+      (
+        NotificationsTableData,
+        BaseReferences<
+          _$AppDatabase,
+          $NotificationsTableTable,
+          NotificationsTableData
+        >,
+      ),
+      NotificationsTableData,
+      PrefetchHooks Function()
+    >;
 
 class $AppDatabaseManager {
   final _$AppDatabase _db;
@@ -7097,4 +8036,6 @@ class $AppDatabaseManager {
       $$FocusLogsTableTableManager(_db, _db.focusLogs);
   $$CheckInTableTableTableManager get checkInTable =>
       $$CheckInTableTableTableManager(_db, _db.checkInTable);
+  $$NotificationsTableTableTableManager get notificationsTable =>
+      $$NotificationsTableTableTableManager(_db, _db.notificationsTable);
 }
