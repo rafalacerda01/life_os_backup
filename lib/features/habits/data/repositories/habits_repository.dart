@@ -97,6 +97,11 @@ class HabitsRepository {
       // 1. Deleta localmente primeiro
       await (_db.delete(_db.habits)..where((t) => t.id.equals(habitId))).go();
 
+      //Remove a notificação correspondente do Drift
+      await (_db.delete(
+        _db.notificationsTable,
+      )..where((t) => t.id.equals('habit_$habitId'))).go();
+
       // 2. Deleta no Firestore em background
       unawaited(_deleteHabitFromFirestore(habitId));
     } catch (error, stackTrace) {
