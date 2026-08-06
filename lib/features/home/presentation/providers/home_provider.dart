@@ -16,6 +16,7 @@ class HomeStateData {
   final int totalHabits;
   final dynamic nextExam;
   final int medicationCount;
+  final bool isLoading; // 🟢 NOVO: Controle de estado de carregamento
 
   HomeStateData({
     required this.dashboard,
@@ -23,6 +24,7 @@ class HomeStateData {
     required this.totalHabits,
     required this.nextExam,
     required this.medicationCount,
+    this.isLoading = false, // Começa como falso por padrão
   });
 }
 
@@ -32,6 +34,12 @@ final homeStateProvider = Provider<HomeStateData>((ref) {
   final habitsAsync = ref.watch(habitsStreamProvider);
   final medicationsAsync = ref.watch(medicationsStreamProvider);
   final subjectsAsync = ref.watch(subjectsStreamProvider);
+
+  // 🟢 NOVO: Verifica se ALGUM dos streams está em carregamento
+  final isDataLoading =
+      habitsAsync.isLoading ||
+      medicationsAsync.isLoading ||
+      subjectsAsync.isLoading;
 
   final now = DateTime.now();
   final habits = habitsAsync.value ?? [];
@@ -49,5 +57,6 @@ final homeStateProvider = Provider<HomeStateData>((ref) {
     totalHabits: habits.length,
     nextExam: repository.getNextExam(subjects, now),
     medicationCount: medicationsCount,
+    isLoading: isDataLoading, // 🟢 NOVO: Repassa para a UI
   );
 });

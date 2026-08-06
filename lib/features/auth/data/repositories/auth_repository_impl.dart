@@ -153,16 +153,20 @@ class AuthRepositoryImpl implements AuthRepository {
   @override
   Future<Result<UserEntity, Failure>> signInWithGoogle() async {
     try {
-      // Instância singleton
       final googleSignIn = GoogleSignIn.instance;
 
-      // Executa a autenticação. Retorna Non-Nullable ou lança exceção em cancelamentos.
+      await googleSignIn.initialize(
+        serverClientId:
+            '278760083864-nfp6h9r9gjaq4tvtcerif8h2d08c6afi.apps.googleusercontent.com',
+      );
+
+      // Executa a autenticação usando o fluxo moderno do Credential Manager
       final googleUser = await googleSignIn.authenticate();
 
-      // Extração direta e síncrona dos tokens (sem await)
+      // Extração direta dos tokens
       final googleAuth = googleUser.authentication;
 
-      // Credencial configurada apenas com o idToken (fluxo moderno)
+      // Credencial configurada com o idToken
       final credential = fb.GoogleAuthProvider.credential(
         idToken: googleAuth.idToken,
       );
@@ -209,8 +213,19 @@ class AuthRepositoryImpl implements AuthRepository {
         ),
       );
     } catch (e) {
-      // Captura de exceções nativas (ex: cancelamento pelo usuário ou erro no Google Play Services)
-      return Error(ServerFailure(e.toString()));
+      final errorStr = e.toString();
+
+      // 🟢 Tratamento amigável para celular novo / sem conta Google logada
+      if (errorStr.contains('No credentials available') ||
+          errorStr.contains('sign_in_failed')) {
+        return const Error(
+          AuthFailure(
+            'Nenhuma conta Google foi encontrada neste aparelho. Adicione uma conta nas configurações do seu celular para continuar.',
+          ),
+        );
+      }
+
+      return Error(ServerFailure('Erro inesperado ao entrar com o Google.'));
     }
   }
 
