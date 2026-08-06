@@ -150,6 +150,9 @@ class HealthRepository {
         _db.medications,
       )..where((t) => t.id.equals(localId))).go();
 
+      await (_db.delete(
+        _db.notificationsTable,
+      )..where((t) => t.id.equals('health_med_$docId'))).go();
       // 2. Cancela notificação
       await _notifService.cancelNotification(docId.hashCode.abs());
       AppLogger.i("Notificação cancelada para o medicamento $docId");

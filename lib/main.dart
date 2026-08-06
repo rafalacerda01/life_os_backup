@@ -9,10 +9,11 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/date_symbol_data_local.dart';
 import 'package:life_os/core/router/router.dart';
 import 'package:life_os/firebase_options.dart';
+import 'package:timezone/data/latest.dart' as tz;
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-
+  tz.initializeTimeZones();
   // 1. Inicialização síncrona obrigatória do núcleo do Firebase
   await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
 

@@ -1,12 +1,20 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:life_os/core/utils/app_logger.dart';
-import 'package:life_os/features/notifications/data/models/notification_model.dart';
+import 'package:life_os/core/database/app_database.dart';
+import 'package:life_os/features/notifications/data/daos/notification_dao.dart';
+import 'package:life_os/features/notifications/domain/models/notification_model.dart';
+
+final appDatabaseProvider = Provider<AppDatabase>((ref) {
+  return AppDatabase();
+});
 
 class NotificationsRepository {
   final FirebaseFirestore firestore;
+  final NotificationDao? localDao;
 
-  NotificationsRepository({FirebaseFirestore? firestore})
+  NotificationsRepository({FirebaseFirestore? firestore, this.localDao})
     : firestore = firestore ?? FirebaseFirestore.instance;
 
   Stream<List<NotificationModel>> getNotificationsStream() {
@@ -37,4 +45,41 @@ class NotificationsRepository {
       return Stream.value([]);
     }
   }
+
+  Stream<List<NotificationModel>> watchLocalNotifications() {
+    if (localDao == null) return Stream.value([]);
+    return localDao!.watchAllNotifications().map(
+      (rows) => rows.map((row) => NotificationModel.fromDrift(row)).toList(),
+    );
+  }
+
+  Future<void> saveLocalNotification(NotificationModel notification) async {
+    if (localDao == null) return;
+    await localDao!.insertNotification(
+      NotificationModel.toCompanion(notification),
+    );
+  }
+
+  Future<void> markAsReadLocal(String id) async {
+    await localDao?.markAsRead(id);
+  }
+
+  Future<void> markAsCompletedLocal(String id) async {
+    await localDao?.markAsCompleted(id);
+  }
+
+  Future<void> deleteNotification(String id) async {
+    if (localDao == null) return;
+    await localDao!.deleteNotification(id);
+  }
 }
+
+final notificationsRepositoryProvider = Provider<NotificationsRepository>((
+  ref,
+) {
+  final db = ref.watch(appDatabaseProvider);
+  return NotificationsRepository(
+    firestore: FirebaseFirestore.instance,
+    localDao: db.notificationDao,
+  );
+});
