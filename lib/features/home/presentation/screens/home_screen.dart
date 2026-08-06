@@ -38,223 +38,230 @@ class HomeScreen extends ConsumerWidget {
     final dashboard = homeState.dashboard;
     final nextExam = homeState.nextExam;
 
-    return Container(
-      color: AppColors.scaffoldBackground,
-      child: SafeArea(
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.all(20),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              // Header
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Row(
-                          children: [
-                            Flexible(
-                              child: Text(
-                                "$greeting, $userName",
-                                style: const TextStyle(
-                                  color: AppColors.textMain,
-                                  fontSize: 22,
-                                  fontWeight: FontWeight.bold,
-                                ),
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                            ),
-                            if (isPremium) ...[
-                              const SizedBox(width: 8),
-                              Container(
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 6,
-                                  vertical: 2,
-                                ),
-                                decoration: BoxDecoration(
-                                  color: AppColors.primary.withOpacity(0.15),
-                                  borderRadius: BorderRadius.circular(8),
-                                  border: Border.all(color: AppColors.primary),
-                                ),
-                                child: const Text(
-                                  "PRO",
-                                  style: TextStyle(
-                                    color: AppColors.primary,
-                                    fontSize: 10,
+    // 🟢 MAGIA ACONTECENDO AQUI: Transição suave entre Carregamento e Interface Real
+    Widget content = homeState.isLoading
+        ? const _HomeScreenSkeleton()
+        : SingleChildScrollView(
+            padding: const EdgeInsets.all(20),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // Header
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            children: [
+                              Flexible(
+                                child: Text(
+                                  "$greeting, $userName",
+                                  style: const TextStyle(
+                                    color: AppColors.textMain,
+                                    fontSize: 22,
                                     fontWeight: FontWeight.bold,
                                   ),
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ),
+                              if (isPremium) ...[
+                                const SizedBox(width: 8),
+                                Container(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 6,
+                                    vertical: 2,
+                                  ),
+                                  decoration: BoxDecoration(
+                                    color: AppColors.primary.withOpacity(0.15),
+                                    borderRadius: BorderRadius.circular(8),
+                                    border: Border.all(
+                                      color: AppColors.primary,
+                                    ),
+                                  ),
+                                  child: const Text(
+                                    "PRO",
+                                    style: TextStyle(
+                                      color: AppColors.primary,
+                                      fontSize: 10,
+                                      fontWeight: FontWeight.bold,
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ],
+                          ),
+                          const SizedBox(height: 4),
+                          Text(
+                            formattedDate,
+                            style: const TextStyle(
+                              color: AppColors.textHint,
+                              fontSize: 13,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    IconButton(
+                      icon: const Icon(
+                        Icons.notifications_none,
+                        color: AppColors.textSecondary,
+                      ),
+                      onPressed: () => context.push('/notifications'),
+                    ),
+                  ],
+                ),
+
+                // Próxima Prova (Banner de Alerta)
+                if (nextExam != null) ...[
+                  const SizedBox(height: 20),
+                  Container(
+                    padding: const EdgeInsets.all(16),
+                    decoration: BoxDecoration(
+                      color: AppColors.warning.withOpacity(0.15),
+                      borderRadius: BorderRadius.circular(20),
+                      border: Border.all(
+                        color: AppColors.warning.withOpacity(0.3),
+                      ),
+                    ),
+                    child: Row(
+                      children: [
+                        const Icon(
+                          Icons.event_note,
+                          color: AppColors.warning,
+                          size: 32,
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                "Prova de ${nextExam.title}",
+                                style: const TextStyle(
+                                  color: AppColors.textMain,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                              Text(
+                                "Faltam ${nextExam.examDate!.difference(now).inDays} dias",
+                                style: const TextStyle(
+                                  color: AppColors.textSecondary,
+                                  fontSize: 13,
                                 ),
                               ),
                             ],
-                          ],
-                        ),
-                        const SizedBox(height: 4),
-                        Text(
-                          formattedDate,
-                          style: const TextStyle(
-                            color: AppColors.textHint,
-                            fontSize: 13,
                           ),
                         ),
                       ],
                     ),
                   ),
-                  IconButton(
-                    icon: const Icon(
-                      Icons.notifications_none,
-                      color: AppColors.textSecondary,
-                    ),
-                    onPressed: () => context.push('/notifications'),
-                  ),
                 ],
-              ),
 
-              // Próxima Prova (Banner de Alerta)
-              if (nextExam != null) ...[
+                const SizedBox(height: 25),
+                _MainScoreCard(dashboard: dashboard),
                 const SizedBox(height: 20),
-                Container(
-                  padding: const EdgeInsets.all(16),
-                  decoration: BoxDecoration(
-                    color: AppColors.warning.withOpacity(0.15),
-                    borderRadius: BorderRadius.circular(20),
-                    border: Border.all(
-                      color: AppColors.warning.withOpacity(0.3),
+
+                // Insight Card
+                const PremiumInsightCard(),
+
+                const SizedBox(height: 20),
+
+                // Mini Cards de Acesso Rápido
+                Row(
+                  children: [
+                    Expanded(
+                      child: MiniCard(
+                        title: "Produtividade",
+                        value: "${dashboard.productivityScore.toInt()}%",
+                        color: Colors.purpleAccent,
+                        onTap: () => context.push('/tasks'),
+                      ),
                     ),
-                  ),
-                  child: Row(
-                    children: [
-                      const Icon(
-                        Icons.event_note,
-                        color: AppColors.warning,
-                        size: 32,
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: MiniCard(
+                        title: "Saúde",
+                        value: "${dashboard.healthScore.toInt()}%",
+                        color: Colors.greenAccent,
+                        onTap: () => context.push('/health'),
                       ),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              "Prova de ${nextExam.title}",
-                              style: const TextStyle(
-                                color: AppColors.textMain,
-                                fontWeight: FontWeight.bold,
-                              ),
-                            ),
-                            Text(
-                              "Faltam ${nextExam.examDate!.difference(now).inDays} dias",
-                              style: const TextStyle(
-                                color: AppColors.textSecondary,
-                                fontSize: 13,
-                              ),
-                            ),
-                          ],
-                        ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: MiniCard(
+                        title: "Financeiro",
+                        value: "${dashboard.financialScore.toInt()}%",
+                        color: Colors.blueAccent,
+                        onTap: () => context.push('/finance'),
                       ),
-                    ],
-                  ),
+                    ),
+                  ],
                 ),
+
+                const SizedBox(height: 25),
+                const SectionTitle("Estudos"),
+                const SizedBox(height: 12),
+                InfoCard(
+                  title: "Progresso de estudo",
+                  subtitle:
+                      "Streak: ${dashboard.studyStreak} dias • Revisões: ${dashboard.studyReviewQueue}",
+                  value: "${(dashboard.studyProgress * 100).toInt()}%",
+                  color: AppColors.study,
+                  icon: Icons.school_rounded,
+                  onTap: () => context.push('/study'),
+                ),
+
+                const SizedBox(height: 20),
+                const SectionTitle("Saúde"),
+                const SizedBox(height: 12),
+                InfoCard(
+                  title: "Estado geral",
+                  subtitle:
+                      "Medicamentos ativos: ${homeState.medicationCount} • Humor: ${dashboard.mood}",
+                  value: "${dashboard.healthScore.toInt()}%",
+                  color: AppColors.health,
+                  icon: Icons.favorite_rounded,
+                  onTap: () => context.push('/health'),
+                ),
+
+                const SizedBox(height: 20),
+                const SectionTitle("Finanças"),
+                const SizedBox(height: 12),
+                InfoCard(
+                  title: "Saldo atual",
+                  subtitle: "Transações: ${dashboard.transactionsCount}",
+                  value: "R\$ ${dashboard.financeBalance.toStringAsFixed(2)}",
+                  color: AppColors.finance,
+                  icon: Icons.account_balance_wallet_rounded,
+                  onTap: () => context.push('/finance'),
+                ),
+
+                const SizedBox(height: 20),
+                const SectionTitle("Hábitos"),
+                const SizedBox(height: 12),
+                InfoCard(
+                  title: "Rotina Diária",
+                  subtitle:
+                      "Concluídos: ${homeState.completedHabitsToday} de ${homeState.totalHabits}",
+                  value: homeState.totalHabits > 0
+                      ? "${((homeState.completedHabitsToday / homeState.totalHabits) * 100).toInt()}%"
+                      : "0%",
+                  color: AppColors.habits,
+                  icon: Icons.local_fire_department_rounded,
+                  onTap: () => context.push('/habits'),
+                ),
+                const SizedBox(height: 30),
               ],
+            ),
+          );
 
-              const SizedBox(height: 25),
-              _MainScoreCard(dashboard: dashboard),
-              const SizedBox(height: 20),
-
-              // Correção aplicada: Substituído o _InsightCard antigo pelo novo motor escalável
-              const PremiumInsightCard(),
-
-              const SizedBox(height: 20),
-
-              // Mini Cards de Acesso Rápido
-              Row(
-                children: [
-                  Expanded(
-                    child: MiniCard(
-                      title: "Produtividade",
-                      value: "${dashboard.productivityScore.toInt()}%",
-                      color: Colors.purpleAccent,
-                      onTap: () => context.push('/tasks'),
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: MiniCard(
-                      title: "Saúde",
-                      value: "${dashboard.healthScore.toInt()}%",
-                      color: Colors.greenAccent,
-                      onTap: () => context.push('/health'),
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: MiniCard(
-                      title: "Financeiro",
-                      value: "${dashboard.financialScore.toInt()}%",
-                      color: Colors.blueAccent,
-                      onTap: () => context.push('/finance'),
-                    ),
-                  ),
-                ],
-              ),
-
-              const SizedBox(height: 25),
-              const SectionTitle("Estudos"),
-              const SizedBox(height: 12),
-              InfoCard(
-                title: "Progresso de estudo",
-                subtitle:
-                    "Streak: ${dashboard.studyStreak} dias • Revisões: ${dashboard.studyReviewQueue}",
-                value: "${(dashboard.studyProgress * 100).toInt()}%",
-                color: AppColors.study,
-                icon: Icons.school_rounded,
-                onTap: () => context.push('/study'),
-              ),
-
-              const SizedBox(height: 20),
-              const SectionTitle("Saúde"),
-              const SizedBox(height: 12),
-              InfoCard(
-                title: "Estado geral",
-                subtitle:
-                    "Medicamentos ativos: ${homeState.medicationCount} • Humor: ${dashboard.mood}",
-                value: "${dashboard.healthScore.toInt()}%",
-                color: AppColors.health,
-                icon: Icons.favorite_rounded,
-                onTap: () => context.push('/health'),
-              ),
-
-              const SizedBox(height: 20),
-              const SectionTitle("Finanças"),
-              const SizedBox(height: 12),
-              InfoCard(
-                title: "Saldo atual",
-                subtitle: "Transações: ${dashboard.transactionsCount}",
-                value: "R\$ ${dashboard.financeBalance.toStringAsFixed(2)}",
-                color: AppColors.finance,
-                icon: Icons.account_balance_wallet_rounded,
-                onTap: () => context.push('/finance'),
-              ),
-
-              const SizedBox(height: 20),
-              const SectionTitle("Hábitos"),
-              const SizedBox(height: 12),
-              InfoCard(
-                title: "Rotina Diária",
-                subtitle:
-                    "Concluídos: ${homeState.completedHabitsToday} de ${homeState.totalHabits}",
-                value: homeState.totalHabits > 0
-                    ? "${((homeState.completedHabitsToday / homeState.totalHabits) * 100).toInt()}%"
-                    : "0%",
-                color: AppColors.habits,
-                icon: Icons.local_fire_department_rounded,
-                onTap: () => context.push('/habits'),
-              ),
-              const SizedBox(height: 30),
-            ],
-          ),
-        ),
+    return Container(
+      color: AppColors.scaffoldBackground,
+      child: SafeArea(
+        child: content, // 🟢 Renderiza o Skeleton OU a tela real aqui
       ),
     );
   }
@@ -356,7 +363,6 @@ class _InsightCardContent extends StatelessWidget {
         color: AppColors.cardBackground,
         borderRadius: BorderRadius.circular(24),
         border: Border.all(color: primaryColor.withOpacity(0.15), width: 1.5),
-        // boxShadow removido daqui para eliminar a sombra/glow
       ),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -440,6 +446,116 @@ class _InsightCardContent extends StatelessWidget {
           ),
         ],
       ),
+    );
+  }
+}
+
+// ============================================================================
+// 🟢 NOVOS COMPONENTES: ESTRUTURA DO SKELETON (TELA DE CARREGAMENTO)
+// ============================================================================
+
+class _HomeScreenSkeleton extends StatelessWidget {
+  const _HomeScreenSkeleton();
+
+  @override
+  Widget build(BuildContext context) {
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(20),
+      physics:
+          const NeverScrollableScrollPhysics(), // Trava o scroll durante o carregamento
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // Header Skeleton
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  _SkeletonBox(width: 180, height: 24),
+                  const SizedBox(height: 8),
+                  _SkeletonBox(width: 120, height: 14),
+                ],
+              ),
+              _SkeletonBox(width: 40, height: 40, isCircle: true),
+            ],
+          ),
+          const SizedBox(height: 25),
+
+          // Main Score Card Skeleton
+          _SkeletonBox(width: double.infinity, height: 160, borderRadius: 24),
+          const SizedBox(height: 20),
+
+          // Insight Card Skeleton
+          _SkeletonBox(width: double.infinity, height: 110, borderRadius: 24),
+          const SizedBox(height: 20),
+
+          // Mini Cards Skeleton
+          Row(
+            children: [
+              Expanded(child: _SkeletonBox(height: 90, borderRadius: 16)),
+              const SizedBox(width: 12),
+              Expanded(child: _SkeletonBox(height: 90, borderRadius: 16)),
+              const SizedBox(width: 12),
+              Expanded(child: _SkeletonBox(height: 90, borderRadius: 16)),
+            ],
+          ),
+
+          const SizedBox(height: 25),
+          _SkeletonBox(width: 100, height: 20), // Título da Sessão ("Estudos")
+          const SizedBox(height: 12),
+          _SkeletonBox(
+            width: double.infinity,
+            height: 80,
+            borderRadius: 16,
+          ), // InfoCard
+
+          const SizedBox(height: 20),
+          _SkeletonBox(width: 90, height: 20), // Título da Sessão ("Saúde")
+          const SizedBox(height: 12),
+          _SkeletonBox(
+            width: double.infinity,
+            height: 80,
+            borderRadius: 16,
+          ), // InfoCard
+        ],
+      ),
+    );
+  }
+}
+
+class _SkeletonBox extends StatelessWidget {
+  final double width;
+  final double height;
+  final double borderRadius;
+  final bool isCircle;
+
+  const _SkeletonBox({
+    this.width = double.infinity,
+    required this.height,
+    this.borderRadius = 8,
+    this.isCircle = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    // Usando uma animação implícita suave (Fade) para simular o carregamento Triple A
+    return TweenAnimationBuilder<double>(
+      tween: Tween<double>(begin: 0.2, end: 0.6),
+      duration: const Duration(milliseconds: 800),
+      curve: Curves.easeInOut,
+      builder: (context, opacity, child) {
+        return Container(
+          width: width,
+          height: height,
+          decoration: BoxDecoration(
+            color: Colors.white.withOpacity(0.05 * opacity),
+            shape: isCircle ? BoxShape.circle : BoxShape.rectangle,
+            borderRadius: isCircle ? null : BorderRadius.circular(borderRadius),
+          ),
+        );
+      },
     );
   }
 }
