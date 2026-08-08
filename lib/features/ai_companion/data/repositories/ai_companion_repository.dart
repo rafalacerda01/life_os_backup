@@ -15,11 +15,13 @@ class AICompanionRepository {
     : client = client ?? http.Client();
 
   Future<Map<String, dynamic>> getSystemContext({
-    required dynamic health,
-    required List<dynamic> medications,
+    dynamic health,
+    List<dynamic> medications = const [],
+    Map<String, dynamic>? finance, // 🔴 Recebe os dados calculados do Drift!
   }) async {
     final Map<String, dynamic> healthContext = {};
 
+    // 1. Saúde e Medicamentos
     if (health != null) {
       healthContext["humor"] = health.mood.isNotEmpty
           ? health.mood
@@ -34,10 +36,14 @@ class AICompanionRepository {
       healthContext["medicamentos"] = "Dados indisponíveis";
     }
 
+    // 2. Finanças (Injetado em tempo real, sem custo de leitura no Firebase!)
+    healthContext["financas"] = finance ?? "Dados indisponíveis";
+
+    // 3. Dados extras do usuário (Ex: Ciclo Menstrual)
     try {
       final user = FirebaseAuth.instance.currentUser;
       if (user != null) {
-        // 1. Ciclo menstrual com timeout de segurança
+        // Ciclo menstrual com timeout de segurança
         final userDoc = await FirebaseFirestore.instance
             .collection('users')
             .doc(user.uid)
@@ -53,39 +59,10 @@ class AICompanionRepository {
           healthContext["ciclo_menstrual"] =
               userDoc.data()?['menstrualCycle'] ?? "Não rastreado";
         }
-
-        // 2. Finanças com timeout de segurança
-        final financeDoc = await FirebaseFirestore.instance
-            .collection('users')
-            .doc(user.uid)
-            .collection('finance')
-            .doc('main')
-            .get()
-            .timeout(
-              _networkTimeout,
-              onTimeout: () => throw TimeoutException(
-                'Timeout ao buscar dados financeiros para a IA.',
-              ),
-            );
-
-        if (financeDoc.exists) {
-          final data = financeDoc.data();
-          final income = (data?['totalIncome'] ?? 0.0).toDouble();
-          final expense = (data?['totalExpense'] ?? 0.0).toDouble();
-
-          healthContext["financas"] = {
-            "entradas": income,
-            "saidas": expense,
-            "saldo": income - expense,
-          };
-        } else {
-          healthContext["financas"] = "Dados indisponíveis";
-        }
       }
     } catch (e, stack) {
       AppLogger.e('Erro ao buscar contexto para IA', e, stack);
       healthContext["ciclo_menstrual"] = "Erro ao carregar";
-      healthContext["financas"] = "Erro ao carregar";
     }
 
     healthContext["data_coleta"] = DateTime.now().toIso8601String();

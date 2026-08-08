@@ -6,6 +6,7 @@ import 'package:life_os/features/premium/presentation/premium_provider.dart';
 import 'package:life_os/features/health/presentation/providers/health_provider.dart';
 import 'package:life_os/features/ai_companion/presentation/providers/ai_consent_provider.dart';
 import 'package:life_os/features/ai_companion/presentation/screens/ai_consent_view.dart';
+import 'package:life_os/features/finance/presentation/providers/finance_provider.dart';
 
 class AICompanionScreen extends ConsumerStatefulWidget {
   const AICompanionScreen({super.key});
@@ -225,19 +226,46 @@ class _AICompanionScreenState extends ConsumerState<AICompanionScreen> {
     _controller.clear();
 
     try {
-      // Sincroniza dados de saúde e obtém os estados atuais
+      // 1. Sincroniza e puxa os dados de saúde
       await ref.read(healthRepositoryProvider).syncHealthFromFirebase();
       final healthAsyncValue = ref.read(healthStreamProvider);
       final medicationsAsyncValue = ref.read(medicationsStreamProvider);
 
+      // 2. Puxa os dados financeiros do banco de dados local (Drift)
+      final financeAsyncValue = ref.read(financeStreamProvider);
+
       final health = healthAsyncValue.asData?.value;
       final medications = medicationsAsyncValue.asData?.value ?? [];
+      final transactions = financeAsyncValue.asData?.value ?? [];
 
-      // Delega a montagem do contexto para o repositório de IA
+      // 3. O CÉREBRO FINANCEIRO: Calculando o resumo para a IA
+      double totalIncome = 0.0;
+      double totalExpense = 0.0;
+
+      for (final t in transactions) {
+        // Verifica se é 'income' (entrada) ou 'expense' (saída)
+        if (t.type == 'income') {
+          totalIncome += t.amount;
+        } else if (t.type == 'expense') {
+          totalExpense += t.amount;
+        }
+      }
+
+      final balance = totalIncome - totalExpense;
+
+      // Monta o pacote mastigado para a IA ler facilmente
+      final financeSummary = {
+        'saldo_atual': balance,
+        'total_entradas': totalIncome,
+        'total_saidas': totalExpense,
+      };
+
+      // 4. Delega a montagem do contexto para o repositório de IA
       final repository = ref.read(aiCompanionRepositoryProvider);
       final contextData = await repository.getSystemContext(
         health: health,
         medications: medications,
+        finance: financeSummary, // 🔴 Agora o dinheiro vai junto no pacote!
       );
 
       await ref
