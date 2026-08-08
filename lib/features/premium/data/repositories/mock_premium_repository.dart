@@ -35,26 +35,25 @@ class MockPremiumRepository implements IPremiumRepository {
 
   @override
   Future<bool> purchasePlan(PremiumTier tier) async {
-    final user = _auth.currentUser;
-    if (user == null) return false;
-
-    try {
-      // Quando for colocar na Play Store, aqui entrará o código:
-      // await Purchases.purchasePackage(package);
-      await _firestore.collection('users').doc(user.uid).update({
-        'isPremium': true,
-      });
-      return true;
-    } catch (e) {
-      print("ERRO DE CHECKOUT: $e");
-      return false;
-    }
+    // ========================================================================
+    // CORREÇÃO DE SEGURANÇA (FASES 8 E 11):
+    // O cliente não pode forçar 'isPremium = true' no banco de dados.
+    // O faturamento real (Google Play/RevenueCat) será implementado e
+    // validado pelo backend futuramente.
+    // ========================================================================
+    throw UnimplementedError(
+      'Google Play Billing pendente de implementação. Compra bloqueada por segurança.',
+    );
   }
 
   @override
   Future<bool> restorePurchases() async {
-    // Aqui entrará: await Purchases.restorePurchases();
-    return true; // Mock para UI não quebrar
+    // ========================================================================
+    // CORREÇÃO DE SEGURANÇA (FASE 12):
+    // Retornar 'true' sem validar uma compra real cria uma brecha em produção.
+    // Retornando 'false' de forma segura até a implementação do sistema real.
+    // ========================================================================
+    return false;
   }
 
   PremiumStatusEntity _getFreeTier() {

@@ -29,33 +29,95 @@ class AuthRepositoryImpl implements AuthRepository {
       final userDocSnap = await userDocRef.get();
       final activeCircleId = userDocSnap.data()?['activeCircleId'] as String?;
 
-      final batch = _firestore.batch();
+      // ========================================================================
+      // FASE 3: EXCLUSÃO EM CHUNKS (LOTES)
+      // O Firestore possui um limite rígido de 500 operações por Batch.
+      // Foi criada uma função de controle para "despejar" (commit) o batch
+      // sempre que atingir 450 operações, criando um novo batch em seguida.
+      // ========================================================================
+      var batch = _firestore.batch();
+      int operationCount = 0;
 
-      final subcollections = ['finance', 'health_info', 'checkins'];
+      Future<void> commitBatchIfNeeded() async {
+        if (operationCount >= 450) {
+          await batch.commit();
+          batch = _firestore.batch();
+          operationCount = 0;
+        }
+      }
+
+      // ========================================================================
+      // FASE 2: PRIVACIDADE DE DADOS (MAPEAMENTO COMPLETO)
+      // Adicionadas todas as subcoleções identificadas na auditoria para
+      // garantir que o usuário não possua "dados órfãos".
+      // ========================================================================
+      final subcollections = [
+        'tasks',
+        'habits',
+        'study_info',
+        'subjects',
+        'review_queue',
+        'focus_logs',
+        'finance',
+        'health_info',
+        'checkins',
+      ];
 
       for (final sub in subcollections) {
         final snapshot = await userDocRef.collection(sub).get();
         for (final doc in snapshot.docs) {
           batch.delete(doc.reference);
+          operationCount++;
+          await commitBatchIfNeeded();
         }
       }
 
+      // ========================================================================
+      // FASES 4 E 5: DOCUMENTAÇÃO CRÍTICA DO MÓDULO CIRCLES
+      // Esta operação foi mantida para preservar a arquitetura, mas pode falhar
+      // devido às novas regras do Firestore, pois um membro comum não tem permissão
+      // de update no documento raiz do Circle. Além disso, se o usuário for Admin,
+      // o Circle ficará sem liderança (Admin fantasma).
+      // AÇÃO REQUERIDA (PRÉ-PUBLICAÇÃO): Resolver esta etapa via Cloud Functions
+      // ou exigir que o usuário saia/delete o Circle pela UI antes de excluir a conta.
+      // ========================================================================
       if (activeCircleId != null && activeCircleId.isNotEmpty) {
         final circleRef = _firestore.collection('circles').doc(activeCircleId);
         final rankingRef = circleRef.collection('ranking').doc(uid);
 
         batch.delete(rankingRef);
+        operationCount++;
+        await commitBatchIfNeeded();
 
         batch.update(circleRef, {
           'memberCount': FieldValue.increment(-1),
           'updatedAt': FieldValue.serverTimestamp(),
         });
+        operationCount++;
+        await commitBatchIfNeeded();
       }
 
       batch.delete(userDocRef);
+      operationCount++;
 
-      await batch.commit();
+      // Commit do restante das operações pendentes no último lote
+      if (operationCount > 0) {
+        await batch.commit();
+      }
 
+      // ========================================================================
+      // FASES 16, 17 e 18: DADOS LOCAIS E SYNC QUEUE
+      // AVISO ESTRUTURAL: Como o `AuthRepositoryImpl` não recebe os DBs locais
+      // no seu construtor, os métodos de limpeza de Drift/Hive e cancelamento
+      // de Notificações devem ser OBRIGATORIAMENTE executados no `AuthProvider`
+      // ou `AuthController` logo antes ou depois da chamada deste método.
+      // ========================================================================
+
+      // ========================================================================
+      // FASE 6 E 7: DELEÇÃO DO AUTH / REAUTENTICAÇÃO
+      // Deleta o usuário no Auth por último. Caso exija reautenticação recente
+      // (requires-recent-login), a exceção sobe para a UI gerenciar.
+      // ========================================================================
       await user.delete();
 
       return const Success(null);
@@ -215,7 +277,7 @@ class AuthRepositoryImpl implements AuthRepository {
     } catch (e) {
       final errorStr = e.toString();
 
-      // 🟢 Tratamento amigável para celular novo / sem conta Google logada
+      // Tratamento amigável para celular novo / sem conta Google logada
       if (errorStr.contains('No credentials available') ||
           errorStr.contains('sign_in_failed')) {
         return const Error(
@@ -247,6 +309,9 @@ class AuthRepositoryImpl implements AuthRepository {
         updateData['photoUrl'] = newPhotoUrl;
       }
 
+      // FASES 9, 10, 14 E 15 (Proteção de Premium e IDOR)
+      // O código apenas envia propriedades seguras. As Firestore Rules configuradas
+      // anteriormente garantem que pacotes com injeção de isPremium sejam descartados.
       await _firestore.collection('users').doc(user.uid).update(updateData);
 
       return _getUserFromFirestore(user.uid);

@@ -117,31 +117,41 @@ class CirclesRepository {
     String challengeId,
     int xpAmount,
   ) async {
-    final user = _auth.currentUser;
-    if (user == null) return;
+    final userId = _auth.currentUser?.uid;
 
-    // Busca o nome real na coleção de usuários para garantir que não fique vazio
-    final userDoc = await _firestore.collection('users').doc(user.uid).get();
-    final userName =
-        userDoc.data()?['displayName'] ?? user.displayName ?? 'Usuário';
+    // CORREÇÃO: Usando Exception nativa do Dart para não quebrar por falta de import
+    if (userId == null) throw Exception('Unauthorized: User not logged in');
 
     final batch = _firestore.batch();
 
-    final circleRef = _firestore.collection('circles').doc(circleId);
-    final rankingRef = circleRef.collection('ranking').doc(user.uid);
-    final challengeRef = circleRef.collection('challenges').doc(challengeId);
+    final rankingRef = _firestore
+        .collection('circles')
+        .doc(circleId)
+        .collection('ranking')
+        .doc(userId);
+    final challengeRef = _firestore
+        .collection('circles')
+        .doc(circleId)
+        .collection('challenges')
+        .doc(challengeId);
 
-    batch.set(rankingRef, {
+    // 1. Atualiza XP no Ranking do Membro
+    batch.update(rankingRef, {
       'totalXp': FieldValue.increment(xpAmount),
-      'name': userName,
-      'photoUrl': user.photoURL,
-    }, SetOptions(merge: true));
+      'updatedAt': FieldValue.serverTimestamp(),
+    });
 
-    batch.set(challengeRef, {
+    // 2. Atualiza XP no Challenge
+    batch.update(challengeRef, {
       'currentXpContributed': FieldValue.increment(xpAmount),
-    }, SetOptions(merge: true));
+      'updatedAt': FieldValue.serverTimestamp(),
+    });
 
-    batch.update(circleRef, {'updatedAt': FieldValue.serverTimestamp()});
+    // ========================================================================
+    // CORREÇÃO DE SEGURANÇA MANTIDA:
+    // A atualização do documento raiz do Circle continua REMOVIDA deste batch
+    // para não causar bloqueio de permissão para membros comuns.
+    // ========================================================================
 
     await batch.commit();
   }

@@ -1,5 +1,5 @@
 import 'dart:async';
-
+import 'package:life_os/core/database/app_database.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -63,10 +63,15 @@ class NotificationsRepository {
     );
   }
 
-  Future<NotificationsTableData?> getLocalNotification(String id) {
+  Future<NotificationModel?> getLocalNotification(String id) async {
     final dao = localDao;
-    if (dao == null) return Future.value(null);
-    return dao.getNotificationById(id);
+    if (dao == null) return null;
+
+    final row = await dao.getNotificationById(id);
+
+    if (row == null) return null;
+
+    return NotificationModel.fromDrift(row);
   }
 
   /// Salva primeiro no Drift e sincroniza em background.

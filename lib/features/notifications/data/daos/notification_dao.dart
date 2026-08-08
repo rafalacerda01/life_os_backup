@@ -31,54 +31,60 @@ class NotificationDao extends DatabaseAccessor<AppDatabase>
   Future<bool> upsertPreservingState(
     NotificationsTableCompanion incoming,
   ) async {
-    final existing = await getNotificationById(incoming.id);
+    final existing = await getNotificationById(incoming.id.value);
 
+    // Notificação ainda não existe.
     if (existing == null) {
       await into(notificationsTable).insert(incoming);
       return true;
     }
 
-    final incomingDueDate = incoming.dueDate.present
-        ? incoming.dueDate.value
-        : null;
+    final incomingPriority = incoming.priority.value;
+    final incomingModuleType = incoming.moduleType.value;
+    final incomingRoute = incoming.route.value;
+    final incomingDueDate = incoming.dueDate.value;
 
-    final sameEventDay = _sameLocalDay(existing.dueDate, incomingDueDate);
-    final incomingPriority = existing.isCompleted
-        ? 'completed'
-        : (incoming.priority.present
-              ? incoming.priority.value
-              : existing.priority);
+    final sameEventDay =
+        existing.dueDate != null &&
+        incomingDueDate != null &&
+        existing.dueDate!.year == incomingDueDate.year &&
+        existing.dueDate!.month == incomingDueDate.month &&
+        existing.dueDate!.day == incomingDueDate.day;
 
     final changed =
         existing.title != incoming.title.value ||
         existing.description != incoming.description.value ||
         existing.priority != incomingPriority ||
-        existing.moduleType != incoming.moduleType.value ||
-        existing.route != incoming.route.value ||
+        existing.moduleType != incomingModuleType ||
+        existing.route != incomingRoute ||
         existing.dueDate != incomingDueDate ||
         (!sameEventDay && (existing.isRead || existing.isCompleted));
 
-    if (!changed) return false;
+    if (!changed) {
+      return false;
+    }
 
     await (update(
       notificationsTable,
-    )..where((t) => t.id.equals(incoming.id))).write(
+    )..where((t) => t.id.equals(incoming.id.value))).write(
       NotificationsTableCompanion(
         title: incoming.title,
         description: incoming.description,
         priority: Value(incomingPriority),
-        moduleType: incoming.moduleType,
-        route: incoming.route,
-        dueDate: incoming.dueDate,
-        // Se o evento mudou de dia, o estado pertence ao evento antigo.
-        // Para o mesmo evento, preservamos o estado do usuário.
+        moduleType: Value(incomingModuleType),
+        route: Value(incomingRoute),
+        dueDate: Value(incomingDueDate),
+
+        // Se o evento é do mesmo dia, preservamos a interação do usuário.
+        // Se mudou de dia, trata-se de uma nova ocorrência.
         isRead: Value(sameEventDay ? existing.isRead : false),
         isCompleted: Value(sameEventDay ? existing.isCompleted : false),
-        // createdAt é a data de criação da notificação e não deve ser
-        // reescrita a cada varredura do Engine.
-        createdAt: Value(existing.createdAt),
+
+        // Não alteramos createdAt durante um upsert.
+        // A data original da notificação deve permanecer preservada.
       ),
     );
+
     return true;
   }
 
