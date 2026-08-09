@@ -1,20 +1,21 @@
 import 'dart:io';
+
 import 'package:drift/drift.dart';
 import 'package:drift/native.dart';
-import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as p;
-// 🚀 NOTIFICATIONS CENTER: Imports mantidos
-import '../../features/notifications/data/tables/notifications_table.dart';
-import '../../features/notifications/data/daos/notification_dao.dart';
+import 'package:path_provider/path_provider.dart';
+
+import 'package:life_os/core/db/db_key_manager.dart';
+import 'package:life_os/features/checkin/data/local/checkin_table.dart';
 import 'package:life_os/features/finance/data/local/transaction_table.dart';
+import 'package:life_os/features/goals/data/models/local/goals_table.dart';
+import 'package:life_os/features/habits/data/models/local/habit_table.dart';
 import 'package:life_os/features/health/data/local/health_table.dart';
 import 'package:life_os/features/health/data/local/medication_table.dart';
-import 'package:life_os/features/habits/data/models/local/habit_table.dart';
-import 'package:life_os/features/tasks/data/models/local/task_table.dart';
 import 'package:life_os/features/study/data/models/local/study_table.dart';
-import 'package:life_os/features/goals/data/models/local/goals_table.dart';
-import 'package:life_os/features/checkin/data/local/checkin_table.dart';
-import '../db/db_key_manager.dart';
+import 'package:life_os/features/tasks/data/models/local/task_table.dart';
+import 'package:life_os/features/notifications/data/daos/notification_dao.dart';
+import 'package:life_os/features/notifications/data/tables/notifications_table.dart';
 
 part 'app_database.g.dart';
 
@@ -31,115 +32,529 @@ part 'app_database.g.dart';
     Goals,
     FocusLogs,
     CheckInTable,
-    NotificationsTable, // 🚀 NOTIFICATIONS CENTER: Tabela adicionada
+    NotificationsTable,
+    SyncQueueTable,
   ],
-  daos: [
-    NotificationDao, // 🚀 NOTIFICATIONS CENTER: DAO adicionado
-  ],
+  daos: [NotificationDao],
 )
 class AppDatabase extends _$AppDatabase {
+  /// Permite injetar um executor, principalmente para testes.
   AppDatabase({QueryExecutor? executor}) : super(executor ?? _openConnection());
 
+  // =========================================================================
+  // CONFIGURAÇÃO DO SCHEMA
+  // =========================================================================
+
   @override
-  int get schemaVersion => 6; // 🚀 NOTIFICATIONS CENTER: Subido para 6
+  int get schemaVersion => 7;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
-    onCreate: (m) async {
-      await m.createAll();
+    onCreate: (Migrator migrator) async {
+      await migrator.createAll();
     },
-    onUpgrade: (m, from, to) async {
+    onUpgrade: (Migrator migrator, int from, int to) async {
+      // -----------------------------------------------------------------
+      // V1 -> V2
+      // -----------------------------------------------------------------
       if (from < 2) {
-        await m.createTable(focusLogs);
+        await migrator.createTable(focusLogs);
       }
+
+      // -----------------------------------------------------------------
+      // V2 -> V3
+      // -----------------------------------------------------------------
       if (from < 3) {
-        await m.addColumn(flashcards, flashcards.subjectId);
+        await migrator.addColumn(flashcards, flashcards.subjectId);
       }
+
+      // -----------------------------------------------------------------
+      // V3 -> V4
+      // -----------------------------------------------------------------
       if (from < 4) {
-        await m.addColumn(flashcards, flashcards.lastReviewed);
+        await migrator.addColumn(flashcards, flashcards.lastReviewed);
       }
+
+      // -----------------------------------------------------------------
+      // V4 -> V5
+      // -----------------------------------------------------------------
       if (from < 5) {
-        await m.createTable(checkInTable);
+        await migrator.createTable(checkInTable);
       }
+
+      // -----------------------------------------------------------------
+      // V5 -> V6
+      // -----------------------------------------------------------------
       if (from < 6) {
-        // 🚀 NOTIFICATIONS CENTER: Migração para criar a tabela de notificações
-        await m.createTable(notificationsTable);
+        await migrator.createTable(notificationsTable);
+      }
+
+      // -----------------------------------------------------------------
+      // V6 -> V7
+      // -----------------------------------------------------------------
+      if (from < 7) {
+        await migrator.createTable(syncQueueTable);
       }
     },
   );
 
-  // ===========================================================================
-  // QUERIES PARA O MÓDULO DE CHECK-IN (OFFLINE-FIRST)
-  // ===========================================================================
+  // =========================================================================
+  // CHECK-IN — OFFLINE FIRST
+  // =========================================================================
 
-  /// Observa todos os check-ins em tempo real (A UI vai consumir isso)
-  Stream<List<CheckInEntry>> watchAllCheckIns() {
+  /// Observa todos os check-ins em tempo real.
+  ///
+  /// Os registros mais recentes aparecem primeiro.
+  Stream<List> watchAllCheckIns() {
     return (select(checkInTable)..orderBy([
-          (t) => OrderingTerm(expression: t.createdAt, mode: OrderingMode.desc),
+          (table) => OrderingTerm(
+            expression: table.createdAt,
+            mode: OrderingMode.desc,
+          ),
         ]))
         .watch();
   }
 
-  /// Insere um novo Check-in localmente
-  Future<void> insertCheckIn(CheckInTableCompanion entry) {
+  /// Insere um check-in localmente.
+  ///
+  /// O comportamento REPLACE é preservado porque o projeto
+  /// utiliza o identificador do check-in como chave lógica.
+  Future<int> insertCheckIn(CheckInTableCompanion entry) {
     return into(checkInTable).insert(entry, mode: InsertMode.replace);
   }
 
-  /// Busca apenas os check-ins que ainda não foram para a nuvem
-  Future<List<CheckInEntry>> getPendingCheckIns() {
-    return (select(checkInTable)..where((t) => t.isSynced.equals(false))).get();
+  /// Retorna somente os check-ins ainda não sincronizados.
+  Future<List> getPendingCheckIns() {
+    return (select(
+      checkInTable,
+    )..where((table) => table.isSynced.equals(false))).get();
   }
 
-  /// Marca um check-in específico como sincronizado após sucesso no Firebase
-  Future<void> markCheckInAsSynced(String id) {
-    return (update(checkInTable)..where((t) => t.id.equals(id))).write(
-      const CheckInTableCompanion(isSynced: Value(true)),
+  /// Marca um check-in como sincronizado.
+  Future<int> markCheckInAsSynced(String id) {
+    final cleanId = id.trim();
+
+    if (cleanId.isEmpty) {
+      return Future.value(0);
+    }
+
+    return (update(checkInTable)..where((table) => table.id.equals(cleanId)))
+        .write(const CheckInTableCompanion(isSynced: Value(true)));
+  }
+
+  // =========================================================================
+  // SYNC QUEUE — OFFLINE FIRST
+  // =========================================================================
+
+  /// Insere uma operação na fila de sincronização.
+  ///
+  /// Esta operação deve acontecer junto da alteração local sempre que
+  /// possível, preferencialmente dentro da mesma transaction.
+  ///
+  /// Exemplo:
+  ///
+  /// Local:
+  ///   medication criado
+  ///
+  /// Queue:
+  ///   CREATE / medications / abc123
+  Future<int> insertSyncItem({
+    required String collection,
+    required String docId,
+    required String operationType,
+    required String payloadJson,
+    int? createdAt,
+  }) async {
+    final cleanCollection = collection.trim();
+    final cleanDocId = docId.trim();
+    final cleanOperationType = operationType.trim();
+    final cleanPayload = payloadJson.trim();
+
+    if (cleanCollection.isEmpty) {
+      throw ArgumentError(
+        'A collection da sincronização não pode estar vazia.',
+      );
+    }
+
+    if (cleanDocId.isEmpty) {
+      throw ArgumentError('O docId da sincronização não pode estar vazio.');
+    }
+
+    if (cleanOperationType.isEmpty) {
+      throw ArgumentError(
+        'O operationType da sincronização não pode estar vazio.',
+      );
+    }
+
+    if (cleanPayload.isEmpty) {
+      throw ArgumentError('O payload da sincronização não pode estar vazio.');
+    }
+
+    final timestamp = createdAt ?? DateTime.now().millisecondsSinceEpoch;
+
+    if (timestamp <= 0) {
+      throw ArgumentError('O timestamp da sincronização é inválido.');
+    }
+
+    return into(syncQueueTable).insert(
+      SyncQueueTableCompanion.insert(
+        collection: cleanCollection,
+        docId: cleanDocId,
+        operationType: cleanOperationType,
+        payloadJson: cleanPayload,
+        createdAt: timestamp,
+      ),
     );
   }
 
-  // ===========================================================================
-  // POLÍTICA DE LOGOUT E LIMPEZA DE DADOS
-  // ===========================================================================
+  /// Retorna todas as operações ainda pendentes.
+  ///
+  /// A ordem FIFO é preservada pelo ID autoincremental.
+  Future<List> getPendingSyncItems() {
+    return (select(syncQueueTable)
+          ..where((table) => table.isSynced.equals(false))
+          ..orderBy([
+            (table) =>
+                OrderingTerm(expression: table.id, mode: OrderingMode.asc),
+          ]))
+        .get();
+  }
 
-  /// 🚀 Limpa todos os dados de todas as tabelas (Usado no Logout)
+  /// Retorna somente uma operação pendente específica.
+  Future<dynamic> getSyncItemById(int id) {
+    if (id <= 0) {
+      return Future.value(null);
+    }
+
+    return (select(
+      syncQueueTable,
+    )..where((table) => table.id.equals(id))).getSingleOrNull();
+  }
+
+  /// Marca uma operação como sincronizada.
+  ///
+  /// A operação não é removida imediatamente.
+  /// Isso permite auditoria e evita que uma operação seja perdida
+  /// antes de o SyncManager confirmar o processamento.
+  Future<int> markSyncItemAsSynced(int id) {
+    if (id <= 0) {
+      return Future.value(0);
+    }
+
+    return (update(syncQueueTable)..where((table) => table.id.equals(id)))
+        .write(const SyncQueueTableCompanion(isSynced: Value(true)));
+  }
+
+  /// Remove definitivamente uma operação já processada.
+  ///
+  /// Deve ser chamada somente depois de uma sincronização confirmada.
+  Future<int> deleteSyncItem(int id) {
+    if (id <= 0) {
+      return Future.value(0);
+    }
+
+    return (delete(syncQueueTable)..where((table) => table.id.equals(id))).go();
+  }
+
+  /// Remove todas as operações já sincronizadas.
+  ///
+  /// Mantém operações pendentes intactas.
+  Future<int> cleanupSyncedSyncItems() {
+    return (delete(
+      syncQueueTable,
+    )..where((table) => table.isSynced.equals(true))).go();
+  }
+
+  /// Remove todas as operações de sincronização de um documento.
+  ///
+  /// Útil quando uma operação posterior torna operações anteriores
+  /// obsoletas.
+  ///
+  /// Exemplo:
+  ///
+  /// CREATE medicamento
+  /// UPDATE medicamento
+  /// DELETE medicamento
+  ///
+  /// O SyncManager pode decidir consolidar as operações antes
+  /// do envio ao Firebase.
+  Future<int> deleteSyncItemsForDocument({
+    required String collection,
+    required String docId,
+  }) {
+    final cleanCollection = collection.trim();
+    final cleanDocId = docId.trim();
+
+    if (cleanCollection.isEmpty || cleanDocId.isEmpty) {
+      return Future.value(0);
+    }
+
+    return (delete(syncQueueTable)..where(
+          (table) =>
+              table.collection.equals(cleanCollection) &
+              table.docId.equals(cleanDocId) &
+              table.isSynced.equals(false),
+        ))
+        .go();
+  }
+
+  /// Executa uma operação local + registro na fila de sincronização
+  /// dentro da mesma transaction.
+  ///
+  /// Isso evita este estado inconsistente:
+  ///
+  ///   Drift atualizado
+  ///   ↓
+  ///   aplicativo fecha
+  ///   ↓
+  ///   operação nunca entrou na fila
+  ///
+  /// O callback recebe a transação atual e deve realizar a alteração
+  /// local antes de inserir a operação de sync.
+  Future<T> transactionWithSync<T>({
+    required Future<T> Function() localOperation,
+    required String collection,
+    required String docId,
+    required String operationType,
+    required String payloadJson,
+  }) async {
+    final cleanCollection = collection.trim();
+    final cleanDocId = docId.trim();
+    final cleanOperationType = operationType.trim();
+    final cleanPayload = payloadJson.trim();
+
+    if (cleanCollection.isEmpty) {
+      throw ArgumentError(
+        'A collection da sincronização não pode estar vazia.',
+      );
+    }
+
+    if (cleanDocId.isEmpty) {
+      throw ArgumentError('O docId da sincronização não pode estar vazio.');
+    }
+
+    if (cleanOperationType.isEmpty) {
+      throw ArgumentError(
+        'O operationType da sincronização não pode estar vazio.',
+      );
+    }
+
+    if (cleanPayload.isEmpty) {
+      throw ArgumentError('O payload da sincronização não pode estar vazio.');
+    }
+
+    return transaction<T>(() async {
+      // O Drift executa todo o callback dentro da transação.
+      //
+      // Nas versões atuais do Drift utilizadas pelo projeto,
+      // transaction() não fornece um objeto Transaction ao callback.
+      //
+      // Portanto a operação local deve ser executada diretamente.
+      final result = await localOperation();
+
+      await into(syncQueueTable).insert(
+        SyncQueueTableCompanion.insert(
+          collection: cleanCollection,
+          docId: cleanDocId,
+          operationType: cleanOperationType,
+          payloadJson: cleanPayload,
+          createdAt: DateTime.now().millisecondsSinceEpoch,
+        ),
+      );
+
+      return result;
+    });
+  }
+
+  // =========================================================================
+  // LIMPEZA COMPLETA DO BANCO
+  // =========================================================================
+
+  /// Remove os dados locais de todas as tabelas.
+  ///
+  /// Utilizado principalmente durante logout ou troca de conta.
+  ///
+  /// IMPORTANTE:
+  /// Esta operação é destrutiva e NÃO deve ser chamada durante
+  /// um simples refresh de sessão.
   Future<void> clearAllData() async {
-    await customStatement('PRAGMA foreign_keys = OFF');
-    try {
-      await transaction(() async {
+    await transaction(() async {
+      await customStatement('PRAGMA foreign_keys = OFF');
+
+      try {
         for (final table in allTables) {
           await delete(table).go();
         }
-      });
-    } finally {
-      await customStatement('PRAGMA foreign_keys = ON');
-    }
+      } finally {
+        await customStatement('PRAGMA foreign_keys = ON');
+      }
+    });
+  }
+
+  // =========================================================================
+  // FECHAMENTO DO BANCO
+  // =========================================================================
+
+  /// Fecha corretamente a conexão com o banco.
+  ///
+  /// Útil em testes, logout completo ou encerramento controlado.
+  Future<void> closeDatabase() async {
+    await close();
   }
 }
 
-// Definição da tabela FocusLogs
+// =============================================================================
+// TABELA DE LOGS DE FOCO
+// =============================================================================
+//
+// Esta tabela é mantida aqui porque faz parte do schema principal do Drift.
+//
+// =============================================================================
+
 class FocusLogs extends Table {
+  /// ID local autoincremental.
   IntColumn get id => integer().autoIncrement()();
+
+  /// ID da entidade relacionada ao foco.
   TextColumn get targetId => text()();
+
+  /// Tipo da entidade relacionada.
+  ///
+  /// Exemplos:
+  /// - task
+  /// - habit
+  /// - study
+  /// - goal
   TextColumn get targetType => text()();
+
+  /// Duração da sessão em segundos.
   IntColumn get durationSeconds => integer()();
+
+  /// Timestamp Unix da sessão.
   IntColumn get timestamp => integer()();
 }
+
+// =============================================================================
+// FILA GLOBAL DE SINCRONIZAÇÃO
+// =============================================================================
+//
+// Esta tabela representa operações locais que ainda precisam chegar
+// ao Firebase.
+//
+// Fluxo:
+//
+//   UI
+//    ↓
+//   Drift
+//    ↓
+//   SyncQueue
+//    ↓
+//   SyncManager
+//    ↓
+//   Firebase
+//
+// =============================================================================
+
+class SyncQueueTable extends Table {
+  /// ID local da operação de sincronização.
+  ///
+  /// Autoincremental para preservar a ordem FIFO.
+  IntColumn get id => integer().autoIncrement()();
+
+  /// Coleção lógica do Firebase.
+  ///
+  /// Exemplos:
+  /// - medications
+  /// - health_info
+  /// - transactions
+  /// - habits
+  TextColumn get collection => text()();
+
+  /// ID do documento no Firebase.
+  TextColumn get docId => text()();
+
+  /// Tipo da operação.
+  ///
+  /// Valores esperados:
+  /// - create
+  /// - update
+  /// - delete
+  TextColumn get operationType => text()();
+
+  /// Dados necessários para executar a operação.
+  ///
+  /// Deve ser JSON válido.
+  TextColumn get payloadJson => text()();
+
+  /// Timestamp Unix em milissegundos.
+  ///
+  /// Utilizado para ordenação e auditoria.
+  IntColumn get createdAt => integer()();
+
+  /// Indica se a operação já foi processada com sucesso.
+  BoolColumn get isSynced => boolean().withDefault(const Constant(false))();
+}
+
+// =============================================================================
+// ABERTURA DO BANCO
+// =============================================================================
 
 LazyDatabase _openConnection() {
   return LazyDatabase(() async {
     final dbFolder = await getApplicationDocumentsDirectory();
+
     final file = File(p.join(dbFolder.path, 'life_os.sqlite'));
+
+    // -----------------------------------------------------------------------
+    // CHAVE DE CRIPTOGRAFIA
+    // -----------------------------------------------------------------------
+
     final key = await DbKeyManager.getEncryptionKey();
+
+    if (key.trim().isEmpty) {
+      throw StateError('A chave de criptografia do banco de dados está vazia.');
+    }
+
+    // Evita quebra da instrução SQL caso a chave contenha aspas simples.
     final sanitizedKey = key.replaceAll("'", "''");
+
+    // -----------------------------------------------------------------------
+    // DATABASE
+    // -----------------------------------------------------------------------
 
     return NativeDatabase.createInBackground(
       file,
       setup: (database) {
+        // -------------------------------------------------------------------
+        // SQLCipher
+        // -------------------------------------------------------------------
+        //
+        // IMPORTANTE:
+        //
+        // PRAGMA key somente fornece criptografia real quando o SQLite
+        // utilizado pelo aplicativo foi compilado com suporte ao SQLCipher.
+        //
+        // O DbKeyManager sozinho NÃO transforma o SQLite padrão em banco
+        // criptografado.
+        //
+        // Mantemos estas instruções porque o projeto já possui a camada
+        // DbKeyManager preparada para esse cenário.
+        //
+        // -------------------------------------------------------------------
+
         database.execute("PRAGMA key = '$sanitizedKey';");
-        database.execute("PRAGMA cipher_page_size = 4096;");
-        database.execute("PRAGMA journal_mode = WAL;");
-        database.execute("PRAGMA synchronous = NORMAL;");
-        database.execute("PRAGMA foreign_keys = ON;");
+
+        database.execute('PRAGMA cipher_page_size = 4096;');
+
+        // -------------------------------------------------------------------
+        // Configurações do SQLite
+        // -------------------------------------------------------------------
+
+        database.execute('PRAGMA journal_mode = WAL;');
+
+        database.execute('PRAGMA synchronous = NORMAL;');
+
+        database.execute('PRAGMA foreign_keys = ON;');
       },
     );
   });

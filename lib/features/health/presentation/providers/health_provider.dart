@@ -1,18 +1,21 @@
-import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
-
-import 'package:life_os/core/services/notification_service.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+// 🛡️ CORREÇÃO: Adicionado alias 'drift' para evitar qualquer conflito de nomes
+import 'package:drift/drift.dart' as drift hide Column;
+import 'package:life_os/core/database/app_database.dart';
 import 'package:life_os/core/database/database_provider.dart';
-import 'package:life_os/core/database/app_database.dart'; // Necessário para o tipo Medication
+import 'package:life_os/core/services/notification_service.dart';
 import 'package:life_os/features/health/data/models/health_model.dart';
-
-// 🚀 Atualize este import com o caminho correto
 import 'package:life_os/features/health/data/repositories/health_repository.dart';
 
-// --- INJEÇÃO DO REPOSITÓRIO ---
-final healthRepositoryProvider = Provider((ref) {
+// ===========================================================================
+// REPOSITORY
+// ===========================================================================
+
+final healthRepositoryProvider = Provider<HealthRepository>((ref) {
   final db = ref.watch(databaseProvider);
+
   return HealthRepository(
     NotificationService(),
     FirebaseFirestore.instance,
@@ -21,14 +24,30 @@ final healthRepositoryProvider = Provider((ref) {
   );
 });
 
-// --- PROVIDERS DE LEITURA (STREAMS) ---
+// ===========================================================================
+// SAÚDE DIÁRIA
+// ===========================================================================
+
 final healthStreamProvider = StreamProvider<HealthModel>((ref) {
-  return ref.watch(healthRepositoryProvider).getHealthStream();
+  final repository = ref.watch(healthRepositoryProvider);
+
+  // 🛡️ CORREÇÃO: Forçando o cast para garantir que o Riverpod receba o tipo exato
+  return repository.getHealthStream().cast<HealthModel>();
 });
 
-final medicationsStreamProvider = StreamProvider.autoDispose<List<Medication>>((
-  ref,
-) {
+// ===========================================================================
+// MEDICAMENTOS
+// ===========================================================================
+
+// 🛡️ REMOVIDO o autoDispose para evitar descarte prematuro e crash de Overlay
+final medicationsStreamProvider = StreamProvider<List<Medication>>((ref) {
   final db = ref.watch(databaseProvider);
-  return db.select(db.medications).watch();
+
+  return (db.select(db.medications)..orderBy([
+        (table) => drift.OrderingTerm(
+          expression: table.startDate,
+          mode: drift.OrderingMode.desc,
+        ),
+      ]))
+      .watch();
 });

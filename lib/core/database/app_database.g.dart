@@ -188,11 +188,45 @@ class $HealthEntriesTable extends HealthEntries
 }
 
 class HealthEntry extends DataClass implements Insertable<HealthEntry> {
+  /// Identificador único do registro diário.
+  ///
+  /// Formato esperado:
+  /// yyyy-MM-dd
+  ///
+  /// Exemplo:
+  /// 2026-07-08
+  ///
+  /// O docId funciona como chave primária para garantir que exista
+  /// apenas um registro de saúde por dia.
   final String docId;
+
+  /// Humor registrado pelo usuário no dia.
+  ///
+  /// Valor padrão utilizado quando nenhum humor foi informado.
   final String mood;
+
+  /// Quantidade de água ingerida no dia, em mililitros.
+  ///
+  /// Valor inicial padrão: 0 ml.
   final int waterIntakeMl;
+
+  /// Indica se o medicamento/pílula diária foi marcado como tomado.
+  ///
+  /// Valor inicial padrão: false.
   final bool hasTakenPillToday;
+
+  /// Configurações/dados do ciclo menstrual serializados em JSON.
+  ///
+  /// O armazenamento como TEXT permite manter uma estrutura flexível
+  /// sem criar várias colunas para os dados do ciclo.
+  ///
+  /// A conversão JSON <-> Map é responsabilidade do HealthRepository.
   final String? menstrualCycleJson;
+
+  /// Data/hora associada ao registro.
+  ///
+  /// O valor é fornecido explicitamente pelo repository em todas as
+  /// operações de escrita.
   final DateTime date;
   const HealthEntry({
     required this.docId,
@@ -462,9 +496,10 @@ class $MedicationsTable extends Medications
   late final GeneratedColumn<String> firestoreId = GeneratedColumn<String>(
     'firestore_id',
     aliasedName,
-    true,
+    false,
     type: DriftSqlType.string,
-    requiredDuringInsert: false,
+    requiredDuringInsert: true,
+    defaultConstraints: GeneratedColumn.constraintIsAlways('UNIQUE'),
   );
   static const VerificationMeta _nameMeta = const VerificationMeta('name');
   @override
@@ -540,6 +575,8 @@ class $MedicationsTable extends Medications
           _firestoreIdMeta,
         ),
       );
+    } else if (isInserting) {
+      context.missing(_firestoreIdMeta);
     }
     if (data.containsKey('name')) {
       context.handle(
@@ -588,7 +625,7 @@ class $MedicationsTable extends Medications
       firestoreId: attachedDatabase.typeMapping.read(
         DriftSqlType.string,
         data['${effectivePrefix}firestore_id'],
-      ),
+      )!,
       name: attachedDatabase.typeMapping.read(
         DriftSqlType.string,
         data['${effectivePrefix}name'],
@@ -615,15 +652,38 @@ class $MedicationsTable extends Medications
 }
 
 class Medication extends DataClass implements Insertable<Medication> {
+  /// Identificador local autoincrementável.
+  ///
+  /// Usado pelo Drift/UI para operações locais.
   final int id;
-  final String? firestoreId;
+
+  /// Identificador definitivo do medicamento no Firebase.
+  ///
+  /// O HealthRepository gera esse UUID antes de salvar o medicamento
+  /// localmente e utiliza o mesmo valor como ID do documento no Firestore.
+  ///
+  /// Deve ser único para impedir que o mesmo medicamento seja
+  /// duplicado durante sincronizações.
+  final String firestoreId;
+
+  /// Nome do medicamento.
   final String name;
+
+  /// Data/hora de início do medicamento.
   final DateTime startDate;
+
+  /// Duração do tratamento em dias.
+  ///
+  /// Null significa que não foi definida uma duração.
   final int? durationDays;
+
+  /// Data/hora de término do tratamento.
+  ///
+  /// Null quando o tratamento não possui data de término.
   final DateTime? endDate;
   const Medication({
     required this.id,
-    this.firestoreId,
+    required this.firestoreId,
     required this.name,
     required this.startDate,
     this.durationDays,
@@ -633,9 +693,7 @@ class Medication extends DataClass implements Insertable<Medication> {
   Map<String, Expression> toColumns(bool nullToAbsent) {
     final map = <String, Expression>{};
     map['id'] = Variable<int>(id);
-    if (!nullToAbsent || firestoreId != null) {
-      map['firestore_id'] = Variable<String>(firestoreId);
-    }
+    map['firestore_id'] = Variable<String>(firestoreId);
     map['name'] = Variable<String>(name);
     map['start_date'] = Variable<DateTime>(startDate);
     if (!nullToAbsent || durationDays != null) {
@@ -650,9 +708,7 @@ class Medication extends DataClass implements Insertable<Medication> {
   MedicationsCompanion toCompanion(bool nullToAbsent) {
     return MedicationsCompanion(
       id: Value(id),
-      firestoreId: firestoreId == null && nullToAbsent
-          ? const Value.absent()
-          : Value(firestoreId),
+      firestoreId: Value(firestoreId),
       name: Value(name),
       startDate: Value(startDate),
       durationDays: durationDays == null && nullToAbsent
@@ -671,7 +727,7 @@ class Medication extends DataClass implements Insertable<Medication> {
     serializer ??= driftRuntimeOptions.defaultSerializer;
     return Medication(
       id: serializer.fromJson<int>(json['id']),
-      firestoreId: serializer.fromJson<String?>(json['firestoreId']),
+      firestoreId: serializer.fromJson<String>(json['firestoreId']),
       name: serializer.fromJson<String>(json['name']),
       startDate: serializer.fromJson<DateTime>(json['startDate']),
       durationDays: serializer.fromJson<int?>(json['durationDays']),
@@ -683,7 +739,7 @@ class Medication extends DataClass implements Insertable<Medication> {
     serializer ??= driftRuntimeOptions.defaultSerializer;
     return <String, dynamic>{
       'id': serializer.toJson<int>(id),
-      'firestoreId': serializer.toJson<String?>(firestoreId),
+      'firestoreId': serializer.toJson<String>(firestoreId),
       'name': serializer.toJson<String>(name),
       'startDate': serializer.toJson<DateTime>(startDate),
       'durationDays': serializer.toJson<int?>(durationDays),
@@ -693,14 +749,14 @@ class Medication extends DataClass implements Insertable<Medication> {
 
   Medication copyWith({
     int? id,
-    Value<String?> firestoreId = const Value.absent(),
+    String? firestoreId,
     String? name,
     DateTime? startDate,
     Value<int?> durationDays = const Value.absent(),
     Value<DateTime?> endDate = const Value.absent(),
   }) => Medication(
     id: id ?? this.id,
-    firestoreId: firestoreId.present ? firestoreId.value : this.firestoreId,
+    firestoreId: firestoreId ?? this.firestoreId,
     name: name ?? this.name,
     startDate: startDate ?? this.startDate,
     durationDays: durationDays.present ? durationDays.value : this.durationDays,
@@ -751,7 +807,7 @@ class Medication extends DataClass implements Insertable<Medication> {
 
 class MedicationsCompanion extends UpdateCompanion<Medication> {
   final Value<int> id;
-  final Value<String?> firestoreId;
+  final Value<String> firestoreId;
   final Value<String> name;
   final Value<DateTime> startDate;
   final Value<int?> durationDays;
@@ -766,12 +822,13 @@ class MedicationsCompanion extends UpdateCompanion<Medication> {
   });
   MedicationsCompanion.insert({
     this.id = const Value.absent(),
-    this.firestoreId = const Value.absent(),
+    required String firestoreId,
     required String name,
     required DateTime startDate,
     this.durationDays = const Value.absent(),
     this.endDate = const Value.absent(),
-  }) : name = Value(name),
+  }) : firestoreId = Value(firestoreId),
+       name = Value(name),
        startDate = Value(startDate);
   static Insertable<Medication> custom({
     Expression<int>? id,
@@ -793,7 +850,7 @@ class MedicationsCompanion extends UpdateCompanion<Medication> {
 
   MedicationsCompanion copyWith({
     Value<int>? id,
-    Value<String?>? firestoreId,
+    Value<String>? firestoreId,
     Value<String>? name,
     Value<DateTime>? startDate,
     Value<int?>? durationDays,
@@ -3819,10 +3876,25 @@ class $FocusLogsTable extends FocusLogs
 }
 
 class FocusLog extends DataClass implements Insertable<FocusLog> {
+  /// ID local autoincremental.
   final int id;
+
+  /// ID da entidade relacionada ao foco.
   final String targetId;
+
+  /// Tipo da entidade relacionada.
+  ///
+  /// Exemplos:
+  /// - task
+  /// - habit
+  /// - study
+  /// - goal
   final String targetType;
+
+  /// Duração da sessão em segundos.
   final int durationSeconds;
+
+  /// Timestamp Unix da sessão.
   final int timestamp;
   const FocusLog({
     required this.id,
@@ -5047,6 +5119,502 @@ class NotificationsTableCompanion
   }
 }
 
+class $SyncQueueTableTable extends SyncQueueTable
+    with TableInfo<$SyncQueueTableTable, SyncQueueTableData> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  $SyncQueueTableTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _idMeta = const VerificationMeta('id');
+  @override
+  late final GeneratedColumn<int> id = GeneratedColumn<int>(
+    'id',
+    aliasedName,
+    false,
+    hasAutoIncrement: true,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    defaultConstraints: GeneratedColumn.constraintIsAlways(
+      'PRIMARY KEY AUTOINCREMENT',
+    ),
+  );
+  static const VerificationMeta _collectionMeta = const VerificationMeta(
+    'collection',
+  );
+  @override
+  late final GeneratedColumn<String> collection = GeneratedColumn<String>(
+    'collection',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _docIdMeta = const VerificationMeta('docId');
+  @override
+  late final GeneratedColumn<String> docId = GeneratedColumn<String>(
+    'doc_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _operationTypeMeta = const VerificationMeta(
+    'operationType',
+  );
+  @override
+  late final GeneratedColumn<String> operationType = GeneratedColumn<String>(
+    'operation_type',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _payloadJsonMeta = const VerificationMeta(
+    'payloadJson',
+  );
+  @override
+  late final GeneratedColumn<String> payloadJson = GeneratedColumn<String>(
+    'payload_json',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _createdAtMeta = const VerificationMeta(
+    'createdAt',
+  );
+  @override
+  late final GeneratedColumn<int> createdAt = GeneratedColumn<int>(
+    'created_at',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _isSyncedMeta = const VerificationMeta(
+    'isSynced',
+  );
+  @override
+  late final GeneratedColumn<bool> isSynced = GeneratedColumn<bool>(
+    'is_synced',
+    aliasedName,
+    false,
+    type: DriftSqlType.bool,
+    requiredDuringInsert: false,
+    defaultConstraints: GeneratedColumn.constraintIsAlways(
+      'CHECK ("is_synced" IN (0, 1))',
+    ),
+    defaultValue: const Constant(false),
+  );
+  @override
+  List<GeneratedColumn> get $columns => [
+    id,
+    collection,
+    docId,
+    operationType,
+    payloadJson,
+    createdAt,
+    isSynced,
+  ];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'sync_queue_table';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<SyncQueueTableData> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('id')) {
+      context.handle(_idMeta, id.isAcceptableOrUnknown(data['id']!, _idMeta));
+    }
+    if (data.containsKey('collection')) {
+      context.handle(
+        _collectionMeta,
+        collection.isAcceptableOrUnknown(data['collection']!, _collectionMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_collectionMeta);
+    }
+    if (data.containsKey('doc_id')) {
+      context.handle(
+        _docIdMeta,
+        docId.isAcceptableOrUnknown(data['doc_id']!, _docIdMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_docIdMeta);
+    }
+    if (data.containsKey('operation_type')) {
+      context.handle(
+        _operationTypeMeta,
+        operationType.isAcceptableOrUnknown(
+          data['operation_type']!,
+          _operationTypeMeta,
+        ),
+      );
+    } else if (isInserting) {
+      context.missing(_operationTypeMeta);
+    }
+    if (data.containsKey('payload_json')) {
+      context.handle(
+        _payloadJsonMeta,
+        payloadJson.isAcceptableOrUnknown(
+          data['payload_json']!,
+          _payloadJsonMeta,
+        ),
+      );
+    } else if (isInserting) {
+      context.missing(_payloadJsonMeta);
+    }
+    if (data.containsKey('created_at')) {
+      context.handle(
+        _createdAtMeta,
+        createdAt.isAcceptableOrUnknown(data['created_at']!, _createdAtMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_createdAtMeta);
+    }
+    if (data.containsKey('is_synced')) {
+      context.handle(
+        _isSyncedMeta,
+        isSynced.isAcceptableOrUnknown(data['is_synced']!, _isSyncedMeta),
+      );
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {id};
+  @override
+  SyncQueueTableData map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return SyncQueueTableData(
+      id: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}id'],
+      )!,
+      collection: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}collection'],
+      )!,
+      docId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}doc_id'],
+      )!,
+      operationType: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}operation_type'],
+      )!,
+      payloadJson: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}payload_json'],
+      )!,
+      createdAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}created_at'],
+      )!,
+      isSynced: attachedDatabase.typeMapping.read(
+        DriftSqlType.bool,
+        data['${effectivePrefix}is_synced'],
+      )!,
+    );
+  }
+
+  @override
+  $SyncQueueTableTable createAlias(String alias) {
+    return $SyncQueueTableTable(attachedDatabase, alias);
+  }
+}
+
+class SyncQueueTableData extends DataClass
+    implements Insertable<SyncQueueTableData> {
+  /// ID local da operação de sincronização.
+  ///
+  /// Autoincremental para preservar a ordem FIFO.
+  final int id;
+
+  /// Coleção lógica do Firebase.
+  ///
+  /// Exemplos:
+  /// - medications
+  /// - health_info
+  /// - transactions
+  /// - habits
+  final String collection;
+
+  /// ID do documento no Firebase.
+  final String docId;
+
+  /// Tipo da operação.
+  ///
+  /// Valores esperados:
+  /// - create
+  /// - update
+  /// - delete
+  final String operationType;
+
+  /// Dados necessários para executar a operação.
+  ///
+  /// Deve ser JSON válido.
+  final String payloadJson;
+
+  /// Timestamp Unix em milissegundos.
+  ///
+  /// Utilizado para ordenação e auditoria.
+  final int createdAt;
+
+  /// Indica se a operação já foi processada com sucesso.
+  final bool isSynced;
+  const SyncQueueTableData({
+    required this.id,
+    required this.collection,
+    required this.docId,
+    required this.operationType,
+    required this.payloadJson,
+    required this.createdAt,
+    required this.isSynced,
+  });
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['id'] = Variable<int>(id);
+    map['collection'] = Variable<String>(collection);
+    map['doc_id'] = Variable<String>(docId);
+    map['operation_type'] = Variable<String>(operationType);
+    map['payload_json'] = Variable<String>(payloadJson);
+    map['created_at'] = Variable<int>(createdAt);
+    map['is_synced'] = Variable<bool>(isSynced);
+    return map;
+  }
+
+  SyncQueueTableCompanion toCompanion(bool nullToAbsent) {
+    return SyncQueueTableCompanion(
+      id: Value(id),
+      collection: Value(collection),
+      docId: Value(docId),
+      operationType: Value(operationType),
+      payloadJson: Value(payloadJson),
+      createdAt: Value(createdAt),
+      isSynced: Value(isSynced),
+    );
+  }
+
+  factory SyncQueueTableData.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return SyncQueueTableData(
+      id: serializer.fromJson<int>(json['id']),
+      collection: serializer.fromJson<String>(json['collection']),
+      docId: serializer.fromJson<String>(json['docId']),
+      operationType: serializer.fromJson<String>(json['operationType']),
+      payloadJson: serializer.fromJson<String>(json['payloadJson']),
+      createdAt: serializer.fromJson<int>(json['createdAt']),
+      isSynced: serializer.fromJson<bool>(json['isSynced']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'id': serializer.toJson<int>(id),
+      'collection': serializer.toJson<String>(collection),
+      'docId': serializer.toJson<String>(docId),
+      'operationType': serializer.toJson<String>(operationType),
+      'payloadJson': serializer.toJson<String>(payloadJson),
+      'createdAt': serializer.toJson<int>(createdAt),
+      'isSynced': serializer.toJson<bool>(isSynced),
+    };
+  }
+
+  SyncQueueTableData copyWith({
+    int? id,
+    String? collection,
+    String? docId,
+    String? operationType,
+    String? payloadJson,
+    int? createdAt,
+    bool? isSynced,
+  }) => SyncQueueTableData(
+    id: id ?? this.id,
+    collection: collection ?? this.collection,
+    docId: docId ?? this.docId,
+    operationType: operationType ?? this.operationType,
+    payloadJson: payloadJson ?? this.payloadJson,
+    createdAt: createdAt ?? this.createdAt,
+    isSynced: isSynced ?? this.isSynced,
+  );
+  SyncQueueTableData copyWithCompanion(SyncQueueTableCompanion data) {
+    return SyncQueueTableData(
+      id: data.id.present ? data.id.value : this.id,
+      collection: data.collection.present
+          ? data.collection.value
+          : this.collection,
+      docId: data.docId.present ? data.docId.value : this.docId,
+      operationType: data.operationType.present
+          ? data.operationType.value
+          : this.operationType,
+      payloadJson: data.payloadJson.present
+          ? data.payloadJson.value
+          : this.payloadJson,
+      createdAt: data.createdAt.present ? data.createdAt.value : this.createdAt,
+      isSynced: data.isSynced.present ? data.isSynced.value : this.isSynced,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('SyncQueueTableData(')
+          ..write('id: $id, ')
+          ..write('collection: $collection, ')
+          ..write('docId: $docId, ')
+          ..write('operationType: $operationType, ')
+          ..write('payloadJson: $payloadJson, ')
+          ..write('createdAt: $createdAt, ')
+          ..write('isSynced: $isSynced')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hash(
+    id,
+    collection,
+    docId,
+    operationType,
+    payloadJson,
+    createdAt,
+    isSynced,
+  );
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is SyncQueueTableData &&
+          other.id == this.id &&
+          other.collection == this.collection &&
+          other.docId == this.docId &&
+          other.operationType == this.operationType &&
+          other.payloadJson == this.payloadJson &&
+          other.createdAt == this.createdAt &&
+          other.isSynced == this.isSynced);
+}
+
+class SyncQueueTableCompanion extends UpdateCompanion<SyncQueueTableData> {
+  final Value<int> id;
+  final Value<String> collection;
+  final Value<String> docId;
+  final Value<String> operationType;
+  final Value<String> payloadJson;
+  final Value<int> createdAt;
+  final Value<bool> isSynced;
+  const SyncQueueTableCompanion({
+    this.id = const Value.absent(),
+    this.collection = const Value.absent(),
+    this.docId = const Value.absent(),
+    this.operationType = const Value.absent(),
+    this.payloadJson = const Value.absent(),
+    this.createdAt = const Value.absent(),
+    this.isSynced = const Value.absent(),
+  });
+  SyncQueueTableCompanion.insert({
+    this.id = const Value.absent(),
+    required String collection,
+    required String docId,
+    required String operationType,
+    required String payloadJson,
+    required int createdAt,
+    this.isSynced = const Value.absent(),
+  }) : collection = Value(collection),
+       docId = Value(docId),
+       operationType = Value(operationType),
+       payloadJson = Value(payloadJson),
+       createdAt = Value(createdAt);
+  static Insertable<SyncQueueTableData> custom({
+    Expression<int>? id,
+    Expression<String>? collection,
+    Expression<String>? docId,
+    Expression<String>? operationType,
+    Expression<String>? payloadJson,
+    Expression<int>? createdAt,
+    Expression<bool>? isSynced,
+  }) {
+    return RawValuesInsertable({
+      if (id != null) 'id': id,
+      if (collection != null) 'collection': collection,
+      if (docId != null) 'doc_id': docId,
+      if (operationType != null) 'operation_type': operationType,
+      if (payloadJson != null) 'payload_json': payloadJson,
+      if (createdAt != null) 'created_at': createdAt,
+      if (isSynced != null) 'is_synced': isSynced,
+    });
+  }
+
+  SyncQueueTableCompanion copyWith({
+    Value<int>? id,
+    Value<String>? collection,
+    Value<String>? docId,
+    Value<String>? operationType,
+    Value<String>? payloadJson,
+    Value<int>? createdAt,
+    Value<bool>? isSynced,
+  }) {
+    return SyncQueueTableCompanion(
+      id: id ?? this.id,
+      collection: collection ?? this.collection,
+      docId: docId ?? this.docId,
+      operationType: operationType ?? this.operationType,
+      payloadJson: payloadJson ?? this.payloadJson,
+      createdAt: createdAt ?? this.createdAt,
+      isSynced: isSynced ?? this.isSynced,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (id.present) {
+      map['id'] = Variable<int>(id.value);
+    }
+    if (collection.present) {
+      map['collection'] = Variable<String>(collection.value);
+    }
+    if (docId.present) {
+      map['doc_id'] = Variable<String>(docId.value);
+    }
+    if (operationType.present) {
+      map['operation_type'] = Variable<String>(operationType.value);
+    }
+    if (payloadJson.present) {
+      map['payload_json'] = Variable<String>(payloadJson.value);
+    }
+    if (createdAt.present) {
+      map['created_at'] = Variable<int>(createdAt.value);
+    }
+    if (isSynced.present) {
+      map['is_synced'] = Variable<bool>(isSynced.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('SyncQueueTableCompanion(')
+          ..write('id: $id, ')
+          ..write('collection: $collection, ')
+          ..write('docId: $docId, ')
+          ..write('operationType: $operationType, ')
+          ..write('payloadJson: $payloadJson, ')
+          ..write('createdAt: $createdAt, ')
+          ..write('isSynced: $isSynced')
+          ..write(')'))
+        .toString();
+  }
+}
+
 abstract class _$AppDatabase extends GeneratedDatabase {
   _$AppDatabase(QueryExecutor e) : super(e);
   $AppDatabaseManager get managers => $AppDatabaseManager(this);
@@ -5063,6 +5631,7 @@ abstract class _$AppDatabase extends GeneratedDatabase {
   late final $CheckInTableTable checkInTable = $CheckInTableTable(this);
   late final $NotificationsTableTable notificationsTable =
       $NotificationsTableTable(this);
+  late final $SyncQueueTableTable syncQueueTable = $SyncQueueTableTable(this);
   late final Index idxTransactionsDate = Index(
     'idx_transactions_date',
     'CREATE INDEX idx_transactions_date ON transactions (date)',
@@ -5111,6 +5680,7 @@ abstract class _$AppDatabase extends GeneratedDatabase {
     focusLogs,
     checkInTable,
     notificationsTable,
+    syncQueueTable,
     idxTransactionsDate,
     idxTransactionsCategory,
     idxTransactionsType,
@@ -5359,7 +5929,7 @@ typedef $$HealthEntriesTableProcessedTableManager =
 typedef $$MedicationsTableCreateCompanionBuilder =
     MedicationsCompanion Function({
       Value<int> id,
-      Value<String?> firestoreId,
+      required String firestoreId,
       required String name,
       required DateTime startDate,
       Value<int?> durationDays,
@@ -5368,7 +5938,7 @@ typedef $$MedicationsTableCreateCompanionBuilder =
 typedef $$MedicationsTableUpdateCompanionBuilder =
     MedicationsCompanion Function({
       Value<int> id,
-      Value<String?> firestoreId,
+      Value<String> firestoreId,
       Value<String> name,
       Value<DateTime> startDate,
       Value<int?> durationDays,
@@ -5519,7 +6089,7 @@ class $$MedicationsTableTableManager
           updateCompanionCallback:
               ({
                 Value<int> id = const Value.absent(),
-                Value<String?> firestoreId = const Value.absent(),
+                Value<String> firestoreId = const Value.absent(),
                 Value<String> name = const Value.absent(),
                 Value<DateTime> startDate = const Value.absent(),
                 Value<int?> durationDays = const Value.absent(),
@@ -5535,7 +6105,7 @@ class $$MedicationsTableTableManager
           createCompanionCallback:
               ({
                 Value<int> id = const Value.absent(),
-                Value<String?> firestoreId = const Value.absent(),
+                required String firestoreId,
                 required String name,
                 required DateTime startDate,
                 Value<int?> durationDays = const Value.absent(),
@@ -8010,6 +8580,250 @@ typedef $$NotificationsTableTableProcessedTableManager =
       NotificationsTableData,
       PrefetchHooks Function()
     >;
+typedef $$SyncQueueTableTableCreateCompanionBuilder =
+    SyncQueueTableCompanion Function({
+      Value<int> id,
+      required String collection,
+      required String docId,
+      required String operationType,
+      required String payloadJson,
+      required int createdAt,
+      Value<bool> isSynced,
+    });
+typedef $$SyncQueueTableTableUpdateCompanionBuilder =
+    SyncQueueTableCompanion Function({
+      Value<int> id,
+      Value<String> collection,
+      Value<String> docId,
+      Value<String> operationType,
+      Value<String> payloadJson,
+      Value<int> createdAt,
+      Value<bool> isSynced,
+    });
+
+class $$SyncQueueTableTableFilterComposer
+    extends Composer<_$AppDatabase, $SyncQueueTableTable> {
+  $$SyncQueueTableTableFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<int> get id => $composableBuilder(
+    column: $table.id,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get collection => $composableBuilder(
+    column: $table.collection,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get docId => $composableBuilder(
+    column: $table.docId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get operationType => $composableBuilder(
+    column: $table.operationType,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get payloadJson => $composableBuilder(
+    column: $table.payloadJson,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get createdAt => $composableBuilder(
+    column: $table.createdAt,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<bool> get isSynced => $composableBuilder(
+    column: $table.isSynced,
+    builder: (column) => ColumnFilters(column),
+  );
+}
+
+class $$SyncQueueTableTableOrderingComposer
+    extends Composer<_$AppDatabase, $SyncQueueTableTable> {
+  $$SyncQueueTableTableOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<int> get id => $composableBuilder(
+    column: $table.id,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get collection => $composableBuilder(
+    column: $table.collection,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get docId => $composableBuilder(
+    column: $table.docId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get operationType => $composableBuilder(
+    column: $table.operationType,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get payloadJson => $composableBuilder(
+    column: $table.payloadJson,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get createdAt => $composableBuilder(
+    column: $table.createdAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<bool> get isSynced => $composableBuilder(
+    column: $table.isSynced,
+    builder: (column) => ColumnOrderings(column),
+  );
+}
+
+class $$SyncQueueTableTableAnnotationComposer
+    extends Composer<_$AppDatabase, $SyncQueueTableTable> {
+  $$SyncQueueTableTableAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<int> get id =>
+      $composableBuilder(column: $table.id, builder: (column) => column);
+
+  GeneratedColumn<String> get collection => $composableBuilder(
+    column: $table.collection,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get docId =>
+      $composableBuilder(column: $table.docId, builder: (column) => column);
+
+  GeneratedColumn<String> get operationType => $composableBuilder(
+    column: $table.operationType,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get payloadJson => $composableBuilder(
+    column: $table.payloadJson,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<int> get createdAt =>
+      $composableBuilder(column: $table.createdAt, builder: (column) => column);
+
+  GeneratedColumn<bool> get isSynced =>
+      $composableBuilder(column: $table.isSynced, builder: (column) => column);
+}
+
+class $$SyncQueueTableTableTableManager
+    extends
+        RootTableManager<
+          _$AppDatabase,
+          $SyncQueueTableTable,
+          SyncQueueTableData,
+          $$SyncQueueTableTableFilterComposer,
+          $$SyncQueueTableTableOrderingComposer,
+          $$SyncQueueTableTableAnnotationComposer,
+          $$SyncQueueTableTableCreateCompanionBuilder,
+          $$SyncQueueTableTableUpdateCompanionBuilder,
+          (
+            SyncQueueTableData,
+            BaseReferences<
+              _$AppDatabase,
+              $SyncQueueTableTable,
+              SyncQueueTableData
+            >,
+          ),
+          SyncQueueTableData,
+          PrefetchHooks Function()
+        > {
+  $$SyncQueueTableTableTableManager(
+    _$AppDatabase db,
+    $SyncQueueTableTable table,
+  ) : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $$SyncQueueTableTableFilterComposer($db: db, $table: table),
+          createOrderingComposer: () =>
+              $$SyncQueueTableTableOrderingComposer($db: db, $table: table),
+          createComputedFieldComposer: () =>
+              $$SyncQueueTableTableAnnotationComposer($db: db, $table: table),
+          updateCompanionCallback:
+              ({
+                Value<int> id = const Value.absent(),
+                Value<String> collection = const Value.absent(),
+                Value<String> docId = const Value.absent(),
+                Value<String> operationType = const Value.absent(),
+                Value<String> payloadJson = const Value.absent(),
+                Value<int> createdAt = const Value.absent(),
+                Value<bool> isSynced = const Value.absent(),
+              }) => SyncQueueTableCompanion(
+                id: id,
+                collection: collection,
+                docId: docId,
+                operationType: operationType,
+                payloadJson: payloadJson,
+                createdAt: createdAt,
+                isSynced: isSynced,
+              ),
+          createCompanionCallback:
+              ({
+                Value<int> id = const Value.absent(),
+                required String collection,
+                required String docId,
+                required String operationType,
+                required String payloadJson,
+                required int createdAt,
+                Value<bool> isSynced = const Value.absent(),
+              }) => SyncQueueTableCompanion.insert(
+                id: id,
+                collection: collection,
+                docId: docId,
+                operationType: operationType,
+                payloadJson: payloadJson,
+                createdAt: createdAt,
+                isSynced: isSynced,
+              ),
+          withReferenceMapper: (p0) => p0
+              .map((e) => (e.readTable(table), BaseReferences(db, table, e)))
+              .toList(),
+          prefetchHooksCallback: null,
+        ),
+      );
+}
+
+typedef $$SyncQueueTableTableProcessedTableManager =
+    ProcessedTableManager<
+      _$AppDatabase,
+      $SyncQueueTableTable,
+      SyncQueueTableData,
+      $$SyncQueueTableTableFilterComposer,
+      $$SyncQueueTableTableOrderingComposer,
+      $$SyncQueueTableTableAnnotationComposer,
+      $$SyncQueueTableTableCreateCompanionBuilder,
+      $$SyncQueueTableTableUpdateCompanionBuilder,
+      (
+        SyncQueueTableData,
+        BaseReferences<_$AppDatabase, $SyncQueueTableTable, SyncQueueTableData>,
+      ),
+      SyncQueueTableData,
+      PrefetchHooks Function()
+    >;
 
 class $AppDatabaseManager {
   final _$AppDatabase _db;
@@ -8038,4 +8852,6 @@ class $AppDatabaseManager {
       $$CheckInTableTableTableManager(_db, _db.checkInTable);
   $$NotificationsTableTableTableManager get notificationsTable =>
       $$NotificationsTableTableTableManager(_db, _db.notificationsTable);
+  $$SyncQueueTableTableTableManager get syncQueueTable =>
+      $$SyncQueueTableTableTableManager(_db, _db.syncQueueTable);
 }

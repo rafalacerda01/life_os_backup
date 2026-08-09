@@ -1,156 +1,378 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:firebase_auth/firebase_auth.dart';
 import 'package:intl/intl.dart';
 
-// 🔑 IMPORTS
+import 'package:life_os/core/security/input_sanitizer.dart';
+import 'package:life_os/core/utils/app_logger.dart';
+import 'package:life_os/features/checkin/presentation/checkin_screen.dart';
 import 'package:life_os/features/health/data/models/health_model.dart';
 import 'package:life_os/features/health/presentation/providers/health_provider.dart';
-import 'package:life_os/core/security/input_sanitizer.dart';
-import 'package:life_os/features/checkin/presentation/checkin_screen.dart'; // Import da tela de check-in profunda
 
 class HealthScreen extends ConsumerWidget {
   const HealthScreen({super.key});
 
-  // 1. Modal para adicionar medicamento
-  void _showAddMedicationModal(BuildContext context, WidgetRef ref) {
+  static const Color _background = Color(0xFF070B14);
+  static const Color _surface = Color(0xFF11182E);
+  static const Color _green = Colors.greenAccent;
+  static const Color _blue = Colors.blueAccent;
+  static const Color _purple = Colors.purpleAccent;
+
+  void _showSnackBar(
+    BuildContext context,
+    String message, {
+    bool error = false,
+  }) {
+    if (!context.mounted) return;
+
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          content: Text(message),
+          backgroundColor: error ? Colors.redAccent : _surface,
+          behavior: SnackBarBehavior.floating,
+          margin: const EdgeInsets.all(16),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(14),
+          ),
+        ),
+      );
+  }
+
+  Future<void> _updateMood(
+    BuildContext context,
+    WidgetRef ref,
+    String mood,
+  ) async {
+    try {
+      await ref.read(healthRepositoryProvider).updateMood(mood);
+    } catch (e, stack) {
+      AppLogger.e('Erro ao atualizar humor', e, stack);
+
+      _showSnackBar(
+        context,
+        'Não foi possível registrar seu humor.',
+        error: true,
+      );
+    }
+  }
+
+  Future<void> _addWater(
+    BuildContext context,
+    WidgetRef ref,
+    int currentAmount,
+  ) async {
+    try {
+      await ref.read(healthRepositoryProvider).addWater(currentAmount);
+    } catch (e, stack) {
+      AppLogger.e('Erro ao registrar hidratação', e, stack);
+
+      _showSnackBar(
+        context,
+        'Não foi possível registrar a hidratação.',
+        error: true,
+      );
+    }
+  }
+
+  void _showAddMedicationModal(BuildContext parentContext, WidgetRef ref) {
     final nameController = TextEditingController();
     final durationController = TextEditingController();
+
     DateTime startDate = DateTime.now();
 
-    showDialog(
-      context: context,
-      builder: (context) => StatefulBuilder(
-        builder: (context, setModal) => AlertDialog(
-          backgroundColor: const Color(0xFF11182E),
-          title: const Text(
-            "Adicionar Medicamento",
-            style: TextStyle(color: Colors.white),
+    showDialog<void>(
+      context: parentContext,
+      builder: (dialogContext) {
+        return StatefulBuilder(
+          builder: (modalContext, setModalState) {
+            return AlertDialog(
+              backgroundColor: _surface,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(24),
+              ),
+              title: const Row(
+                children: [
+                  Icon(Icons.medication_rounded, color: _green),
+                  SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      'Adicionar medicamento',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              content: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    _DialogField(
+                      controller: nameController,
+                      label: 'Nome',
+                      hint: 'Ex.: Vitamina D',
+                    ),
+                    const SizedBox(height: 14),
+                    _DialogField(
+                      controller: durationController,
+                      label: 'Duração',
+                      hint: 'Opcional',
+                      keyboardType: TextInputType.number,
+                    ),
+                    const SizedBox(height: 18),
+                    const Text(
+                      'Data de início',
+                      style: TextStyle(color: Colors.white54, fontSize: 12),
+                    ),
+                    const SizedBox(height: 8),
+                    InkWell(
+                      borderRadius: BorderRadius.circular(14),
+                      onTap: () async {
+                        FocusManager.instance.primaryFocus?.unfocus();
+
+                        final picked = await showDatePicker(
+                          context: parentContext,
+                          initialDate: startDate,
+                          firstDate: DateTime(2025),
+                          lastDate: DateTime(2035),
+                        );
+
+                        if (picked != null) {
+                          setModalState(() {
+                            startDate = picked;
+                          });
+                        }
+                      },
+                      child: Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 16,
+                          vertical: 14,
+                        ),
+                        decoration: BoxDecoration(
+                          color: _background,
+                          borderRadius: BorderRadius.circular(14),
+                          border: Border.all(color: Colors.white10),
+                        ),
+                        child: Row(
+                          children: [
+                            const Icon(
+                              Icons.calendar_today_rounded,
+                              color: _green,
+                              size: 18,
+                            ),
+                            const SizedBox(width: 10),
+                            Text(
+                              DateFormat('dd/MM/yyyy').format(startDate),
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                            const Spacer(),
+                            const Icon(
+                              Icons.chevron_right_rounded,
+                              color: Colors.white38,
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              actionsPadding: const EdgeInsets.fromLTRB(20, 0, 20, 18),
+              actions: [
+                TextButton(
+                  onPressed: () {
+                    FocusManager.instance.primaryFocus?.unfocus();
+                    Navigator.pop(dialogContext);
+                  },
+                  child: const Text(
+                    'Cancelar',
+                    style: TextStyle(color: Colors.white54),
+                  ),
+                ),
+                ElevatedButton(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: _green,
+                    foregroundColor: Colors.black,
+                    elevation: 0,
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 20,
+                      vertical: 12,
+                    ),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                  ),
+                  onPressed: () async {
+                    FocusManager.instance.primaryFocus?.unfocus();
+
+                    final cleanName = InputSanitizer.sanitize(
+                      nameController.text.trim(),
+                    );
+
+                    if (cleanName.isEmpty) {
+                      _showSnackBar(
+                        parentContext,
+                        'Informe o nome do medicamento.',
+                        error: true,
+                      );
+                      return;
+                    }
+
+                    final durationText = durationController.text.trim();
+
+                    final duration = durationText.isEmpty
+                        ? null
+                        : int.tryParse(durationText);
+
+                    if (durationText.isNotEmpty &&
+                        (duration == null || duration <= 0)) {
+                      _showSnackBar(
+                        parentContext,
+                        'Informe uma duração válida.',
+                        error: true,
+                      );
+                      return;
+                    }
+
+                    final navigator = Navigator.of(dialogContext);
+
+                    try {
+                      await ref
+                          .read(healthRepositoryProvider)
+                          .addMedication(cleanName, startDate, duration);
+
+                      if (dialogContext.mounted) {
+                        navigator.pop();
+                      }
+
+                      if (parentContext.mounted) {
+                        _showSnackBar(parentContext, 'Medicamento adicionado.');
+                      }
+                    } catch (e, stack) {
+                      AppLogger.e('Erro ao adicionar medicamento', e, stack);
+
+                      if (parentContext.mounted) {
+                        _showSnackBar(
+                          parentContext,
+                          'Não foi possível salvar o medicamento.',
+                          error: true,
+                        );
+                      }
+                    }
+                  },
+                  child: const Text(
+                    'Salvar',
+                    style: TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    ).whenComplete(() {
+      nameController.dispose();
+      durationController.dispose();
+    });
+  }
+
+  void _showDeleteConfirmation(
+    BuildContext parentContext,
+    WidgetRef ref,
+    String docId,
+    int localId,
+  ) {
+    FocusManager.instance.primaryFocus?.unfocus();
+
+    showDialog<void>(
+      context: parentContext,
+      builder: (dialogContext) {
+        return AlertDialog(
+          backgroundColor: _surface,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(24),
           ),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
+          title: const Row(
             children: [
-              TextField(
-                controller: nameController,
-                style: const TextStyle(color: Colors.white),
-                decoration: const InputDecoration(
-                  labelText: "Nome",
-                  labelStyle: TextStyle(color: Colors.white54),
-                ),
-              ),
-              TextField(
-                controller: durationController,
-                keyboardType: TextInputType.number,
-                style: const TextStyle(color: Colors.white),
-                decoration: const InputDecoration(
-                  labelText: "Duração (dias, opcional)",
-                  labelStyle: TextStyle(color: Colors.white54),
-                ),
-              ),
-              const SizedBox(height: 10),
-              TextButton(
-                onPressed: () async {
-                  final picked = await showDatePicker(
-                    context: context,
-                    initialDate: startDate,
-                    firstDate: DateTime(2025),
-                    lastDate: DateTime(2030),
-                  );
-                  if (picked != null) setModal(() => startDate = picked);
-                },
+              Icon(Icons.warning_amber_rounded, color: Colors.redAccent),
+              SizedBox(width: 10),
+              Expanded(
                 child: Text(
-                  "Início: ${DateFormat('dd/MM/yyyy').format(startDate)}",
-                  style: const TextStyle(color: Colors.greenAccent),
+                  'Excluir medicamento?',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                  ),
                 ),
               ),
             ],
           ),
+          content: const Text(
+            'O medicamento será removido da sua lista. '
+            'Essa ação não poderá ser desfeita.',
+            style: TextStyle(color: Colors.white70, height: 1.4),
+          ),
+          actionsPadding: const EdgeInsets.fromLTRB(20, 0, 20, 18),
           actions: [
             TextButton(
-              onPressed: () => Navigator.pop(context),
+              onPressed: () => Navigator.pop(dialogContext),
               child: const Text(
-                "Cancelar",
+                'Cancelar',
                 style: TextStyle(color: Colors.white54),
               ),
             ),
             ElevatedButton(
               style: ElevatedButton.styleFrom(
-                backgroundColor: Colors.greenAccent,
+                backgroundColor: Colors.redAccent,
+                foregroundColor: Colors.white,
+                elevation: 0,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
               ),
               onPressed: () async {
-                final cleanName = InputSanitizer.sanitize(nameController.text);
-                final duration = int.tryParse(durationController.text);
-
-                if (cleanName.isEmpty) return;
-
-                Navigator.pop(context);
+                // 🛡️ CORREÇÃO CRÍTICA: Fechar o diálogo PRIMEIRO, de forma limpa,
+                // ANTES de executar a exclusão assíncrona no banco/repositório.
+                Navigator.pop(dialogContext);
 
                 try {
                   await ref
                       .read(healthRepositoryProvider)
-                      .addMedication(cleanName, startDate, duration);
-                } catch (e) {
-                  debugPrint("Erro ao salvar medicamento: $e");
-                  if (context.mounted) {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      SnackBar(
-                        content: Text("Erro ao salvar (pendente): $e"),
-                        backgroundColor: Colors.red,
-                      ),
+                      .deleteMedication(docId, localId);
+
+                  if (parentContext.mounted) {
+                    _showSnackBar(parentContext, 'Medicamento removido.');
+                  }
+                } catch (e, stack) {
+                  AppLogger.e('Erro ao excluir medicamento', e, stack);
+
+                  if (parentContext.mounted) {
+                    _showSnackBar(
+                      parentContext,
+                      'Não foi possível excluir o medicamento.',
+                      error: true,
                     );
                   }
                 }
               },
               child: const Text(
-                "Salvar",
-                style: TextStyle(color: Colors.black),
+                'Excluir',
+                style: TextStyle(fontWeight: FontWeight.bold),
               ),
             ),
           ],
-        ),
-      ),
-    );
-  }
-
-  // 2. Modal de Confirmação de Exclusão
-  void _showDeleteConfirmation(
-    BuildContext context,
-    WidgetRef ref,
-    String docId,
-    int localId,
-  ) {
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        backgroundColor: const Color(0xFF11182E),
-        title: const Text(
-          "Excluir Medicamento?",
-          style: TextStyle(color: Colors.white),
-        ),
-        content: const Text(
-          "Tem certeza que deseja remover este medicamento da sua lista?",
-          style: TextStyle(color: Colors.white70),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text(
-              "Cancelar",
-              style: TextStyle(color: Colors.white54),
-            ),
-          ),
-          ElevatedButton(
-            style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent),
-            onPressed: () async {
-              await ref
-                  .read(healthRepositoryProvider)
-                  .deleteMedication(docId, localId);
-              if (context.mounted) Navigator.pop(context);
-            },
-            child: const Text("Excluir", style: TextStyle(color: Colors.white)),
-          ),
-        ],
-      ),
+        );
+      },
     );
   }
 
@@ -158,315 +380,102 @@ class HealthScreen extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final healthAsync = ref.watch(healthStreamProvider);
 
-    final moods = [
-      {'label': 'Radiante', 'emoji': '🤩'},
-      {'label': 'Focado', 'emoji': '🧠'},
-      {'label': 'Neutro', 'emoji': '😐'},
-      {'label': 'Cansado', 'emoji': '😴'},
-      {'label': 'Estressado', 'emoji': '🤯'},
+    const moods = [
+      _MoodData(label: 'Radiante', emoji: '🤩'),
+      _MoodData(label: 'Focado', emoji: '🧠'),
+      _MoodData(label: 'Neutro', emoji: '😐'),
+      _MoodData(label: 'Cansado', emoji: '😴'),
+      _MoodData(label: 'Estressado', emoji: '🤯'),
     ];
 
     return Scaffold(
-      backgroundColor: const Color(0xFF070B14),
+      backgroundColor: _background,
       body: SafeArea(
         child: healthAsync.when(
-          loading: () => const Center(
-            child: CircularProgressIndicator(color: Colors.greenAccent),
-          ),
-          error: (err, stack) => Center(
-            child: Text(
-              "Erro na saúde: $err",
-              style: const TextStyle(color: Colors.red),
-            ),
-          ),
-          data: (health) {
-            double waterProgress = (health.waterIntakeMl / 3000).clamp(
-              0.0,
-              1.0,
+          loading: () => const _HealthLoading(),
+          error: (error, stack) {
+            AppLogger.e('Erro ao carregar dados de saúde', error, stack);
+
+            return _HealthError(
+              onRetry: () {
+                ref.invalidate(healthStreamProvider);
+              },
             );
+          },
+          data: (health) {
+            final waterProgress = (health.waterIntakeMl / 3000)
+                .clamp(0.0, 1.0)
+                .toDouble();
 
-            return SingleChildScrollView(
-              padding: const EdgeInsets.all(20),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      const Text(
-                        "Bio-Monitoramento & Saúde",
-                        style: TextStyle(
-                          color: Colors.white,
-                          fontSize: 24,
-                          fontWeight: FontWeight.bold,
+            return RefreshIndicator(
+              color: _green,
+              backgroundColor: _surface,
+              onRefresh: () async {
+                ref.invalidate(healthStreamProvider);
+
+                await Future<void>.delayed(const Duration(milliseconds: 250));
+              },
+              child: CustomScrollView(
+                physics: const AlwaysScrollableScrollPhysics(),
+                slivers: [
+                  SliverPadding(
+                    padding: const EdgeInsets.fromLTRB(20, 16, 20, 32),
+                    sliver: SliverList(
+                      delegate: SliverChildListDelegate([
+                        _buildHeader(context),
+                        const SizedBox(height: 22),
+
+                        _buildDailySnapshot(health),
+
+                        const SizedBox(height: 28),
+
+                        _buildSectionLabel(
+                          'COMO VOCÊ ESTÁ HOJE?',
+                          'Seu estado mental',
                         ),
-                      ),
-                      IconButton(
-                        onPressed: () {
-                          Navigator.push(
-                            context,
-                            MaterialPageRoute(
-                              builder: (context) => const CheckInScreen(),
-                            ),
-                          );
-                        },
-                        icon: const Icon(
-                          Icons.tune_rounded,
-                          color: Colors.greenAccent,
+
+                        const SizedBox(height: 12),
+
+                        _buildMoodSelector(context, ref, health, moods),
+
+                        const SizedBox(height: 28),
+
+                        _buildSectionLabel(
+                          'HIDRATAÇÃO',
+                          'Meta diária de 3 litros',
                         ),
-                        tooltip: "Check-in Profundo de Estado",
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 25),
 
-                  // ================= SELETOR DE HUMOR (INTEGRADO AO AI COMPANION E HOME) =================
-                  const Text(
-                    "Como está o seu estado mental hoje?",
-                    style: TextStyle(color: Colors.white70, fontSize: 14),
-                  ),
-                  const SizedBox(height: 12),
-                  Container(
-                    padding: const EdgeInsets.symmetric(
-                      vertical: 16,
-                      horizontal: 12,
-                    ),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFF11182E),
-                      borderRadius: BorderRadius.circular(20),
-                    ),
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceAround,
-                      children: moods.map((m) {
-                        bool isSelected = health.mood == m['label'];
-                        return GestureDetector(
-                          onTap: () async => await ref
-                              .read(healthRepositoryProvider)
-                              .updateMood(m['label']!),
-                          child: AnimatedContainer(
-                            duration: const Duration(milliseconds: 200),
-                            padding: const EdgeInsets.all(12),
-                            decoration: BoxDecoration(
-                              color: isSelected
-                                  ? Colors.greenAccent.withOpacity(0.15)
-                                  : Colors.transparent,
-                              shape: BoxShape.circle,
-                              border: Border.all(
-                                color: isSelected
-                                    ? Colors.greenAccent
-                                    : Colors.transparent,
-                                width: 1.5,
-                              ),
-                            ),
-                            child: Text(
-                              m['emoji']!,
-                              style: const TextStyle(fontSize: 28),
-                            ),
-                          ),
-                        );
-                      }).toList(),
-                    ),
-                  ),
+                        const SizedBox(height: 12),
 
-                  if (health.mood != '—') ...[
-                    const SizedBox(height: 8),
-                    Center(
-                      child: Text(
-                        "Humor selecionado: ${health.mood}",
-                        style: const TextStyle(
-                          color: Colors.greenAccent,
-                          fontWeight: FontWeight.bold,
-                          fontSize: 13,
+                        _buildHydrationCard(
+                          context,
+                          ref,
+                          health,
+                          waterProgress,
                         ),
-                      ),
-                    ),
-                  ],
 
-                  // 🩸 CICLO MENSTRUAL
-                  _MenstrualCycleWidget(health: health),
+                        const SizedBox(height: 28),
 
-                  const SizedBox(height: 25),
-
-                  // ================= CONSUMO DE ÁGUA =================
-                  Container(
-                    padding: const EdgeInsets.all(20),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFF11182E),
-                      borderRadius: BorderRadius.circular(20),
-                      border: Border.all(color: Colors.white10),
-                    ),
-                    child: Column(
-                      children: [
-                        Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                          children: [
-                            const Row(
-                              children: [
-                                Icon(
-                                  Icons.water_drop,
-                                  color: Colors.blueAccent,
-                                ),
-                                SizedBox(width: 8),
-                                Text(
-                                  "Hidratação Diária",
-                                  style: TextStyle(
-                                    color: Colors.white,
-                                    fontWeight: FontWeight.bold,
-                                  ),
-                                ),
-                              ],
-                            ),
-                            Text(
-                              "${health.waterIntakeMl}ml / 3000ml",
-                              style: const TextStyle(
-                                color: Colors.blueAccent,
-                                fontWeight: FontWeight.bold,
-                              ),
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: 16),
-                        ClipRRect(
-                          borderRadius: BorderRadius.circular(8),
-                          child: LinearProgressIndicator(
-                            value: waterProgress,
-                            backgroundColor: const Color(0xFF070B14),
-                            valueColor: const AlwaysStoppedAnimation<Color>(
-                              Colors.blueAccent,
-                            ),
-                            minHeight: 12,
+                        _buildSectionLabel(
+                          'MEDICAMENTOS',
+                          'Tratamentos ativos',
+                          trailing: IconButton(
+                            onPressed: () =>
+                                _showAddMedicationModal(context, ref),
+                            icon: const Icon(Icons.add_rounded),
+                            color: _green,
+                            tooltip: 'Adicionar medicamento',
                           ),
                         ),
-                        const SizedBox(height: 16),
-                        SizedBox(
-                          width: double.infinity,
-                          height: 45,
-                          child: OutlinedButton.icon(
-                            style: OutlinedButton.styleFrom(
-                              side: const BorderSide(color: Colors.blueAccent),
-                              shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(12),
-                              ),
-                            ),
-                            onPressed: () async => await ref
-                                .read(healthRepositoryProvider)
-                                .addWater(health.waterIntakeMl),
-                            icon: const Icon(
-                              Icons.add,
-                              color: Colors.blueAccent,
-                              size: 18,
-                            ),
-                            label: const Text(
-                              "Registrar +250ml",
-                              style: TextStyle(
-                                color: Colors.blueAccent,
-                                fontWeight: FontWeight.bold,
-                              ),
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
 
-                  const SizedBox(height: 25),
+                        const SizedBox(height: 12),
 
-                  // ================= MEDICAMENTOS ATIVOS =================
-                  Container(
-                    padding: const EdgeInsets.all(20),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFF11182E),
-                      borderRadius: BorderRadius.circular(20),
-                    ),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                          children: [
-                            const Text(
-                              "Medicamentos Ativos",
-                              style: TextStyle(
-                                color: Colors.white,
-                                fontWeight: FontWeight.bold,
-                              ),
-                            ),
-                            IconButton(
-                              icon: const Icon(
-                                Icons.add_circle,
-                                color: Colors.greenAccent,
-                              ),
-                              onPressed: () =>
-                                  _showAddMedicationModal(context, ref),
-                            ),
-                          ],
-                        ),
-                        ref
-                            .watch(medicationsStreamProvider)
-                            .when(
-                              loading: () => const Center(
-                                child: CircularProgressIndicator(
-                                  color: Colors.greenAccent,
-                                  strokeWidth: 2,
-                                ),
-                              ),
-                              error: (err, stack) => Text(
-                                "Erro ao carregar: $err",
-                                style: const TextStyle(color: Colors.red),
-                              ),
-                              data: (medications) {
-                                if (medications.isEmpty) {
-                                  return const Text(
-                                    "Nenhum medicamento.",
-                                    style: TextStyle(
-                                      color: Colors.white54,
-                                      fontSize: 12,
-                                    ),
-                                  );
-                                }
+                        _buildMedicationsCard(context, ref),
 
-                                return ListView.builder(
-                                  shrinkWrap: true,
-                                  physics: const NeverScrollableScrollPhysics(),
-                                  itemCount: medications.length,
-                                  itemBuilder: (context, index) {
-                                    final med = medications[index];
+                        const SizedBox(height: 28),
 
-                                    return ListTile(
-                                      contentPadding: EdgeInsets.zero,
-                                      title: Text(
-                                        med.name,
-                                        style: const TextStyle(
-                                          color: Colors.white,
-                                        ),
-                                      ),
-                                      subtitle: Text(
-                                        "Fim: ${med.endDate != null ? DateFormat('dd/MM/yyyy').format(med.endDate!) : 'Sem data'}",
-                                        style: const TextStyle(
-                                          color: Colors.white54,
-                                          fontSize: 11,
-                                        ),
-                                      ),
-                                      trailing: IconButton(
-                                        icon: const Icon(
-                                          Icons.delete,
-                                          color: Colors.redAccent,
-                                          size: 18,
-                                        ),
-                                        onPressed: () =>
-                                            _showDeleteConfirmation(
-                                              context,
-                                              ref,
-                                              med.firestoreId ?? '',
-                                              med.id,
-                                            ),
-                                      ),
-                                    );
-                                  },
-                                );
-                              },
-                            ),
-                      ],
+                        _MenstrualCycleWidget(health: health),
+                      ]),
                     ),
                   ),
                 ],
@@ -477,54 +486,573 @@ class HealthScreen extends ConsumerWidget {
       ),
     );
   }
+
+  Widget _buildHeader(BuildContext context) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.center,
+      children: [
+        const Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'SAÚDE',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 26,
+                  fontWeight: FontWeight.w800,
+                  letterSpacing: 0.5,
+                ),
+              ),
+              SizedBox(height: 4),
+              Text(
+                'Seu bem-estar hoje',
+                style: TextStyle(color: Colors.white54, fontSize: 14),
+              ),
+            ],
+          ),
+        ),
+        Container(
+          decoration: BoxDecoration(
+            color: _surface,
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(color: Colors.white10),
+          ),
+          child: IconButton(
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (_) => const CheckInScreen()),
+              );
+            },
+            icon: const Icon(Icons.insights_rounded, color: _green),
+            tooltip: 'Check-in de estado',
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildDailySnapshot(HealthModel health) {
+    return Container(
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          colors: [_surface, _surface.withOpacity(0.78)],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+        borderRadius: BorderRadius.circular(24),
+        border: Border.all(color: Colors.white10),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Row(
+            children: [
+              Icon(Icons.today_rounded, color: _green, size: 18),
+              SizedBox(width: 8),
+              Text(
+                'RESUMO DO DIA',
+                style: TextStyle(
+                  color: Colors.white54,
+                  fontSize: 11,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: 1,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 16),
+          Row(
+            children: [
+              Expanded(
+                child: _SnapshotItem(
+                  icon: Icons.psychology_rounded,
+                  color: _purple,
+                  label: 'Humor',
+                  value: health.mood == '—' ? 'Não registrado' : health.mood,
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: _SnapshotItem(
+                  icon: Icons.water_drop_rounded,
+                  color: _blue,
+                  label: 'Hidratação',
+                  value: '${health.waterIntakeMl} ml',
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              const Expanded(
+                child: _SnapshotItem(
+                  icon: Icons.medication_rounded,
+                  color: _green,
+                  label: 'Cuidados',
+                  value: 'Monitorados',
+                ),
+              ),
+              const SizedBox(width: 12),
+              const Expanded(
+                child: _SnapshotItem(
+                  icon: Icons.auto_awesome_rounded,
+                  color: _purple,
+                  label: 'Insight',
+                  value: 'Disponível',
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSectionLabel(String title, String subtitle, {Widget? trailing}) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.center,
+      children: [
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                title,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 13,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: 0.4,
+                ),
+              ),
+              const SizedBox(height: 3),
+              Text(
+                subtitle,
+                style: const TextStyle(color: Colors.white38, fontSize: 11),
+              ),
+            ],
+          ),
+        ),
+        ?trailing,
+      ],
+    );
+  }
+
+  Widget _buildMoodSelector(
+    BuildContext context,
+    WidgetRef ref,
+    HealthModel health,
+    List<_MoodData> moods,
+  ) {
+    return Container(
+      padding: const EdgeInsets.fromLTRB(10, 18, 10, 16),
+      decoration: BoxDecoration(
+        color: _surface,
+        borderRadius: BorderRadius.circular(22),
+        border: Border.all(color: Colors.white10),
+      ),
+      child: Column(
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceAround,
+            children: moods.map((mood) {
+              final isSelected = health.mood == mood.label;
+
+              return Expanded(
+                child: GestureDetector(
+                  onTap: () => _updateMood(context, ref, mood.label),
+                  behavior: HitTestBehavior.opaque,
+                  child: AnimatedContainer(
+                    duration: const Duration(milliseconds: 220),
+                    margin: const EdgeInsets.symmetric(horizontal: 2),
+                    padding: const EdgeInsets.symmetric(vertical: 8),
+                    decoration: BoxDecoration(
+                      color: isSelected
+                          ? _green.withOpacity(0.10)
+                          : Colors.transparent,
+                      borderRadius: BorderRadius.circular(16),
+                      border: Border.all(
+                        color: isSelected ? _green : Colors.transparent,
+                        width: 1.4,
+                      ),
+                    ),
+                    child: Column(
+                      children: [
+                        AnimatedScale(
+                          scale: isSelected ? 1.08 : 1.0,
+                          duration: const Duration(milliseconds: 220),
+                          child: Text(
+                            mood.emoji,
+                            style: const TextStyle(fontSize: 26),
+                          ),
+                        ),
+                        const SizedBox(height: 7),
+                        Text(
+                          mood.label,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          textAlign: TextAlign.center,
+                          style: TextStyle(
+                            color: isSelected ? _green : Colors.white38,
+                            fontSize: 9.5,
+                            fontWeight: isSelected
+                                ? FontWeight.w700
+                                : FontWeight.w500,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              );
+            }).toList(),
+          ),
+          if (health.mood != '—') ...[
+            const SizedBox(height: 12),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              decoration: BoxDecoration(
+                color: _green.withOpacity(0.06),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(
+                    Icons.check_circle_rounded,
+                    color: _green,
+                    size: 15,
+                  ),
+                  const SizedBox(width: 6),
+                  Text(
+                    'Estado registrado: ${health.mood}',
+                    style: const TextStyle(
+                      color: _green,
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _buildHydrationCard(
+    BuildContext context,
+    WidgetRef ref,
+    HealthModel health,
+    double progress,
+  ) {
+    final remaining = (3000 - health.waterIntakeMl).clamp(0, 3000);
+
+    final percentage = (progress * 100).round();
+
+    return Container(
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        color: _surface,
+        borderRadius: BorderRadius.circular(24),
+        border: Border.all(color: _blue.withOpacity(0.14)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                width: 42,
+                height: 42,
+                decoration: BoxDecoration(
+                  color: _blue.withOpacity(0.10),
+                  shape: BoxShape.circle,
+                ),
+                child: const Icon(
+                  Icons.water_drop_rounded,
+                  color: _blue,
+                  size: 21,
+                ),
+              ),
+              const SizedBox(width: 12),
+              const Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Hidratação diária',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    SizedBox(height: 3),
+                    Text(
+                      'Meta de 3.000 ml',
+                      style: TextStyle(color: Colors.white38, fontSize: 11),
+                    ),
+                  ],
+                ),
+              ),
+              Text(
+                '$percentage%',
+                style: const TextStyle(
+                  color: _blue,
+                  fontSize: 18,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 20),
+          ClipRRect(
+            borderRadius: BorderRadius.circular(10),
+            child: LinearProgressIndicator(
+              value: progress,
+              minHeight: 11,
+              backgroundColor: _background,
+              valueColor: const AlwaysStoppedAnimation<Color>(_blue),
+            ),
+          ),
+          const SizedBox(height: 12),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(
+                '${health.waterIntakeMl} ml consumidos',
+                style: const TextStyle(
+                  color: Colors.white70,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              Text(
+                remaining > 0 ? '$remaining ml restantes' : 'Meta atingida',
+                style: TextStyle(
+                  color: remaining > 0 ? Colors.white38 : _blue,
+                  fontSize: 11,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 16),
+          SizedBox(
+            width: double.infinity,
+            height: 46,
+            child: OutlinedButton.icon(
+              onPressed: () => _addWater(context, ref, health.waterIntakeMl),
+              style: OutlinedButton.styleFrom(
+                side: BorderSide(color: _blue.withOpacity(0.45)),
+                foregroundColor: _blue,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(14),
+                ),
+              ),
+              icon: const Icon(Icons.add_rounded, size: 19),
+              label: const Text(
+                'Registrar +250 ml',
+                style: TextStyle(fontWeight: FontWeight.w700),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildMedicationsCard(BuildContext context, WidgetRef ref) {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: _surface,
+        borderRadius: BorderRadius.circular(24),
+        border: Border.all(color: Colors.white10),
+      ),
+      child: ref
+          .watch(medicationsStreamProvider)
+          .when(
+            loading: () => const Padding(
+              padding: EdgeInsets.all(20),
+              child: Center(
+                child: CircularProgressIndicator(color: _green, strokeWidth: 2),
+              ),
+            ),
+            error: (error, stack) {
+              AppLogger.e('Erro ao carregar medicamentos', error, stack);
+
+              return const Padding(
+                padding: EdgeInsets.all(16),
+                child: Text(
+                  'Não foi possível carregar os medicamentos.',
+                  style: TextStyle(color: Colors.redAccent, fontSize: 12),
+                ),
+              );
+            },
+            data: (medications) {
+              if (medications.isEmpty) {
+                return const _EmptyMedicationState();
+              }
+
+              return Column(
+                children: [
+                  for (var index = 0; index < medications.length; index++) ...[
+                    _MedicationCard(
+                      key: ValueKey(medications[index].id),
+                      medication: medications[index],
+                      onDelete: () {
+                        final medication = medications[index];
+
+                        _showDeleteConfirmation(
+                          context,
+                          ref,
+                          medication.firestoreId ?? '',
+                          medication.id,
+                        );
+                      },
+                    ),
+                    if (index < medications.length - 1)
+                      const SizedBox(height: 10),
+                  ],
+                ],
+              );
+            },
+          ),
+    );
+  }
 }
 
-// 🩸 ================= WIDGET COMPONENTE: MATRIZ DE CICLO MENSTRUAL =================
 class _MenstrualCycleWidget extends ConsumerWidget {
   final HealthModel health;
+
   const _MenstrualCycleWidget({required this.health});
+
+  static const Color _background = Color(0xFF070B14);
+  static const Color _surface = Color(0xFF11182E);
+  static const Color _pink = Colors.pinkAccent;
+  static const Color _purple = Colors.purpleAccent;
+
+  void _showSnackBar(
+    BuildContext context,
+    String message, {
+    bool error = false,
+  }) {
+    if (!context.mounted) return;
+
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          content: Text(message),
+          backgroundColor: error ? Colors.redAccent : _surface,
+          behavior: SnackBarBehavior.floating,
+          margin: const EdgeInsets.all(16),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(14),
+          ),
+        ),
+      );
+  }
+
+  Future<void> _updatePillStatus(
+    BuildContext context,
+    WidgetRef ref,
+    bool value,
+  ) async {
+    try {
+      await ref.read(healthRepositoryProvider).updatePillStatus(value);
+    } catch (e, stack) {
+      AppLogger.e('Erro ao atualizar status da pílula', e, stack);
+
+      _showSnackBar(
+        context,
+        'Não foi possível atualizar o status.',
+        error: true,
+      );
+    }
+  }
+
+  Future<void> _toggleCycle(
+    BuildContext context,
+    WidgetRef ref,
+    bool enabled,
+  ) async {
+    try {
+      await ref
+          .read(healthRepositoryProvider)
+          .toggleMenstrualCycleFeature(enabled);
+    } catch (e, stack) {
+      AppLogger.e(
+        enabled
+            ? 'Erro ao ativar ciclo menstrual'
+            : 'Erro ao desativar ciclo menstrual',
+        e,
+        stack,
+      );
+
+      _showSnackBar(
+        context,
+        enabled
+            ? 'Não foi possível ativar o ciclo.'
+            : 'Não foi possível desativar o ciclo.',
+        error: true,
+      );
+    }
+  }
 
   Widget _buildWeekTracker() {
     final now = DateTime.now();
-    final monday = now.subtract(Duration(days: now.weekday - 1));
-    final dayNames = ['Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb', 'Dom'];
+
+    final monday = DateTime(
+      now.year,
+      now.month,
+      now.day,
+    ).subtract(Duration(days: now.weekday - 1));
+
+    const dayNames = ['Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb', 'Dom'];
 
     return Row(
       mainAxisAlignment: MainAxisAlignment.spaceBetween,
       children: List.generate(7, (index) {
         final date = monday.add(Duration(days: index));
+
         final isToday =
-            date.day == now.day &&
+            date.year == now.year &&
             date.month == now.month &&
-            date.year == now.year;
+            date.day == now.day;
 
         return Column(
           children: [
             Text(
               dayNames[index],
               style: TextStyle(
-                fontSize: 10,
-                color: isToday ? Colors.pinkAccent : Colors.white38,
+                fontSize: 9,
+                color: isToday ? _pink : Colors.white38,
                 fontWeight: isToday ? FontWeight.bold : FontWeight.normal,
               ),
             ),
-            const SizedBox(height: 6),
-            Container(
-              width: 30,
-              height: 30,
+            const SizedBox(height: 7),
+            AnimatedContainer(
+              duration: const Duration(milliseconds: 200),
+              width: 32,
+              height: 32,
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
-                color: isToday
-                    ? Colors.pinkAccent.withOpacity(0.2)
-                    : Colors.transparent,
+                color: isToday ? _pink.withOpacity(0.15) : Colors.transparent,
                 border: Border.all(
-                  color: isToday ? Colors.pinkAccent : Colors.white10,
-                  width: isToday ? 2 : 1,
+                  color: isToday ? _pink : Colors.white10,
+                  width: isToday ? 1.7 : 1,
                 ),
               ),
               child: Center(
                 child: Text(
-                  "${date.day}",
+                  '${date.day}',
                   style: TextStyle(
                     fontSize: 10,
                     color: isToday ? Colors.white : Colors.white38,
@@ -540,43 +1068,54 @@ class _MenstrualCycleWidget extends ConsumerWidget {
   }
 
   void _showCycleSettings(
-    BuildContext context,
+    BuildContext parentContext,
     WidgetRef ref,
-    String uid,
     Map<String, dynamic>? currentData,
   ) {
-    final String initialDateStr =
-        currentData?['lastPeriodStart'] ?? DateTime.now().toIso8601String();
-    DateTime tempDate = DateTime.parse(initialDateStr);
+    final initialDateStr = currentData?['lastPeriodStart'];
 
-    final TextEditingController cycleController = TextEditingController(
+    DateTime tempDate;
+
+    try {
+      tempDate = initialDateStr is String
+          ? DateTime.parse(initialDateStr)
+          : DateTime.now();
+    } catch (e, stack) {
+      AppLogger.e('Data de início do ciclo inválida', e, stack);
+
+      tempDate = DateTime.now();
+    }
+
+    final cycleController = TextEditingController(
       text: (currentData?['cycleLengthDays'] ?? 28).toString(),
     );
-    final TextEditingController periodController = TextEditingController(
+
+    final periodController = TextEditingController(
       text: (currentData?['periodLengthDays'] ?? 5).toString(),
     );
 
-    showDialog(
-      context: context,
-      builder: (context) {
+    showDialog<void>(
+      context: parentContext,
+      builder: (dialogContext) {
         return StatefulBuilder(
-          builder: (context, setDialogState) {
-            final formattedDate = DateFormat('dd/MM/yyyy').format(tempDate);
+          builder: (modalContext, setDialogState) {
             return AlertDialog(
-              backgroundColor: const Color(0xFF11182E),
+              backgroundColor: _surface,
               shape: RoundedRectangleBorder(
                 borderRadius: BorderRadius.circular(24),
               ),
               title: const Row(
                 children: [
-                  Icon(Icons.tune_rounded, color: Colors.pinkAccent),
+                  Icon(Icons.calendar_month_rounded, color: _pink),
                   SizedBox(width: 10),
-                  Text(
-                    "Calibrar Matriz",
-                    style: TextStyle(
-                      color: Colors.white,
-                      fontSize: 18,
-                      fontWeight: FontWeight.bold,
+                  Expanded(
+                    child: Text(
+                      'Configurar ciclo',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold,
+                      ),
                     ),
                   ),
                 ],
@@ -587,97 +1126,81 @@ class _MenstrualCycleWidget extends ConsumerWidget {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     const Text(
-                      "Início do último ciclo:",
+                      'Início do último ciclo',
                       style: TextStyle(color: Colors.white54, fontSize: 12),
                     ),
                     const SizedBox(height: 8),
                     InkWell(
+                      borderRadius: BorderRadius.circular(14),
                       onTap: () async {
+                        FocusManager.instance.primaryFocus?.unfocus();
+
                         final picked = await showDatePicker(
-                          context: context,
+                          context: parentContext,
                           initialDate: tempDate,
                           firstDate: DateTime(2025),
                           lastDate: DateTime.now(),
                         );
-                        if (picked != null)
-                          setDialogState(() => tempDate = picked);
+
+                        if (picked != null) {
+                          setDialogState(() {
+                            tempDate = picked;
+                          });
+                        }
                       },
                       child: Container(
+                        width: double.infinity,
                         padding: const EdgeInsets.symmetric(
-                          vertical: 12,
                           horizontal: 16,
+                          vertical: 14,
                         ),
                         decoration: BoxDecoration(
-                          color: const Color(0xFF070B14),
-                          borderRadius: BorderRadius.circular(12),
+                          color: _background,
+                          borderRadius: BorderRadius.circular(14),
+                          border: Border.all(color: Colors.white10),
                         ),
                         child: Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
                           children: [
-                            Text(
-                              formattedDate,
-                              style: const TextStyle(
-                                color: Colors.white,
-                                fontWeight: FontWeight.bold,
-                              ),
-                            ),
                             const Icon(
                               Icons.calendar_today_rounded,
-                              color: Colors.pinkAccent,
-                              size: 16,
+                              color: _pink,
+                              size: 17,
+                            ),
+                            const SizedBox(width: 10),
+                            Text(
+                              DateFormat('dd/MM/yyyy').format(tempDate),
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                            const Spacer(),
+                            const Icon(
+                              Icons.chevron_right_rounded,
+                              color: Colors.white38,
                             ),
                           ],
                         ),
                       ),
                     ),
-                    const SizedBox(height: 16),
+                    const SizedBox(height: 18),
                     Row(
                       children: [
                         Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              const Text(
-                                "Duração Ciclo (Dias):",
-                                style: TextStyle(
-                                  color: Colors.white54,
-                                  fontSize: 11,
-                                ),
-                              ),
-                              TextField(
-                                controller: cycleController,
-                                keyboardType: TextInputType.number,
-                                style: const TextStyle(color: Colors.white),
-                                decoration: const InputDecoration(
-                                  filled: true,
-                                  fillColor: Color(0xFF070B14),
-                                ),
-                              ),
-                            ],
+                          child: _DialogField(
+                            controller: cycleController,
+                            label: 'Ciclo',
+                            hint: '28 dias',
+                            keyboardType: TextInputType.number,
                           ),
                         ),
                         const SizedBox(width: 12),
                         Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              const Text(
-                                "Menstruação (Dias):",
-                                style: TextStyle(
-                                  color: Colors.white54,
-                                  fontSize: 11,
-                                ),
-                              ),
-                              TextField(
-                                controller: periodController,
-                                keyboardType: TextInputType.number,
-                                style: const TextStyle(color: Colors.white),
-                                decoration: const InputDecoration(
-                                  filled: true,
-                                  fillColor: Color(0xFF070B14),
-                                ),
-                              ),
-                            ],
+                          child: _DialogField(
+                            controller: periodController,
+                            label: 'Período',
+                            hint: '5 dias',
+                            keyboardType: TextInputType.number,
                           ),
                         ),
                       ],
@@ -685,104 +1208,176 @@ class _MenstrualCycleWidget extends ConsumerWidget {
                   ],
                 ),
               ),
+              actionsPadding: const EdgeInsets.fromLTRB(20, 0, 20, 18),
               actions: [
                 TextButton(
-                  onPressed: () => Navigator.pop(context),
-                  child: const Text("Cancelar"),
+                  onPressed: () {
+                    FocusManager.instance.primaryFocus?.unfocus();
+                    Navigator.pop(dialogContext);
+                  },
+                  child: const Text(
+                    'Cancelar',
+                    style: TextStyle(color: Colors.white54),
+                  ),
                 ),
                 ElevatedButton(
                   style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.pinkAccent,
+                    backgroundColor: _pink,
+                    foregroundColor: Colors.white,
+                    elevation: 0,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
                   ),
                   onPressed: () async {
-                    final newCycleData = {
+                    FocusManager.instance.primaryFocus?.unfocus();
+
+                    final cycleLength = int.tryParse(
+                      cycleController.text.trim(),
+                    );
+                    final periodLength = int.tryParse(
+                      periodController.text.trim(),
+                    );
+
+                    if (cycleLength == null || cycleLength <= 0) {
+                      _showSnackBar(
+                        parentContext,
+                        'Informe uma duração de ciclo válida.',
+                        error: true,
+                      );
+                      return;
+                    }
+
+                    if (periodLength == null || periodLength <= 0) {
+                      _showSnackBar(
+                        parentContext,
+                        'Informe uma duração de menstruação válida.',
+                        error: true,
+                      );
+                      return;
+                    }
+
+                    if (periodLength > cycleLength) {
+                      _showSnackBar(
+                        parentContext,
+                        'A menstruação não pode ser maior que o ciclo.',
+                        error: true,
+                      );
+                      return;
+                    }
+
+                    final newCycleData = <String, dynamic>{
                       'isEnabled': true,
                       'lastPeriodStart': tempDate.toIso8601String(),
-                      'cycleLengthDays':
-                          int.tryParse(cycleController.text) ?? 28,
-                      'periodLengthDays':
-                          int.tryParse(periodController.text) ?? 5,
+                      'cycleLengthDays': cycleLength,
+                      'periodLengthDays': periodLength,
                     };
+
+                    final navigator = Navigator.of(dialogContext);
 
                     try {
                       await ref
                           .read(healthRepositoryProvider)
                           .updateCycleSettings(newCycleData);
-                      if (context.mounted) Navigator.pop(context);
-                    } catch (e) {
-                      debugPrint("Erro ao salvar ciclo: $e");
-                      if (context.mounted) {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          SnackBar(
-                            content: Text("Erro ao salvar: $e"),
-                            backgroundColor: Colors.red,
-                          ),
+
+                      if (dialogContext.mounted) {
+                        navigator.pop();
+                      }
+
+                      if (parentContext.mounted) {
+                        _showSnackBar(
+                          parentContext,
+                          'Configuração do ciclo atualizada.',
+                        );
+                      }
+                    } catch (e, stack) {
+                      AppLogger.e(
+                        'Erro ao salvar configuração do ciclo',
+                        e,
+                        stack,
+                      );
+
+                      if (parentContext.mounted) {
+                        _showSnackBar(
+                          parentContext,
+                          'Não foi possível salvar a configuração.',
+                          error: true,
                         );
                       }
                     }
                   },
-                  child: const Text("Salvar"),
+                  child: const Text(
+                    'Salvar',
+                    style: TextStyle(fontWeight: FontWeight.bold),
+                  ),
                 ),
               ],
             );
           },
         );
       },
-    );
+    ).whenComplete(() {
+      cycleController.dispose();
+      periodController.dispose();
+    });
   }
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final user = FirebaseAuth.instance.currentUser;
-    if (user == null) return const SizedBox.shrink();
-
     final cycleData = health.menstrualCycle;
-    final isEnabled = cycleData != null && (cycleData['isEnabled'] == true);
+
+    final isEnabled = cycleData != null && cycleData['isEnabled'] == true;
 
     if (!isEnabled) {
       return Container(
-        margin: const EdgeInsets.only(top: 25),
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.all(18),
         decoration: BoxDecoration(
-          color: const Color(0xFF11182E),
-          borderRadius: BorderRadius.circular(20),
-          border: Border.all(color: Colors.pinkAccent.withOpacity(0.05)),
+          color: _surface,
+          borderRadius: BorderRadius.circular(24),
+          border: Border.all(color: _pink.withOpacity(0.12)),
         ),
         child: Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
-            const Row(
-              children: [
-                Icon(
-                  Icons.bubble_chart_rounded,
-                  color: Colors.pinkAccent,
-                  size: 22,
-                ),
-                SizedBox(width: 12),
-                Text(
-                  "Ativar Ciclo Menstrual",
-                  style: TextStyle(
-                    color: Colors.white70,
-                    fontSize: 13,
-                    fontWeight: FontWeight.w500,
-                  ),
-                ),
-              ],
+            Container(
+              width: 44,
+              height: 44,
+              decoration: BoxDecoration(
+                color: _pink.withOpacity(0.09),
+                shape: BoxShape.circle,
+              ),
+              child: const Icon(Icons.calendar_month_rounded, color: _pink),
             ),
-            TextButton.icon(
-              onPressed: () => ref
-                  .read(healthRepositoryProvider)
-                  .toggleMenstrualCycleFeature(true),
+            const SizedBox(width: 12),
+            const Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Ciclo menstrual',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  SizedBox(height: 3),
+                  Text(
+                    'Ative para acompanhar seu ciclo',
+                    style: TextStyle(color: Colors.white38, fontSize: 11),
+                  ),
+                ],
+              ),
+            ),
+            TextButton(
+              onPressed: () => _toggleCycle(context, ref, true),
               style: TextButton.styleFrom(
-                foregroundColor: Colors.pinkAccent,
-                backgroundColor: Colors.pinkAccent.withOpacity(0.08),
+                foregroundColor: _pink,
+                backgroundColor: _pink.withOpacity(0.08),
                 shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(10),
+                  borderRadius: BorderRadius.circular(12),
                 ),
               ),
-              icon: const Icon(Icons.add, size: 16),
-              label: const Text(
-                "Ativar",
+              child: const Text(
+                'Ativar',
                 style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12),
               ),
             ),
@@ -792,132 +1387,169 @@ class _MenstrualCycleWidget extends ConsumerWidget {
     }
 
     final cycleInfo = health.cyclePhaseInfo;
-    final int currentDay = cycleInfo['day'];
-    final int totalDays = cycleInfo['totalDays'];
-    final String phaseName = cycleInfo['name'];
-    final String aiMessage = cycleInfo['message'];
-    final Color phaseColor = cycleInfo['color'];
+
+    final currentDay = (cycleInfo['day'] as num?)?.toInt() ?? 1;
+
+    final totalDays = (cycleInfo['totalDays'] as num?)?.toInt() ?? 28;
+
+    final phaseName = cycleInfo['name']?.toString() ?? 'Fase atual';
+
+    final aiMessage =
+        cycleInfo['message']?.toString() ??
+        'Observe como seu corpo está respondendo hoje.';
+
+    final phaseColor = cycleInfo['color'] is Color
+        ? cycleInfo['color'] as Color
+        : _pink;
 
     return Container(
-      margin: const EdgeInsets.only(top: 25),
       padding: const EdgeInsets.all(20),
       decoration: BoxDecoration(
-        color: const Color(0xFF11182E),
+        color: _surface,
         borderRadius: BorderRadius.circular(24),
-        border: Border.all(color: phaseColor.withOpacity(0.15), width: 1),
+        border: Border.all(color: phaseColor.withOpacity(0.16)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              Row(
-                children: [
-                  Icon(
-                    Icons.calendar_month_rounded,
-                    color: phaseColor,
-                    size: 20,
-                  ),
-                  const SizedBox(width: 8),
-                  const Text(
-                    "Bio-Cycle Matrix",
-                    style: TextStyle(color: Colors.white54, fontSize: 12),
-                  ),
-                ],
+              Container(
+                width: 38,
+                height: 38,
+                decoration: BoxDecoration(
+                  color: phaseColor.withOpacity(0.09),
+                  shape: BoxShape.circle,
+                ),
+                child: Icon(
+                  Icons.calendar_month_rounded,
+                  color: phaseColor,
+                  size: 19,
+                ),
               ),
-              Row(
-                children: [
-                  IconButton(
-                    icon: const Icon(
-                      Icons.settings_rounded,
-                      color: Colors.white54,
-                      size: 18,
+              const SizedBox(width: 10),
+              const Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'CICLO MENSTRUAL',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w700,
+                        letterSpacing: 0.5,
+                      ),
                     ),
-                    onPressed: () =>
-                        _showCycleSettings(context, ref, user.uid, cycleData),
-                  ),
-                  IconButton(
-                    icon: const Icon(
-                      Icons.disabled_by_default_rounded,
-                      color: Colors.white24,
-                      size: 18,
+                    SizedBox(height: 3),
+                    Text(
+                      'Acompanhamento do seu ciclo',
+                      style: TextStyle(color: Colors.white38, fontSize: 10),
                     ),
-                    onPressed: () => ref
-                        .read(healthRepositoryProvider)
-                        .toggleMenstrualCycleFeature(false),
-                  ),
-                ],
+                  ],
+                ),
+              ),
+              IconButton(
+                visualDensity: VisualDensity.compact,
+                icon: const Icon(
+                  Icons.settings_rounded,
+                  color: Colors.white54,
+                  size: 18,
+                ),
+                onPressed: () => _showCycleSettings(context, ref, cycleData),
+                tooltip: 'Configurar ciclo',
+              ),
+              IconButton(
+                visualDensity: VisualDensity.compact,
+                icon: const Icon(
+                  Icons.power_settings_new_rounded,
+                  color: Colors.white24,
+                  size: 18,
+                ),
+                onPressed: () => _toggleCycle(context, ref, false),
+                tooltip: 'Desativar ciclo',
               ),
             ],
           ),
-          const SizedBox(height: 12),
+          const SizedBox(height: 20),
           _buildWeekTracker(),
-          const SizedBox(height: 18),
+          const SizedBox(height: 22),
           Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            crossAxisAlignment: CrossAxisAlignment.end,
             children: [
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    "Dia $currentDay de $totalDays",
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 24,
-                      fontWeight: FontWeight.bold,
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Dia $currentDay',
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 28,
+                        fontWeight: FontWeight.w800,
+                      ),
                     ),
-                  ),
-                  Text(
-                    phaseName,
-                    style: TextStyle(
-                      color: phaseColor,
-                      fontSize: 14,
-                      fontWeight: FontWeight.bold,
+                    const SizedBox(height: 2),
+                    Text(
+                      'de $totalDays dias',
+                      style: const TextStyle(
+                        color: Colors.white38,
+                        fontSize: 12,
+                      ),
                     ),
-                  ),
-                ],
+                    const SizedBox(height: 7),
+                    Text(
+                      phaseName,
+                      style: TextStyle(
+                        color: phaseColor,
+                        fontSize: 14,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ],
+                ),
               ),
               InkWell(
-                onTap: () => ref
-                    .read(healthRepositoryProvider)
-                    .updatePillStatus(!health.hasTakenPillToday),
+                borderRadius: BorderRadius.circular(14),
+                onTap: () =>
+                    _updatePillStatus(context, ref, !health.hasTakenPillToday),
                 child: Container(
                   padding: const EdgeInsets.symmetric(
-                    horizontal: 14,
+                    horizontal: 13,
                     vertical: 10,
                   ),
                   decoration: BoxDecoration(
                     color: health.hasTakenPillToday
-                        ? Colors.pinkAccent.withOpacity(0.1)
-                        : const Color(0xFF070B14),
+                        ? _pink.withOpacity(0.10)
+                        : _background,
                     borderRadius: BorderRadius.circular(14),
                     border: Border.all(
                       color: health.hasTakenPillToday
-                          ? Colors.pinkAccent
+                          ? _pink.withOpacity(0.7)
                           : Colors.white10,
                     ),
                   ),
                   child: Row(
+                    mainAxisSize: MainAxisSize.min,
                     children: [
                       Icon(
                         health.hasTakenPillToday
                             ? Icons.check_circle_rounded
-                            : Icons.medication_liquid_sharp,
+                            : Icons.medication_rounded,
                         color: health.hasTakenPillToday
-                            ? Colors.pinkAccent
+                            ? _pink
                             : Colors.white38,
                         size: 18,
                       ),
                       const SizedBox(width: 6),
                       Text(
-                        health.hasTakenPillToday ? "Pílula Ok" : "Tomar Pílula",
+                        health.hasTakenPillToday ? 'Pílula OK' : 'Registrar',
                         style: TextStyle(
                           color: health.hasTakenPillToday
-                              ? Colors.pinkAccent
+                              ? _pink
                               : Colors.white54,
-                          fontSize: 12,
-                          fontWeight: FontWeight.bold,
+                          fontSize: 11,
+                          fontWeight: FontWeight.w700,
                         ),
                       ),
                     ],
@@ -926,31 +1558,58 @@ class _MenstrualCycleWidget extends ConsumerWidget {
               ),
             ],
           ),
+          const SizedBox(height: 16),
+          ClipRRect(
+            borderRadius: BorderRadius.circular(8),
+            child: LinearProgressIndicator(
+              value: totalDays > 0
+                  ? (currentDay / totalDays).clamp(0.0, 1.0)
+                  : 0,
+              minHeight: 7,
+              backgroundColor: _background,
+              valueColor: AlwaysStoppedAnimation<Color>(phaseColor),
+            ),
+          ),
           const SizedBox(height: 18),
           Container(
-            padding: const EdgeInsets.all(14),
+            padding: const EdgeInsets.all(15),
             decoration: BoxDecoration(
-              color: const Color(0xFF070B14),
+              color: _background,
               borderRadius: BorderRadius.circular(16),
-              border: Border.all(color: Colors.purpleAccent.withOpacity(0.08)),
+              border: Border.all(color: _purple.withOpacity(0.10)),
             ),
             child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 const Icon(
-                  Icons.auto_awesome,
-                  color: Colors.purpleAccent,
-                  size: 16,
+                  Icons.auto_awesome_rounded,
+                  color: _purple,
+                  size: 17,
                 ),
                 const SizedBox(width: 10),
                 Expanded(
-                  child: Text(
-                    aiMessage,
-                    style: const TextStyle(
-                      color: Colors.white70,
-                      fontSize: 13,
-                      height: 1.4,
-                      fontStyle: FontStyle.italic,
-                    ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        'INSIGHT DO DIA',
+                        style: TextStyle(
+                          color: _purple,
+                          fontSize: 9,
+                          fontWeight: FontWeight.w800,
+                          letterSpacing: 0.7,
+                        ),
+                      ),
+                      const SizedBox(height: 5),
+                      Text(
+                        aiMessage,
+                        style: const TextStyle(
+                          color: Colors.white70,
+                          fontSize: 12,
+                          height: 1.45,
+                        ),
+                      ),
+                    ],
                   ),
                 ),
               ],
@@ -960,4 +1619,354 @@ class _MenstrualCycleWidget extends ConsumerWidget {
       ),
     );
   }
+}
+
+class _MedicationCard extends StatelessWidget {
+  final dynamic medication;
+  final VoidCallback onDelete;
+
+  const _MedicationCard({
+    super.key,
+    required this.medication,
+    required this.onDelete,
+  });
+
+  static const Color _background = Color(0xFF070B14);
+  static const Color _green = Colors.greenAccent;
+
+  String _getStatus() {
+    final endDate = medication.endDate;
+
+    if (endDate == null) {
+      return 'Uso contínuo';
+    }
+
+    final now = DateTime.now();
+
+    final today = DateTime(now.year, now.month, now.day);
+
+    final end = DateTime(endDate.year, endDate.month, endDate.day);
+
+    final daysRemaining = end.difference(today).inDays;
+
+    if (daysRemaining < 0) {
+      return 'Tratamento encerrado';
+    }
+
+    if (daysRemaining == 0) {
+      return 'Encerra hoje';
+    }
+
+    return '$daysRemaining dias restantes';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final endDate = medication.endDate;
+    final status = _getStatus();
+
+    final now = DateTime.now();
+
+    final today = DateTime(now.year, now.month, now.day);
+
+    final isExpired =
+        endDate != null &&
+        DateTime(endDate.year, endDate.month, endDate.day).isBefore(today);
+
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: _background,
+        borderRadius: BorderRadius.circular(17),
+        border: Border.all(color: Colors.white10),
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 42,
+            height: 42,
+            decoration: BoxDecoration(
+              color: isExpired
+                  ? Colors.redAccent.withOpacity(0.08)
+                  : _green.withOpacity(0.08),
+              shape: BoxShape.circle,
+            ),
+            child: Icon(
+              Icons.medication_rounded,
+              color: isExpired ? Colors.redAccent : _green,
+              size: 20,
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  medication.name.toString(),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  status,
+                  style: TextStyle(
+                    color: isExpired ? Colors.redAccent : Colors.white54,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+                if (endDate != null) ...[
+                  const SizedBox(height: 2),
+                  Text(
+                    'Até ${DateFormat('dd/MM/yyyy').format(endDate)}',
+                    style: const TextStyle(
+                      color: Colors.white30,
+                      fontSize: 9.5,
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+          IconButton(
+            icon: const Icon(
+              Icons.delete_outline_rounded,
+              color: Colors.redAccent,
+              size: 20,
+            ),
+            onPressed: onDelete,
+            tooltip: 'Excluir medicamento',
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _SnapshotItem extends StatelessWidget {
+  final IconData icon;
+  final Color color;
+  final String label;
+  final String value;
+
+  const _SnapshotItem({
+    required this.icon,
+    required this.color,
+    required this.label,
+    required this.value,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Colors.white.withOpacity(0.025),
+        borderRadius: BorderRadius.circular(15),
+      ),
+      child: Row(
+        children: [
+          Icon(icon, color: color, size: 18),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  label,
+                  style: const TextStyle(color: Colors.white38, fontSize: 9),
+                ),
+                const SizedBox(height: 3),
+                Text(
+                  value,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _DialogField extends StatelessWidget {
+  final TextEditingController controller;
+  final String label;
+  final String hint;
+  final TextInputType? keyboardType;
+
+  const _DialogField({
+    required this.controller,
+    required this.label,
+    required this.hint,
+    this.keyboardType,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          label,
+          style: const TextStyle(color: Colors.white54, fontSize: 11),
+        ),
+        const SizedBox(height: 7),
+        TextField(
+          controller: controller,
+          keyboardType: keyboardType,
+          style: const TextStyle(color: Colors.white),
+          decoration: InputDecoration(
+            hintText: hint,
+            hintStyle: const TextStyle(color: Colors.white24, fontSize: 12),
+            filled: true,
+            fillColor: const Color(0xFF070B14),
+            contentPadding: const EdgeInsets.symmetric(
+              horizontal: 14,
+              vertical: 13,
+            ),
+            border: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(13),
+              borderSide: BorderSide.none,
+            ),
+            enabledBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(13),
+              borderSide: const BorderSide(color: Colors.white10),
+            ),
+            focusedBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(13),
+              borderSide: const BorderSide(color: Colors.greenAccent),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _EmptyMedicationState extends StatelessWidget {
+  const _EmptyMedicationState();
+
+  @override
+  Widget build(BuildContext context) {
+    return const Padding(
+      padding: EdgeInsets.symmetric(horizontal: 12, vertical: 22),
+      child: Column(
+        children: [
+          Icon(Icons.medication_outlined, color: Colors.white24, size: 34),
+          SizedBox(height: 10),
+          Text(
+            'Nenhum medicamento cadastrado',
+            style: TextStyle(
+              color: Colors.white54,
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          SizedBox(height: 4),
+          Text(
+            'Adicione um tratamento para acompanhá-lo aqui.',
+            textAlign: TextAlign.center,
+            style: TextStyle(color: Colors.white30, fontSize: 10),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _HealthLoading extends StatelessWidget {
+  const _HealthLoading();
+
+  @override
+  Widget build(BuildContext context) {
+    return const Center(
+      child: CircularProgressIndicator(
+        color: Colors.greenAccent,
+        strokeWidth: 2.5,
+      ),
+    );
+  }
+}
+
+class _HealthError extends StatelessWidget {
+  final VoidCallback onRetry;
+
+  const _HealthError({required this.onRetry});
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(28),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: 64,
+              height: 64,
+              decoration: BoxDecoration(
+                color: Colors.redAccent.withOpacity(0.08),
+                shape: BoxShape.circle,
+              ),
+              child: const Icon(
+                Icons.cloud_off_rounded,
+                color: Colors.redAccent,
+                size: 30,
+              ),
+            ),
+            const SizedBox(height: 16),
+            const Text(
+              'Não foi possível carregar sua saúde',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 16,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const SizedBox(height: 8),
+            const Text(
+              'Verifique sua conexão e tente novamente.',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: Colors.white54, fontSize: 12),
+            ),
+            const SizedBox(height: 18),
+            OutlinedButton.icon(
+              onPressed: onRetry,
+              style: OutlinedButton.styleFrom(
+                foregroundColor: Colors.greenAccent,
+                side: const BorderSide(color: Colors.greenAccent),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(13),
+                ),
+              ),
+              icon: const Icon(Icons.refresh_rounded, size: 18),
+              label: const Text('Tentar novamente'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _MoodData {
+  final String label;
+  final String emoji;
+
+  const _MoodData({required this.label, required this.emoji});
 }

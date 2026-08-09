@@ -1,55 +1,108 @@
-import 'package:flutter_local_notifications/flutter_local_notifications.dart';
-import 'package:timezone/data/latest_all.dart' as tz;
-import 'package:timezone/timezone.dart' as tz;
-import 'package:shared_preferences/shared_preferences.dart';
 import 'dart:io';
 import 'dart:math';
 
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:timezone/data/latest_all.dart' as tz;
+import 'package:timezone/timezone.dart' as tz;
+
 class NotificationService {
+  NotificationService();
+
+  static final NotificationService instance = NotificationService();
+
   final FlutterLocalNotificationsPlugin _notificationsPlugin =
       FlutterLocalNotificationsPlugin();
 
+  bool _initialized = false;
+
+  // ---------------------------------------------------------------------------
+  // INICIALIZAÇÃO
+  // ---------------------------------------------------------------------------
+
   Future<void> init() async {
+    if (_initialized) return;
+
+    tz.initializeTimeZones();
+
     const AndroidInitializationSettings androidSettings =
         AndroidInitializationSettings('@mipmap/ic_launcher');
 
-    const InitializationSettings initializationSettings =
-        InitializationSettings(
-          android: androidSettings,
-          iOS: DarwinInitializationSettings(),
-        );
+    const DarwinInitializationSettings iosSettings =
+        DarwinInitializationSettings();
 
-    // Na versão 17+, "settings" é obrigatório
+    const InitializationSettings initializationSettings =
+        InitializationSettings(android: androidSettings, iOS: iosSettings);
+
     await _notificationsPlugin.initialize(
       settings: initializationSettings,
-      onDidReceiveNotificationResponse: (NotificationResponse response) {
-        // Lógica para quando o usuário clicar na notificação
-      },
+      onDidReceiveNotificationResponse: _onNotificationResponse,
     );
-    tz.initializeTimeZones();
+
+    _initialized = true;
   }
 
-  Future<void> requestPermissions() async {
-    if (Platform.isAndroid) {
-      await _notificationsPlugin
-          .resolvePlatformSpecificImplementation<
-            AndroidFlutterLocalNotificationsPlugin
-          >()
-          ?.requestNotificationsPermission();
+  void _onNotificationResponse(NotificationResponse response) {
+    // Tratamento futuro de clique na notificação.
+  }
 
-      await _notificationsPlugin
-          .resolvePlatformSpecificImplementation<
-            AndroidFlutterLocalNotificationsPlugin
-          >()
-          ?.requestExactAlarmsPermission();
-    } else if (Platform.isIOS) {
-      await _notificationsPlugin
-          .resolvePlatformSpecificImplementation<
-            IOSFlutterLocalNotificationsPlugin
-          >()
-          ?.requestPermissions(alert: true, badge: true, sound: true);
+  // ---------------------------------------------------------------------------
+  // PERMISSÕES
+  // ---------------------------------------------------------------------------
+
+  Future<bool> requestPermissions() async {
+    try {
+      await init();
+
+      if (Platform.isAndroid) {
+        final AndroidFlutterLocalNotificationsPlugin? androidPlugin =
+            _notificationsPlugin
+                .resolvePlatformSpecificImplementation<
+                  AndroidFlutterLocalNotificationsPlugin
+                >();
+
+        if (androidPlugin == null) {
+          return false;
+        }
+
+        // Android 13+ — permissão para exibir notificações.
+        final bool? notificationPermission = await androidPlugin
+            .requestNotificationsPermission();
+
+        return notificationPermission ?? true;
+      }
+
+      if (Platform.isIOS) {
+        final IOSFlutterLocalNotificationsPlugin? iosPlugin =
+            _notificationsPlugin
+                .resolvePlatformSpecificImplementation<
+                  IOSFlutterLocalNotificationsPlugin
+                >();
+
+        if (iosPlugin == null) {
+          return false;
+        }
+
+        final bool? permission = await iosPlugin.requestPermissions(
+          alert: true,
+          badge: true,
+          sound: true,
+        );
+
+        return permission ?? true;
+      }
+
+      return true;
+    } catch (_) {
+      // A falha na permissão NÃO deve impedir o cadastro
+      // de medicamentos ou qualquer outra operação do aplicativo.
+      return false;
     }
   }
+
+  // ---------------------------------------------------------------------------
+  // NOTIFICAÇÃO IMEDIATA
+  // ---------------------------------------------------------------------------
 
   Future<void> showNotification(
     String title,
@@ -57,28 +110,47 @@ class NotificationService {
     String? preferenceKey,
     int? id,
   }) async {
-    if (preferenceKey != null) {
-      final prefs = await SharedPreferences.getInstance();
-      bool isEnabled = prefs.getBool(preferenceKey) ?? true;
-      if (!isEnabled) return;
+    try {
+      await init();
+
+      if (preferenceKey != null) {
+        final SharedPreferences prefs = await SharedPreferences.getInstance();
+
+        final bool isEnabled = prefs.getBool(preferenceKey) ?? true;
+
+        if (!isEnabled) {
+          return;
+        }
+      }
+
+      const AndroidNotificationDetails androidDetails =
+          AndroidNotificationDetails(
+            'life_os_channel',
+            'Life OS Notificações',
+            channelDescription: 'Notificações gerais do Life OS',
+            importance: Importance.max,
+            priority: Priority.high,
+          );
+
+      const NotificationDetails notificationDetails = NotificationDetails(
+        android: androidDetails,
+        iOS: DarwinNotificationDetails(),
+      );
+
+      await _notificationsPlugin.show(
+        id: id ?? Random().nextInt(100000),
+        title: title,
+        body: body,
+        notificationDetails: notificationDetails,
+      );
+    } catch (_) {
+      // Notificações nunca devem quebrar o fluxo principal do aplicativo.
     }
-
-    const AndroidNotificationDetails androidDetails =
-        AndroidNotificationDetails(
-          'life_os_channel',
-          'Life OS Notificações',
-          importance: Importance.max,
-          priority: Priority.high,
-        );
-
-    // Parâmetros nomeados corretamente aplicados
-    await _notificationsPlugin.show(
-      id: id ?? Random().nextInt(10000),
-      title: title,
-      body: body,
-      notificationDetails: const NotificationDetails(android: androidDetails),
-    );
   }
+
+  // ---------------------------------------------------------------------------
+  // NOTIFICAÇÃO DE MEDICAMENTO
+  // ---------------------------------------------------------------------------
 
   Future<void> scheduleMedicationNotification({
     required int id,
@@ -88,43 +160,84 @@ class NotificationService {
     String? preferenceKey,
     bool repeatDaily = false,
   }) async {
-    if (preferenceKey != null) {
-      final prefs = await SharedPreferences.getInstance();
-      bool isEnabled = prefs.getBool(preferenceKey) ?? true;
-      if (!isEnabled) return;
+    try {
+      await init();
+
+      if (preferenceKey != null) {
+        final SharedPreferences prefs = await SharedPreferences.getInstance();
+
+        final bool isEnabled = prefs.getBool(preferenceKey) ?? true;
+
+        if (!isEnabled) {
+          return;
+        }
+      }
+
+      DateTime validDate = scheduledDate;
+
+      // Se o horário já passou hoje, agenda para amanhã.
+      if (validDate.isBefore(DateTime.now())) {
+        validDate = validDate.add(const Duration(days: 1));
+      }
+
+      const AndroidNotificationDetails androidDetails =
+          AndroidNotificationDetails(
+            'medication_reminders_channel',
+            'Lembretes de Medicamentos',
+            channelDescription: 'Lembretes para tomar medicamentos',
+            importance: Importance.max,
+            priority: Priority.high,
+          );
+
+      const NotificationDetails notificationDetails = NotificationDetails(
+        android: androidDetails,
+        iOS: DarwinNotificationDetails(),
+      );
+
+      await _notificationsPlugin.zonedSchedule(
+        id: id,
+        title: title,
+        body: body,
+        scheduledDate: tz.TZDateTime.from(validDate, tz.local),
+        notificationDetails: notificationDetails,
+
+        // Mantém o agendamento exato.
+        androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
+
+        matchDateTimeComponents: repeatDaily ? DateTimeComponents.time : null,
+      );
+    } catch (_) {
+      // O medicamento já foi salvo.
+      // Uma falha no sistema de notificações não pode
+      // cancelar ou quebrar o cadastro.
     }
-
-    DateTime validDate = scheduledDate;
-    if (validDate.isBefore(DateTime.now())) {
-      validDate = validDate.add(const Duration(days: 1));
-    }
-
-    const AndroidNotificationDetails androidDetails =
-        AndroidNotificationDetails(
-          'medication_reminders_channel',
-          'Lembretes de Medicamentos',
-          importance: Importance.max,
-          priority: Priority.high,
-        );
-
-    // Parâmetros nomeados para agendamento
-    await _notificationsPlugin.zonedSchedule(
-      id: id,
-      title: title,
-      body: body,
-      scheduledDate: tz.TZDateTime.from(validDate, tz.local),
-      notificationDetails: const NotificationDetails(android: androidDetails),
-      androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
-      matchDateTimeComponents: repeatDaily ? DateTimeComponents.time : null,
-    );
   }
+
+  // ---------------------------------------------------------------------------
+  // CANCELAR UMA NOTIFICAÇÃO
+  // ---------------------------------------------------------------------------
 
   Future<void> cancelNotification(int id) async {
-    // ID nomeado obrigatório
-    await _notificationsPlugin.cancel(id: id);
+    try {
+      await init();
+
+      await _notificationsPlugin.cancel(id: id);
+    } catch (_) {
+      // Não propagar erro para o fluxo principal.
+    }
   }
 
+  // ---------------------------------------------------------------------------
+  // CANCELAR TODAS
+  // ---------------------------------------------------------------------------
+
   Future<void> cancelAllNotifications() async {
-    await _notificationsPlugin.cancelAll();
+    try {
+      await init();
+
+      await _notificationsPlugin.cancelAll();
+    } catch (_) {
+      // Não propagar erro para o fluxo principal.
+    }
   }
 }

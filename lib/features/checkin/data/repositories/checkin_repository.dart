@@ -1,29 +1,36 @@
 import 'dart:async';
+
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:drift/drift.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:intl/intl.dart';
 import 'package:life_os/core/database/app_database.dart';
-import 'package:life_os/core/utils/app_logger.dart'; // 🚀 Nosso Logger de produção
+import 'package:life_os/core/utils/app_logger.dart';
 
 class CheckInRepository {
   final AppDatabase _db;
   final FirebaseFirestore _firestore;
   final FirebaseAuth _auth;
 
-  // 💉 Injeção de dependência completa para testabilidade
+  // ===========================================================================
+  // INJEÇÃO DE DEPENDÊNCIA
+  // ===========================================================================
+
   CheckInRepository(this._db, this._firestore, this._auth);
 
   // ===========================================================================
-  // 1. LEITURA (UI CONSOME APENAS DO DRIFT)
+  // 1. LEITURA
+  //
+  // A UI consome exclusivamente o Drift.
+  // O Firebase não é consultado diretamente pela interface.
   // ===========================================================================
 
   Stream<List<CheckInEntry>> watchCheckIns() {
-    return _db.watchAllCheckIns();
+    return _db.watchAllCheckIns().map((items) => items.cast<CheckInEntry>());
   }
 
   // ===========================================================================
-  // 2. ESCRITA (OFFLINE-FIRST)
+  // 2. ESCRITA OFFLINE-FIRST
   // ===========================================================================
 
   Future<void> saveDailyMetrics({
@@ -31,28 +38,45 @@ class CheckInRepository {
     required double focus,
     required double motivation,
   }) async {
-    // 🔒 Trava de segurança: exige usuário logado
-    if (_auth.currentUser == null) return;
+    final user = _auth.currentUser;
+
+    if (user == null) {
+      AppLogger.w('Tentativa de salvar check-in sem usuário autenticado.');
+      return;
+    }
 
     try {
-      final todayId = DateFormat('yyyy-MM-dd').format(DateTime.now());
+      final now = DateTime.now();
 
-      // PASSO A: Salva no banco local (Drift) instantaneamente
+      // Um check-in por dia.
+      final todayId = DateFormat('yyyy-MM-dd').format(now);
+
+      // -----------------------------------------------------------------------
+      // PASSO A
+      // Salva imediatamente no Drift.
+      // -----------------------------------------------------------------------
+
       await _db.insertCheckIn(
         CheckInTableCompanion(
           id: Value(todayId),
           energy: Value(energy),
           focus: Value(focus),
           motivation: Value(motivation),
-          createdAt: Value(DateTime.now()),
+          createdAt: Value(now),
           isSynced: const Value(false),
         ),
       );
 
-      // PASSO B: Dispara a sincronização com o Firebase em background
+      AppLogger.i('Check-in salvo localmente: $todayId');
+
+      // -----------------------------------------------------------------------
+      // PASSO B
+      // Tenta sincronizar em background.
+      // -----------------------------------------------------------------------
+
       unawaited(
         _syncWithFirebase(
-          userId: _auth.currentUser!.uid,
+          userId: user.uid,
           checkInId: todayId,
           energy: energy,
           focus: focus,
@@ -61,58 +85,76 @@ class CheckInRepository {
       );
     } catch (error, stackTrace) {
       AppLogger.e('Erro ao salvar check-in localmente', error, stackTrace);
+
       rethrow;
     }
   }
 
   // ===========================================================================
-  // 3. SINCRONIZAÇÃO EM BACKGROUND (SYNC-DOWN / HIDRATAÇÃO)
+  // 3. DOWNLOAD / HIDRATAÇÃO
+  //
+  // Firebase -> Drift
   // ===========================================================================
 
   Future<void> syncCheckinsFromFirebaseToLocal() async {
-    final userId = _auth.currentUser?.uid;
-    if (userId == null) return;
+    final user = _auth.currentUser;
+
+    if (user == null) {
+      AppLogger.w('SYNC Check-ins ignorado: usuário não autenticado.');
+      return;
+    }
 
     try {
-      AppLogger.i('SYNC Check-ins: Iniciando...');
+      AppLogger.i('SYNC Check-ins: iniciando download do Firebase...');
+
       final snapshot = await _firestore
           .collection('users')
-          .doc(userId)
+          .doc(user.uid)
           .collection('checkins')
           .get();
 
-      for (var doc in snapshot.docs) {
+      for (final doc in snapshot.docs) {
         final data = doc.data();
 
-        // Verifica se a tabela se chama checkInTable.
-        // Caso seu AppDatabase use um nome diferente para a tabela (ex: checkIns), ajuste abaixo!
+        final energy = (data['energy'] as num?)?.toDouble() ?? 0.0;
+
+        final focus = (data['focus'] as num?)?.toDouble() ?? 0.0;
+
+        final motivation = (data['motivation'] as num?)?.toDouble() ?? 0.0;
+
+        final updatedAt = data['updatedAt'];
+
+        final createdAt = updatedAt is Timestamp
+            ? updatedAt.toDate()
+            : DateTime.now();
+
         await _db
             .into(_db.checkInTable)
             .insertOnConflictUpdate(
               CheckInTableCompanion(
                 id: Value(doc.id),
-                energy: Value((data['energy'] as num?)?.toDouble() ?? 0.0),
-                focus: Value((data['focus'] as num?)?.toDouble() ?? 0.0),
-                motivation: Value(
-                  (data['motivation'] as num?)?.toDouble() ?? 0.0,
-                ),
-                createdAt: Value(
-                  (data['updatedAt'] as Timestamp?)?.toDate() ?? DateTime.now(),
-                ),
-                isSynced: const Value(
-                  true,
-                ), // Chegou da nuvem, então já tá sincronizado!
+                energy: Value(energy),
+                focus: Value(focus),
+                motivation: Value(motivation),
+                createdAt: Value(createdAt),
+                isSynced: const Value(true),
               ),
             );
       }
-      AppLogger.i('SYNC Check-ins: Concluído com sucesso.');
+
+      AppLogger.i(
+        'SYNC Check-ins: download concluído. '
+        '${snapshot.docs.length} registros processados.',
+      );
     } catch (error, stackTrace) {
-      AppLogger.e('SYNC Check-ins: ERRO CRÍTICO', error, stackTrace);
+      AppLogger.e('SYNC Check-ins: erro durante download', error, stackTrace);
     }
   }
 
   // ===========================================================================
-  // 4. SINCRONIZAÇÃO EM BACKGROUND (SYNC-UP PENDENTES)
+  // 4. UPLOAD DE UM CHECK-IN
+  //
+  // Drift -> Firebase
   // ===========================================================================
 
   Future<void> _syncWithFirebase({
@@ -135,23 +177,51 @@ class CheckInRepository {
             'updatedAt': FieldValue.serverTimestamp(),
           }, SetOptions(merge: true));
 
-      // PASSO C: Confirmação e atualização local
+      // Só marca como sincronizado depois da confirmação
+      // do Firebase.
       await _db.markCheckInAsSynced(checkInId);
+
+      AppLogger.i('Check-in sincronizado com sucesso: $checkInId');
     } catch (error, stackTrace) {
-      // O dado está seguro no Drift. Logamos o erro silencioso para análise.
-      AppLogger.e('Erro de sincronização: enviar check-in', error, stackTrace);
+      // Não marca como sincronizado.
+      //
+      // O registro continua no Drift com isSynced = false
+      // e poderá ser enviado posteriormente.
+      AppLogger.e(
+        'Erro ao sincronizar check-in: $checkInId',
+        error,
+        stackTrace,
+      );
     }
   }
 
+  // ===========================================================================
+  // 5. SINCRONIZAÇÃO DOS PENDENTES
+  //
+  // Envia registros que ficaram offline.
+  // ===========================================================================
+
   Future<void> syncPendingCheckIns() async {
     final user = _auth.currentUser;
-    if (user == null) return;
+
+    if (user == null) {
+      AppLogger.w('SYNC pendentes ignorado: usuário não autenticado.');
+      return;
+    }
 
     try {
       final pendingList = await _db.getPendingCheckIns();
 
-      for (var checkIn in pendingList) {
-        // Envia sequencialmente os pendentes
+      if (pendingList.isEmpty) {
+        AppLogger.i('SYNC Check-ins: nenhum registro pendente.');
+        return;
+      }
+
+      AppLogger.i(
+        'SYNC Check-ins: ${pendingList.length} registro(s) pendente(s).',
+      );
+
+      for (final checkIn in pendingList) {
         await _syncWithFirebase(
           userId: user.uid,
           checkInId: checkIn.id,
@@ -160,12 +230,10 @@ class CheckInRepository {
           motivation: checkIn.motivation,
         );
       }
+
+      AppLogger.i('SYNC Check-ins: processamento dos pendentes concluído.');
     } catch (error, stackTrace) {
-      AppLogger.e(
-        'Erro ao varrer ou sincronizar check-ins pendentes',
-        error,
-        stackTrace,
-      );
+      AppLogger.e('Erro ao processar check-ins pendentes', error, stackTrace);
     }
   }
 }
