@@ -4,7 +4,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:drift/drift.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:life_os/core/database/app_database.dart';
-import 'package:life_os/core/utils/app_logger.dart'; // 🚀 Nosso Logger de produção
+import 'package:life_os/core/utils/app_logger.dart';
 import 'package:life_os/features/habits/data/models/habit_model.dart';
 import 'package:uuid/uuid.dart';
 
@@ -29,14 +29,12 @@ class HabitsRepository {
   }
 
   Future<void> addHabit(String title) async {
-    // 🔒 Trava de segurança: exige usuário logado
     if (_auth.currentUser == null) return;
 
     try {
       final id = _uuid.v4();
       final dates = <String>[];
 
-      // 1. Salva localmente primeiro (Resposta instantânea na UI)
       await _db
           .into(_db.habits)
           .insert(
@@ -47,7 +45,6 @@ class HabitsRepository {
             ),
           );
 
-      // 2. Dispara pro Firestore em background (Não bloqueia o app se estiver sem rede)
       unawaited(_saveHabitToFirestore(id, title, dates));
     } catch (error, stackTrace) {
       AppLogger.e('Erro ao criar hábito localmente', error, stackTrace);
@@ -59,7 +56,6 @@ class HabitsRepository {
     String habitId,
     List<String> currentDates,
   ) async {
-    // 🔒 Trava de segurança: exige usuário logado
     if (_auth.currentUser == null) return;
 
     try {
@@ -72,12 +68,10 @@ class HabitsRepository {
         updatedDates.add(todayStr);
       }
 
-      // 1. Atualiza localmente primeiro
       await (_db.update(_db.habits)..where((t) => t.id.equals(habitId))).write(
         HabitsCompanion(completedDates: Value(jsonEncode(updatedDates))),
       );
 
-      // 2. Dispara pro Firestore em background
       unawaited(_updateHabitInFirestore(habitId, updatedDates));
     } catch (error, stackTrace) {
       AppLogger.e(
@@ -89,30 +83,114 @@ class HabitsRepository {
     }
   }
 
-  Future<void> deleteHabit(String habitId) async {
-    // 🔒 Trava de segurança: exige usuário logado
+  // 🚀 NOVO MÉTODO: Permite atualizar e alternar qualquer dia da semana na matriz interativa
+  Future<void> updateHabitDates(String habitId, List<String> newDates) async {
     if (_auth.currentUser == null) return;
 
     try {
-      // 1. Deleta localmente primeiro
-      await (_db.delete(_db.habits)..where((t) => t.id.equals(habitId))).go();
+      // 1. Atualiza localmente primeiro (Drift)
+      await (_db.update(_db.habits)..where((t) => t.id.equals(habitId))).write(
+        HabitsCompanion(completedDates: Value(jsonEncode(newDates))),
+      );
 
-      //Remove a notificação correspondente do Drift
-      await (_db.delete(
-        _db.notificationsTable,
-      )..where((t) => t.id.equals('habit_$habitId'))).go();
-
-      // 2. Deleta no Firestore em background
-      unawaited(_deleteHabitFromFirestore(habitId));
+      // 2. Dispara pro Firestore em background
+      unawaited(_updateHabitInFirestore(habitId, newDates));
     } catch (error, stackTrace) {
-      AppLogger.e('Erro ao deletar hábito localmente', error, stackTrace);
+      AppLogger.e(
+        'Erro ao atualizar datas do hábito localmente',
+        error,
+        stackTrace,
+      );
       rethrow;
     }
   }
 
-  // ===========================================================================
-  // 🚀 SINCRONIZAÇÃO EM BACKGROUND (SYNC-DOWN / HIDRATAÇÃO)
-  // ===========================================================================
+  Future<void> deleteHabit(String habitId, String habitTitle) async {
+    // 🔒 Trava de segurança: exige usuário logado
+    if (_auth.currentUser == null) return;
+
+    try {
+      // 1. Deleta o hábito localmente no Drift pelo ID
+      await (_db.delete(_db.habits)..where((t) => t.id.equals(habitId))).go();
+
+      // 2. Limpeza profunda no Drift: Apaga qualquer notificação relacionada ao ID ou ao Título do Hábito
+      await (_db.delete(_db.notificationsTable)..where(
+            (t) =>
+                t.id.equals(habitId) |
+                t.id.equals('habit_$habitId') |
+                t.title.like('%$habitTitle%'),
+          ))
+          .go();
+
+      // 3. Deleta no Firestore (Hábito e Notificações) e aguarda
+      try {
+        final userId = _auth.currentUser!.uid;
+        final batch = _firestore.batch();
+
+        final habitDoc = _firestore
+            .collection('users')
+            .doc(userId)
+            .collection('habits')
+            .doc(habitId);
+        final notifDoc1 = _firestore
+            .collection('users')
+            .doc(userId)
+            .collection('notifications')
+            .doc(habitId);
+        final notifDoc2 = _firestore
+            .collection('users')
+            .doc(userId)
+            .collection('notifications')
+            .doc('habit_$habitId');
+
+        batch.delete(habitDoc);
+        batch.delete(notifDoc1);
+        batch.delete(notifDoc2);
+
+        await batch.commit().timeout(const Duration(seconds: 5));
+      } catch (e) {
+        AppLogger.e(
+          'Aviso: Falha ao apagar na nuvem, mas foi limpo localmente',
+          e,
+        );
+      }
+    } catch (error, stackTrace) {
+      AppLogger.e('Erro ao deletar hábito completamente', error, stackTrace);
+      rethrow;
+    }
+  }
+
+  // 🚀 Método auxiliar para limpar a notificação do hábito no Firestore
+  Future<void> _deleteNotificationFromFirestore(String habitId) async {
+    final userId = _auth.currentUser?.uid;
+    if (userId == null) return;
+
+    try {
+      final batch = _firestore.batch();
+
+      final notifDoc1 = _firestore
+          .collection('users')
+          .doc(userId)
+          .collection('notifications')
+          .doc(habitId);
+      final notifDoc2 = _firestore
+          .collection('users')
+          .doc(userId)
+          .collection('notifications')
+          .doc('habit_$habitId');
+
+      batch.delete(notifDoc1);
+      batch.delete(notifDoc2);
+
+      await batch.commit();
+    } catch (error, stackTrace) {
+      AppLogger.e(
+        'Erro ao deletar notificação do hábito no Firestore',
+        error,
+        stackTrace,
+      );
+    }
+  }
 
   Future<void> syncHabitsFromFirebaseToLocal() async {
     final userId = _auth.currentUser?.uid;
@@ -129,7 +207,6 @@ class HabitsRepository {
       for (var doc in snapshot.docs) {
         final data = doc.data();
 
-        // Converte a lista dinâmica que vem do Firestore de volta para List<String>
         final rawDates = data['completedDates'] as List<dynamic>? ?? [];
         final dates = rawDates.map((e) => e.toString()).toList();
 
@@ -148,8 +225,6 @@ class HabitsRepository {
       AppLogger.e('SYNC Hábitos: ERRO CRÍTICO', error, stackTrace);
     }
   }
-
-  // --- Métodos Privados para Sincronização com o Firestore ---
 
   Future<void> _saveHabitToFirestore(
     String id,
@@ -170,7 +245,6 @@ class HabitsRepository {
             'completedDates': dates,
           }, SetOptions(merge: true));
     } catch (error, stackTrace) {
-      // Em falta de internet, o Firebase enfileira. Logamos caso falhe de vez.
       AppLogger.e(
         'Erro de sincronização: criar hábito no Firestore',
         error,
