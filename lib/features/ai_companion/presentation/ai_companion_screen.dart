@@ -50,50 +50,102 @@ class _AICompanionScreenState extends ConsumerState<AICompanionScreen> {
 
     // 2. CHECAGEM DE CONSENTIMENTO LGPD (OPT-IN)
     // Se o usuário é Premium mas ainda não aceitou os termos, mostra a tela de aceite.
-    final hasConsented = ref.watch(aiConsentProvider);
-    if (!hasConsented) {
-      return const AiConsentView();
-    }
+    final consentState = ref.watch(aiConsentProvider);
 
-    // 3. CARREGAMENTO DO CHAT (Se for premium e já tiver consentido)
-    final aiState = ref.watch(aiCompanionProvider);
-    _scrollToBottom();
-
-    return Scaffold(
-      backgroundColor: const Color(0xFF070B14),
-      appBar: _buildAppBar(),
-      body: SafeArea(
-        child: Column(
-          children: [
-            Expanded(
-              child: ListView.builder(
-                controller: _scrollController,
-                padding: const EdgeInsets.all(20),
-                itemCount: aiState.messages.length,
-                itemBuilder: (context, index) {
-                  final message = aiState.messages[index];
-                  return _buildMessageBubble(message);
-                },
-              ),
-            ),
-            if (aiState.isLoading)
-              const Padding(
-                padding: EdgeInsets.symmetric(vertical: 10),
-                child: Center(
-                  child: SizedBox(
-                    height: 20,
-                    width: 20,
-                    child: CircularProgressIndicator(
-                      color: Colors.purpleAccent,
-                      strokeWidth: 2,
-                    ),
-                  ),
-                ),
-              ),
-            _buildInputArea(aiState),
-          ],
+    return consentState.when(
+      loading: () => const Scaffold(
+        backgroundColor: Color(0xFF070B14),
+        body: Center(
+          child: CircularProgressIndicator(color: Colors.purpleAccent),
         ),
       ),
+      error: (error, stackTrace) => Scaffold(
+        backgroundColor: const Color(0xFF070B14),
+        body: Center(
+          child: Padding(
+            padding: const EdgeInsets.all(24),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(
+                  Icons.error_outline_rounded,
+                  color: Colors.redAccent,
+                  size: 48,
+                ),
+                const SizedBox(height: 16),
+                const Text(
+                  'Não foi possível verificar o consentimento.',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 16,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                const Text(
+                  'Tente novamente.',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(color: Colors.white54),
+                ),
+                const SizedBox(height: 20),
+                ElevatedButton(
+                  onPressed: () {
+                    ref.invalidate(aiConsentProvider);
+                  },
+                  child: const Text('Tentar novamente'),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+      data: (hasConsented) {
+        if (!hasConsented) {
+          return const AiConsentView();
+        }
+
+        final aiState = ref.watch(aiCompanionProvider);
+
+        _scrollToBottom();
+
+        return Scaffold(
+          backgroundColor: const Color(0xFF070B14),
+          appBar: _buildAppBar(),
+          body: SafeArea(
+            child: Column(
+              children: [
+                Expanded(
+                  child: ListView.builder(
+                    controller: _scrollController,
+                    padding: const EdgeInsets.all(20),
+                    itemCount: aiState.messages.length,
+                    itemBuilder: (context, index) {
+                      final message = aiState.messages[index];
+                      return _buildMessageBubble(message);
+                    },
+                  ),
+                ),
+                if (aiState.isLoading)
+                  const Padding(
+                    padding: EdgeInsets.symmetric(vertical: 10),
+                    child: Center(
+                      child: SizedBox(
+                        height: 20,
+                        width: 20,
+                        child: CircularProgressIndicator(
+                          color: Colors.purpleAccent,
+                          strokeWidth: 2,
+                        ),
+                      ),
+                    ),
+                  ),
+                _buildInputArea(aiState),
+              ],
+            ),
+          ),
+        );
+      },
     );
   }
 
@@ -221,52 +273,90 @@ class _AICompanionScreenState extends ConsumerState<AICompanionScreen> {
 
   Future<void> _handleSendMessage() async {
     final text = _controller.text.trim();
+
     if (text.isEmpty) return;
+
+    final hasConsented = ref.read(aiConsentProvider).value ?? false;
+
+    if (!hasConsented) {
+      if (!mounted) return;
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Aceite o consentimento para permitir o uso dos seus dados pelo Companion.',
+          ),
+        ),
+      );
+
+      return;
+    }
 
     _controller.clear();
 
     try {
-      // 1. Sincroniza e puxa os dados de saúde
+      // ----------------------------------------------------------------------
+      // 1. SINCRONIZAÇÃO
+      // ----------------------------------------------------------------------
+
       await ref.read(healthRepositoryProvider).syncHealthFromFirebase();
+
+      // ----------------------------------------------------------------------
+      // 2. LEITURA DOS ESTADOS ATUAIS
+      //
+      // O Companion usa os providers de dados completos,
+      // nunca os providers destinados apenas à apresentação/paginação.
+      // ----------------------------------------------------------------------
+
       final healthAsyncValue = ref.read(healthStreamProvider);
       final medicationsAsyncValue = ref.read(medicationsStreamProvider);
-
-      // 2. Puxa os dados financeiros do banco de dados local (Drift)
       final financeAsyncValue = ref.read(financeStreamProvider);
 
       final health = healthAsyncValue.asData?.value;
       final medications = medicationsAsyncValue.asData?.value ?? [];
       final transactions = financeAsyncValue.asData?.value ?? [];
 
-      // 3. O CÉREBRO FINANCEIRO: Calculando o resumo para a IA
+      // ----------------------------------------------------------------------
+      // 3. CÁLCULO FINANCEIRO
+      // ----------------------------------------------------------------------
+
       double totalIncome = 0.0;
       double totalExpense = 0.0;
 
-      for (final t in transactions) {
-        // Verifica se é 'income' (entrada) ou 'expense' (saída)
-        if (t.type == 'income') {
-          totalIncome += t.amount;
-        } else if (t.type == 'expense') {
-          totalExpense += t.amount;
+      for (final transaction in transactions) {
+        if (transaction.type == 'income') {
+          totalIncome += transaction.amount;
+        } else if (transaction.type == 'expense') {
+          totalExpense += transaction.amount;
         }
       }
 
       final balance = totalIncome - totalExpense;
 
-      // Monta o pacote mastigado para a IA ler facilmente
       final financeSummary = {
         'saldo_atual': balance,
         'total_entradas': totalIncome,
         'total_saidas': totalExpense,
       };
 
-      // 4. Delega a montagem do contexto para o repositório de IA
+      // ----------------------------------------------------------------------
+      // 4. MONTAGEM DO CONTEXTO
+      //
+      // Só chegamos aqui depois de validar o consentimento.
+      // ----------------------------------------------------------------------
+
       final repository = ref.read(aiCompanionRepositoryProvider);
+
       final contextData = await repository.getSystemContext(
+        hasConsent: hasConsented,
         health: health,
         medications: medications,
-        finance: financeSummary, // 🔴 Agora o dinheiro vai junto no pacote!
+        finance: financeSummary,
       );
+
+      // ----------------------------------------------------------------------
+      // 5. ENVIO
+      // ----------------------------------------------------------------------
 
       await ref
           .read(aiCompanionProvider.notifier)
@@ -280,9 +370,9 @@ class _AICompanionScreenState extends ConsumerState<AICompanionScreen> {
           MaterialPageRoute(builder: (_) => const PremiumScreen()),
         );
       } else {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text("Erro: ${e.toString()}")));
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text("Não foi possível processar a mensagem.")),
+        );
       }
     }
   }

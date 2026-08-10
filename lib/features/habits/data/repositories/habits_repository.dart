@@ -16,6 +16,10 @@ class HabitsRepository {
 
   HabitsRepository(this._db, this._firestore, this._auth);
 
+  // ===========================================================================
+  // 1. LEITURA (STREAMS LOCAIS)
+  // ===========================================================================
+
   Stream<List<HabitModel>> getHabitsStream() {
     return _db.select(_db.habits).watch().map((rows) {
       return rows.map((row) {
@@ -27,6 +31,10 @@ class HabitsRepository {
       }).toList();
     });
   }
+
+  // ===========================================================================
+  // 2. ESCRITA (OFFLINE-FIRST)
+  // ===========================================================================
 
   Future<void> addHabit(String title) async {
     if (_auth.currentUser == null) return;
@@ -88,12 +96,10 @@ class HabitsRepository {
     if (_auth.currentUser == null) return;
 
     try {
-      // 1. Atualiza localmente primeiro (Drift)
       await (_db.update(_db.habits)..where((t) => t.id.equals(habitId))).write(
         HabitsCompanion(completedDates: Value(jsonEncode(newDates))),
       );
 
-      // 2. Dispara pro Firestore em background
       unawaited(_updateHabitInFirestore(habitId, newDates));
     } catch (error, stackTrace) {
       AppLogger.e(
@@ -106,14 +112,13 @@ class HabitsRepository {
   }
 
   Future<void> deleteHabit(String habitId, String habitTitle) async {
-    // 🔒 Trava de segurança: exige usuário logado
     if (_auth.currentUser == null) return;
 
     try {
-      // 1. Deleta o hábito localmente no Drift pelo ID
+      // 1. Deleta o hábito localmente no Drift
       await (_db.delete(_db.habits)..where((t) => t.id.equals(habitId))).go();
 
-      // 2. Limpeza profunda no Drift: Apaga qualquer notificação relacionada ao ID ou ao Título do Hábito
+      // 2. Limpeza local da notificação
       await (_db.delete(_db.notificationsTable)..where(
             (t) =>
                 t.id.equals(habitId) |
@@ -122,75 +127,17 @@ class HabitsRepository {
           ))
           .go();
 
-      // 3. Deleta no Firestore (Hábito e Notificações) e aguarda
-      try {
-        final userId = _auth.currentUser!.uid;
-        final batch = _firestore.batch();
-
-        final habitDoc = _firestore
-            .collection('users')
-            .doc(userId)
-            .collection('habits')
-            .doc(habitId);
-        final notifDoc1 = _firestore
-            .collection('users')
-            .doc(userId)
-            .collection('notifications')
-            .doc(habitId);
-        final notifDoc2 = _firestore
-            .collection('users')
-            .doc(userId)
-            .collection('notifications')
-            .doc('habit_$habitId');
-
-        batch.delete(habitDoc);
-        batch.delete(notifDoc1);
-        batch.delete(notifDoc2);
-
-        await batch.commit().timeout(const Duration(seconds: 5));
-      } catch (e) {
-        AppLogger.e(
-          'Aviso: Falha ao apagar na nuvem, mas foi limpo localmente',
-          e,
-        );
-      }
+      // 3. Deleta no Firestore (Hábito e Notificações) em BACKGROUND
+      unawaited(_deleteHabitAndNotifsInFirestore(habitId));
     } catch (error, stackTrace) {
-      AppLogger.e('Erro ao deletar hábito completamente', error, stackTrace);
+      AppLogger.e('Erro ao deletar hábito localmente', error, stackTrace);
       rethrow;
     }
   }
 
-  // 🚀 Método auxiliar para limpar a notificação do hábito no Firestore
-  Future<void> _deleteNotificationFromFirestore(String habitId) async {
-    final userId = _auth.currentUser?.uid;
-    if (userId == null) return;
-
-    try {
-      final batch = _firestore.batch();
-
-      final notifDoc1 = _firestore
-          .collection('users')
-          .doc(userId)
-          .collection('notifications')
-          .doc(habitId);
-      final notifDoc2 = _firestore
-          .collection('users')
-          .doc(userId)
-          .collection('notifications')
-          .doc('habit_$habitId');
-
-      batch.delete(notifDoc1);
-      batch.delete(notifDoc2);
-
-      await batch.commit();
-    } catch (error, stackTrace) {
-      AppLogger.e(
-        'Erro ao deletar notificação do hábito no Firestore',
-        error,
-        stackTrace,
-      );
-    }
-  }
+  // ===========================================================================
+  // 3. SINCRONIZAÇÃO FIREBASE <-> DRIFT
+  // ===========================================================================
 
   Future<void> syncHabitsFromFirebaseToLocal() async {
     final userId = _auth.currentUser?.uid;
@@ -225,6 +172,10 @@ class HabitsRepository {
       AppLogger.e('SYNC Hábitos: ERRO CRÍTICO', error, stackTrace);
     }
   }
+
+  // ===========================================================================
+  // 4. FIREBASE - MÉTODOS PRIVADOS EM BACKGROUND
+  // ===========================================================================
 
   Future<void> _saveHabitToFirestore(
     String id,
@@ -276,17 +227,40 @@ class HabitsRepository {
     }
   }
 
-  Future<void> _deleteHabitFromFirestore(String habitId) async {
+  // 🛡️ CORREÇÃO: Método único que garante a deleção do hábito E da notificação
+  Future<void> _deleteHabitAndNotifsInFirestore(String habitId) async {
     final userId = _auth.currentUser?.uid;
     if (userId == null) return;
 
     try {
-      await _firestore
+      final batch = _firestore.batch();
+
+      // Deleta o documento do hábito
+      final habitDoc = _firestore
           .collection('users')
           .doc(userId)
           .collection('habits')
-          .doc(habitId)
-          .delete();
+          .doc(habitId);
+
+      // Deleta possíveis variações do ID da notificação
+      final notifDoc1 = _firestore
+          .collection('users')
+          .doc(userId)
+          .collection('notifications')
+          .doc(habitId);
+
+      final notifDoc2 = _firestore
+          .collection('users')
+          .doc(userId)
+          .collection('notifications')
+          .doc('habit_$habitId');
+
+      batch.delete(habitDoc);
+      batch.delete(notifDoc1);
+      batch.delete(notifDoc2);
+
+      await batch.commit();
+      AppLogger.i('Hábito $habitId e suas notificações removidos do Firebase.');
     } catch (error, stackTrace) {
       AppLogger.e(
         'Erro de sincronização: deletar hábito no Firestore',

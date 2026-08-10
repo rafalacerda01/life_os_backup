@@ -82,7 +82,7 @@ class AiConsentView extends ConsumerWidget {
                     SizedBox(width: 12),
                     Expanded(
                       child: Text(
-                        "Seus dados são anonimizados e não são usados para treinar modelos públicos (LGPD Compliant).",
+                        "Privacidade de Controle. O uso do companion com seus dados é opcional. Se você aceitar, o Life Os poderá utilizar os dados selecionados nesta tela para gerar insights personalizados. Se voc~e não aceitar, o Companion não terá acesso a esses dados.",
                         style: TextStyle(
                           color: Colors.amberAccent,
                           fontSize: 12,
@@ -108,7 +108,7 @@ class AiConsentView extends ConsumerWidget {
                     ref.read(aiConsentProvider.notifier).acceptConsent();
                   },
                   child: const Text(
-                    "Li e Aceito Compartilhar Dados",
+                    "Permitir acesso aos meus dados",
                     style: TextStyle(
                       color: Colors.white,
                       fontSize: 16,

@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:life_os/features/ai_companion/data/models/chat_message.dart';
 import 'package:life_os/features/ai_companion/data/repositories/ai_companion_repository.dart';
 import 'package:life_os/features/premium/presentation/premium_provider.dart';
+import 'package:life_os/core/utils/app_logger.dart';
 
 // --- INJEÇÃO DO REPOSITÓRIO ---
 final aiCompanionRepositoryProvider = Provider<AICompanionRepository>((ref) {
@@ -82,12 +83,42 @@ class AICompanionNotifier extends Notifier<AICompanionState> {
         isLoading: false,
       );
     } catch (e) {
+      String errorMessage;
+
+      if (e is AIAuthenticationException) {
+        errorMessage =
+            '🔐 Sua sessão expirou ou não é válida. Faça login novamente.';
+      } else if (e is AIConsentRequiredException) {
+        errorMessage =
+            '🔒 O consentimento é necessário para utilizar o Companion IA.';
+      } else if (e is AIRateLimitException) {
+        errorMessage =
+            '⏳ Você atingiu o limite de solicitações. Aguarde um pouco e tente novamente.';
+      } else if (e is AIBadRequestException) {
+        errorMessage =
+            '⚠️ Não foi possível processar essa mensagem. Verifique o conteúdo e tente novamente.';
+      } else if (e is AITimeoutException) {
+        errorMessage =
+            '⏱️ O servidor demorou para responder. Verifique sua conexão e tente novamente.';
+      } else if (e is AINetworkException) {
+        errorMessage =
+            '🌐 Não foi possível conectar ao serviço de IA. Verifique sua conexão e tente novamente.';
+      } else if (e is AIServiceException) {
+        errorMessage =
+            '⚡ O serviço de IA está temporariamente indisponível. Tente novamente mais tarde.';
+      } else {
+        errorMessage =
+            '⚠️ Não foi possível processar sua mensagem. Tente novamente.';
+      }
+
+      AppLogger.e('Erro no AI Companion', e, StackTrace.current);
+
       state = state.copyWith(
         isLoading: false,
         messages: [
           ...state.messages,
           ChatMessage(
-            text: "🚨 ERRO DE CONEXÃO: $e",
+            text: errorMessage,
             isUser: false,
             timestamp: DateTime.now(),
           ),
