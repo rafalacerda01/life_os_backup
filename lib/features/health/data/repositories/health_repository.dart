@@ -786,14 +786,31 @@ class HealthRepository {
     required String docId,
   }) async {
     try {
-      await _firestore
-          .collection('users')
-          .doc(userId)
-          .collection('medications')
-          .doc(docId)
-          .delete();
+      final batch = _firestore.batch();
 
-      AppLogger.i('Medicamento $docId removido do Firebase.');
+      // 1. Deleta o medicamento da coleção medications
+      batch.delete(
+        _firestore
+            .collection('users')
+            .doc(userId)
+            .collection('medications')
+            .doc(docId),
+      );
+
+      // 2. 🛡️ CORREÇÃO: Deleta a notificação atrelada da coleção notifications na nuvem
+      batch.delete(
+        _firestore
+            .collection('users')
+            .doc(userId)
+            .collection('notifications')
+            .doc('health_med_$docId'),
+      );
+
+      await batch.commit();
+
+      AppLogger.i(
+        'Medicamento $docId e sua notificação removidos do Firebase.',
+      );
     } catch (e, stack) {
       AppLogger.e('Sync Error: Deletar medicamento.', e, stack);
     }
