@@ -96,6 +96,8 @@ class AuthRepositoryImpl implements AuthRepository {
 
       // Notificações
       'notifications',
+      // Privacy
+      'privacy',
     ];
 
     for (final collectionName in userSubcollections) {
@@ -110,46 +112,82 @@ class AuthRepositoryImpl implements AuthRepository {
 
     // -------------------------------------------------------------------------
     // CIRCLES
-    //
-    // O ranking do usuário pertence ao Circle e deve ser removido quando
-    // possível. A atualização do memberCount não deve impedir a exclusão
-    // da conta caso as Firestore Rules não permitam essa operação.
     // -------------------------------------------------------------------------
+    //
+    // Se o usuário for o único membro e também o administrador,
+    // o Circle pertence exclusivamente à conta e deve ser removido
+    // juntamente com suas subcoleções.
+    //
+    // Se houver outros membros, NÃO apagamos o Circle.
+    // Removemos somente os dados privados/ranking do usuário.
+    //
+
     final userSnapshot = await userDocRef.get();
     final userData = userSnapshot.data();
 
     final activeCircleId = userData?['activeCircleId'] as String?;
 
-    if (activeCircleId != null && activeCircleId.isNotEmpty) {
-      final rankingRef = _firestore
-          .collection('circles')
-          .doc(activeCircleId)
-          .collection('ranking')
-          .doc(uid);
+    if (activeCircleId != null && activeCircleId.trim().isNotEmpty) {
+      final circleId = activeCircleId.trim();
 
-      try {
-        await rankingRef.delete();
-      } on FirebaseException {
-        // O ranking é um dado secundário do Circle.
-        // Se as Rules impedirem a operação, não interrompemos
-        // a exclusão dos dados privados da conta.
+      final circleRef = _firestore.collection('circles').doc(circleId);
+      final circleSnapshot = await circleRef.get();
+
+      if (circleSnapshot.exists) {
+        final circleData = circleSnapshot.data();
+
+        final adminId = circleData?['adminId'] as String?;
+        final memberCount = circleData?['memberCount'];
+
+        final isAdmin = adminId == uid;
+        final isLastMember = memberCount is num && memberCount <= 1;
+
+        // ================================================================
+        // CIRCLE EXCLUSIVO DO USUÁRIO
+        // ================================================================
+        //
+        // No seu caso do print:
+        // memberCount = 1
+        // adminId = uid
+        //
+        // Portanto podemos apagar o Circle inteiro.
+        //
+        if (isAdmin && isLastMember) {
+          // Remove desafios e quaisquer documentos dentro deles.
+          await _deleteCollection(
+            circleRef.collection('challenges'),
+            nestedCollections: const ['items', 'entries', 'logs', 'history'],
+          );
+
+          // Remove ranking.
+          await _deleteCollection(circleRef.collection('ranking'));
+
+          // Remove outras estruturas conhecidas do Circle,
+          // caso existam.
+          await _deleteCollection(circleRef.collection('members'));
+
+          await _deleteCollection(circleRef.collection('activities'));
+
+          // Finalmente remove o documento principal do Circle.
+          await circleRef.delete();
+        } else {
+          // ================================================================
+          // CIRCLE COMPARTILHADO
+          // ================================================================
+          //
+          // Nunca apagamos dados dos outros membros.
+          //
+          final rankingRef = circleRef.collection('ranking').doc(uid);
+
+          try {
+            await rankingRef.delete();
+          } on FirebaseException {
+            // Ranking é secundário.
+            // Não interrompe a exclusão da conta.
+          }
+        }
       }
-
-      // Não alteramos memberCount aqui.
-      //
-      // Isso evita que uma Rule de segurança do Circle impeça a exclusão
-      // completa da conta.
-      //
-      // A manutenção de membros do Circle deve continuar sendo tratada
-      // pelo fluxo próprio de Circle/Backend.
     }
-
-    // -------------------------------------------------------------------------
-    // DOCUMENTO PRINCIPAL
-    // -------------------------------------------------------------------------
-    //
-    // Somente depois de todas as subcoleções serem removidas.
-    //
     await userDocRef.delete();
   }
 

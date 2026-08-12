@@ -1,7 +1,6 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-// 🛡️ CORREÇÃO: Adicionado alias 'drift' para evitar qualquer conflito de nomes
 import 'package:drift/drift.dart' as drift hide Column;
 import 'package:life_os/core/database/app_database.dart';
 import 'package:life_os/core/database/database_provider.dart';
@@ -31,15 +30,15 @@ final healthRepositoryProvider = Provider<HealthRepository>((ref) {
 final healthStreamProvider = StreamProvider<HealthModel>((ref) {
   final repository = ref.watch(healthRepositoryProvider);
 
-  // 🛡️ CORREÇÃO: Forçando o cast para garantir que o Riverpod receba o tipo exato
-  return repository.getHealthStream().cast<HealthModel>();
+  // 🛡️ CORREÇÃO: Removido o .cast<HealthModel>() que estava matando o Broadcast
+  // e impedindo a UI de receber as atualizações em tempo real.
+  return repository.getHealthStream();
 });
 
 // ===========================================================================
 // MEDICAMENTOS
 // ===========================================================================
 
-// 🛡️ REMOVIDO o autoDispose para evitar descarte prematuro e crash de Overlay
 final medicationsStreamProvider = StreamProvider<List<Medication>>((ref) {
   final db = ref.watch(databaseProvider);
 

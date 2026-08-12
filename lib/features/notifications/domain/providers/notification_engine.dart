@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:riverpod_annotation/riverpod_annotation.dart';
@@ -10,29 +11,59 @@ part 'notification_engine.g.dart';
 
 @riverpod
 class NotificationEngine extends _$NotificationEngine {
+  Future<void>? _bootstrapJob;
+  DateTime? _lastBootstrapDay;
+
   @override
   Stream<List<NotificationModel>> build() {
     final repository = ref.watch(notificationsRepositoryProvider);
+    _scheduleBootstrap();
+    return repository.watchLocalNotifications();
+  }
 
-    // Primeiro hidrata dados remotos, depois reconcilia os módulos locais.
-    Future.microtask(() async {
-      await repository.syncNotificationsFromFirebaseToLocal();
-      await syncExistingModules();
+  void _scheduleBootstrap() {
+    final today = _startOfDay(DateTime.now());
+
+    if (_bootstrapJob != null) {
+      return;
+    }
+
+    if (_lastBootstrapDay != null && _lastBootstrapDay == today) {
+      return;
+    }
+
+    _bootstrapJob = _bootstrap(today).whenComplete(() {
+      _lastBootstrapDay = today;
+      _bootstrapJob = null;
     });
 
-    // A UI permanece 100% Offline-First.
-    return repository.watchLocalNotifications();
+    unawaited(_bootstrapJob);
+  }
+
+  Future<void> _bootstrap(DateTime today) async {
+    final repository = ref.read(notificationsRepositoryProvider);
+
+    try {
+      await repository.syncNotificationsFromFirebaseToLocal();
+      await syncExistingModules(today: today);
+    } catch (error, stackTrace) {
+      AppLogger.e(
+        'NotificationEngine: falha no bootstrap inicial',
+        error,
+        stackTrace,
+      );
+    }
   }
 
   /// Reconcilia notificações derivadas dos módulos existentes.
   ///
-  /// Este método é idempotente: executá-lo várias vezes não deve criar
+  /// Este método é idempotente: executar várias vezes não deve criar
   /// duplicatas nem apagar o estado de leitura/conclusão do usuário.
-  Future<void> syncExistingModules() async {
+  Future<void> syncExistingModules({DateTime? today}) async {
     final repository = ref.read(notificationsRepositoryProvider);
     final db = ref.read(databaseProvider);
     final now = DateTime.now();
-    final today = DateTime(now.year, now.month, now.day);
+    final baseDay = today ?? _startOfDay(now);
 
     // ===================================================================
     // 1. ESTUDOS — próxima prova cadastrada
@@ -56,7 +87,7 @@ class NotificationEngine extends _$NotificationEngine {
 
       if (exams.isNotEmpty) {
         final nextExam = exams.first;
-        final daysUntil = _calendarDaysBetween(today, nextExam.date);
+        final daysUntil = _calendarDaysBetween(baseDay, nextExam.date);
 
         final notification = NotificationModel(
           id: 'exam_${nextExam.id}',
@@ -92,23 +123,16 @@ class NotificationEngine extends _$NotificationEngine {
       final medications = await db.select(db.medications).get();
 
       for (final med in medications) {
-        final startDate = DateTime(
-          med.startDate.year,
-          med.startDate.month,
-          med.startDate.day,
-        );
-
-        final endDate = med.endDate == null
-            ? null
-            : DateTime(med.endDate!.year, med.endDate!.month, med.endDate!.day);
+        final startDate = _startOfDay(med.startDate);
+        final endDate = med.endDate == null ? null : _startOfDay(med.endDate!);
 
         // Sem horário/posologia nesta fase: só usamos o período do tratamento.
-        if (startDate.isAfter(today)) continue;
-        if (endDate != null && endDate.isBefore(today)) continue;
+        if (startDate.isAfter(baseDay)) continue;
+        if (endDate != null && endDate.isBefore(baseDay)) continue;
 
         final daysToEnd = endDate == null
             ? null
-            : _calendarDaysBetween(today, endDate);
+            : _calendarDaysBetween(baseDay, endDate);
 
         final notification = NotificationModel(
           id: 'health_med_${med.firestoreId ?? med.id}',
@@ -145,17 +169,15 @@ class NotificationEngine extends _$NotificationEngine {
     try {
       final habits = await db.select(db.habits).get();
       final todayKey =
-          '${today.year.toString().padLeft(4, '0')}-'
-          '${today.month.toString().padLeft(2, '0')}-'
-          '${today.day.toString().padLeft(2, '0')}';
+          '${baseDay.year.toString().padLeft(4, '0')}-'
+          '${baseDay.month.toString().padLeft(2, '0')}-'
+          '${baseDay.day.toString().padLeft(2, '0')}';
 
       for (final habit in habits) {
         final completedDates = _decodeCompletedDates(habit.completedDates);
         final completedToday = completedDates.contains(todayKey);
 
-        // A data de vencimento faz parte da identidade temporal do evento.
-        // Assim, amanhã o mesmo hábito poderá gerar uma nova pendência sem
-        // destruir o estado registrado hoje.
+        // A identidade do item é estável para evitar duplicatas.
         final notificationId = 'habit_${habit.id}';
         final notification = NotificationModel(
           id: notificationId,
@@ -168,7 +190,7 @@ class NotificationEngine extends _$NotificationEngine {
           route: '/habits',
           isRead: false,
           isCompleted: completedToday,
-          dueDate: today,
+          dueDate: baseDay,
           createdAt: now,
         );
 
@@ -196,9 +218,13 @@ class NotificationEngine extends _$NotificationEngine {
   }
 
   int _calendarDaysBetween(DateTime from, DateTime to) {
-    final a = DateTime(from.year, from.month, from.day);
-    final b = DateTime(to.year, to.month, to.day);
+    final a = _startOfDay(from);
+    final b = _startOfDay(to);
     return b.difference(a).inDays;
+  }
+
+  DateTime _startOfDay(DateTime value) {
+    return DateTime(value.year, value.month, value.day);
   }
 
   String _examPriority(int daysUntil) {
@@ -214,8 +240,6 @@ class NotificationEngine extends _$NotificationEngine {
   }
 
   List<String> _decodeCompletedDates(String raw) {
-    // Evita importar json apenas para este pequeno parser? Não.
-    // O formato atual é JSON e precisa ser interpretado corretamente.
     try {
       final decoded = _decodeJson(raw);
       if (decoded is List) {

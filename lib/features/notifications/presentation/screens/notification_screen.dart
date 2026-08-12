@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:life_os/features/notifications/domain/providers/notification_engine.dart';
-// 🟢 O Widget de tile já fará o import correto do model
 import 'package:life_os/features/notifications/presentation/widgets/notification_tile.dart';
 
 class NotificationScreen extends ConsumerWidget {
@@ -9,11 +8,11 @@ class NotificationScreen extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final notificationsStream = ref.watch(notificationEngineProvider);
+    final notificationsAsync = ref.watch(notificationEngineProvider);
 
     return Scaffold(
       appBar: AppBar(title: const Text('Central de Notificações')),
-      body: notificationsStream.when(
+      body: notificationsAsync.when(
         data: (notifications) {
           if (notifications.isEmpty) {
             return const Center(child: Text('Nenhuma notificação no momento.'));
@@ -42,7 +41,10 @@ class NotificationScreen extends ConsumerWidget {
                   ),
                 ),
                 const SizedBox(height: 8),
-                ...highPriority.map((n) => NotificationTile(notification: n)),
+                ...highPriority.map(
+                  (notification) =>
+                      NotificationTile(notification: notification),
+                ),
                 const SizedBox(height: 16),
               ],
               if (today.isNotEmpty) ...[
@@ -53,7 +55,10 @@ class NotificationScreen extends ConsumerWidget {
                   ),
                 ),
                 const SizedBox(height: 8),
-                ...today.map((n) => NotificationTile(notification: n)),
+                ...today.map(
+                  (notification) =>
+                      NotificationTile(notification: notification),
+                ),
                 const SizedBox(height: 16),
               ],
               if (upcoming.isNotEmpty) ...[
@@ -64,7 +69,10 @@ class NotificationScreen extends ConsumerWidget {
                   ),
                 ),
                 const SizedBox(height: 8),
-                ...upcoming.map((n) => NotificationTile(notification: n)),
+                ...upcoming.map(
+                  (notification) =>
+                      NotificationTile(notification: notification),
+                ),
                 const SizedBox(height: 16),
               ],
               if (completed.isNotEmpty) ...[
@@ -76,13 +84,21 @@ class NotificationScreen extends ConsumerWidget {
                   ),
                 ),
                 const SizedBox(height: 8),
-                ...completed.map((n) => NotificationTile(notification: n)),
+                ...completed.map(
+                  (notification) =>
+                      NotificationTile(notification: notification),
+                ),
               ],
             ],
           );
         },
         loading: () => const Center(child: CircularProgressIndicator()),
-        error: (err, stack) => Center(child: Text('Erro: $err')),
+        error: (error, stackTrace) => Center(
+          child: Padding(
+            padding: const EdgeInsets.all(24),
+            child: Text('Erro ao carregar notificações: $error'),
+          ),
+        ),
       ),
     );
   }
