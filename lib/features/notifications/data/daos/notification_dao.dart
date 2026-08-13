@@ -44,13 +44,7 @@ class NotificationDao extends DatabaseAccessor<AppDatabase>
     final incomingRoute = incoming.route.value;
     final incomingDueDate = incoming.dueDate.value;
 
-    final sameEventDay =
-        existing.dueDate != null &&
-        incomingDueDate != null &&
-        existing.dueDate!.year == incomingDueDate.year &&
-        existing.dueDate!.month == incomingDueDate.month &&
-        existing.dueDate!.day == incomingDueDate.day;
-
+    final sameEventDay = _sameLocalDay(existing.dueDate, incomingDueDate);
     final changed =
         existing.title != incoming.title.value ||
         existing.description != incoming.description.value ||

@@ -35,7 +35,7 @@ final class NotificationEngineProvider
 }
 
 String _$notificationEngineHash() =>
-    r'0af7cdaa9503fa463744370d28e58a958a015586';
+    r'dc4c9509e94ae917c4ebc21426e81ab84b2eae20';
 
 abstract class _$NotificationEngine
     extends $StreamNotifier<List<NotificationModel>> {
@@ -104,4 +104,4 @@ final class UnreadNotificationsCountProvider
 }
 
 String _$unreadNotificationsCountHash() =>
-    r'a1347383daad654541d56c88b0e484b12e0dec70';
+    r'6634ce0db4845e99cb9dc26d95ef0372ddd75f0d';

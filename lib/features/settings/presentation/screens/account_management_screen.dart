@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:life_os/features/auth/domain/entities/user_entity.dart';
 import 'package:life_os/features/auth/presentation/providers/auth_provider.dart';
 import 'package:life_os/features/settings/presentation/screens/edit_profile_screen.dart';
@@ -230,7 +231,7 @@ class AccountManagementScreen extends ConsumerWidget {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  user.displayName ?? 'Usuário',
+                  user.displayName ?? 'Usuario',
                   style: const TextStyle(
                     color: Colors.white,
                     fontSize: 20,
@@ -272,11 +273,18 @@ class AccountManagementScreen extends ConsumerWidget {
     );
   }
 
-  void _showDeleteAccountDialog(BuildContext context, WidgetRef ref) {
-    final TextEditingController passwordController = TextEditingController();
-    bool obscureText = true;
+  Future<void> _showDeleteAccountDialog(
+    BuildContext context,
+    WidgetRef ref,
+  ) async {
+    final currentUser = FirebaseAuth.instance.currentUser;
+    final usesPasswordProvider =
+        currentUser?.providerData.any((p) => p.providerId == 'password') ??
+        false;
+    final passwordController = TextEditingController();
+    var obscureText = true;
 
-    showDialog(
+    await showDialog(
       context: context,
       builder: (dialogContext) => StatefulBuilder(
         builder: (context, setState) {
@@ -297,49 +305,56 @@ class AccountManagementScreen extends ConsumerWidget {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 const Text(
-                  'Esta ação é irreversível. Todos os seus dados locais e na nuvem '
-                  'serão permanentemente removidos.',
+                  'Esta acao e irreversivel. Todos os seus dados locais e na nuvem serao permanentemente removidos.',
                   style: TextStyle(color: Colors.white70),
                 ),
-                const SizedBox(height: 20),
-                const Text(
-                  'Para sua segurança, digite sua senha:',
-                  style: TextStyle(
-                    color: Colors.white,
-                    fontWeight: FontWeight.w600,
+                if (usesPasswordProvider) ...[
+                  const SizedBox(height: 20),
+                  const Text(
+                    'Para sua seguranca, digite sua senha:',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.w600,
+                    ),
                   ),
-                ),
-                const SizedBox(height: 8),
-                TextField(
-                  controller: passwordController,
-                  obscureText: obscureText,
-                  style: const TextStyle(color: Colors.white),
-                  decoration: InputDecoration(
-                    hintText: 'Sua senha',
-                    hintStyle: const TextStyle(color: Colors.white38),
-                    filled: true,
-                    fillColor: Colors.black26,
-                    contentPadding: const EdgeInsets.symmetric(
-                      horizontal: 16,
-                      vertical: 14,
-                    ),
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(12),
-                      borderSide: BorderSide.none,
-                    ),
-                    suffixIcon: IconButton(
-                      icon: Icon(
-                        obscureText ? Icons.visibility_off : Icons.visibility,
-                        color: Colors.white54,
+                  const SizedBox(height: 8),
+                  TextField(
+                    controller: passwordController,
+                    obscureText: obscureText,
+                    style: const TextStyle(color: Colors.white),
+                    decoration: InputDecoration(
+                      hintText: 'Sua senha',
+                      hintStyle: const TextStyle(color: Colors.white38),
+                      filled: true,
+                      fillColor: Colors.black26,
+                      contentPadding: const EdgeInsets.symmetric(
+                        horizontal: 16,
+                        vertical: 14,
                       ),
-                      onPressed: () {
-                        setState(() {
-                          obscureText = !obscureText;
-                        });
-                      },
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12),
+                        borderSide: BorderSide.none,
+                      ),
+                      suffixIcon: IconButton(
+                        icon: Icon(
+                          obscureText ? Icons.visibility_off : Icons.visibility,
+                          color: Colors.white54,
+                        ),
+                        onPressed: () {
+                          setState(() {
+                            obscureText = !obscureText;
+                          });
+                        },
+                      ),
                     ),
                   ),
-                ),
+                ] else ...[
+                  const SizedBox(height: 20),
+                  const Text(
+                    'Sua conta sera confirmada novamente pelo provedor Google antes da exclusao.',
+                    style: TextStyle(color: Colors.white70),
+                  ),
+                ],
               ],
             ),
             actions: [
@@ -354,11 +369,11 @@ class AccountManagementScreen extends ConsumerWidget {
                 onPressed: () {
                   final password = passwordController.text.trim();
 
-                  if (password.isEmpty) {
+                  if (usesPasswordProvider && password.isEmpty) {
                     ScaffoldMessenger.of(context).showSnackBar(
                       const SnackBar(
                         content: Text(
-                          'A senha é obrigatória para excluir a conta.',
+                          'A senha e obrigatoria para excluir a conta.',
                         ),
                         backgroundColor: Colors.redAccent,
                       ),
@@ -369,7 +384,9 @@ class AccountManagementScreen extends ConsumerWidget {
                   Navigator.pop(dialogContext);
                   ref
                       .read(authNotifierProvider.notifier)
-                      .deleteAccount(password: password);
+                      .deleteAccount(
+                        password: usesPasswordProvider ? password : null,
+                      );
                 },
                 style: ElevatedButton.styleFrom(
                   backgroundColor: Colors.redAccent,
@@ -385,9 +402,12 @@ class AccountManagementScreen extends ConsumerWidget {
         },
       ),
     );
+
+    passwordController.dispose();
   }
 
   void _showLogoutDialog(BuildContext context, WidgetRef ref) {
+
     showDialog(
       context: context,
       builder: (dialogContext) => AlertDialog(

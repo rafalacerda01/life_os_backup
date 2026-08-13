@@ -26,15 +26,15 @@
 	<string>$(FLUTTER_BUILD_NUMBER)</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
-	<key>UIApplicationSceneManifest</key>
 	<key>NSFaceIDUsageDescription</key>
-<string>Precisamos da sua biometria para autenticar e proteger o acesso aos seus dados pessoais.</string>
-<key>NSPhotoLibraryUsageDescription</key>
-<string>O Life OS precisa de acesso à galeria para você selecionar sua foto de perfil.</string>
-<key>NSCameraUsageDescription</key>
-<string>O Life OS precisa de acesso à câmera para você tirar sua foto de perfil.</string>
-<key>NSLocalNotificationUsageDescription</key>
-<string>Precisamos enviar lembretes para ajudar você a manter seus hábitos e horários de medicação em dia.</string>
+	<string>Precisamos da sua biometria para autenticar e proteger o acesso aos seus dados pessoais.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>O Life OS precisa de acesso a galeria para voce selecionar sua foto de perfil.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>O Life OS precisa de acesso a camera para voce tirar sua foto de perfil.</string>
+	<key>NSLocalNotificationUsageDescription</key>
+	<string>Precisamos enviar lembretes para ajudar voce a manter seus habitos e horarios de medicao em dia.</string>
+	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
 		<false/>
@@ -75,15 +75,15 @@
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
 	<key>CFBundleURLTypes</key>
-<array>
-	<dict>
-		<key>CFBundleTypeRole</key>
-		<string>Editor</string>
-		<key>CFBundleURLSchemes</key>
-		<array>
-			<string>com.googleusercontent.apps.278760083864-ig6e90lv4mk22ecmn201p2v8ppvvvp7t</string>
-		</array>
-	</dict>
-</array>
+	<array>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>com.googleusercontent.apps.278760083864-ig6e90lv4mk22ecmn201p2v8ppvvvp7t</string>
+			</array>
+		</dict>
+	</array>
 </dict>
 </plist>

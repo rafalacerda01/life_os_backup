@@ -27,7 +27,16 @@ void main() async {
       .catchError((_) {});
 
   // 3. Inicialização de localidade de datas
-  await initializeDateFormatting('pt_BR', null).catchError((_) {});
+  await initializeDateFormatting('pt_BR', null).catchError((error, stack) {
+    if (!kDebugMode) {
+      FirebaseCrashlytics.instance.recordError(
+        error,
+        stack,
+        fatal: true,
+        reason: 'Falha no initializeDateFormatting',
+      );
+    }
+  });
 
   // Execução do aplicativo com tratamento global de erros
   runZonedGuarded(
@@ -72,9 +81,15 @@ Future<void> _initAppCheckInBackground() async {
           ? AppleProvider.debug
           : AppleProvider.deviceCheck,
     );
-  } catch (e) {
+  } catch (e, stack) {
     if (kDebugMode) {
       debugPrint('Aviso App Check (Ignorado em Debug): $e');
+    } else {
+      FirebaseCrashlytics.instance.recordError(
+        e,
+        stack,
+        reason: 'Falha na inicialização do App Check',
+      );
     }
   }
 }

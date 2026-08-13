@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:riverpod_annotation/riverpod_annotation.dart';
+import 'package:life_os/core/database/app_database.dart';
 import 'package:life_os/core/database/database_provider.dart';
 import 'package:life_os/core/utils/app_logger.dart';
 import 'package:life_os/features/notifications/data/repositories/notifications_repository.dart';
@@ -13,39 +14,67 @@ part 'notification_engine.g.dart';
 class NotificationEngine extends _$NotificationEngine {
   Future<void>? _bootstrapJob;
   DateTime? _lastBootstrapDay;
+  bool _disposed = false;
 
   @override
   Stream<List<NotificationModel>> build() {
     final repository = ref.watch(notificationsRepositoryProvider);
-    _scheduleBootstrap();
+    final db = ref.read(databaseProvider);
+
+    ref.onDispose(() {
+      _disposed = true;
+      _bootstrapJob = null;
+    });
+
+    _scheduleBootstrap(repository: repository, db: db);
+
     return repository.watchLocalNotifications();
   }
 
-  void _scheduleBootstrap() {
+  void _scheduleBootstrap({
+    required NotificationsRepository repository,
+    required AppDatabase db,
+  }) {
     final today = _startOfDay(DateTime.now());
 
-    if (_bootstrapJob != null) {
-      return;
-    }
+    if (_disposed) return;
+
+    if (_bootstrapJob != null) return;
 
     if (_lastBootstrapDay != null && _lastBootstrapDay == today) {
       return;
     }
 
-    _bootstrapJob = _bootstrap(today).whenComplete(() {
-      _lastBootstrapDay = today;
-      _bootstrapJob = null;
-    });
+    final job = _bootstrap(today: today, repository: repository, db: db);
 
-    unawaited(_bootstrapJob);
+    _bootstrapJob = job;
+
+    unawaited(
+      job.whenComplete(() {
+        if (_disposed) return;
+
+        _bootstrapJob = null;
+      }),
+    );
   }
 
-  Future<void> _bootstrap(DateTime today) async {
-    final repository = ref.read(notificationsRepositoryProvider);
+  Future<void> _bootstrap({
+    required DateTime today,
+    required NotificationsRepository repository,
+    required AppDatabase db,
+  }) async {
+    if (_disposed) return;
 
     try {
       await repository.syncNotificationsFromFirebaseToLocal();
-      await syncExistingModules(today: today);
+
+      if (_disposed) return;
+
+      await syncExistingModules(repository: repository, db: db, today: today);
+
+      if (_disposed) return;
+
+      _lastBootstrapDay = today;
     } catch (error, stackTrace) {
       AppLogger.e(
         'NotificationEngine: falha no bootstrap inicial',
@@ -57,11 +86,18 @@ class NotificationEngine extends _$NotificationEngine {
 
   /// Reconcilia notificações derivadas dos módulos existentes.
   ///
-  /// Este método é idempotente: executar várias vezes não deve criar
-  /// duplicatas nem apagar o estado de leitura/conclusão do usuário.
-  Future<void> syncExistingModules({DateTime? today}) async {
-    final repository = ref.read(notificationsRepositoryProvider);
-    final db = ref.read(databaseProvider);
+  /// As dependências são recebidas por parâmetro para impedir que
+  /// `ref.read()` seja executado depois de um `await`.
+  ///
+  /// As notificações possuem IDs estáveis e o repository utiliza
+  /// upsertPreservingState(), preservando o estado de leitura/conclusão.
+  Future<void> syncExistingModules({
+    required NotificationsRepository repository,
+    required AppDatabase db,
+    DateTime? today,
+  }) async {
+    if (_disposed) return;
+
     final now = DateTime.now();
     final baseDay = today ?? _startOfDay(now);
 
@@ -70,6 +106,8 @@ class NotificationEngine extends _$NotificationEngine {
     // ===================================================================
     try {
       final subjects = await db.select(db.subjects).get();
+
+      if (_disposed) return;
 
       final exams =
           subjects
@@ -107,6 +145,8 @@ class NotificationEngine extends _$NotificationEngine {
         );
 
         await repository.saveLocalNotification(notification);
+
+        if (_disposed) return;
       }
     } catch (error, stackTrace) {
       AppLogger.e(
@@ -116,19 +156,27 @@ class NotificationEngine extends _$NotificationEngine {
       );
     }
 
+    if (_disposed) return;
+
     // ===================================================================
     // 2. SAÚDE — medicamentos atualmente ativos
     // ===================================================================
     try {
       final medications = await db.select(db.medications).get();
 
+      if (_disposed) return;
+
       for (final med in medications) {
+        if (_disposed) return;
+
         final startDate = _startOfDay(med.startDate);
         final endDate = med.endDate == null ? null : _startOfDay(med.endDate!);
 
-        // Sem horário/posologia nesta fase: só usamos o período do tratamento.
         if (startDate.isAfter(baseDay)) continue;
-        if (endDate != null && endDate.isBefore(baseDay)) continue;
+
+        if (endDate != null && endDate.isBefore(baseDay)) {
+          continue;
+        }
 
         final daysToEnd = endDate == null
             ? null
@@ -163,24 +211,30 @@ class NotificationEngine extends _$NotificationEngine {
       );
     }
 
+    if (_disposed) return;
+
     // ===================================================================
     // 3. HÁBITOS — somente pendências reais do dia
     // ===================================================================
     try {
       final habits = await db.select(db.habits).get();
+
+      if (_disposed) return;
+
       final todayKey =
           '${baseDay.year.toString().padLeft(4, '0')}-'
           '${baseDay.month.toString().padLeft(2, '0')}-'
           '${baseDay.day.toString().padLeft(2, '0')}';
 
       for (final habit in habits) {
+        if (_disposed) return;
+
         final completedDates = _decodeCompletedDates(habit.completedDates);
+
         final completedToday = completedDates.contains(todayKey);
 
-        // A identidade do item é estável para evitar duplicatas.
-        final notificationId = 'habit_${habit.id}';
         final notification = NotificationModel(
-          id: notificationId,
+          id: 'habit_${habit.id}',
           title: 'Hábito: ${habit.title}',
           description: completedToday
               ? 'Hábito concluído hoje.'
@@ -206,20 +260,30 @@ class NotificationEngine extends _$NotificationEngine {
   }
 
   Future<void> markAsRead(String id) async {
-    await ref.read(notificationsRepositoryProvider).markAsReadLocal(id);
+    if (_disposed) return;
+
+    final repository = ref.read(notificationsRepositoryProvider);
+    await repository.markAsReadLocal(id);
   }
 
   Future<void> markAsCompleted(String id) async {
-    await ref.read(notificationsRepositoryProvider).markAsCompletedLocal(id);
+    if (_disposed) return;
+
+    final repository = ref.read(notificationsRepositoryProvider);
+    await repository.markAsCompletedLocal(id);
   }
 
   Future<void> removeNotification(String id) async {
-    await ref.read(notificationsRepositoryProvider).deleteNotification(id);
+    if (_disposed) return;
+
+    final repository = ref.read(notificationsRepositoryProvider);
+    await repository.deleteNotification(id);
   }
 
   int _calendarDaysBetween(DateTime from, DateTime to) {
     final a = _startOfDay(from);
     final b = _startOfDay(to);
+
     return b.difference(a).inDays;
   }
 
@@ -234,32 +298,42 @@ class NotificationEngine extends _$NotificationEngine {
   }
 
   String _medicationPriority(int? daysToEnd) {
-    if (daysToEnd != null && daysToEnd <= 3) return 'high';
-    if (daysToEnd != null && daysToEnd <= 7) return 'today';
+    if (daysToEnd != null && daysToEnd <= 3) {
+      return 'high';
+    }
+
+    if (daysToEnd != null && daysToEnd <= 7) {
+      return 'today';
+    }
+
     return 'upcoming';
   }
 
   List<String> _decodeCompletedDates(String raw) {
     try {
-      final decoded = _decodeJson(raw);
+      final decoded = jsonDecode(raw);
+
       if (decoded is List) {
         return decoded.map((value) => value.toString()).toList();
       }
     } catch (_) {
       // Dados antigos inválidos não devem derrubar a Central.
     }
+
     return const [];
   }
-
-  dynamic _decodeJson(String raw) => jsonDecode(raw);
 }
 
 @riverpod
 int unreadNotificationsCount(Ref ref) {
   final notificationsAsync = ref.watch(notificationEngineProvider);
+
   return notificationsAsync.maybeWhen(
-    data: (notifications) =>
-        notifications.where((n) => !n.isRead && !n.isCompleted).length,
+    data: (notifications) => notifications
+        .where(
+          (notification) => !notification.isRead && !notification.isCompleted,
+        )
+        .length,
     orElse: () => 0,
   );
 }

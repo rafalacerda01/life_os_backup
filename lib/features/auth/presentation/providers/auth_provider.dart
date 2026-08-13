@@ -2,6 +2,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:google_sign_in/google_sign_in.dart';
 
 // Imports dos providers de todos os módulos
 import 'package:life_os/features/finance/presentation/providers/finance_provider.dart';
@@ -61,7 +62,7 @@ class AuthNotifier extends Notifier<AuthState> {
     final subscription = auth.authStateChanges().listen((firebaseUser) async {
       if (firebaseUser == null) {
         await _secureStorage.deleteToken();
-
+        await _clearLocalData();
         state.maybeWhen(
           unauthenticated: () {},
           orElse: () => state = AuthState.unauthenticated(),
@@ -225,33 +226,39 @@ class AuthNotifier extends Notifier<AuthState> {
       final user = ref.read(firebaseAuthProvider).currentUser;
 
       if (user != null) {
-        // 🚀 1. Mapeamos de quais provedores este usuário depende (ex: 'password', 'google.com')
         final providerIds = user.providerData.map((e) => e.providerId).toList();
 
-        // 🚀 2. Roteamento de Segurança baseado no Provedor
         if (providerIds.contains('password')) {
-          // Fluxo para usuários tradicionais (E-mail e Senha)
           if (password != null && password.isNotEmpty && user.email != null) {
-            AuthCredential credential = EmailAuthProvider.credential(
+            final credential = EmailAuthProvider.credential(
               email: user.email!,
               password: password,
             );
             await user.reauthenticateWithCredential(credential);
           } else {
-            // Falha rápida se o usuário não enviou a senha obrigatória
             state = AuthState.error(
-              'A senha atual é obrigatória para confirmar a exclusão.',
+              'A senha atual e obrigatoria para confirmar a exclusao.',
             );
             return;
           }
         } else if (providerIds.contains('google.com')) {
-          // Fluxo para usuários Google (Ignora a variável password e reautentica via OAuth)
-          final googleProvider = GoogleAuthProvider();
-          await user.reauthenticateWithProvider(googleProvider);
+          final googleSignIn = GoogleSignIn.instance;
+          await googleSignIn.initialize(
+            serverClientId:
+                '278760083864-nfp6h9r9gjaq4tvtcerif8h2d08c6afi.apps.googleusercontent.com',
+          );
+
+          final googleUser = await googleSignIn.authenticate();
+          final googleAuth = googleUser.authentication;
+
+          final credential = GoogleAuthProvider.credential(
+            idToken: googleAuth.idToken,
+          );
+
+          await user.reauthenticateWithCredential(credential);
         }
       }
 
-      // 3. Após garantir a sessão fresca, prosseguimos para a deleção no Firestore
       final result = await _repository.deleteAccount();
 
       result.when(
@@ -268,11 +275,11 @@ class AuthNotifier extends Notifier<AuthState> {
         state = AuthState.error('Senha incorreta. Tente novamente.');
       } else if (e.code == 'requires-recent-login') {
         state = AuthState.error(
-          'Sessão expirada. Por segurança, faça logout, entre novamente e repita a operação.',
+          'Sessao expirada. Faca login novamente e tente de novo.',
         );
       } else {
         state = AuthState.error(
-          e.message ?? 'Ocorreu um erro de reautenticação.',
+          e.message ?? 'Ocorreu um erro de reautenticacao.',
         );
       }
     } catch (e) {
