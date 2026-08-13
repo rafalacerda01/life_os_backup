@@ -9,12 +9,18 @@ exports.cleanupUserData = functions.auth.user().onDelete(async (user) => {
   const db = admin.firestore();
   const userRef = db.collection("users").doc(uid);
 
-  console.log(`[v1] Iniciando exclusão em cascata para: ${uid}`);
+  console.log(
+      `[v1] Iniciando exclusão em cascata para: ${uid}`,
+  );
 
   try {
-    // Apaga o documento principal e as subcoleções ignorando limites do client-side
+    // Apaga o documento principal e as subcoleções
+    // ignorando limites do client-side
     await db.recursiveDelete(userRef);
-    console.log(`[v1] Erradicação concluída para o usuário: ${uid}`);
+
+    console.log(
+        `[v1] Erradicação concluída para o usuário: ${uid}`,
+    );
   } catch (error) {
     console.error(`[v1] Erro na exclusão:`, error);
   }
