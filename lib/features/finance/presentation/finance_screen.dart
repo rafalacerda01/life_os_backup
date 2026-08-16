@@ -4,6 +4,9 @@ import 'package:intl/intl.dart';
 import 'package:life_os/features/finance/presentation/providers/finance_provider.dart';
 import 'package:life_os/core/security/input_sanitizer.dart';
 import 'package:life_os/core/database/app_database.dart';
+import 'package:life_os/features/premium/domain/services/plan_limits.dart';
+import 'package:life_os/features/premium/domain/services/quota_service.dart';
+import 'package:life_os/features/premium/presentation/plan_limits_provider.dart';
 
 class FinanceScreen extends ConsumerStatefulWidget {
   const FinanceScreen({super.key});
@@ -262,26 +265,79 @@ class _FinanceScreenState extends ConsumerState<FinanceScreen> {
                             titleController.text,
                           );
 
-                          if (title.isNotEmpty &&
-                              amountController.text.isNotEmpty) {
-                            final amount =
-                                double.tryParse(
-                                  amountController.text.replaceAll(',', '.'),
-                                ) ??
-                                0.0;
+                          if (title.isEmpty || amountController.text.isEmpty) {
+                            return;
+                          }
 
-                            await ref
-                                .read(financeRepositoryProvider)
-                                .addTransaction(
-                                  title: title,
-                                  amount: amount,
-                                  type: selectedType,
-                                  category: selectedCategory,
-                                );
+                          final amount =
+                              double.tryParse(
+                                amountController.text.replaceAll(',', '.'),
+                              ) ??
+                              0.0;
+
+                          final transactionsAsync = ref.read(
+                            financeStreamProvider,
+                          );
+
+                          if (!transactionsAsync.hasValue) {
+                            if (context.mounted) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(
+                                  content: Text(
+                                    'Não foi possível verificar suas transações agora. Tente novamente.',
+                                  ),
+                                ),
+                              );
+                            }
+                            return;
+                          }
+
+                          final transactions = transactionsAsync.requireValue;
+
+                          final limits = ref.read(planLimitsProvider);
+                          const quotaService = QuotaService();
+
+                          final transactionLimit = limits.limitFor(
+                            QuotaResource.transactions,
+                          );
+
+                          final canCreate = quotaService.canCreate(
+                            limit: transactionLimit,
+                            currentCount: transactions.length,
+                          );
+
+                          if (!canCreate) {
+                            final message = switch (transactionLimit.mode) {
+                              QuotaMode.disabled =>
+                                'Este recurso não está disponível no seu plano.',
+                              QuotaMode.limited =>
+                                'Você atingiu o limite de ${transactionLimit.maximum} transações do seu plano.',
+                              QuotaMode.unlimited =>
+                                'Você não possui limite de transações.',
+                              QuotaMode.notConfigured =>
+                                'O limite deste recurso ainda não está configurado.',
+                            };
 
                             if (context.mounted) {
-                              Navigator.pop(context);
+                              ScaffoldMessenger.of(
+                                context,
+                              ).showSnackBar(SnackBar(content: Text(message)));
                             }
+
+                            return;
+                          }
+
+                          await ref
+                              .read(financeRepositoryProvider)
+                              .addTransaction(
+                                title: title,
+                                amount: amount,
+                                type: selectedType,
+                                category: selectedCategory,
+                              );
+
+                          if (context.mounted) {
+                            Navigator.pop(context);
                           }
                         },
                         child: const Text(

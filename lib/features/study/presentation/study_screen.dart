@@ -4,7 +4,9 @@ import 'package:intl/intl.dart';
 import 'providers/study_provider.dart';
 import 'package:life_os/features/study/presentation/screens/revisar_screen.dart';
 import 'package:life_os/features/focus/presentation/providers/screens/focus_screen.dart'; // ⏱️ Importação da Tela de Foco
-// Importação de Segurança
+import 'package:life_os/features/premium/domain/services/plan_limits.dart';
+import 'package:life_os/features/premium/domain/services/quota_service.dart';
+import 'package:life_os/features/premium/presentation/plan_limits_provider.dart';
 import 'package:life_os/core/security/input_sanitizer.dart';
 
 class StudyScreen extends ConsumerStatefulWidget {
@@ -184,19 +186,74 @@ class _StudyScreenState extends ConsumerState<StudyScreen> {
                         backgroundColor: const Color(0xFFB026FF),
                       ),
                       onPressed: () async {
-                        // ✅ Sanitização Aplicada
                         final title = InputSanitizer.sanitize(
                           titleController.text.trim(),
                         );
-                        if (title.isNotEmpty) {
-                          await ref
-                              .read(studyRepositoryProvider)
-                              .createSubject(
-                                title,
-                                hasExam: hasExam,
-                                examDate: selectedDate,
-                              );
-                          if (context.mounted) Navigator.pop(context);
+
+                        if (title.isEmpty) {
+                          return;
+                        }
+
+                        final subjectsAsync = ref.read(subjectsStreamProvider);
+
+                        if (!subjectsAsync.hasValue) {
+                          if (context.mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(
+                                content: Text(
+                                  'Não foi possível verificar suas disciplinas agora. Tente novamente.',
+                                ),
+                              ),
+                            );
+                          }
+                          return;
+                        }
+
+                        final subjects = subjectsAsync.requireValue;
+
+                        final limits = ref.read(planLimitsProvider);
+                        const quotaService = QuotaService();
+
+                        final subjectLimit = limits.limitFor(
+                          QuotaResource.subjects,
+                        );
+
+                        final canCreate = quotaService.canCreate(
+                          limit: subjectLimit,
+                          currentCount: subjects.length,
+                        );
+
+                        if (!canCreate) {
+                          final message = switch (subjectLimit.mode) {
+                            QuotaMode.disabled =>
+                              'Este recurso não está disponível no seu plano.',
+                            QuotaMode.limited =>
+                              'Você atingiu o limite de ${subjectLimit.maximum} disciplinas do seu plano.',
+                            QuotaMode.unlimited =>
+                              'Você não possui limite de disciplinas.',
+                            QuotaMode.notConfigured =>
+                              'O limite deste recurso ainda não está configurado.',
+                          };
+
+                          if (context.mounted) {
+                            ScaffoldMessenger.of(
+                              context,
+                            ).showSnackBar(SnackBar(content: Text(message)));
+                          }
+
+                          return;
+                        }
+
+                        await ref
+                            .read(studyRepositoryProvider)
+                            .createSubject(
+                              title,
+                              hasExam: hasExam,
+                              examDate: selectedDate,
+                            );
+
+                        if (context.mounted) {
+                          Navigator.pop(context);
                         }
                       },
                       child: const Text(

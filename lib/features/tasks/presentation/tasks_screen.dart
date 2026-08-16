@@ -2,6 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:life_os/features/tasks/presentation/providers/tasks_provider.dart';
 import 'package:life_os/features/tasks/data/models/task_model.dart';
+import 'package:life_os/features/premium/domain/services/plan_limits.dart';
+import 'package:life_os/features/premium/domain/services/quota_service.dart';
+import 'package:life_os/features/premium/presentation/plan_limits_provider.dart';
 
 class TasksScreen extends ConsumerStatefulWidget {
   const TasksScreen({super.key});
@@ -148,17 +151,68 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
                         ),
                       ),
                       onPressed: () async {
-                        // FIX: Foca fora para fechar o teclado antes de fechar o modal
                         FocusManager.instance.primaryFocus?.unfocus();
 
-                        if (titleController.text.trim().isNotEmpty) {
-                          await ref
-                              .read(tasksRepositoryProvider)
-                              .addTask(
-                                titleController.text.trim(),
-                                selectedPriority,
-                              );
-                          if (mounted) Navigator.pop(context);
+                        final title = titleController.text.trim();
+
+                        if (title.isEmpty) {
+                          return;
+                        }
+
+                        final tasksAsync = ref.read(tasksStreamProvider);
+
+                        if (!tasksAsync.hasValue) {
+                          if (context.mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(
+                                content: Text(
+                                  'Não foi possível verificar suas tarefas agora. Tente novamente.',
+                                ),
+                              ),
+                            );
+                          }
+                          return;
+                        }
+
+                        final tasks = tasksAsync.requireValue;
+
+                        final limits = ref.read(planLimitsProvider);
+                        const quotaService = QuotaService();
+
+                        final taskLimit = limits.limitFor(QuotaResource.tasks);
+
+                        final canCreate = quotaService.canCreate(
+                          limit: taskLimit,
+                          currentCount: tasks.length,
+                        );
+
+                        if (!canCreate) {
+                          final message = switch (taskLimit.mode) {
+                            QuotaMode.disabled =>
+                              'Este recurso não está disponível no seu plano.',
+                            QuotaMode.limited =>
+                              'Você atingiu o limite de ${taskLimit.maximum} tarefas do seu plano.',
+                            QuotaMode.unlimited =>
+                              'Você não possui limite de tarefas.',
+                            QuotaMode.notConfigured =>
+                              'O limite deste recurso ainda não está configurado.',
+                          };
+
+                          if (context.mounted) {
+                            ScaffoldMessenger.of(
+                              context,
+                            ).showSnackBar(SnackBar(content: Text(message)));
+                          }
+
+                          return;
+                        }
+
+                        await ref
+                            .read(tasksRepositoryProvider)
+                            .addTask(title, selectedPriority);
+
+                        if (context.mounted) {
+                          Navigator.pop(context);
                         }
                       },
                       child: const Text(

@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
-
+import 'package:life_os/features/premium/domain/services/plan_limits.dart';
+import 'package:life_os/features/premium/domain/services/quota_service.dart';
+import 'package:life_os/features/premium/presentation/plan_limits_provider.dart';
 import 'package:life_os/core/security/input_sanitizer.dart';
 import 'package:life_os/core/utils/app_logger.dart';
 import 'package:life_os/features/checkin/presentation/checkin_screen.dart';
@@ -240,6 +242,50 @@ class HealthScreen extends ConsumerWidget {
                         'Informe uma duração válida.',
                         error: true,
                       );
+                      return;
+                    }
+
+                    final medicationsAsync = ref.read(
+                      medicationsStreamProvider,
+                    );
+
+                    if (!medicationsAsync.hasValue) {
+                      _showSnackBar(
+                        parentContext,
+                        'Não foi possível verificar seus medicamentos agora. Tente novamente.',
+                        error: true,
+                      );
+                      return;
+                    }
+
+                    final medications = medicationsAsync.requireValue;
+
+                    final limits = ref.read(planLimitsProvider);
+                    const quotaService = QuotaService();
+
+                    final medicationLimit = limits.limitFor(
+                      QuotaResource.medications,
+                    );
+
+                    final canCreate = quotaService.canCreate(
+                      limit: medicationLimit,
+                      currentCount: medications.length,
+                    );
+
+                    if (!canCreate) {
+                      final message = switch (medicationLimit.mode) {
+                        QuotaMode.disabled =>
+                          'Este recurso não está disponível no seu plano.',
+                        QuotaMode.limited =>
+                          'Você atingiu o limite de ${medicationLimit.maximum} medicamentos do seu plano.',
+                        QuotaMode.unlimited =>
+                          'Você não possui limite de medicamentos.',
+                        QuotaMode.notConfigured =>
+                          'O limite deste recurso ainda não está configurado.',
+                      };
+
+                      _showSnackBar(parentContext, message, error: true);
+
                       return;
                     }
 

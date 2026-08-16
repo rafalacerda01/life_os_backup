@@ -2,6 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:life_os/features/goals/presentation/goals_provider.dart';
 import 'package:life_os/core/security/input_sanitizer.dart';
+import 'package:life_os/features/premium/domain/services/plan_limits.dart';
+import 'package:life_os/features/premium/domain/services/quota_service.dart';
+import 'package:life_os/features/premium/presentation/plan_limits_provider.dart';
 
 class GoalsScreen extends ConsumerStatefulWidget {
   const GoalsScreen({super.key});
@@ -287,18 +290,66 @@ class _GoalsScreenState extends ConsumerState<GoalsScreen> {
                               final target =
                                   int.tryParse(targetController.text) ?? 1;
 
-                              if (title.isNotEmpty) {
-                                await ref
-                                    .read(goalRepositoryProvider)
-                                    .createGoal(
-                                      title,
-                                      selectedTimeframe,
-                                      target,
-                                    );
+                              if (title.isEmpty) {
+                                return;
+                              }
+
+                              final goalsAsync = ref.read(goalsStreamProvider);
+
+                              if (!goalsAsync.hasValue) {
+                                if (context.mounted) {
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    const SnackBar(
+                                      content: Text(
+                                        'Não foi possível verificar suas metas agora. Tente novamente.',
+                                      ),
+                                    ),
+                                  );
+                                }
+                                return;
+                              }
+
+                              final goals = goalsAsync.requireValue;
+
+                              final limits = ref.read(planLimitsProvider);
+                              const quotaService = QuotaService();
+
+                              final goalLimit = limits.limitFor(
+                                QuotaResource.goals,
+                              );
+
+                              final canCreate = quotaService.canCreate(
+                                limit: goalLimit,
+                                currentCount: goals.length,
+                              );
+
+                              if (!canCreate) {
+                                final message = switch (goalLimit.mode) {
+                                  QuotaMode.disabled =>
+                                    'Este recurso não está disponível no seu plano.',
+                                  QuotaMode.limited =>
+                                    'Você atingiu o limite de ${goalLimit.maximum} metas do seu plano.',
+                                  QuotaMode.unlimited =>
+                                    'Você não possui limite de metas.',
+                                  QuotaMode.notConfigured =>
+                                    'O limite deste recurso ainda não está configurado.',
+                                };
 
                                 if (context.mounted) {
-                                  Navigator.pop(context);
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    SnackBar(content: Text(message)),
+                                  );
                                 }
+
+                                return;
+                              }
+
+                              await ref
+                                  .read(goalRepositoryProvider)
+                                  .createGoal(title, selectedTimeframe, target);
+
+                              if (context.mounted) {
+                                Navigator.pop(context);
                               }
                             },
                             child: const Row(
