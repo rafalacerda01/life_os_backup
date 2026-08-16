@@ -4,6 +4,7 @@ import 'package:life_os/features/analytics/presentation/analytics_provider.dart'
 import 'package:life_os/features/premium/presentation/premium_provider.dart';
 import 'package:life_os/features/ai_companion/presentation/providers/ai_companion_provider.dart';
 import 'package:life_os/features/ai_companion/presentation/ai_companion_screen.dart';
+import 'package:life_os/features/premium/domain/services/feature_gate.dart';
 
 class AnalyticsScreen extends ConsumerWidget {
   const AnalyticsScreen({super.key});
@@ -11,8 +12,18 @@ class AnalyticsScreen extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final analyticsData = ref.watch(analyticsProvider);
-    final isPremium = ref.watch(premiumProvider).isPremium;
+    final premiumStatus = ref.watch(premiumProvider);
+    const featureGate = FeatureGate();
 
+    final canAccessAdvancedAnalytics = featureGate.canAccess(
+      status: premiumStatus,
+      feature: PremiumFeature.analyticsAdvanced,
+    );
+
+    final canAccessAiCompanion = featureGate.canAccess(
+      status: premiumStatus,
+      feature: PremiumFeature.aiCompanion,
+    );
     return Scaffold(
       backgroundColor: const Color(0xFF070B14),
       appBar: AppBar(
@@ -89,7 +100,7 @@ class AnalyticsScreen extends ConsumerWidget {
                       ),
 
                       // Proteção Server-Side Visual (Blur/Overlay se for Free)
-                      if (!isPremium)
+                      if (!canAccessAdvancedAnalytics)
                         Positioned.fill(
                           child: Container(
                             decoration: BoxDecoration(
@@ -167,7 +178,7 @@ class AnalyticsScreen extends ConsumerWidget {
             const SizedBox(height: 25),
 
             // BOTÃO DO AI COACH INTEGRADO PARA USUÁRIOS PREMIUM
-            if (isPremium) ...[
+            if (canAccessAiCompanion) ...[
               SizedBox(
                 width: double.infinity,
                 child: ElevatedButton.icon(

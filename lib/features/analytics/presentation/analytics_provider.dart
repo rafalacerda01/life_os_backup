@@ -6,6 +6,7 @@ import 'package:life_os/features/tasks/presentation/providers/tasks_provider.dar
 import 'package:life_os/features/health/presentation/providers/health_provider.dart';
 import 'package:life_os/features/finance/presentation/providers/finance_provider.dart';
 import 'package:life_os/features/habits/presentation/providers/habits_provider.dart';
+import 'package:life_os/features/premium/domain/services/feature_gate.dart';
 
 // --- INJEÇÃO DO REPOSITÓRIO ---
 final analyticsRepositoryProvider = Provider((ref) {
@@ -31,7 +32,10 @@ final analyticsProvider = Provider<AnalyticsEntity>((ref) {
   return ref
       .watch(analyticsRepositoryProvider)
       .generateAnalytics(
-        isPremium: premiumState.isPremium,
+        isPremium: const FeatureGate().canAccess(
+          status: premiumState,
+          feature: PremiumFeature.analyticsAdvanced,
+        ),
         tasks: tasks,
         health: health,
         transactions: transactions,

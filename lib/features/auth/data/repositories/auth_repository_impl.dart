@@ -313,10 +313,10 @@ class AuthRepositoryImpl implements AuthRepository {
         streak: 0,
       );
 
-      await _firestore
-          .collection('users')
-          .doc(newUser.uid)
-          .set(newUser.toFirestore());
+      await _firestore.collection('users').doc(newUser.uid).set({
+        ...newUser.toFirestore(),
+        'habitsCount': 0,
+      });
 
       return Success(newUser);
     } on fb.FirebaseAuthException catch (e) {
@@ -374,10 +374,10 @@ class AuthRepositoryImpl implements AuthRepository {
           streak: 0,
         );
 
-        await _firestore
-            .collection('users')
-            .doc(fbUser.uid)
-            .set(newUser.toFirestore());
+        await _firestore.collection('users').doc(newUser.uid).set({
+          ...newUser.toFirestore(),
+          'habitsCount': 0,
+        });
 
         return Success(newUser);
       }

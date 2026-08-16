@@ -3,7 +3,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:google_sign_in/google_sign_in.dart';
-
+import 'package:life_os/core/services/sync_manager_provider.dart';
 // Imports dos providers de todos os módulos
 import 'package:life_os/features/finance/presentation/providers/finance_provider.dart';
 import 'package:life_os/features/tasks/presentation/providers/tasks_provider.dart';
@@ -87,11 +87,11 @@ class AuthNotifier extends Notifier<AuthState> {
       ref.read(tasksRepositoryProvider).syncTasksFromFirebaseToLocal();
       ref.read(habitsRepositoryProvider).syncHabitsFromFirebaseToLocal();
       ref.read(goalRepositoryProvider).syncGoalsFromFirebaseToLocal();
-      ref
-          .read(checkInRepositoryProvider)
-          .syncCheckinsFromFirebaseToLocal(); // Corrigido para CheckIn (I maiúsculo)
+      ref.read(checkInRepositoryProvider).syncCheckinsFromFirebaseToLocal();
       ref.read(healthRepositoryProvider).syncHealthFromFirebase();
       ref.read(focusRepositoryProvider).syncFocusFromFirebaseToLocal();
+
+      ref.read(syncManagerProvider).processPendingItems();
     } catch (e) {
       print("Erro ao tentar hidratar dados na inicialização: $e");
     }

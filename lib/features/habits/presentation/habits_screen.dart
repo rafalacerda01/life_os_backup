@@ -2,6 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
 import 'package:life_os/features/habits/presentation/providers/habits_provider.dart';
+import 'package:life_os/features/premium/domain/services/plan_limits.dart';
+import 'package:life_os/features/premium/domain/services/quota_service.dart';
+import 'package:life_os/features/premium/presentation/plan_limits_provider.dart';
 
 class HabitsScreen extends ConsumerWidget {
   const HabitsScreen({super.key});
@@ -39,11 +42,63 @@ class HabitsScreen extends ConsumerWidget {
           ElevatedButton(
             style: ElevatedButton.styleFrom(backgroundColor: Colors.cyanAccent),
             onPressed: () async {
-              if (controller.text.isNotEmpty) {
-                await ref
-                    .read(habitsRepositoryProvider)
-                    .addHabit(controller.text);
-                if (context.mounted) Navigator.pop(context);
+              final title = controller.text.trim();
+
+              if (title.isEmpty) {
+                return;
+              }
+
+              final habitsAsync = ref.read(habitsStreamProvider);
+
+              if (!habitsAsync.hasValue) {
+                if (context.mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(
+                      content: Text(
+                        'Não foi possível verificar seus hábitos agora. Tente novamente.',
+                      ),
+                    ),
+                  );
+                }
+                return;
+              }
+
+              final habits = habitsAsync.requireValue;
+
+              final limits = ref.read(planLimitsProvider);
+              const quotaService = QuotaService();
+
+              final canCreate = quotaService.canCreate(
+                limit: limits.limitFor(QuotaResource.habits),
+                currentCount: habits.length,
+              );
+
+              if (!canCreate) {
+                final limit = limits.limitFor(QuotaResource.habits);
+
+                final message = switch (limit.mode) {
+                  QuotaMode.disabled =>
+                    'Este recurso não está disponível no seu plano.',
+                  QuotaMode.limited =>
+                    'Você atingiu o limite de ${limit.maximum} hábitos do seu plano.',
+                  QuotaMode.unlimited => 'Você não possui limite de hábitos.',
+                  QuotaMode.notConfigured =>
+                    'O limite deste recurso ainda não está configurado.',
+                };
+
+                if (context.mounted) {
+                  ScaffoldMessenger.of(
+                    context,
+                  ).showSnackBar(SnackBar(content: Text(message)));
+                }
+
+                return;
+              }
+
+              await ref.read(habitsRepositoryProvider).addHabit(title);
+
+              if (context.mounted) {
+                Navigator.pop(context);
               }
             },
             child: const Text(

@@ -1,4 +1,5 @@
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:life_os/features/premium/domain/services/feature_gate.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:life_os/features/ai_companion/data/models/chat_message.dart';
 import 'package:life_os/features/ai_companion/data/repositories/ai_companion_repository.dart';
@@ -53,7 +54,14 @@ class AICompanionNotifier extends Notifier<AICompanionState> {
     if (text.trim().isEmpty) return;
 
     final premiumStatus = ref.read(premiumProvider);
-    if (!premiumStatus.isPremium) {
+    const featureGate = FeatureGate();
+
+    final canUseAi = featureGate.canAccess(
+      status: premiumStatus,
+      feature: PremiumFeature.aiCompanion,
+    );
+
+    if (!canUseAi) {
       throw Exception("PREMIUM_REQUIRED");
     }
 
