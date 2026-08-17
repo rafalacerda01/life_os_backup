@@ -318,6 +318,7 @@ class AuthRepositoryImpl implements AuthRepository {
         'habitsCount': 0,
         'tasksCount': 0,
         'goalsCount': 0,
+        'subjectsCount': 0,
       });
 
       return Success(newUser);
@@ -381,6 +382,7 @@ class AuthRepositoryImpl implements AuthRepository {
           'habitsCount': 0,
           'tasksCount': 0,
           'goalsCount': 0,
+          'subjectsCount': 0,
         });
 
         return Success(newUser);

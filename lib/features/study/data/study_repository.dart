@@ -1,5 +1,5 @@
 import 'dart:async';
-
+import 'dart:convert';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:drift/drift.dart' hide Query;
 import 'package:firebase_auth/firebase_auth.dart';
@@ -100,27 +100,39 @@ class StudyRepository {
     bool hasExam = false,
     DateTime? examDate,
   }) async {
-    if (_auth.currentUser == null) return;
+    if (_auth.currentUser == null) {
+      return;
+    }
 
     final id = _uuid.v4();
     final cleanTitle = InputSanitizer.sanitize(title);
 
     try {
-      await _db
-          .into(_db.subjects)
-          .insert(
-            SubjectsCompanion.insert(
-              id: id,
-              title: cleanTitle,
-              cardsToReview: 0,
-              streakDays: 0,
-              progress: 0.0,
-              hasExam: hasExam,
-              examDate: Value(examDate?.millisecondsSinceEpoch),
-            ),
-          );
-
-      unawaited(_createSubjectInFirestore(id, cleanTitle, hasExam, examDate));
+      await _db.transactionWithSync(
+        localOperation: () async {
+          await _db
+              .into(_db.subjects)
+              .insert(
+                SubjectsCompanion.insert(
+                  id: id,
+                  title: cleanTitle,
+                  cardsToReview: 0,
+                  streakDays: 0,
+                  progress: 0.0,
+                  hasExam: hasExam,
+                  examDate: Value(examDate?.millisecondsSinceEpoch),
+                ),
+              );
+        },
+        collection: 'subjects',
+        docId: id,
+        operationType: 'create',
+        payloadJson: jsonEncode({
+          'title': cleanTitle,
+          'hasExam': hasExam,
+          'examDate': examDate?.toIso8601String(),
+        }),
+      );
     } catch (e, stack) {
       AppLogger.e('Erro ao criar matéria localmente', e, stack);
       rethrow;
@@ -198,12 +210,14 @@ class StudyRepository {
   }
 
   Future<void> removeSubject(String id) async {
-    if (_auth.currentUser == null) return;
+    if (_auth.currentUser == null) {
+      return;
+    }
 
     try {
       final flashcardsQuery = await (_db.select(
         _db.flashcards,
-      )..where((t) => t.subjectId.equals(id))).get();
+      )..where((table) => table.subjectId.equals(id))).get();
 
       final removedCardsCount = flashcardsQuery.length;
 
@@ -215,22 +229,29 @@ class StudyRepository {
           .clamp(0, 99999)
           .toInt();
 
-      await _db.transaction(() async {
-        await (_db.delete(
-          _db.flashcards,
-        )..where((t) => t.subjectId.equals(id))).go();
+      await _db.transactionWithSync(
+        localOperation: () async {
+          await (_db.delete(
+            _db.flashcards,
+          )..where((table) => table.subjectId.equals(id))).go();
 
-        await (_db.delete(_db.subjects)..where((t) => t.id.equals(id))).go();
+          await (_db.delete(
+            _db.subjects,
+          )..where((table) => table.id.equals(id))).go();
 
-        await (_db.delete(
-          _db.notificationsTable,
-        )..where((t) => t.id.equals('exam_$id'))).go();
+          await (_db.delete(
+            _db.notificationsTable,
+          )..where((table) => table.id.equals('exam_$id'))).go();
 
-        await (_db.update(_db.studyStats)..where((t) => t.id.equals('main')))
-            .write(StudyStatsCompanion(reviewQueue: Value(newQueue)));
-      });
-
-      unawaited(_removeSubjectFromFirestore(id, newQueue));
+          await (_db.update(_db.studyStats)
+                ..where((table) => table.id.equals('main')))
+              .write(StudyStatsCompanion(reviewQueue: Value(newQueue)));
+        },
+        collection: 'subjects',
+        docId: id,
+        operationType: 'delete',
+        payloadJson: jsonEncode({'subjectId': id}),
+      );
     } catch (e, stack) {
       AppLogger.e('Erro ao deletar matéria', e, stack);
       rethrow;
@@ -721,37 +742,6 @@ class StudyRepository {
     }
   }
 
-  // ===========================================================================
-  // 4. FIREBASE - MÉTODOS PRIVADOS
-  // ===========================================================================
-
-  Future<void> _createSubjectInFirestore(
-    String id,
-    String title,
-    bool hasExam,
-    DateTime? examDate,
-  ) async {
-    final user = _auth.currentUser;
-
-    if (user == null) return;
-
-    try {
-      await _firestore
-          .collection('users')
-          .doc(user.uid)
-          .collection('subjects')
-          .doc(id)
-          .set({
-            'title': title,
-            'hasExam': hasExam,
-            'examDate': examDate != null ? Timestamp.fromDate(examDate) : null,
-            'createdAt': FieldValue.serverTimestamp(),
-          }, SetOptions(merge: true));
-    } catch (e, stack) {
-      AppLogger.e('Sync Error: Criar Subject', e, stack);
-    }
-  }
-
   Future<void> _completeCardInFirestore(
     String cardId,
     String subjectId,
@@ -808,47 +798,6 @@ class StudyRepository {
       await batch.commit();
     } catch (e, stack) {
       AppLogger.e('Sync Error: Completar Flashcard', e, stack);
-    }
-  }
-
-  Future<void> _removeSubjectFromFirestore(String id, int newQueue) async {
-    final user = _auth.currentUser;
-
-    if (user == null) return;
-
-    try {
-      final uid = user.uid;
-
-      final flashcardsQuery = await _firestore
-          .collection('users')
-          .doc(uid)
-          .collection('review_queue')
-          .where('subjectId', isEqualTo: id)
-          .get();
-
-      final batch = _firestore.batch();
-
-      for (final doc in flashcardsQuery.docs) {
-        batch.delete(doc.reference);
-      }
-
-      batch.delete(
-        _firestore.collection('users').doc(uid).collection('subjects').doc(id),
-      );
-
-      batch.set(
-        _firestore
-            .collection('users')
-            .doc(uid)
-            .collection('study_info')
-            .doc('main'),
-        {'reviewQueue': newQueue},
-        SetOptions(merge: true),
-      );
-
-      await batch.commit();
-    } catch (e, stack) {
-      AppLogger.e('Sync Error: Deletar Subject', e, stack);
     }
   }
 

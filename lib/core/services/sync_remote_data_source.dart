@@ -77,6 +77,19 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
       if (collection == 'goals' && operationType == 'delete') {
         return _deleteGoalServerSide(item: item);
       }
+
+      // ----------------------------------------------------------------------
+      // CREATE DE SUBJECTS
+      // Obrigatoriamente passa pelo backend para enforcement de quota.
+      // ----------------------------------------------------------------------
+
+      if (collection == 'subjects' && operationType == 'create') {
+        return _createSubjectServerSide(item: item);
+      }
+
+      if (collection == 'subjects' && operationType == 'delete') {
+        return _deleteSubjectServerSide(item: item);
+      }
       // ----------------------------------------------------------------------
       // DELETE DE HÁBITO
       // A operação batch_delete do hábito também passa pelo backend,
@@ -135,6 +148,41 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
         code: 'UNEXPECTED_SYNC_ERROR',
       );
     }
+  }
+
+  Future<SyncOperationResult> _createSubjectServerSide({
+    required SyncQueueTableData item,
+  }) async {
+    final data = _decodePayload(item.payloadJson);
+
+    final title = data['title'];
+    final hasExam = data['hasExam'];
+    final examDate = data['examDate'];
+
+    if (title is! String ||
+        hasExam is! bool ||
+        (examDate != null && examDate is! String)) {
+      return const SyncOperationResult.invalidPayload(
+        message: 'Payload de criação de matéria inválido.',
+      );
+    }
+
+    return _postToSyncBackend({
+      'operation': 'create_subject',
+      'subjectId': item.docId,
+      'title': title,
+      'hasExam': hasExam,
+      'examDate': examDate,
+    });
+  }
+
+  Future<SyncOperationResult> _deleteSubjectServerSide({
+    required SyncQueueTableData item,
+  }) async {
+    return _postToSyncBackend({
+      'operation': 'delete_subject',
+      'subjectId': item.docId,
+    });
   }
 
   Future<SyncOperationResult> _createGoalServerSide({
