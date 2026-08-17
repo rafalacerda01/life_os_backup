@@ -7,6 +7,7 @@ import 'package:life_os/core/security/input_sanitizer.dart';
 import 'package:life_os/features/finance/data/models/transaction_model.dart';
 import 'package:uuid/uuid.dart';
 import 'package:drift/drift.dart';
+import 'dart:convert';
 
 class FinanceRepository {
   final local_db.AppDatabase _db;
@@ -32,33 +33,36 @@ class FinanceRepository {
       );
 
       final firestoreId = const Uuid().v4();
+
       final createdAt = DateTime.now();
 
-      await _db
-          .into(_db.transactions)
-          .insert(
-            local_db.TransactionsCompanion.insert(
-              firestoreId: Value(firestoreId), // Ajustado para local_db.Value
-              title: cleanTitle,
-              amount: amount,
-              type: transactionType.name,
-              category: cleanCategory,
-              date: createdAt,
-            ),
-          );
-
-      unawaited(
-        _saveTransactionToFirestore(
-          firestoreId: firestoreId,
-          title: cleanTitle,
-          amount: amount,
-          type: transactionType.name,
-          category: cleanCategory,
-          createdAt: createdAt,
-        ),
+      await _db.transactionWithSync(
+        localOperation: () async {
+          await _db
+              .into(_db.transactions)
+              .insert(
+                local_db.TransactionsCompanion.insert(
+                  firestoreId: Value(firestoreId),
+                  title: cleanTitle,
+                  amount: amount,
+                  type: transactionType.name,
+                  category: cleanCategory,
+                  date: createdAt,
+                ),
+              );
+        },
+        collection: 'transactions',
+        docId: firestoreId,
+        operationType: 'create',
+        payloadJson: jsonEncode({
+          'title': cleanTitle,
+          'amount': amount,
+          'type': transactionType.name,
+          'category': cleanCategory,
+          'date': createdAt.toIso8601String(),
+        }),
       );
     } catch (error, stackTrace) {
-      // 🚀 Substituído debugPrint por AppLogger
       AppLogger.e('Erro ao inserir transação localmente', error, stackTrace);
       rethrow;
     }
@@ -70,11 +74,9 @@ class FinanceRepository {
         _db.transactions,
       )..where((table) => table.id.equals(localId))).getSingleOrNull();
 
-      if (transaction == null) return;
-
-      await (_db.update(_db.transactions)
-            ..where((table) => table.id.equals(localId)))
-          .write(const local_db.TransactionsCompanion(isDeleted: Value(true)));
+      if (transaction == null) {
+        return;
+      }
 
       final firestoreId = transaction.firestoreId;
 
@@ -82,15 +84,21 @@ class FinanceRepository {
           firestoreId.isEmpty ||
           firestoreId == 'pending' ||
           firestoreId == 'synced') {
-        await _deleteLocalTransaction(localId);
+        await _db.transaction(() async {
+          await _deleteLocalTransaction(localId);
+        });
+
         return;
       }
 
-      unawaited(
-        _deleteTransactionFromFirestore(
-          localId: localId,
-          firestoreId: firestoreId,
-        ),
+      await _db.transactionWithSync(
+        localOperation: () async {
+          await _deleteLocalTransaction(localId);
+        },
+        collection: 'transactions',
+        docId: firestoreId,
+        operationType: 'delete',
+        payloadJson: jsonEncode({'transactionId': firestoreId}),
       );
     } catch (error, stackTrace) {
       AppLogger.e('Erro ao excluir transação', error, stackTrace);
@@ -150,71 +158,6 @@ class FinanceRepository {
     } catch (error, stackTrace) {
       AppLogger.e(
         'Erro ao sincronizar transações do Firebase',
-        error,
-        stackTrace,
-      );
-    }
-  }
-
-  Future<void> _saveTransactionToFirestore({
-    required String firestoreId,
-    required String title,
-    required double amount,
-    required String type,
-    required String category,
-    required DateTime createdAt,
-  }) async {
-    final userId = _auth.currentUser?.uid;
-
-    if (userId == null) {
-      AppLogger.i('Transação salva localmente: usuário não autenticado.');
-      return;
-    }
-
-    try {
-      await _firestore
-          .collection('users')
-          .doc(userId)
-          .collection('transactions')
-          .doc(firestoreId)
-          .set({
-            'id': firestoreId,
-            'title': title,
-            'amount': amount,
-            'type': type,
-            'category': category,
-            'date': Timestamp.fromDate(createdAt),
-            'createdAt': Timestamp.fromDate(createdAt),
-            'updatedAt': FieldValue.serverTimestamp(),
-          }, SetOptions(merge: true));
-    } catch (error, stackTrace) {
-      AppLogger.e('Envio da transação pendente (offline)', error, stackTrace);
-    }
-  }
-
-  Future<void> _deleteTransactionFromFirestore({
-    required int localId,
-    required String firestoreId,
-  }) async {
-    final userId = _auth.currentUser?.uid;
-
-    if (userId == null) {
-      AppLogger.i('Exclusão local concluída; usuário não autenticado.');
-      return;
-    }
-
-    try {
-      await _firestore
-          .collection('users')
-          .doc(userId)
-          .collection('transactions')
-          .doc(firestoreId)
-          .delete();
-
-      await _deleteLocalTransaction(localId);
-    } catch (error, stackTrace) {
-      AppLogger.e(
-        'Exclusão da transação pendente (offline)',
         error,
         stackTrace,
       );

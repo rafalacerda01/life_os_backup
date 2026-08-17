@@ -91,12 +91,30 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
         return _deleteSubjectServerSide(item: item);
       }
 
+      // ----------------------------------------------------------------------
+      // CREATE DE MEDICATIONS
+      // Obrigatoriamente passa pelo backend para enforcement de quota.
+      // ----------------------------------------------------------------------
+
       if (collection == 'medications' && operationType == 'create') {
         return _createMedicationServerSide(item: item);
       }
 
       if (collection == 'medications' && operationType == 'delete') {
         return _deleteMedicationServerSide(item: item);
+      }
+
+      // ----------------------------------------------------------------------
+      // CREATE DE TRANSACTIONS
+      // Obrigatoriamente passa pelo backend para enforcement de quota.
+      // ----------------------------------------------------------------------
+
+      if (collection == 'transactions' && operationType == 'create') {
+        return _createTransactionServerSide(item: item);
+      }
+
+      if (collection == 'transactions' && operationType == 'delete') {
+        return _deleteTransactionServerSide(item: item);
       }
       // ----------------------------------------------------------------------
       // DELETE DE HÁBITO
@@ -156,6 +174,47 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
         code: 'UNEXPECTED_SYNC_ERROR',
       );
     }
+  }
+
+  Future<SyncOperationResult> _createTransactionServerSide({
+    required SyncQueueTableData item,
+  }) async {
+    final data = _decodePayload(item.payloadJson);
+
+    final title = data['title'];
+    final amount = data['amount'];
+    final type = data['type'];
+    final category = data['category'];
+    final date = data['date'];
+
+    if (title is! String ||
+        amount is! num ||
+        type is! String ||
+        category is! String ||
+        date is! String) {
+      return const SyncOperationResult.invalidPayload(
+        message: 'Payload de criação de transação inválido.',
+      );
+    }
+
+    return _postToSyncBackend({
+      'operation': 'create_transaction',
+      'transactionId': item.docId,
+      'title': title,
+      'amount': amount.toDouble(),
+      'type': type,
+      'category': category,
+      'date': date,
+    });
+  }
+
+  Future<SyncOperationResult> _deleteTransactionServerSide({
+    required SyncQueueTableData item,
+  }) async {
+    return _postToSyncBackend({
+      'operation': 'delete_transaction',
+      'transactionId': item.docId,
+    });
   }
 
   Future<SyncOperationResult> _createMedicationServerSide({
