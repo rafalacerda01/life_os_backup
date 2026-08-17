@@ -57,6 +57,13 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
         return _createHabitServerSide(item: item);
       }
 
+      if (collection == 'tasks' && operationType == 'create') {
+        return _createTaskServerSide(item: item);
+      }
+
+      if (collection == 'tasks' && operationType == 'delete') {
+        return _deleteTaskServerSide(item: item);
+      }
       // ----------------------------------------------------------------------
       // DELETE DE HÁBITO
       // A operação batch_delete do hábito também passa pelo backend,
@@ -115,6 +122,39 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
         code: 'UNEXPECTED_SYNC_ERROR',
       );
     }
+  }
+
+  Future<SyncOperationResult> _createTaskServerSide({
+    required SyncQueueTableData item,
+  }) async {
+    final data = _decodePayload(item.payloadJson);
+
+    final title = data['title'];
+    final priority = data['priority'];
+    final date = data['date'];
+
+    if (title is! String || priority is! String || date is! String) {
+      return const SyncOperationResult.invalidPayload(
+        message: 'Payload de criação de tarefa inválido.',
+      );
+    }
+
+    return _postToSyncBackend({
+      'operation': 'create_task',
+      'taskId': item.docId,
+      'title': title,
+      'priority': priority,
+      'date': date,
+    });
+  }
+
+  Future<SyncOperationResult> _deleteTaskServerSide({
+    required SyncQueueTableData item,
+  }) async {
+    return _postToSyncBackend({
+      'operation': 'delete_task',
+      'taskId': item.docId,
+    });
   }
 
   Future<SyncOperationResult> _createHabitServerSide({
@@ -201,8 +241,14 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
         return const SyncOperationResult.success();
       }
 
-      if (response.statusCode == 401 || response.statusCode == 403) {
+      if (response.statusCode == 401) {
         return const SyncOperationResult.permissionDenied();
+      }
+
+      if (response.statusCode == 403) {
+        return SyncOperationResult.invalidPayload(
+          message: _extractBackendMessage(response.body),
+        );
       }
 
       if (response.statusCode == 400 || response.statusCode == 412) {

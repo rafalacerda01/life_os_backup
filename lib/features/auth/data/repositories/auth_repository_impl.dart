@@ -316,6 +316,7 @@ class AuthRepositoryImpl implements AuthRepository {
       await _firestore.collection('users').doc(newUser.uid).set({
         ...newUser.toFirestore(),
         'habitsCount': 0,
+        'tasksCount': 0,
       });
 
       return Success(newUser);
@@ -377,6 +378,7 @@ class AuthRepositoryImpl implements AuthRepository {
         await _firestore.collection('users').doc(newUser.uid).set({
           ...newUser.toFirestore(),
           'habitsCount': 0,
+          'tasksCount': 0,
         });
 
         return Success(newUser);
