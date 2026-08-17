@@ -207,14 +207,16 @@ class FocusScreen extends ConsumerWidget {
     final hasTarget = focusState.activeTargetId != null;
 
     return GestureDetector(
-      onTap: () {
-        Navigator.push(
-          context,
-          MaterialPageRoute(
-            builder: (context) => const TargetSelectionScreen(),
-          ),
-        );
-      },
+      onTap: focusState.isRunning
+          ? null
+          : () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (context) => const TargetSelectionScreen(),
+                ),
+              );
+            },
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 250),
         width: double.infinity,

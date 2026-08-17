@@ -9,6 +9,15 @@ import 'package:life_os/features/focus/data/repositories/focus_repository.dart';
 import 'package:life_os/features/tasks/presentation/providers/tasks_provider.dart';
 import 'package:life_os/features/study/presentation/providers/study_provider.dart';
 
+enum FocusTargetType {
+  task('TASK'),
+  subject('SUBJECT');
+
+  const FocusTargetType(this.value);
+
+  final String value;
+}
+
 // --- INJEÇÃO DO REPOSITÓRIO ---
 final focusRepositoryProvider = Provider((ref) {
   return FocusRepository(
@@ -18,13 +27,22 @@ final focusRepositoryProvider = Provider((ref) {
   );
 });
 
+typedef FocusPeriodicTimerFactory =
+    Timer Function(Duration duration, void Function(Timer timer) callback);
+
+final focusPeriodicTimerFactoryProvider = Provider<FocusPeriodicTimerFactory>(
+  (ref) => Timer.periodic,
+);
+
+const _keepCurrentTargetValue = Object();
+
 class FocusState {
   final int durationRemaining;
   final bool isRunning;
   final bool isBreak;
   final String? activeTargetId;
   final String? activeTargetTitle;
-  final String? activeTargetType;
+  final FocusTargetType? activeTargetType;
 
   const FocusState({
     required this.durationRemaining,
@@ -39,23 +57,30 @@ class FocusState {
     int? durationRemaining,
     bool? isRunning,
     bool? isBreak,
-    String? activeTargetId,
-    String? activeTargetTitle,
-    String? activeTargetType,
+    Object? activeTargetId = _keepCurrentTargetValue,
+    Object? activeTargetTitle = _keepCurrentTargetValue,
+    Object? activeTargetType = _keepCurrentTargetValue,
   }) {
     return FocusState(
       durationRemaining: durationRemaining ?? this.durationRemaining,
       isRunning: isRunning ?? this.isRunning,
       isBreak: isBreak ?? this.isBreak,
-      activeTargetId: activeTargetId ?? this.activeTargetId,
-      activeTargetTitle: activeTargetTitle ?? this.activeTargetTitle,
-      activeTargetType: activeTargetType ?? this.activeTargetType,
+      activeTargetId: identical(activeTargetId, _keepCurrentTargetValue)
+          ? this.activeTargetId
+          : activeTargetId as String?,
+      activeTargetTitle: identical(activeTargetTitle, _keepCurrentTargetValue)
+          ? this.activeTargetTitle
+          : activeTargetTitle as String?,
+      activeTargetType: identical(activeTargetType, _keepCurrentTargetValue)
+          ? this.activeTargetType
+          : activeTargetType as FocusTargetType?,
     );
   }
 }
 
 class FocusNotifier extends Notifier<FocusState> {
   Timer? _timer;
+  bool _isCompletingSession = false;
   int _timerDurationInSeconds = 1500; // Armazena a duração atual configurada
 
   @override
@@ -71,7 +96,9 @@ class FocusNotifier extends Notifier<FocusState> {
     );
   }
 
-  void selectTarget(String id, String title, {String targetType = 'TASK'}) {
+  void selectTarget(String id, String title, FocusTargetType targetType) {
+    if (state.isRunning) return;
+
     state = state.copyWith(
       activeTargetId: id,
       activeTargetTitle: title,
@@ -100,51 +127,61 @@ class FocusNotifier extends Notifier<FocusState> {
   }
 
   void startTimer() {
-    if (state.isRunning) return;
+    if (state.isRunning || _isCompletingSession) return;
 
     state = state.copyWith(isRunning: true);
 
-    _timer = Timer.periodic(const Duration(seconds: 1), (timer) {
-      if (state.durationRemaining > 1) {
-        state = state.copyWith(durationRemaining: state.durationRemaining - 1);
-      } else {
-        _timer?.cancel();
-        state = state.copyWith(durationRemaining: 0, isRunning: false);
-        _handleSessionEnd();
-      }
-    });
+    _timer = ref.read(focusPeriodicTimerFactoryProvider)(
+      const Duration(seconds: 1),
+      (timer) {
+        if (state.durationRemaining > 1) {
+          state = state.copyWith(
+            durationRemaining: state.durationRemaining - 1,
+          );
+        } else {
+          _timer?.cancel();
+          state = state.copyWith(durationRemaining: 0, isRunning: false);
+          unawaited(_handleSessionEnd());
+        }
+      },
+    );
   }
 
   Future<void> _handleSessionEnd() async {
-    if (!state.isBreak && state.activeTargetId != null) {
-      try {
+    if (_isCompletingSession) return;
+
+    _isCompletingSession = true;
+
+    try {
+      if (!state.isBreak && state.activeTargetId != null) {
         final targetIdStr = state.activeTargetId!;
-        final targetType = state.activeTargetType ?? 'TASK';
+        final targetType = state.activeTargetType ?? FocusTargetType.task;
         final elapsedSeconds = _timerDurationInSeconds;
 
         // 1. Grava o log de foco bruto
         await ref
             .read(focusRepositoryProvider)
-            .saveFocusSession(targetIdStr, targetType, elapsedSeconds);
+            .saveFocusSession(targetIdStr, targetType.value, elapsedSeconds);
 
         // 2. Atualiza Tarefa se for do tipo TASK
-        if (targetType == 'TASK') {
+        if (targetType == FocusTargetType.task) {
           await ref
               .read(tasksRepositoryProvider)
               .toggleTaskStatus(targetIdStr, false);
         }
-        // 3. Atualiza Matéria/Estudo se for do tipo SUBJECT ou EXAM
-        else if (targetType == 'SUBJECT' || targetType == 'EXAM') {
+        // 3. Atualiza Matéria/Estudo se for do tipo SUBJECT
+        else if (targetType == FocusTargetType.subject) {
           await ref
               .read(studyRepositoryProvider)
               .addStudyTime(targetIdStr, elapsedSeconds);
         }
-      } catch (e, stack) {
-        // 🚀 AQUI: O 'stack' foi adicionado no catch e passado para o AppLogger
-        AppLogger.e("Erro ao finalizar sessão de foco", e, stack);
       }
+    } catch (e, stack) {
+      AppLogger.e("Erro ao finalizar sessão de foco", e, stack);
+    } finally {
+      toggleSessionType();
+      _isCompletingSession = false;
     }
-    toggleSessionType();
   }
 
   void pauseTimer() {

@@ -36,6 +36,7 @@ class TargetSelectionScreen extends ConsumerWidget {
                       ref,
                       t.id,
                       t.title,
+                      FocusTargetType.task,
                       Icons.check_circle_outline,
                     ),
                   )
@@ -61,6 +62,7 @@ class TargetSelectionScreen extends ConsumerWidget {
                       ref,
                       s.id,
                       s.title,
+                      FocusTargetType.subject,
                       Icons.menu_book,
                     ),
                   )
@@ -93,6 +95,7 @@ class TargetSelectionScreen extends ConsumerWidget {
     WidgetRef ref,
     String id,
     String title,
+    FocusTargetType targetType,
     IconData icon,
   ) {
     return Card(
@@ -103,7 +106,7 @@ class TargetSelectionScreen extends ConsumerWidget {
         title: Text(title, style: const TextStyle(color: Colors.white)),
         trailing: const Icon(Icons.chevron_right, color: Colors.white24),
         onTap: () {
-          ref.read(focusProvider.notifier).selectTarget(id, title);
+          ref.read(focusProvider.notifier).selectTarget(id, title, targetType);
           Navigator.pop(context); // Retorna ao timer
         },
       ),
