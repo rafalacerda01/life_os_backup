@@ -64,6 +64,19 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
       if (collection == 'tasks' && operationType == 'delete') {
         return _deleteTaskServerSide(item: item);
       }
+
+      // ----------------------------------------------------------------------
+      // CREATE DE HÁBITO
+      // Obrigatoriamente passa pelo backend para enforcement de quota.
+      // ----------------------------------------------------------------------
+
+      if (collection == 'goals' && operationType == 'create') {
+        return _createGoalServerSide(item: item);
+      }
+
+      if (collection == 'goals' && operationType == 'delete') {
+        return _deleteGoalServerSide(item: item);
+      }
       // ----------------------------------------------------------------------
       // DELETE DE HÁBITO
       // A operação batch_delete do hábito também passa pelo backend,
@@ -122,6 +135,44 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
         code: 'UNEXPECTED_SYNC_ERROR',
       );
     }
+  }
+
+  Future<SyncOperationResult> _createGoalServerSide({
+    required SyncQueueTableData item,
+  }) async {
+    final data = _decodePayload(item.payloadJson);
+
+    final title = data['title'];
+    final period = data['period'];
+    final targetValue = data['targetValue'];
+    final createdAt = data['createdAt'];
+
+    if (title is! String ||
+        period is! String ||
+        targetValue is! int ||
+        createdAt is! String) {
+      return const SyncOperationResult.invalidPayload(
+        message: 'Payload de criação de meta inválido.',
+      );
+    }
+
+    return _postToSyncBackend({
+      'operation': 'create_goal',
+      'goalId': item.docId,
+      'title': title,
+      'period': period,
+      'targetValue': targetValue,
+      'createdAt': createdAt,
+    });
+  }
+
+  Future<SyncOperationResult> _deleteGoalServerSide({
+    required SyncQueueTableData item,
+  }) async {
+    return _postToSyncBackend({
+      'operation': 'delete_goal',
+      'goalId': item.docId,
+    });
   }
 
   Future<SyncOperationResult> _createTaskServerSide({

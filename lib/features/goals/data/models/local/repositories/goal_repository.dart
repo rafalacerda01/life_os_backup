@@ -1,4 +1,4 @@
-import 'dart:async';
+import 'dart:convert';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:drift/drift.dart';
@@ -47,31 +47,42 @@ class GoalRepository {
   // ===========================================================================
 
   Future<void> createGoal(String title, String period, int targetValue) async {
-    if (_auth.currentUser == null) return;
+    if (_auth.currentUser == null) {
+      return;
+    }
 
     final id = _uuid.v4();
     final cleanTitle = InputSanitizer.sanitize(title);
     final now = DateTime.now();
 
     try {
-      // 1. Salva Localmente
-      await _db
-          .into(_db.goals)
-          .insert(
-            GoalsCompanion.insert(
-              id: id,
-              title: cleanTitle,
-              period: period,
-              currentValue: 0,
-              targetValue: targetValue,
-              createdAt: now.millisecondsSinceEpoch,
-              lastReset: now.millisecondsSinceEpoch,
-            ),
-          );
-
-      // 2. Envia para o Firebase em Background
-      unawaited(
-        _createGoalInFirestore(id, cleanTitle, period, targetValue, now),
+      await _db.transactionWithSync(
+        localOperation: () async {
+          await _db
+              .into(_db.goals)
+              .insert(
+                GoalsCompanion.insert(
+                  id: id,
+                  title: cleanTitle,
+                  period: period,
+                  currentValue: 0,
+                  targetValue: targetValue,
+                  createdAt: now.millisecondsSinceEpoch,
+                  lastReset: now.millisecondsSinceEpoch,
+                ),
+              );
+        },
+        collection: 'goals',
+        docId: id,
+        operationType: 'create',
+        payloadJson: jsonEncode({
+          'title': cleanTitle,
+          'period': period,
+          'currentValue': 0,
+          'targetValue': targetValue,
+          'createdAt': now.toIso8601String(),
+          'lastReset': now.toIso8601String(),
+        }),
       );
     } catch (e, stack) {
       AppLogger.e('Erro ao criar Meta localmente', e, stack);
@@ -80,16 +91,21 @@ class GoalRepository {
   }
 
   Future<void> updateGoalProgress(String id, int newValue) async {
-    if (_auth.currentUser == null) return;
+    if (_auth.currentUser == null) {
+      return;
+    }
 
     try {
-      // 1. Atualiza Localmente
-      await (_db.update(_db.goals)..where((t) => t.id.equals(id))).write(
-        GoalsCompanion(currentValue: Value(newValue)),
+      await _db.transactionWithSync(
+        localOperation: () async {
+          await (_db.update(_db.goals)..where((table) => table.id.equals(id)))
+              .write(GoalsCompanion(currentValue: Value(newValue)));
+        },
+        collection: 'goals',
+        docId: id,
+        operationType: 'update',
+        payloadJson: jsonEncode({'currentValue': newValue}),
       );
-
-      // 2. Atualiza no Firebase em Background
-      unawaited(_updateGoalProgressInFirestore(id, newValue));
     } catch (e, stack) {
       AppLogger.e('Erro ao atualizar progresso da Meta local', e, stack);
       rethrow;
@@ -97,20 +113,32 @@ class GoalRepository {
   }
 
   Future<void> resetGoalCycle(String id) async {
-    if (_auth.currentUser == null) return;
+    if (_auth.currentUser == null) {
+      return;
+    }
+
     final now = DateTime.now();
 
     try {
-      // 1. Reseta Localmente
-      await (_db.update(_db.goals)..where((t) => t.id.equals(id))).write(
-        GoalsCompanion(
-          currentValue: const Value(0),
-          lastReset: Value(now.millisecondsSinceEpoch),
-        ),
+      await _db.transactionWithSync(
+        localOperation: () async {
+          await (_db.update(
+            _db.goals,
+          )..where((table) => table.id.equals(id))).write(
+            GoalsCompanion(
+              currentValue: const Value(0),
+              lastReset: Value(now.millisecondsSinceEpoch),
+            ),
+          );
+        },
+        collection: 'goals',
+        docId: id,
+        operationType: 'update',
+        payloadJson: jsonEncode({
+          'currentValue': 0,
+          'lastReset': now.toIso8601String(),
+        }),
       );
-
-      // 2. Reseta no Firebase em Background
-      unawaited(_resetGoalCycleInFirestore(id, now));
     } catch (e, stack) {
       AppLogger.e('Erro ao resetar ciclo da Meta local', e, stack);
       rethrow;
@@ -118,14 +146,22 @@ class GoalRepository {
   }
 
   Future<void> removeGoal(String id) async {
-    if (_auth.currentUser == null) return;
+    if (_auth.currentUser == null) {
+      return;
+    }
 
     try {
-      // 1. Deleta Localmente
-      await (_db.delete(_db.goals)..where((t) => t.id.equals(id))).go();
-
-      // 2. Deleta no Firebase em Background
-      unawaited(_removeGoalFromFirestore(id));
+      await _db.transactionWithSync(
+        localOperation: () async {
+          await (_db.delete(
+            _db.goals,
+          )..where((table) => table.id.equals(id))).go();
+        },
+        collection: 'goals',
+        docId: id,
+        operationType: 'delete',
+        payloadJson: jsonEncode({'goalId': id}),
+      );
     } catch (e, stack) {
       AppLogger.e('Erro ao remover Meta localmente', e, stack);
       rethrow;
@@ -171,79 +207,6 @@ class GoalRepository {
       AppLogger.i("SYNC Metas: Concluído.");
     } catch (e, stack) {
       AppLogger.e("SYNC Metas: ERRO CRÍTICO", e, stack);
-    }
-  }
-
-  // --- Métodos Privados Fire-and-Forget ---
-
-  Future<void> _createGoalInFirestore(
-    String id,
-    String title,
-    String period,
-    int targetValue,
-    DateTime now,
-  ) async {
-    try {
-      await _firestore
-          .collection('users')
-          .doc(_auth.currentUser!.uid)
-          .collection('goals')
-          .doc(id)
-          .set({
-            'title': title,
-            'period': period,
-            'currentValue': 0,
-            'targetValue': targetValue,
-            // Usando a mesma data local garante sincronia 100% perfeita entre Drift e Firestore
-            'createdAt': Timestamp.fromDate(now),
-            'lastReset': Timestamp.fromDate(now),
-          }, SetOptions(merge: true));
-    } catch (e, stack) {
-      AppLogger.e('Sync Error: Criar Meta', e, stack);
-    }
-  }
-
-  Future<void> _updateGoalProgressInFirestore(String id, int newValue) async {
-    try {
-      // Usando set com merge: true para evitar erro NOT_FOUND
-      await _firestore
-          .collection('users')
-          .doc(_auth.currentUser!.uid)
-          .collection('goals')
-          .doc(id)
-          .set({'currentValue': newValue}, SetOptions(merge: true));
-    } catch (e, stack) {
-      AppLogger.e('Sync Error: Progresso da Meta', e, stack);
-    }
-  }
-
-  Future<void> _resetGoalCycleInFirestore(String id, DateTime now) async {
-    try {
-      // Usando set com merge: true para evitar erro NOT_FOUND
-      await _firestore
-          .collection('users')
-          .doc(_auth.currentUser!.uid)
-          .collection('goals')
-          .doc(id)
-          .set({
-            'currentValue': 0,
-            'lastReset': Timestamp.fromDate(now),
-          }, SetOptions(merge: true));
-    } catch (e, stack) {
-      AppLogger.e('Sync Error: Reset da Meta', e, stack);
-    }
-  }
-
-  Future<void> _removeGoalFromFirestore(String id) async {
-    try {
-      await _firestore
-          .collection('users')
-          .doc(_auth.currentUser!.uid)
-          .collection('goals')
-          .doc(id)
-          .delete();
-    } catch (e, stack) {
-      AppLogger.e('Sync Error: Remover Meta', e, stack);
     }
   }
 }

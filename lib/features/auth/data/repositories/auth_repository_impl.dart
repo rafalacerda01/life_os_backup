@@ -317,6 +317,7 @@ class AuthRepositoryImpl implements AuthRepository {
         ...newUser.toFirestore(),
         'habitsCount': 0,
         'tasksCount': 0,
+        'goalsCount': 0,
       });
 
       return Success(newUser);
@@ -379,6 +380,7 @@ class AuthRepositoryImpl implements AuthRepository {
           ...newUser.toFirestore(),
           'habitsCount': 0,
           'tasksCount': 0,
+          'goalsCount': 0,
         });
 
         return Success(newUser);
