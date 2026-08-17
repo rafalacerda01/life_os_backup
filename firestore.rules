@@ -1,0 +1,733 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn()
+        && request.auth.uid == userId;
+    }
+
+    function circlePath(circleId) {
+      return /databases/$(database)/documents/circles/$(circleId);
+    }
+
+    function rankingPath(circleId, userId) {
+      return /databases/$(database)/documents/circles/$(circleId)/ranking/$(userId);
+    }
+
+    function isCircleAdmin(circleId) {
+      return isSignedIn()
+        && exists(circlePath(circleId))
+        && get(circlePath(circleId)).data.adminId == request.auth.uid;
+    }
+
+    function isCircleMember(circleId) {
+      return isSignedIn()
+        && exists(rankingPath(circleId, request.auth.uid));
+    }
+
+    function isUpdatingOnly(fields) {
+      return request.resource.data
+        .diff(resource.data)
+        .affectedKeys()
+        .hasOnly(fields);
+    }
+
+    function validNewRankingData() {
+      return request.resource.data.keys().hasOnly([
+          'totalXp',
+          'name',
+          'photoUrl',
+          'updatedAt'
+        ])
+        && request.resource.data.totalXp == 0
+        && request.resource.data.name is string
+        && request.resource.data.name.size() > 0
+        && request.resource.data.name.size() <= 50
+        && request.resource.data.updatedAt == request.time
+        && (
+          !request.resource.data.keys().hasAny(['photoUrl']) ||
+          request.resource.data.photoUrl is string
+        );
+    }
+
+    function isAtomicJoin(circleId) {
+      return isSignedIn()
+        && !isCircleMember(circleId)
+        && isUpdatingOnly([
+          'memberCount',
+          'updatedAt'
+        ])
+        && request.resource.data.memberCount ==
+            resource.data.memberCount + 1
+        && request.resource.data.updatedAt ==
+            request.time
+        && existsAfter(
+          rankingPath(
+            circleId,
+            request.auth.uid
+          )
+        );
+    }
+
+    function isValidRankingJoin(
+      circleId,
+      userId
+    ) {
+      return isOwner(userId)
+        && !isCircleMember(circleId)
+        && validNewRankingData()
+        && getAfter(
+          circlePath(circleId)
+        ).data.memberCount ==
+            get(
+              circlePath(circleId)
+            ).data.memberCount + 1;
+    }
+
+    function validUserCreate() {
+      return request.resource.data.keys().hasOnly([
+          'email',
+          'displayName',
+          'isPremium',
+          'photoUrl',
+          'xp',
+          'level',
+          'streak',
+          'habitsCount',
+          'tasksCount',
+          'goalsCount',
+          'subjectsCount',
+          'medicationsCount',
+          'transactionsCount'
+        ])
+        && request.resource.data.keys().hasAll([
+          'email',
+          'displayName',
+          'isPremium',
+          'photoUrl',
+          'xp',
+          'level',
+          'streak',
+          'habitsCount',
+          'tasksCount',
+          'goalsCount',
+          'subjectsCount',
+          'medicationsCount',
+          'transactionsCount'
+        ])
+        && request.resource.data.email is string
+        && request.resource.data.displayName is string
+        && (
+          request.resource.data.photoUrl == null ||
+          request.resource.data.photoUrl is string
+        )
+        && request.resource.data.isPremium == false
+        && request.resource.data.xp is int
+        && request.resource.data.xp == 0
+        && request.resource.data.level is int
+        && request.resource.data.level == 1
+        && request.resource.data.streak is int
+        && request.resource.data.streak == 0
+        && request.resource.data.habitsCount is int
+        && request.resource.data.habitsCount == 0
+        && request.resource.data.tasksCount is int
+        && request.resource.data.tasksCount == 0
+        && request.resource.data.goalsCount is int
+        && request.resource.data.goalsCount == 0
+        && request.resource.data.subjectsCount is int
+        && request.resource.data.subjectsCount == 0
+        && request.resource.data.medicationsCount is int
+        && request.resource.data.medicationsCount == 0
+        && request.resource.data.transactionsCount is int
+        && request.resource.data.transactionsCount == 0;
+    }
+
+    function validUserUpdate() {
+      return isUpdatingOnly([
+          'displayName',
+          'photoUrl',
+          'selectedFocusAreas',
+          'hasCompletedOnboarding',
+          'activeCircleId'
+        ])
+        && (
+          !request.resource.data
+            .diff(resource.data)
+            .affectedKeys()
+            .hasAny(['displayName']) ||
+          request.resource.data.displayName is string
+        )
+        && (
+          !request.resource.data
+            .diff(resource.data)
+            .affectedKeys()
+            .hasAny(['photoUrl']) ||
+          request.resource.data.photoUrl == null ||
+          request.resource.data.photoUrl is string
+        )
+        && (
+          !request.resource.data
+            .diff(resource.data)
+            .affectedKeys()
+            .hasAny(['selectedFocusAreas']) ||
+          (
+            request.resource.data.selectedFocusAreas is list
+            && request.resource.data.selectedFocusAreas.size() <= 20
+          )
+        )
+        && (
+          !request.resource.data
+            .diff(resource.data)
+            .affectedKeys()
+            .hasAny(['hasCompletedOnboarding']) ||
+          request.resource.data.hasCompletedOnboarding is bool
+        )
+        && (
+          !request.resource.data
+            .diff(resource.data)
+            .affectedKeys()
+            .hasAny(['activeCircleId']) ||
+          request.resource.data.activeCircleId == null ||
+          request.resource.data.activeCircleId is string
+        );
+    }
+
+    function validCheckinData() {
+      return request.resource.data.keys().hasOnly([
+          'energy',
+          'focus',
+          'motivation',
+          'updatedAt'
+        ])
+        && request.resource.data.keys().hasAll([
+          'energy',
+          'focus',
+          'motivation',
+          'updatedAt'
+        ])
+        && request.resource.data.energy is number
+        && request.resource.data.focus is number
+        && request.resource.data.motivation is number
+        && request.resource.data.updatedAt == request.time;
+    }
+
+    function validFocusLogData() {
+      return request.resource.data.keys().hasOnly([
+          'targetId',
+          'targetType',
+          'durationSeconds',
+          'timestamp'
+        ])
+        && request.resource.data.keys().hasAll([
+          'targetId',
+          'targetType',
+          'durationSeconds',
+          'timestamp'
+        ])
+        && request.resource.data.targetId is string
+        && request.resource.data.targetType is string
+        && request.resource.data.durationSeconds is int
+        && request.resource.data.durationSeconds >= 0
+        && request.resource.data.timestamp is timestamp;
+    }
+
+    function validMenstrualCycleData() {
+      return request.resource.data.menstrualCycle is map
+        && request.resource.data.menstrualCycle.keys().hasOnly([
+          'isEnabled',
+          'lastPeriodStart',
+          'cycleLengthDays',
+          'periodLengthDays'
+        ])
+        && request.resource.data.menstrualCycle.keys().hasAll([
+          'isEnabled',
+          'lastPeriodStart',
+          'cycleLengthDays',
+          'periodLengthDays'
+        ])
+        && request.resource.data.menstrualCycle.isEnabled is bool
+        && request.resource.data.menstrualCycle.lastPeriodStart is string
+        && request.resource.data.menstrualCycle.cycleLengthDays is int
+        && request.resource.data.menstrualCycle.cycleLengthDays >= 1
+        && request.resource.data.menstrualCycle.cycleLengthDays <= 120
+        && request.resource.data.menstrualCycle.periodLengthDays is int
+        && request.resource.data.menstrualCycle.periodLengthDays >= 1
+        && request.resource.data.menstrualCycle.periodLengthDays <=
+            request.resource.data.menstrualCycle.cycleLengthDays;
+    }
+
+    function validHealthData() {
+      return request.resource.data.keys().hasOnly([
+          'mood',
+          'waterIntakeMl',
+          'hasTakenPillToday',
+          'menstrualCycle',
+          'date'
+        ])
+        && request.resource.data.keys().hasAny([
+          'mood',
+          'waterIntakeMl',
+          'hasTakenPillToday',
+          'menstrualCycle'
+        ])
+        && request.resource.data.keys().hasAll(['date'])
+        && request.resource.data.date is timestamp
+        && (
+          !request.resource.data.keys().hasAny(['mood']) ||
+          request.resource.data.mood is string
+        )
+        && (
+          !request.resource.data.keys().hasAny(['waterIntakeMl']) ||
+          (
+            request.resource.data.waterIntakeMl is int
+            && request.resource.data.waterIntakeMl >= 0
+            && request.resource.data.waterIntakeMl <= 1000000
+          )
+        )
+        && (
+          !request.resource.data.keys().hasAny(['hasTakenPillToday']) ||
+          request.resource.data.hasTakenPillToday is bool
+        )
+        && (
+          !request.resource.data.keys().hasAny(['menstrualCycle']) ||
+          validMenstrualCycleData()
+        );
+    }
+
+    function validStudyInfoData() {
+      return request.resource.data.keys().hasOnly([
+          'reviewQueue',
+          'progress',
+          'streak',
+          'lastStudyDate'
+        ])
+        && request.resource.data.keys().hasAny([
+          'reviewQueue',
+          'progress',
+          'streak',
+          'lastStudyDate'
+        ])
+        && (
+          !request.resource.data.keys().hasAny(['reviewQueue']) ||
+          (
+            request.resource.data.reviewQueue is int
+            && request.resource.data.reviewQueue >= 0
+          )
+        )
+        && (
+          !request.resource.data.keys().hasAny(['progress']) ||
+          (
+            request.resource.data.progress is number
+            && request.resource.data.progress >= 0
+            && request.resource.data.progress <= 1
+          )
+        )
+        && (
+          !request.resource.data.keys().hasAny(['streak']) ||
+          (
+            request.resource.data.streak is int
+            && request.resource.data.streak >= 0
+          )
+        )
+        && (
+          !request.resource.data.keys().hasAny(['lastStudyDate']) ||
+          request.resource.data.lastStudyDate is timestamp
+        );
+    }
+
+    function validReviewQueueCreate() {
+  return request.resource.data.keys().hasOnly([
+      'subjectId',
+      'question',
+      'answer',
+      'createdAt'
+    ])
+    && request.resource.data.keys().hasAll([
+      'subjectId',
+      'question',
+      'answer',
+      'createdAt'
+    ])
+    && request.resource.data.subjectId is string
+    && request.resource.data.question is string
+    && request.resource.data.answer is string
+    && request.resource.data.createdAt is timestamp;
+}
+
+    function validNotificationData() {
+      return request.resource.data.keys().hasOnly([
+          'title',
+          'description',
+          'priority',
+          'moduleType',
+          'route',
+          'isRead',
+          'isCompleted',
+          'dueDate',
+          'createdAt',
+          'updatedAt'
+        ])
+        && (
+          request.resource.data.keys().hasAll([
+            'title',
+            'description',
+            'priority',
+            'moduleType',
+            'route',
+            'isRead',
+            'isCompleted',
+            'dueDate',
+            'createdAt',
+            'updatedAt'
+          ])
+          ||
+          (
+            request.resource.data.keys().hasAny([
+              'isRead',
+              'isCompleted',
+              'priority'
+            ])
+            && request.resource.data.keys().hasAll(['updatedAt'])
+          )
+        )
+        && (
+          !request.resource.data.keys().hasAny(['title']) ||
+          request.resource.data.title is string
+        )
+        && (
+          !request.resource.data.keys().hasAny(['description']) ||
+          request.resource.data.description is string
+        )
+        && (
+          !request.resource.data.keys().hasAny(['priority']) ||
+          request.resource.data.priority is string
+        )
+        && (
+          !request.resource.data.keys().hasAny(['moduleType']) ||
+          request.resource.data.moduleType is string
+        )
+        && (
+          !request.resource.data.keys().hasAny(['route']) ||
+          request.resource.data.route is string
+        )
+        && (
+          !request.resource.data.keys().hasAny(['isRead']) ||
+          request.resource.data.isRead is bool
+        )
+        && (
+          !request.resource.data.keys().hasAny(['isCompleted']) ||
+          request.resource.data.isCompleted is bool
+        )
+        && (
+          !request.resource.data.keys().hasAny(['dueDate']) ||
+          request.resource.data.dueDate == null ||
+          request.resource.data.dueDate is timestamp
+        )
+        && (
+          !request.resource.data.keys().hasAny(['createdAt']) ||
+          request.resource.data.createdAt is timestamp
+        )
+        && request.resource.data.updatedAt == request.time;
+    }
+
+    function validPrivacyData(userId) {
+      return request.resource.data.keys().hasOnly([
+          'accepted',
+          'userId',
+          'consentVersion',
+          'acceptedAt',
+          'updatedAt',
+          'source'
+        ])
+        && request.resource.data.keys().hasAll([
+          'accepted',
+          'userId',
+          'consentVersion',
+          'acceptedAt',
+          'updatedAt',
+          'source'
+        ])
+        && request.resource.data.accepted == true
+        && request.resource.data.userId == userId
+        && request.resource.data.consentVersion == '1.0'
+        && request.resource.data.acceptedAt is timestamp
+        && request.resource.data.updatedAt == request.time
+        && request.resource.data.source == 'life_os_app';
+    }
+
+    // =========================================================================
+    // USUÁRIOS
+    // =========================================================================
+
+    match /users/{userId} {
+
+  allow read: if isOwner(userId);
+
+  allow create: if isOwner(userId)
+    && validUserCreate();
+
+  allow update: if isOwner(userId)
+    && validUserUpdate();
+
+  allow delete: if false;
+
+      match /habits/{habitId} {
+        allow read: if isOwner(userId);
+        allow create, delete: if false;
+        allow update: if isOwner(userId)
+          && isUpdatingOnly(['completedDates'])
+          && request.resource.data.completedDates is list
+          && request.resource.data.completedDates.size() <= 5000;
+      }
+
+      match /tasks/{taskId} {
+        allow read: if isOwner(userId);
+        allow create, delete: if false;
+        allow update: if isOwner(userId)
+          && isUpdatingOnly(['isCompleted'])
+          && request.resource.data.isCompleted is bool;
+      }
+
+      match /goals/{goalId} {
+        allow read: if isOwner(userId);
+        allow create, delete: if false;
+        allow update: if isOwner(userId)
+          && isUpdatingOnly([
+            'currentValue',
+            'lastReset'
+          ])
+          && (
+            !request.resource.data
+              .diff(resource.data)
+              .affectedKeys()
+              .hasAny(['currentValue']) ||
+            (
+              request.resource.data.currentValue is int
+              && request.resource.data.currentValue >= 0
+            )
+          )
+          && (
+            !request.resource.data
+              .diff(resource.data)
+              .affectedKeys()
+              .hasAny(['lastReset']) ||
+            request.resource.data.lastReset is string
+          );
+      }
+
+      match /subjects/{subjectId} {
+        allow read: if isOwner(userId);
+        allow create, delete: if false;
+        allow update: if isOwner(userId)
+          && isUpdatingOnly([
+            'cardsToReview',
+            'progress',
+            'streakDays'
+          ])
+          && (
+            !request.resource.data
+              .diff(resource.data)
+              .affectedKeys()
+              .hasAny(['cardsToReview']) ||
+            (
+              request.resource.data.cardsToReview is int
+              && request.resource.data.cardsToReview >= 0
+            )
+          )
+          && (
+            !request.resource.data
+              .diff(resource.data)
+              .affectedKeys()
+              .hasAny(['progress']) ||
+            (
+              request.resource.data.progress is number
+              && request.resource.data.progress >= 0
+              && request.resource.data.progress <= 1
+            )
+          )
+          && (
+            !request.resource.data
+              .diff(resource.data)
+              .affectedKeys()
+              .hasAny(['streakDays']) ||
+            (
+              request.resource.data.streakDays is int
+              && request.resource.data.streakDays >= 0
+            )
+          );
+      }
+
+      match /medications/{medicationId} {
+        allow read: if isOwner(userId);
+        allow create, update, delete: if false;
+      }
+
+      match /transactions/{transactionId} {
+        allow read: if isOwner(userId);
+        allow create, update, delete: if false;
+      }
+
+      match /checkins/{checkinId} {
+        allow read: if isOwner(userId);
+        allow create, update: if isOwner(userId)
+          && validCheckinData();
+        allow delete: if false;
+      }
+
+      match /focus_logs/{focusLogId} {
+        allow read: if isOwner(userId);
+        allow create, update: if isOwner(userId)
+          && validFocusLogData();
+        allow delete: if false;
+      }
+
+      match /health_info/{healthInfoId} {
+        allow read: if isOwner(userId);
+        allow create, update: if isOwner(userId)
+          && validHealthData();
+        allow delete: if false;
+      }
+
+      match /study_info/{studyInfoId} {
+        allow read: if isOwner(userId);
+        allow create, update: if isOwner(userId)
+          && studyInfoId == 'main'
+          && validStudyInfoData();
+        allow delete: if false;
+      }
+
+      match /review_queue/{reviewId} {
+  allow read: if isOwner(userId);
+
+  allow create: if isOwner(userId)
+    && validReviewQueueCreate();
+
+  allow update: if isOwner(userId)
+    && isUpdatingOnly(['lastReviewed'])
+    && request.resource.data.lastReviewed is timestamp;
+
+  allow delete: if false;
+}
+
+      match /notifications/{notificationId} {
+        allow read: if isOwner(userId);
+        allow create, update: if isOwner(userId)
+          && validNotificationData();
+        allow delete: if isOwner(userId);
+      }
+
+      match /privacy/{privacyId} {
+        allow read: if isOwner(userId);
+        allow create, update: if isOwner(userId)
+          && privacyId == 'ai_consent'
+          && validPrivacyData(userId);
+        allow delete: if false;
+      }
+    }
+
+    // =========================================================================
+    // CÍRCULOS
+    // =========================================================================
+
+    match /circles/{circleId} {
+
+      allow read: if isSignedIn();
+
+      allow create: if isSignedIn()
+        && request.resource.data.adminId ==
+            request.auth.uid;
+
+      allow update: if isCircleAdmin(circleId)
+        || isAtomicJoin(circleId);
+
+      allow delete: if isCircleAdmin(circleId);
+
+      match /ranking/{userId} {
+
+        allow read: if isSignedIn();
+
+        allow create:
+          if isValidRankingJoin(
+            circleId,
+            userId
+          );
+
+        allow update: if isOwner(userId)
+          && isCircleMember(circleId)
+          && isUpdatingOnly([
+            'totalXp',
+            'name',
+            'photoUrl',
+            'updatedAt'
+          ])
+          && (
+            !request.resource.data
+              .diff(resource.data)
+              .affectedKeys()
+              .hasAny(['totalXp'])
+            ||
+            (
+              request.resource.data.totalXp >=
+                resource.data.totalXp
+              &&
+              request.resource.data.totalXp <=
+                resource.data.totalXp + 200
+            )
+          );
+
+        allow delete:
+          if isCircleAdmin(circleId);
+      }
+
+      match /challenges/{challengeId} {
+
+        allow read: if isSignedIn();
+
+        allow create, delete:
+          if isCircleAdmin(circleId);
+
+        allow update:
+          if isCircleAdmin(circleId)
+          ||
+          (
+            isSignedIn()
+            && isCircleMember(circleId)
+            && isUpdatingOnly([
+              'currentXpContributed',
+              'updatedAt'
+            ])
+            && (
+              !request.resource.data
+                .diff(resource.data)
+                .affectedKeys()
+                .hasAny([
+                  'currentXpContributed'
+                ])
+              ||
+              (
+                request.resource.data.currentXpContributed >=
+                  resource.data.currentXpContributed
+                &&
+                request.resource.data.currentXpContributed <=
+                  resource.data.currentXpContributed + 200
+              )
+            )
+          );
+      }
+    }
+
+    // =========================================================================
+    // DENY BY DEFAULT
+    // =========================================================================
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

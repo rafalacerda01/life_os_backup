@@ -763,14 +763,15 @@ class StudyRepository {
 
       final batch = _firestore.batch();
 
-      batch.set(
-        _firestore
-            .collection('users')
-            .doc(uid)
-            .collection('review_queue')
-            .doc(cardId),
+      final reviewQueueRef = _firestore
+          .collection('users')
+          .doc(uid)
+          .collection('review_queue')
+          .doc(cardId);
+
+      batch.update(
+        reviewQueueRef,
         {'lastReviewed': Timestamp.fromMillisecondsSinceEpoch(nowEpoch)},
-        SetOptions(merge: true),
       );
 
       batch.set(
