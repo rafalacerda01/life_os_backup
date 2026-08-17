@@ -17,6 +17,7 @@ class SyncManager {
     required this._remoteDataSource,
     required this._currentUserId,
   });
+
   Future<void> processPendingItems() async {
     if (_isProcessing) {
       return;
@@ -64,10 +65,8 @@ class SyncManager {
               '${item.collection}/${item.docId}: '
               '${result.code ?? 'SYNC_REJECTED'}',
             );
-
-            // Não descartamos a operação nesta etapa.
-            // A reconciliação será definida com o enforcement do backend.
-            return;
+            await _queueStore.markSyncItemAsSynced(item.id);
+            continue;
         }
       }
     } catch (error, stackTrace) {

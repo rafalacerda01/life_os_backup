@@ -146,7 +146,7 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
         case 'update':
           final data = _decodePayload(item.payloadJson);
 
-          await documentRef.set(data, SetOptions(merge: true));
+          await documentRef.update(data);
 
           return const SyncOperationResult.success();
 
@@ -165,6 +165,14 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
         message: 'OperationType não suportado.',
       );
     } on FirebaseException catch (error) {
+      if (operationType == 'update' && error.code == 'not-found') {
+        return SyncOperationResult.invalidPayload(
+          message:
+              'FIRESTORE_NOT_FOUND: '
+              '${error.message ?? 'Documento não encontrado para atualização.'}',
+        );
+      }
+
       return _mapFirebaseError(error);
     } on FormatException catch (error) {
       return SyncOperationResult.invalidPayload(message: error.message);
@@ -450,12 +458,49 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
       }
 
       if (response.statusCode == 403) {
+        final backendCode = _extractBackendCode(response.body);
+
+        if (_isQuotaExceededCode(backendCode)) {
+          return const SyncOperationResult.quotaExceeded();
+        }
+
+        return SyncOperationResult.permissionDenied();
+      }
+
+      if (response.statusCode == 400) {
         return SyncOperationResult.invalidPayload(
           message: _extractBackendMessage(response.body),
         );
       }
 
-      if (response.statusCode == 400 || response.statusCode == 412) {
+      if (response.statusCode == 404) {
+        return SyncOperationResult.retryable(
+          message: _extractBackendMessage(response.body),
+          code: _extractBackendCode(response.body) ?? 'BACKEND_404',
+        );
+      }
+
+      if (response.statusCode == 409) {
+        final backendCode = _extractBackendCode(response.body);
+        final backendMessage = _extractBackendMessage(response.body);
+
+        return SyncOperationResult.invalidPayload(
+          message: backendCode == null
+              ? backendMessage
+              : '$backendCode: $backendMessage',
+        );
+      }
+
+      if (response.statusCode == 412) {
+        final backendCode = _extractBackendCode(response.body);
+
+        if (_isMigrationRequiredCode(backendCode)) {
+          return SyncOperationResult.retryable(
+            message: _extractBackendMessage(response.body),
+            code: backendCode,
+          );
+        }
+
         return SyncOperationResult.invalidPayload(
           message: _extractBackendMessage(response.body),
         );
@@ -494,6 +539,40 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
     }
 
     return 'Falha na sincronização server-side.';
+  }
+
+  String? _extractBackendCode(String body) {
+    try {
+      final decoded = jsonDecode(body);
+
+      if (decoded is Map) {
+        final code = decoded['code'];
+
+        if (code is String && code.trim().isNotEmpty) {
+          return code.trim();
+        }
+      }
+    } catch (_) {
+      // Usa o fallback abaixo.
+    }
+
+    return null;
+  }
+
+  bool _isQuotaExceededCode(String? code) {
+    if (code == null) {
+      return false;
+    }
+
+    return RegExp(r'^[A-Z][A-Z0-9_]*_QUOTA_EXCEEDED$').hasMatch(code);
+  }
+
+  bool _isMigrationRequiredCode(String? code) {
+    if (code == null) {
+      return false;
+    }
+
+    return RegExp(r'^[A-Z][A-Z0-9_]*_MIGRATION_REQUIRED$').hasMatch(code);
   }
 
   Map<String, dynamic> _decodePayload(String payloadJson) {

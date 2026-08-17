@@ -14,7 +14,9 @@ class FakeSyncQueueStore implements SyncQueueStore {
 
   @override
   Future<List<SyncQueueTableData>> getPendingSyncItems() async {
-    return List.unmodifiable(items);
+    return List.unmodifiable(
+      items.where((item) => !markedAsSynced.contains(item.id)),
+    );
   }
 
   @override
@@ -132,14 +134,18 @@ void main() {
       expect(store.markedAsSynced, isEmpty);
     });
 
-    test('para a fila quando ocorre erro permanente', () async {
+    test('terminaliza erro permanente e não o reprocessa', () async {
       final first = createSyncItem(id: 1);
       final second = createSyncItem(id: 2, docId: 'habit-2');
 
       final store = FakeSyncQueueStore([first, second]);
 
       final remote = FakeSyncRemoteDataSource((uid, item) async {
-        return const SyncOperationResult.permissionDenied();
+        if (item.id == 1) {
+          return const SyncOperationResult.permissionDenied();
+        }
+
+        return const SyncOperationResult.success();
       });
 
       final manager = SyncManager(
@@ -150,8 +156,19 @@ void main() {
 
       await manager.processPendingItems();
 
-      expect(store.markedAsSynced, isEmpty);
-      expect(remote.processedItems.length, 1);
+      expect(store.markedAsSynced, [1, 2]);
+      expect(remote.processedItems, [
+        'user-123:habits:habit-1:create',
+        'user-123:habits:habit-2:create',
+      ]);
+
+      await manager.processPendingItems();
+
+      expect(store.markedAsSynced, [1, 2]);
+      expect(remote.processedItems, [
+        'user-123:habits:habit-1:create',
+        'user-123:habits:habit-2:create',
+      ]);
     });
 
     test('não executa duas sincronizações concorrentes', () async {

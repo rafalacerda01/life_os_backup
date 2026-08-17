@@ -153,6 +153,18 @@ class StudyRepository {
 
       final subjectId = cardData.subjectId;
 
+      final subjectData = await (_db.select(
+        _db.subjects,
+      )..where((t) => t.id.equals(subjectId))).getSingleOrNull();
+
+      if (subjectData == null) {
+        AppLogger.w(
+          'Flashcard $cardId referencia uma matéria local inexistente: '
+          '$subjectId.',
+        );
+        return;
+      }
+
       final currentStats = await _db.select(_db.studyStats).getSingleOrNull();
 
       final currentQueue = currentStats?.reviewQueue ?? 0;
@@ -164,6 +176,10 @@ class StudyRepository {
       final currentProgress = currentStats?.progress ?? 0.0;
 
       final newProgress = (currentProgress + 0.05).clamp(0.0, 1.0).toDouble();
+
+      final newCardsToReview = subjectData.cardsToReview > 0
+          ? subjectData.cardsToReview - 1
+          : 0;
 
       await (_db.update(_db.flashcards)..where((t) => t.id.equals(cardId)))
           .write(FlashcardsCompanion(lastReviewed: Value(nowEpoch)));
@@ -178,20 +194,8 @@ class StudyRepository {
         ),
       );
 
-      int? newCardsToReview;
-
-      final subjectData = await (_db.select(
-        _db.subjects,
-      )..where((t) => t.id.equals(subjectId))).getSingleOrNull();
-
-      if (subjectData != null) {
-        newCardsToReview = subjectData.cardsToReview > 0
-            ? subjectData.cardsToReview - 1
-            : 0;
-
-        await (_db.update(_db.subjects)..where((t) => t.id.equals(subjectId)))
-            .write(SubjectsCompanion(cardsToReview: Value(newCardsToReview)));
-      }
+      await (_db.update(_db.subjects)..where((t) => t.id.equals(subjectId)))
+          .write(SubjectsCompanion(cardsToReview: Value(newCardsToReview)));
 
       unawaited(
         _completeCardInFirestore(
@@ -747,7 +751,7 @@ class StudyRepository {
     String subjectId,
     int newQueue,
     double newProgress,
-    int? newCardsToReview,
+    int newCardsToReview,
     int nowEpoch,
   ) async {
     final user = _auth.currentUser;
@@ -783,17 +787,13 @@ class StudyRepository {
         SetOptions(merge: true),
       );
 
-      if (newCardsToReview != null) {
-        batch.set(
-          _firestore
-              .collection('users')
-              .doc(uid)
-              .collection('subjects')
-              .doc(subjectId),
-          {'cardsToReview': newCardsToReview},
-          SetOptions(merge: true),
-        );
-      }
+      final subjectRef = _firestore
+          .collection('users')
+          .doc(uid)
+          .collection('subjects')
+          .doc(subjectId);
+
+      batch.update(subjectRef, {'cardsToReview': newCardsToReview});
 
       await batch.commit();
     } catch (e, stack) {
@@ -841,15 +841,13 @@ class StudyRepository {
         SetOptions(merge: true),
       );
 
-      batch.set(
-        _firestore
-            .collection('users')
-            .doc(uid)
-            .collection('subjects')
-            .doc(subjectId),
-        {'cardsToReview': FieldValue.increment(1)},
-        SetOptions(merge: true),
-      );
+      final subjectRef = _firestore
+          .collection('users')
+          .doc(uid)
+          .collection('subjects')
+          .doc(subjectId);
+
+      batch.update(subjectRef, {'cardsToReview': FieldValue.increment(1)});
 
       await batch.commit();
     } catch (e, stack) {
@@ -954,15 +952,16 @@ class StudyRepository {
       // 2. Dados específicos da matéria
       // -----------------------------------------------------------------------
 
-      batch.set(
-        _firestore
-            .collection('users')
-            .doc(uid)
-            .collection('subjects')
-            .doc(subjectId),
-        {'progress': subjectProgress, 'streakDays': streak},
-        SetOptions(merge: true),
-      );
+      final subjectRef = _firestore
+          .collection('users')
+          .doc(uid)
+          .collection('subjects')
+          .doc(subjectId);
+
+      batch.update(subjectRef, {
+        'progress': subjectProgress,
+        'streakDays': streak,
+      });
 
       await batch.commit();
     } catch (e, stack) {
