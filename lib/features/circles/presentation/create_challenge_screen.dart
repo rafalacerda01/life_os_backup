@@ -1,11 +1,13 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import 'package:life_os/core/theme/app_colors.dart'; // <-- IMPORT DO SEU TEMA
+import 'package:life_os/core/theme/app_colors.dart';
+import 'package:life_os/features/circles/domain/entities/challenge_entity.dart';
 import 'package:life_os/features/circles/presentation/circles_provider.dart';
 
 class CreateChallengeScreen extends ConsumerStatefulWidget {
   final String circleId;
+
   const CreateChallengeScreen({super.key, required this.circleId});
 
   @override
@@ -14,16 +16,47 @@ class CreateChallengeScreen extends ConsumerStatefulWidget {
 }
 
 class _CreateChallengeScreenState extends ConsumerState<CreateChallengeScreen> {
+  static const int _maxTargetValue = 1000000;
+
   final _formKey = GlobalKey<FormState>();
   final _titleController = TextEditingController();
-  final _targetXpController = TextEditingController();
+  final _targetValueController = TextEditingController();
+
+  ChallengeType _selectedType = ChallengeType.focusMinutes;
+  DateTime _endAt = DateTime.now().add(const Duration(days: 7));
   bool _isLoading = false;
 
   @override
   void dispose() {
     _titleController.dispose();
-    _targetXpController.dispose();
+    _targetValueController.dispose();
     super.dispose();
+  }
+
+  Future<void> _selectEndDate() async {
+    final now = DateTime.now();
+    final firstDate = DateTime(now.year, now.month, now.day + 1);
+    final lastDate = DateTime(now.year + 1, now.month, now.day);
+    final selected = await showDatePicker(
+      context: context,
+      initialDate: _endAt,
+      firstDate: firstDate,
+      lastDate: lastDate,
+    );
+
+    if (selected != null && mounted) {
+      setState(() {
+        _endAt = DateTime(
+          selected.year,
+          selected.month,
+          selected.day,
+          23,
+          59,
+          59,
+          999,
+        );
+      });
+    }
   }
 
   Future<void> _handleCreateChallenge() async {
@@ -32,22 +65,24 @@ class _CreateChallengeScreenState extends ConsumerState<CreateChallengeScreen> {
     setState(() => _isLoading = true);
 
     try {
-      final targetXp = int.tryParse(_targetXpController.text.trim()) ?? 0;
+      final targetValue = int.tryParse(_targetValueController.text.trim()) ?? 0;
 
-      // Chama o provider para criar o desafio de forma otimizada
       await ref
           .read(circlesProvider.notifier)
-          .createNewChallenge(_titleController.text.trim(), targetXp);
+          .createNewChallenge(
+            title: _titleController.text.trim(),
+            type: _selectedType,
+            targetValue: targetValue,
+            endAt: _endAt,
+          );
 
-      if (mounted) {
-        Navigator.pop(context); // Volta para a tela anterior com sucesso
-      }
-    } catch (e) {
+      if (mounted) Navigator.pop(context);
+    } catch (error) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(
-              'Erro ao criar desafio: $e',
+              'Erro ao criar desafio: $error',
               style: const TextStyle(color: Colors.white),
             ),
             backgroundColor: Colors.redAccent,
@@ -55,19 +90,21 @@ class _CreateChallengeScreenState extends ConsumerState<CreateChallengeScreen> {
         );
       }
     } finally {
-      if (mounted) {
-        setState(() => _isLoading = false);
-      }
+      if (mounted) setState(() => _isLoading = false);
     }
   }
 
   @override
   Widget build(BuildContext context) {
+    final endDateLabel = MaterialLocalizations.of(
+      context,
+    ).formatMediumDate(_endAt);
+
     return Scaffold(
       backgroundColor: AppColors.scaffoldBackground,
       appBar: AppBar(
         title: const Text(
-          "Novo Desafio",
+          'Novo Desafio',
           style: TextStyle(
             color: AppColors.textMain,
             fontWeight: FontWeight.bold,
@@ -78,14 +115,14 @@ class _CreateChallengeScreenState extends ConsumerState<CreateChallengeScreen> {
         iconTheme: const IconThemeData(color: AppColors.textMain),
       ),
       body: SingleChildScrollView(
-        padding: const EdgeInsets.all(24.0),
+        padding: const EdgeInsets.all(24),
         child: Form(
           key: _formKey,
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               const Text(
-                "Motive o seu Círculo",
+                'Motive o seu Círculo',
                 style: TextStyle(
                   color: AppColors.textMain,
                   fontSize: 20,
@@ -94,90 +131,83 @@ class _CreateChallengeScreenState extends ConsumerState<CreateChallengeScreen> {
               ),
               const SizedBox(height: 8),
               const Text(
-                "Defina uma meta coletiva de XP para todos os membros trabalharem juntos e alcançarem o objetivo.",
+                'Defina uma meta coletiva baseada em ações reais do aplicativo.',
                 style: TextStyle(color: AppColors.textHint, fontSize: 14),
               ),
               const SizedBox(height: 32),
-
-              // --- CAMPO TÍTULO ---
+              DropdownButtonFormField<ChallengeType>(
+                initialValue: _selectedType,
+                dropdownColor: AppColors.cardBackground,
+                style: const TextStyle(color: AppColors.textMain),
+                decoration: _fieldDecoration('Tipo de desafio'),
+                items: ChallengeType.values
+                    .map(
+                      (type) => DropdownMenuItem(
+                        value: type,
+                        child: Text(type.label),
+                      ),
+                    )
+                    .toList(),
+                onChanged: _isLoading
+                    ? null
+                    : (type) {
+                        if (type != null) {
+                          setState(() => _selectedType = type);
+                        }
+                      },
+              ),
+              const SizedBox(height: 16),
               TextFormField(
                 controller: _titleController,
+                maxLength: 200,
                 style: const TextStyle(color: AppColors.textMain),
-                decoration: InputDecoration(
-                  labelText: "Título do Desafio",
-                  labelStyle: const TextStyle(color: AppColors.textHint),
-                  filled: true,
-                  fillColor: AppColors.cardBackground,
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(16),
-                    borderSide: BorderSide.none,
-                  ),
-                  focusedBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(16),
-                    borderSide: const BorderSide(
-                      color: AppColors.primary,
-                      width: 1.5,
-                    ),
-                  ),
-                  errorBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(16),
-                    borderSide: const BorderSide(
-                      color: Colors.redAccent,
-                      width: 1,
-                    ),
-                  ),
-                ),
-                validator: (v) => v == null || v.trim().isEmpty
-                    ? "Informe um título para o desafio"
-                    : null,
+                decoration: _fieldDecoration('Título do desafio'),
+                validator: (value) {
+                  final title = value?.trim() ?? '';
+                  if (title.isEmpty) return 'Informe um título para o desafio';
+                  if (title.length > 200) return 'Use no máximo 200 caracteres';
+                  return null;
+                },
               ),
-
               const SizedBox(height: 16),
-
-              // --- CAMPO META XP ---
               TextFormField(
-                controller: _targetXpController,
+                controller: _targetValueController,
                 style: const TextStyle(color: AppColors.textMain),
                 keyboardType: TextInputType.number,
-                decoration: InputDecoration(
-                  labelText: "Meta XP (ex: 4000)",
-                  labelStyle: const TextStyle(color: AppColors.textHint),
-                  filled: true,
-                  fillColor: AppColors.cardBackground,
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(16),
-                    borderSide: BorderSide.none,
-                  ),
-                  focusedBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(16),
-                    borderSide: const BorderSide(
-                      color: AppColors.primary,
-                      width: 1.5,
-                    ),
-                  ),
-                  errorBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(16),
-                    borderSide: const BorderSide(
-                      color: Colors.redAccent,
-                      width: 1,
-                    ),
-                  ),
-                ),
-                validator: (v) {
-                  if (v == null || v.trim().isEmpty) {
-                    return "Informe a meta de XP";
-                  }
-                  final number = int.tryParse(v.trim());
+                decoration: _fieldDecoration('Meta em ${_selectedType.label}'),
+                validator: (value) {
+                  final number = int.tryParse(value?.trim() ?? '');
                   if (number == null || number <= 0) {
-                    return "Insira um valor numérico válido maior que zero";
+                    return 'Informe um número maior que zero';
+                  }
+                  if (number > _maxTargetValue) {
+                    return 'A meta máxima é $_maxTargetValue';
                   }
                   return null;
                 },
               ),
-
+              const SizedBox(height: 16),
+              InkWell(
+                borderRadius: BorderRadius.circular(16),
+                onTap: _isLoading ? null : _selectEndDate,
+                child: InputDecorator(
+                  decoration: _fieldDecoration('Data final'),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Text(
+                        endDateLabel,
+                        style: const TextStyle(color: AppColors.textMain),
+                      ),
+                      const Icon(
+                        Icons.calendar_today_outlined,
+                        color: AppColors.primary,
+                      ),
+                    ],
+                  ),
+                ),
+              ),
               const SizedBox(height: 40),
-
-              // --- BOTÃO DE AÇÃO ---
               SizedBox(
                 width: double.infinity,
                 height: 56,
@@ -200,7 +230,7 @@ class _CreateChallengeScreenState extends ConsumerState<CreateChallengeScreen> {
                           ),
                         )
                       : const Text(
-                          "Criar Desafio",
+                          'Criar Desafio',
                           style: TextStyle(
                             color: AppColors.textMain,
                             fontSize: 16,
@@ -212,6 +242,27 @@ class _CreateChallengeScreenState extends ConsumerState<CreateChallengeScreen> {
             ],
           ),
         ),
+      ),
+    );
+  }
+
+  InputDecoration _fieldDecoration(String label) {
+    return InputDecoration(
+      labelText: label,
+      labelStyle: const TextStyle(color: AppColors.textHint),
+      filled: true,
+      fillColor: AppColors.cardBackground,
+      border: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(16),
+        borderSide: BorderSide.none,
+      ),
+      focusedBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(16),
+        borderSide: const BorderSide(color: AppColors.primary, width: 1.5),
+      ),
+      errorBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(16),
+        borderSide: const BorderSide(color: Colors.redAccent),
       ),
     );
   }

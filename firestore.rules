@@ -16,8 +16,12 @@ service cloud.firestore {
       return /databases/$(database)/documents/circles/$(circleId);
     }
 
-    function rankingPath(circleId, userId) {
-      return /databases/$(database)/documents/circles/$(circleId)/ranking/$(userId);
+    function userPath(userId) {
+      return /databases/$(database)/documents/users/$(userId);
+    }
+
+    function memberPath(circleId, userId) {
+      return /databases/$(database)/documents/circles/$(circleId)/members/$(userId);
     }
 
     function isCircleAdmin(circleId) {
@@ -28,7 +32,7 @@ service cloud.firestore {
 
     function isCircleMember(circleId) {
       return isSignedIn()
-        && exists(rankingPath(circleId, request.auth.uid));
+        && exists(memberPath(circleId, request.auth.uid));
     }
 
     function isUpdatingOnly(fields) {
@@ -38,56 +42,329 @@ service cloud.firestore {
         .hasOnly(fields);
     }
 
-    function validNewRankingData() {
-      return request.resource.data.keys().hasOnly([
-          'totalXp',
-          'name',
-          'photoUrl',
-          'updatedAt'
+    function validNewMemberData(data, expectedRole) {
+      return data.keys().hasOnly([
+          'role',
+          'displayNameSnapshot',
+          'photoUrlSnapshot',
+          'joinedAt'
         ])
-        && request.resource.data.totalXp == 0
+        && data.keys().hasAll([
+          'role',
+          'displayNameSnapshot',
+          'photoUrlSnapshot',
+          'joinedAt'
+        ])
+        && data.role == expectedRole
+        && data.displayNameSnapshot is string
+        && data.displayNameSnapshot.size() > 0
+        && data.displayNameSnapshot.size() <= 50
+        && (
+          data.photoUrlSnapshot == null
+          || (
+            data.photoUrlSnapshot is string
+            && data.photoUrlSnapshot.size() <= 2048
+          )
+        )
+        && data.joinedAt == request.time;
+    }
+
+    function hasNoActiveCircle(userId) {
+      return exists(userPath(userId))
+        && (
+          !get(userPath(userId)).data.keys().hasAny(['activeCircleId'])
+          || get(userPath(userId)).data.activeCircleId == null
+        );
+    }
+
+    function changesOnlyActiveCircle(userId) {
+      return exists(userPath(userId))
+        && existsAfter(userPath(userId))
+        && getAfter(userPath(userId)).data
+          .diff(get(userPath(userId)).data)
+          .affectedKeys()
+          .hasOnly(['activeCircleId'])
+        && getAfter(userPath(userId)).data
+          .diff(get(userPath(userId)).data)
+          .affectedKeys()
+          .hasAny(['activeCircleId']);
+    }
+
+    function userActivatesCircle(userId, circleId) {
+      return hasNoActiveCircle(userId)
+        && changesOnlyActiveCircle(userId)
+        && getAfter(userPath(userId)).data.activeCircleId == circleId;
+    }
+
+    function userClearsCircle(userId, circleId) {
+      return exists(userPath(userId))
+        && get(userPath(userId)).data.activeCircleId == circleId
+        && changesOnlyActiveCircle(userId)
+        && getAfter(userPath(userId)).data.activeCircleId == null;
+    }
+
+    function validActiveCircleUpdate(userId) {
+      return changesOnlyActiveCircle(userId)
+        && (
+          (
+            request.resource.data.activeCircleId is string
+            && (
+              !resource.data.keys().hasAny(['activeCircleId'])
+              || resource.data.activeCircleId == null
+            )
+            && !exists(
+              memberPath(
+                request.resource.data.activeCircleId,
+                userId
+              )
+            )
+            && existsAfter(
+              memberPath(
+                request.resource.data.activeCircleId,
+                userId
+              )
+            )
+          )
+          || (
+            request.resource.data.activeCircleId == null
+            && resource.data.activeCircleId is string
+            && (
+              !existsAfter(
+                memberPath(
+                  resource.data.activeCircleId,
+                  userId
+                )
+              )
+              || !existsAfter(
+                circlePath(resource.data.activeCircleId)
+              )
+            )
+          )
+        );
+    }
+
+    function validAdminMemberLimit(adminId, memberLimit) {
+      return exists(userPath(adminId))
+        && (
+          (
+            get(userPath(adminId)).data.isPremium == true
+            && memberLimit == 10
+          )
+          || (
+            get(userPath(adminId)).data.isPremium == false
+            && memberLimit == 3
+          )
+        );
+    }
+
+    function validCircleCreate(circleId) {
+      return request.resource.data.keys().hasOnly([
+          'name',
+          'description',
+          'adminId',
+          'memberCount',
+          'memberLimit',
+          'createdAt',
+          'updatedAt',
+          'schemaVersion'
+        ])
+        && request.resource.data.keys().hasAll([
+          'name',
+          'description',
+          'adminId',
+          'memberCount',
+          'memberLimit',
+          'createdAt',
+          'updatedAt',
+          'schemaVersion'
+        ])
         && request.resource.data.name is string
         && request.resource.data.name.size() > 0
-        && request.resource.data.name.size() <= 50
+        && request.resource.data.name.size() <= 100
+        && request.resource.data.description is string
+        && request.resource.data.description.size() > 0
+        && request.resource.data.description.size() <= 500
+        && request.resource.data.adminId == request.auth.uid
+        && request.resource.data.memberCount is int
+        && request.resource.data.memberCount == 1
+        && request.resource.data.memberLimit is int
+        && validAdminMemberLimit(
+          request.auth.uid,
+          request.resource.data.memberLimit
+        )
+        && request.resource.data.createdAt == request.time
         && request.resource.data.updatedAt == request.time
-        && (
-          !request.resource.data.keys().hasAny(['photoUrl']) ||
-          request.resource.data.photoUrl is string
+        && request.resource.data.schemaVersion == 2
+        && userActivatesCircle(request.auth.uid, circleId)
+        && !exists(memberPath(circleId, request.auth.uid))
+        && existsAfter(memberPath(circleId, request.auth.uid))
+        && validNewMemberData(
+          getAfter(memberPath(circleId, request.auth.uid)).data,
+          'admin'
         );
     }
 
     function isAtomicJoin(circleId) {
       return isSignedIn()
+        && resource.data.schemaVersion == 2
         && !isCircleMember(circleId)
+        && resource.data.memberCount is int
+        && resource.data.memberCount >= 1
+        && resource.data.memberLimit is int
+        && (
+          resource.data.memberLimit == 3
+          || resource.data.memberLimit == 10
+        )
+        && resource.data.memberCount < resource.data.memberLimit
         && isUpdatingOnly([
           'memberCount',
           'updatedAt'
         ])
         && request.resource.data.memberCount ==
             resource.data.memberCount + 1
-        && request.resource.data.updatedAt ==
-            request.time
-        && existsAfter(
-          rankingPath(
-            circleId,
-            request.auth.uid
+        && request.resource.data.memberCount <=
+            resource.data.memberLimit
+        && request.resource.data.updatedAt == request.time
+        && userActivatesCircle(request.auth.uid, circleId)
+        && !exists(memberPath(circleId, request.auth.uid))
+        && existsAfter(memberPath(circleId, request.auth.uid))
+        && validNewMemberData(
+          getAfter(memberPath(circleId, request.auth.uid)).data,
+          'member'
+        );
+    }
+
+    function isAtomicLeave(circleId) {
+      return isSignedIn()
+        && resource.data.schemaVersion == 2
+        && resource.data.adminId != request.auth.uid
+        && resource.data.memberCount is int
+        && resource.data.memberCount > 1
+        && isCircleMember(circleId)
+        && isUpdatingOnly([
+          'memberCount',
+          'updatedAt'
+        ])
+        && request.resource.data.memberCount ==
+            resource.data.memberCount - 1
+        && request.resource.data.updatedAt == request.time
+        && !existsAfter(
+          memberPath(circleId, request.auth.uid)
+        )
+        && userClearsCircle(request.auth.uid, circleId);
+    }
+
+    function isValidMemberCreate(circleId, userId) {
+      return isOwner(userId)
+        && !exists(memberPath(circleId, userId))
+        && userActivatesCircle(userId, circleId)
+        && existsAfter(circlePath(circleId))
+        && (
+          (
+            !exists(circlePath(circleId))
+            && validNewMemberData(request.resource.data, 'admin')
+            && getAfter(circlePath(circleId)).data.schemaVersion == 2
+            && getAfter(circlePath(circleId)).data.adminId == userId
+            && getAfter(circlePath(circleId)).data.memberCount == 1
+          )
+          || (
+            exists(circlePath(circleId))
+            && validNewMemberData(request.resource.data, 'member')
+            && get(circlePath(circleId)).data.schemaVersion == 2
+            && getAfter(circlePath(circleId)).data.memberCount ==
+              get(circlePath(circleId)).data.memberCount + 1
           )
         );
     }
 
-    function isValidRankingJoin(
-      circleId,
-      userId
-    ) {
+    function isAdminTimestampUpdate(circleId) {
+      return isCircleAdmin(circleId)
+        && resource.data.schemaVersion == 2
+        && isUpdatingOnly(['updatedAt'])
+        && request.resource.data
+          .diff(resource.data)
+          .affectedKeys()
+          .hasAny(['updatedAt'])
+        && request.resource.data.updatedAt == request.time;
+    }
+
+    function validCircleDelete(circleId) {
+      return isCircleAdmin(circleId)
+        && resource.data.schemaVersion == 2
+        && resource.data.memberCount is int
+        && resource.data.memberCount == 1
+        && !existsAfter(
+          memberPath(circleId, request.auth.uid)
+        )
+        && userClearsCircle(request.auth.uid, circleId);
+    }
+
+    function validMemberDelete(circleId, userId) {
       return isOwner(userId)
-        && !isCircleMember(circleId)
-        && validNewRankingData()
-        && getAfter(
-          circlePath(circleId)
-        ).data.memberCount ==
-            get(
-              circlePath(circleId)
-            ).data.memberCount + 1;
+        && (
+          (
+            exists(circlePath(circleId))
+            && get(circlePath(circleId)).data.schemaVersion == 2
+            && get(circlePath(circleId)).data.adminId != userId
+            && get(circlePath(circleId)).data.memberCount > 1
+            && existsAfter(circlePath(circleId))
+            && getAfter(circlePath(circleId)).data.memberCount ==
+                get(circlePath(circleId)).data.memberCount - 1
+            && userClearsCircle(userId, circleId)
+          )
+          || (
+            isCircleAdmin(circleId)
+            && get(circlePath(circleId)).data.adminId == userId
+            && !existsAfter(circlePath(circleId))
+            && userClearsCircle(userId, circleId)
+          )
+        );
+    }
+
+    function validChallengeCreate() {
+      return request.resource.data.keys().hasOnly([
+          'type',
+          'title',
+          'targetValue',
+          'startAt',
+          'endAt',
+          'createdBy',
+          'createdAt',
+          'updatedAt',
+          'schemaVersion'
+        ])
+        && request.resource.data.keys().hasAll([
+          'type',
+          'title',
+          'targetValue',
+          'startAt',
+          'endAt',
+          'createdBy',
+          'createdAt',
+          'updatedAt',
+          'schemaVersion'
+        ])
+        && (
+          request.resource.data.type == 'FOCUS_MINUTES'
+          || request.resource.data.type == 'HABIT_COMPLETIONS'
+          || request.resource.data.type == 'STUDY_MINUTES'
+          || request.resource.data.type == 'TASK_COMPLETIONS'
+        )
+        && request.resource.data.title is string
+        && request.resource.data.title.size() > 0
+        && request.resource.data.title.size() <= 200
+        && request.resource.data.targetValue is int
+        && request.resource.data.targetValue > 0
+        && request.resource.data.targetValue <= 1000000
+        && request.resource.data.startAt == request.time
+        && request.resource.data.endAt is timestamp
+        && request.resource.data.endAt > request.time
+        && request.resource.data.endAt <=
+            request.time + duration.value(366, 'd')
+        && request.resource.data.createdBy == request.auth.uid
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time
+        && request.resource.data.schemaVersion == 2;
     }
 
     function validUserCreate() {
@@ -148,7 +425,7 @@ service cloud.firestore {
         && request.resource.data.transactionsCount == 0;
     }
 
-    function validUserUpdate() {
+    function validUserUpdate(userId) {
       return isUpdatingOnly([
           'displayName',
           'photoUrl',
@@ -193,8 +470,13 @@ service cloud.firestore {
             .diff(resource.data)
             .affectedKeys()
             .hasAny(['activeCircleId']) ||
-          request.resource.data.activeCircleId == null ||
-          request.resource.data.activeCircleId is string
+          (
+            (
+              request.resource.data.activeCircleId == null
+              || request.resource.data.activeCircleId is string
+            )
+            && validActiveCircleUpdate(userId)
+          )
         );
     }
 
@@ -473,7 +755,7 @@ service cloud.firestore {
     && validUserCreate();
 
   allow update: if isOwner(userId)
-    && validUserUpdate();
+    && validUserUpdate(userId);
 
   allow delete: if false;
 
@@ -637,88 +919,54 @@ service cloud.firestore {
 
     match /circles/{circleId} {
 
-      allow read: if isSignedIn();
+      allow get: if isSignedIn();
+      allow list: if false;
 
       allow create: if isSignedIn()
-        && request.resource.data.adminId ==
-            request.auth.uid;
+        && validCircleCreate(circleId);
 
-      allow update: if isCircleAdmin(circleId)
-        || isAtomicJoin(circleId);
+      allow update:
+        if isAdminTimestampUpdate(circleId)
+        || isAtomicJoin(circleId)
+        || isAtomicLeave(circleId);
 
-      allow delete: if isCircleAdmin(circleId);
+      allow delete: if validCircleDelete(circleId);
 
-      match /ranking/{userId} {
+      match /members/{userId} {
 
-        allow read: if isSignedIn();
+        allow get: if isOwner(userId)
+          || isCircleMember(circleId);
 
-        allow create:
-          if isValidRankingJoin(
-            circleId,
-            userId
-          );
+        allow list: if isCircleMember(circleId);
 
-        allow update: if isOwner(userId)
-          && isCircleMember(circleId)
-          && isUpdatingOnly([
-            'totalXp',
-            'name',
-            'photoUrl',
-            'updatedAt'
-          ])
-          && (
-            !request.resource.data
-              .diff(resource.data)
-              .affectedKeys()
-              .hasAny(['totalXp'])
-            ||
-            (
-              request.resource.data.totalXp >=
-                resource.data.totalXp
-              &&
-              request.resource.data.totalXp <=
-                resource.data.totalXp + 200
-            )
-          );
+        allow create: if isValidMemberCreate(circleId, userId);
 
-        allow delete:
-          if isCircleAdmin(circleId);
+        allow update: if false;
+
+        allow delete: if validMemberDelete(circleId, userId);
       }
 
       match /challenges/{challengeId} {
 
-        allow read: if isSignedIn();
+        allow read: if isCircleMember(circleId);
 
-        allow create, delete:
-          if isCircleAdmin(circleId);
+        allow create: if isCircleAdmin(circleId)
+          && isCircleMember(circleId)
+          && validChallengeCreate();
 
-        allow update:
-          if isCircleAdmin(circleId)
-          ||
-          (
-            isSignedIn()
-            && isCircleMember(circleId)
-            && isUpdatingOnly([
-              'currentXpContributed',
-              'updatedAt'
-            ])
-            && (
-              !request.resource.data
-                .diff(resource.data)
-                .affectedKeys()
-                .hasAny([
-                  'currentXpContributed'
-                ])
-              ||
-              (
-                request.resource.data.currentXpContributed >=
-                  resource.data.currentXpContributed
-                &&
-                request.resource.data.currentXpContributed <=
-                  resource.data.currentXpContributed + 200
-              )
-            )
-          );
+        allow update: if false;
+
+        allow delete: if isCircleAdmin(circleId)
+          && isCircleMember(circleId);
+
+        match /progress/{userId} {
+          allow read: if isCircleMember(circleId);
+          allow create, update, delete: if false;
+        }
+
+        match /processed_events/{eventKey} {
+          allow read, write: if false;
+        }
       }
     }
 
