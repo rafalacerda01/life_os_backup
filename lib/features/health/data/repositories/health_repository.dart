@@ -268,51 +268,49 @@ class HealthRepository {
     }
 
     try {
-      final DateTime? endDate = durationDays != null && durationDays > 0
+      final DateTime? endDate = durationDays != null
           ? startDate.add(Duration(days: durationDays))
           : null;
 
       final firestoreId = _uuid.v4();
 
-      // =======================================================================
-      // 1. SALVA PRIMEIRO NO DRIFT
-      // =======================================================================
+      // =====================================================================
+      // 1. DRIFT + SYNC QUEUE
+      // =====================================================================
 
-      await _db
-          .into(_db.medications)
-          .insert(
-            MedicationsCompanion.insert(
-              firestoreId: firestoreId,
-              name: cleanName,
-              startDate: startDate,
-              durationDays: Value(durationDays),
-              endDate: Value(endDate),
-            ),
-          );
+      await _db.transactionWithSync(
+        localOperation: () async {
+          await _db
+              .into(_db.medications)
+              .insert(
+                MedicationsCompanion.insert(
+                  firestoreId: firestoreId,
+                  name: cleanName,
+                  startDate: startDate,
+                  durationDays: Value(durationDays),
+                  endDate: Value(endDate),
+                ),
+              );
+        },
+        collection: 'medications',
+        docId: firestoreId,
+        operationType: 'create',
+        payloadJson: jsonEncode({
+          'name': cleanName,
+          'startDate': startDate.toIso8601String(),
+          'durationDays': durationDays,
+          'endDate': endDate?.toIso8601String(),
+        }),
+      );
 
       AppLogger.i('Medicamento $firestoreId salvo localmente com sucesso.');
 
-      // =======================================================================
-      // 2. FIREBASE
-      // =======================================================================
-
-      unawaited(
-        _addMedicationInFirestore(
-          userId: userId,
-          id: firestoreId,
-          name: cleanName,
-          startDate: startDate,
-          durationDays: durationDays,
-          endDate: endDate,
-        ),
-      );
-
-      // =======================================================================
-      // 3. NOTIFICAÇÃO
-      // =======================================================================
+      // =====================================================================
+      // 2. NOTIFICAÇÃO LOCAL
+      // =====================================================================
       //
-      // A notificação NÃO faz mais parte do fluxo crítico do cadastro.
-      // Se permissão/plugin/agendamento falhar, o medicamento permanece salvo.
+      // Continua fora da transação crítica.
+      // Uma falha na notificação não desfaz o medicamento.
       //
 
       try {
@@ -350,7 +348,7 @@ class HealthRepository {
     }
   }
 
-  Future deleteMedication(String docId, int localId) async {
+  Future<void> deleteMedication(String docId, int localId) async {
     final userId = _getUserId();
 
     if (userId == null) {
@@ -358,35 +356,49 @@ class HealthRepository {
       return;
     }
 
-    try {
+    final cleanDocId = docId.trim();
+
+    Future<void> deleteLocalMedication() async {
       await (_db.delete(
         _db.medications,
       )..where((table) => table.id.equals(localId))).go();
 
       await (_db.delete(
         _db.notificationsTable,
-      )..where((table) => table.id.equals('health_med_$docId'))).go();
+      )..where((table) => table.id.equals('health_med_$cleanDocId'))).go();
+    }
+
+    try {
+      // Registros realmente sincronizáveis entram
+      // atomicamente na SyncQueue.
+      if (cleanDocId.isNotEmpty && cleanDocId != 'pending') {
+        await _db.transactionWithSync(
+          localOperation: deleteLocalMedication,
+          collection: 'medications',
+          docId: cleanDocId,
+          operationType: 'delete',
+          payloadJson: jsonEncode({'medicationId': cleanDocId}),
+        );
+      } else {
+        // Preserva o comportamento para registros
+        // puramente locais / pendentes.
+        await _db.transaction(deleteLocalMedication);
+      }
 
       try {
-        await _notifService.cancelNotification(
-          _notificationIdForMedication(docId),
-        );
+        if (cleanDocId.isNotEmpty) {
+          await _notifService.cancelNotification(
+            _notificationIdForMedication(cleanDocId),
+          );
 
-        AppLogger.i('Notificação cancelada para o medicamento $docId.');
+          AppLogger.i('Notificação cancelada para o medicamento $cleanDocId.');
+        }
       } catch (e, stack) {
         AppLogger.e(
           'Medicamento removido, mas não foi possível '
           'cancelar a notificação.',
           e,
           stack,
-        );
-      }
-
-      final cleanDocId = docId.trim();
-
-      if (cleanDocId.isNotEmpty && cleanDocId != 'pending') {
-        unawaited(
-          _deleteMedicationInFirestore(userId: userId, docId: cleanDocId),
         );
       }
     } catch (e, stack) {
@@ -747,73 +759,6 @@ class HealthRepository {
           : _encodeCycleData(_sanitizeCycleData(safeCycleData)),
       date: date,
     );
-  }
-
-  // ===========================================================================
-  // 5. FIREBASE — MEDICAMENTOS
-  // ===========================================================================
-
-  Future _addMedicationInFirestore({
-    required String userId,
-    required String id,
-    required String name,
-    required DateTime startDate,
-    required int? durationDays,
-    required DateTime? endDate,
-  }) async {
-    try {
-      await _firestore
-          .collection('users')
-          .doc(userId)
-          .collection('medications')
-          .doc(id)
-          .set(<String, dynamic>{
-            'name': name,
-            'startDate': Timestamp.fromDate(startDate),
-            'durationDays': durationDays,
-            'endDate': endDate == null ? null : Timestamp.fromDate(endDate),
-            'createdAt': FieldValue.serverTimestamp(),
-          }, SetOptions(merge: true));
-
-      AppLogger.i('Medicamento $id sincronizado com Firebase.');
-    } catch (e, stack) {
-      AppLogger.e('Sync Error: Adicionar medicamento.', e, stack);
-    }
-  }
-
-  Future _deleteMedicationInFirestore({
-    required String userId,
-    required String docId,
-  }) async {
-    try {
-      final batch = _firestore.batch();
-
-      // 1. Deleta o medicamento da coleção medications
-      batch.delete(
-        _firestore
-            .collection('users')
-            .doc(userId)
-            .collection('medications')
-            .doc(docId),
-      );
-
-      // 2. 🛡️ CORREÇÃO: Deleta a notificação atrelada da coleção notifications na nuvem
-      batch.delete(
-        _firestore
-            .collection('users')
-            .doc(userId)
-            .collection('notifications')
-            .doc('health_med_$docId'),
-      );
-
-      await batch.commit();
-
-      AppLogger.i(
-        'Medicamento $docId e sua notificação removidos do Firebase.',
-      );
-    } catch (e, stack) {
-      AppLogger.e('Sync Error: Deletar medicamento.', e, stack);
-    }
   }
 
   // ===========================================================================

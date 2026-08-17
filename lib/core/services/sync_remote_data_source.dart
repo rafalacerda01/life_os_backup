@@ -66,7 +66,7 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
       }
 
       // ----------------------------------------------------------------------
-      // CREATE DE HÁBITO
+      // CREATE DE GOALS
       // Obrigatoriamente passa pelo backend para enforcement de quota.
       // ----------------------------------------------------------------------
 
@@ -89,6 +89,14 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
 
       if (collection == 'subjects' && operationType == 'delete') {
         return _deleteSubjectServerSide(item: item);
+      }
+
+      if (collection == 'medications' && operationType == 'create') {
+        return _createMedicationServerSide(item: item);
+      }
+
+      if (collection == 'medications' && operationType == 'delete') {
+        return _deleteMedicationServerSide(item: item);
       }
       // ----------------------------------------------------------------------
       // DELETE DE HÁBITO
@@ -148,6 +156,44 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
         code: 'UNEXPECTED_SYNC_ERROR',
       );
     }
+  }
+
+  Future<SyncOperationResult> _createMedicationServerSide({
+    required SyncQueueTableData item,
+  }) async {
+    final data = _decodePayload(item.payloadJson);
+
+    final name = data['name'];
+    final startDate = data['startDate'];
+    final durationDays = data['durationDays'];
+    final endDate = data['endDate'];
+
+    if (name is! String ||
+        startDate is! String ||
+        (durationDays != null && durationDays is! int) ||
+        (endDate != null && endDate is! String)) {
+      return const SyncOperationResult.invalidPayload(
+        message: 'Payload de criação de medicamento inválido.',
+      );
+    }
+
+    return _postToSyncBackend({
+      'operation': 'create_medication',
+      'medicationId': item.docId,
+      'name': name,
+      'startDate': startDate,
+      'durationDays': durationDays,
+      'endDate': endDate,
+    });
+  }
+
+  Future<SyncOperationResult> _deleteMedicationServerSide({
+    required SyncQueueTableData item,
+  }) async {
+    return _postToSyncBackend({
+      'operation': 'delete_medication',
+      'medicationId': item.docId,
+    });
   }
 
   Future<SyncOperationResult> _createSubjectServerSide({
