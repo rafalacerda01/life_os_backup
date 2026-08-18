@@ -9,6 +9,7 @@ import 'package:life_os/features/circles/presentation/circle_detail_screen.dart'
 import 'package:life_os/features/circles/presentation/circles_provider.dart';
 import 'package:life_os/features/circles/presentation/create_circle_screen.dart';
 import 'package:life_os/features/circles/presentation/join_circle_screen.dart';
+import 'package:life_os/features/circles/presentation/widgets/circles_guide_sheet.dart';
 
 class CirclesScreen extends ConsumerStatefulWidget {
   const CirclesScreen({super.key});
@@ -50,6 +51,14 @@ class _CirclesScreenState extends ConsumerState<CirclesScreen> {
           ),
         ),
         actions: [
+          IconButton(
+            tooltip: 'Como funcionam os Círculos',
+            icon: const Icon(
+              Icons.help_outline_rounded,
+              color: AppColors.textMain,
+            ),
+            onPressed: () => CirclesGuideSheet.show(context),
+          ),
           IconButton(
             icon: const Icon(Icons.qr_code_scanner, color: AppColors.textMain),
             onPressed: () => Navigator.push(

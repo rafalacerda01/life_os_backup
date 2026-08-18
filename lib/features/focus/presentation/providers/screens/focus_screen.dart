@@ -4,6 +4,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:life_os/features/focus/presentation/providers/providers/focus_provider.dart';
 import 'package:life_os/features/focus/presentation/providers/screens/target_selection_screen.dart';
+import 'package:life_os/features/circles/domain/entities/challenge_entity.dart';
+import 'package:life_os/features/circles/presentation/circle_focus_contribution_provider.dart';
 
 class FocusScreen extends ConsumerWidget {
   const FocusScreen({super.key});
@@ -23,6 +25,21 @@ class FocusScreen extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final focusState = ref.watch(focusProvider);
+
+    final activeCircleIdAsync = ref.watch(activeCircleIdForFocusProvider);
+    final activeCircleId = activeCircleIdAsync.asData?.value;
+
+    final circleChallengesAsync = activeCircleId == null
+        ? null
+        : ref.watch(circleChallengeWindowsProvider(activeCircleId));
+
+    final circleChallenges =
+        circleChallengesAsync?.asData?.value ?? const <CircleChallengeWindow>[];
+
+    final eligibleCircleChallengeCount = _eligibleCircleChallengeCount(
+      focusState,
+      circleChallenges,
+    );
 
     final minutes = (focusState.durationRemaining ~/ 60).toString().padLeft(
       2,
@@ -69,6 +86,13 @@ class FocusScreen extends ConsumerWidget {
                     SizedBox(height: isCompactHeight ? 18 : 26),
 
                     _buildTargetCard(context, focusState),
+
+                    if (eligibleCircleChallengeCount > 0) ...[
+                      SizedBox(height: isCompactHeight ? 12 : 16),
+                      _buildCircleContributionBanner(
+                        eligibleCircleChallengeCount,
+                      ),
+                    ],
 
                     SizedBox(height: isCompactHeight ? 18 : 24),
 
@@ -312,6 +336,108 @@ class FocusScreen extends ConsumerWidget {
     );
   }
 
+  int _eligibleCircleChallengeCount(
+    FocusState focusState,
+    List<CircleChallengeWindow> challenges,
+  ) {
+    if (focusState.isBreak ||
+        focusState.isRunning ||
+        focusState.activeTargetType == null) {
+      return 0;
+    }
+
+    final durationSeconds = focusState.durationRemaining;
+
+    if (!isVerifiedFocusDuration(durationSeconds)) {
+      return 0;
+    }
+
+    final acceptedTypes = switch (focusState.activeTargetType!) {
+      FocusTargetType.task => <ChallengeType>{ChallengeType.focusMinutes},
+      FocusTargetType.subject => <ChallengeType>{
+        ChallengeType.focusMinutes,
+        ChallengeType.studyMinutes,
+      },
+    };
+
+    return countEligibleCircleChallenges(
+      challenges: challenges,
+      acceptedTypes: acceptedTypes,
+      sessionDurationSeconds: durationSeconds,
+    );
+  }
+
+  Widget _buildCircleContributionBanner(int challengeCount) {
+    final challengeLabel = challengeCount == 1
+        ? '1 desafio ativo'
+        : '$challengeCount desafios ativos';
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(15),
+      decoration: BoxDecoration(
+        color: _purple.withValues(alpha: 0.10),
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: _purpleBright.withValues(alpha: 0.24)),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            width: 40,
+            height: 40,
+            decoration: BoxDecoration(
+              color: _purpleBright.withValues(alpha: 0.12),
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: const Icon(
+              Icons.groups_rounded,
+              color: _purpleBright,
+              size: 21,
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'CONTRIBUIÇÃO PARA O CÍRCULO',
+                  style: TextStyle(
+                    color: _purpleBright,
+                    fontSize: 10,
+                    fontWeight: FontWeight.w900,
+                    letterSpacing: 1,
+                  ),
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  'Esta sessão pode contribuir para '
+                  '$challengeLabel do seu Círculo.',
+                  style: const TextStyle(
+                    color: _textPrimary,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w700,
+                    height: 1.35,
+                  ),
+                ),
+                const SizedBox(height: 5),
+                const Text(
+                  'Após a conclusão verificada, o progresso é '
+                  'creditado automaticamente.',
+                  style: TextStyle(
+                    color: _textSecondary,
+                    fontSize: 11,
+                    height: 1.4,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
   // ===========================================================================
   // FOCO / PAUSA
   // ===========================================================================

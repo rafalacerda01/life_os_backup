@@ -44,6 +44,10 @@ final focusRemoteDataSourceProvider = Provider<FocusRemoteDataSource>((ref) {
 const _keepCurrentTargetValue = Object();
 const _verifiedFocusDurations = {60, 180, 600, 1500, 2700};
 
+bool isVerifiedFocusDuration(int durationSeconds) {
+  return _verifiedFocusDurations.contains(durationSeconds);
+}
+
 class _FocusCycleContext {
   final String targetId;
   final FocusTargetType targetType;
@@ -201,7 +205,7 @@ class FocusNotifier extends Notifier<FocusState> {
         cycle != null &&
         _cycleCanBeVerified &&
         state.durationRemaining == _timerDurationInSeconds &&
-        _verifiedFocusDurations.contains(cycle.plannedDurationSeconds);
+        isVerifiedFocusDuration(cycle.plannedDurationSeconds);
   }
 
   Future<void> _startVerifiedThenLocal(
