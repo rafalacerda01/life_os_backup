@@ -3,8 +3,10 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:mockito/mockito.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:http/testing.dart';
 
 import 'package:life_os/core/database/app_database.dart';
+import 'package:life_os/core/network/activity_remote_data_source.dart';
 import 'package:life_os/features/habits/data/repositories/habits_repository.dart';
 
 class MockFirebaseAuth extends Mock implements FirebaseAuth {}
@@ -29,7 +31,15 @@ void main() {
 
     when(auth.currentUser).thenReturn(user);
 
-    repository = HabitsRepository(db, firestore, auth);
+    repository = HabitsRepository(
+      db,
+      firestore,
+      auth,
+      ActivityRemoteDataSource(
+        client: MockClient((_) async => throw UnimplementedError()),
+        idTokenProvider: () async => 'token',
+      ),
+    );
   });
 
   tearDown(() async {

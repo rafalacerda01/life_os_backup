@@ -4,6 +4,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:drift/drift.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:life_os/core/database/app_database.dart';
+import 'package:life_os/core/network/activity_remote_data_source.dart';
 import 'package:life_os/core/utils/app_logger.dart';
 import 'package:life_os/features/habits/data/models/habit_model.dart';
 import 'package:uuid/uuid.dart';
@@ -12,9 +13,10 @@ class HabitsRepository {
   final AppDatabase _db;
   final FirebaseFirestore _firestore;
   final FirebaseAuth _auth;
+  final ActivityRemoteDataSource _activityRemote;
   final _uuid = const Uuid();
 
-  HabitsRepository(this._db, this._firestore, this._auth);
+  HabitsRepository(this._db, this._firestore, this._auth, this._activityRemote);
 
   // ===========================================================================
   // 1. LEITURA (STREAMS LOCAIS)
@@ -74,9 +76,10 @@ class HabitsRepository {
 
     try {
       final todayStr = DateTime.now().toIso8601String().split('T')[0];
+      final wasCompletedToday = currentDates.contains(todayStr);
       List<String> updatedDates = List.from(currentDates);
 
-      if (updatedDates.contains(todayStr)) {
+      if (wasCompletedToday) {
         updatedDates.remove(todayStr);
       } else {
         updatedDates.add(todayStr);
@@ -95,6 +98,10 @@ class HabitsRepository {
         operationType: 'update',
         payloadJson: jsonEncode({'completedDates': updatedDates}),
       );
+
+      if (!wasCompletedToday) {
+        unawaited(_reportCompetitiveCompletion(habitId));
+      }
     } catch (error, stackTrace) {
       AppLogger.e(
         'Erro ao alternar status do hábito localmente',
@@ -102,6 +109,19 @@ class HabitsRepository {
         stackTrace,
       );
       rethrow;
+    }
+  }
+
+  Future<void> _reportCompetitiveCompletion(String habitId) async {
+    try {
+      await _activityRemote.completeHabit(habitId: habitId);
+    } on ActivityRemoteException catch (error) {
+      AppLogger.w(
+        'Atividade competitiva de habito nao registrada '
+        '(status: ${error.statusCode ?? 'network'}, code: ${error.code}).',
+      );
+    } catch (_) {
+      AppLogger.w('Atividade competitiva de habito nao registrada.');
     }
   }
 
@@ -211,5 +231,4 @@ class HabitsRepository {
   // ===========================================================================
   // 4. FIREBASE - MÉTODOS PRIVADOS EM BACKGROUND
   // ===========================================================================
-
 }

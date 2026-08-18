@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -6,6 +7,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:life_os/core/database/app_database.dart';
 import 'package:life_os/core/database/database_provider.dart';
+import 'package:life_os/core/network/activity_remote_data_source.dart';
 import 'package:life_os/core/utils/app_logger.dart';
 import 'package:life_os/features/tasks/data/models/task_model.dart';
 
@@ -15,8 +17,14 @@ import 'package:life_os/features/tasks/data/models/task_model.dart';
 
 final tasksRepositoryProvider = Provider((ref) {
   final db = ref.watch(databaseProvider);
+  final activityRemote = ref.watch(activityRemoteDataSourceProvider);
 
-  return TasksRepository(db, FirebaseFirestore.instance, FirebaseAuth.instance);
+  return TasksRepository(
+    db,
+    FirebaseFirestore.instance,
+    FirebaseAuth.instance,
+    activityRemote,
+  );
 });
 
 // ============================================================================
@@ -37,8 +45,9 @@ class TasksRepository {
   final AppDatabase _db;
   final FirebaseFirestore _firestore;
   final FirebaseAuth _auth;
+  final ActivityRemoteDataSource _activityRemote;
 
-  TasksRepository(this._db, this._firestore, this._auth);
+  TasksRepository(this._db, this._firestore, this._auth, this._activityRemote);
 
   // ==========================================================================
   // LEITURA LOCAL
@@ -172,10 +181,27 @@ class TasksRepository {
         operationType: 'update',
         payloadJson: jsonEncode({'isCompleted': newStatus}),
       );
+
+      if (newStatus) {
+        unawaited(_reportCompetitiveCompletion(taskId));
+      }
     } catch (e, stack) {
       AppLogger.e('Erro ao atualizar tarefa localmente', e, stack);
 
       rethrow;
+    }
+  }
+
+  Future<void> _reportCompetitiveCompletion(String taskId) async {
+    try {
+      await _activityRemote.completeTask(taskId: taskId);
+    } on ActivityRemoteException catch (error) {
+      AppLogger.w(
+        'Atividade competitiva de tarefa nao registrada '
+        '(status: ${error.statusCode ?? 'network'}, code: ${error.code}).',
+      );
+    } catch (_) {
+      AppLogger.w('Atividade competitiva de tarefa nao registrada.');
     }
   }
 
