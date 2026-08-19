@@ -3,6 +3,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:google_sign_in/google_sign_in.dart';
+import 'package:life_os/core/services/notification_service.dart';
 import 'package:life_os/core/services/sync_manager_provider.dart';
 // Imports dos providers de todos os módulos
 import 'package:life_os/features/finance/presentation/providers/finance_provider.dart';
@@ -15,6 +16,7 @@ import 'package:life_os/features/focus/presentation/providers/providers/focus_pr
 
 import 'package:life_os/features/dashboard/presentation/providers/dashboard_provider.dart';
 import 'package:life_os/features/auth/data/repositories/auth_repository_impl.dart';
+import 'package:life_os/features/auth/data/remote/account_remote_data_source.dart';
 import 'package:life_os/features/auth/domain/repositories/auth_repository.dart';
 import 'package:life_os/features/auth/presentation/providers/auth_state.dart';
 import 'package:life_os/core/storage/secure_storage_service.dart';
@@ -34,11 +36,25 @@ final secureStorageServiceProvider = Provider<SecureStorageService>((ref) {
   return SecureStorageService(storage);
 });
 
+final accountRemoteDataSourceProvider = Provider<AccountRemoteDataSource>((
+  ref,
+) {
+  final dataSource = AccountRemoteDataSource(
+    idTokenProvider: () async {
+      final user = ref.read(firebaseAuthProvider).currentUser;
+      return user?.getIdToken(true);
+    },
+  );
+  ref.onDispose(dataSource.close);
+  return dataSource;
+});
+
 // Provider do repositório
 final authRepositoryProvider = Provider<AuthRepository>((ref) {
   return AuthRepositoryImpl(
     ref.watch(firebaseAuthProvider),
     ref.watch(firestoreProvider),
+    ref.watch(accountRemoteDataSourceProvider),
   );
 });
 
@@ -47,9 +63,13 @@ class AuthNotifier extends Notifier<AuthState> {
   AuthRepository get _repository => ref.read(authRepositoryProvider);
   SecureStorageService get _secureStorage =>
       ref.read(secureStorageServiceProvider);
+  bool _disposed = false;
+  bool _accountDeletionInProgress = false;
+  Future<void>? _localCleanupInFlight;
 
   @override
   AuthState build() {
+    _disposed = false;
     _initializeAuthListener();
     return AuthState.initial();
   }
@@ -61,13 +81,9 @@ class AuthNotifier extends Notifier<AuthState> {
 
     final subscription = auth.authStateChanges().listen((firebaseUser) async {
       if (firebaseUser == null) {
-        await _secureStorage.deleteToken();
-        await _clearLocalData();
-        state.maybeWhen(
-          unauthenticated: () {},
-          orElse: () => state = AuthState.unauthenticated(),
-        );
-      } else {
+        if (_accountDeletionInProgress) return;
+        await _finishLocalSignOut();
+      } else if (!_accountDeletionInProgress) {
         final token = await firebaseUser.getIdToken();
         if (token != null) {
           await _secureStorage.saveToken(token);
@@ -76,12 +92,14 @@ class AuthNotifier extends Notifier<AuthState> {
     });
 
     ref.onDispose(() {
+      _disposed = true;
       subscription.cancel();
     });
   }
 
   // --- Função Helper para centralizar a Hidratação de todos os módulos ---
   void _hydrateAllOfflineData() {
+    if (_disposed || _accountDeletionInProgress) return;
     try {
       ref.read(financeRepositoryProvider).syncTransactionsFromFirestore();
       ref.read(tasksRepositoryProvider).syncTasksFromFirebaseToLocal();
@@ -102,6 +120,7 @@ class AuthNotifier extends Notifier<AuthState> {
     final result = await _repository.getCurrentUser();
     result.when(
       (user) async {
+        if (_disposed || _accountDeletionInProgress) return;
         final firebaseUser = ref.read(firebaseAuthProvider).currentUser;
         if (firebaseUser != null) {
           final token = await firebaseUser.getIdToken();
@@ -109,17 +128,21 @@ class AuthNotifier extends Notifier<AuthState> {
             await _secureStorage.saveToken(token);
           }
         }
+        if (_disposed || _accountDeletionInProgress) return;
         state = AuthState.authenticated(user);
         _hydrateAllOfflineData();
       },
       (failure) async {
+        if (_disposed || _accountDeletionInProgress) return;
         await _secureStorage.deleteToken();
+        if (_disposed || _accountDeletionInProgress) return;
         state = AuthState.unauthenticated();
       },
     );
   }
 
   Future<void> login(String email, String password) async {
+    _accountDeletionInProgress = false;
     state = AuthState.loading();
     final result = await _repository.signInWithEmailAndPassword(
       email,
@@ -137,6 +160,7 @@ class AuthNotifier extends Notifier<AuthState> {
   }
 
   Future<void> register(String email, String password, String name) async {
+    _accountDeletionInProgress = false;
     state = AuthState.loading();
     final result = await _repository.signUpWithEmailAndPassword(
       email,
@@ -155,6 +179,7 @@ class AuthNotifier extends Notifier<AuthState> {
   }
 
   Future<void> signInWithGoogle() async {
+    _accountDeletionInProgress = false;
     state = AuthState.loading();
     final result = await _repository.signInWithGoogle();
     result.when((user) async {
@@ -193,15 +218,7 @@ class AuthNotifier extends Notifier<AuthState> {
     final result = await _repository.signOut();
 
     result.when((_) async {
-      await _clearLocalData();
-
-      ref.invalidate(financeStreamProvider);
-      ref.invalidate(tasksStreamProvider);
-      ref.invalidate(habitsStreamProvider);
-      ref.invalidate(dashboardStateProvider);
-      ref.invalidate(checkInStreamProvider);
-
-      state = AuthState.unauthenticated();
+      await _finishLocalSignOut();
     }, (failure) => state = AuthState.error(failure.message));
   }
 
@@ -220,6 +237,8 @@ class AuthNotifier extends Notifier<AuthState> {
   }
 
   Future<void> deleteAccount({String? password}) async {
+    if (_accountDeletionInProgress) return;
+    _accountDeletionInProgress = true;
     state = AuthState.loading();
 
     try {
@@ -236,8 +255,9 @@ class AuthNotifier extends Notifier<AuthState> {
             );
             await user.reauthenticateWithCredential(credential);
           } else {
+            _accountDeletionInProgress = false;
             state = AuthState.error(
-              'A senha atual e obrigatoria para confirmar a exclusao.',
+              'A senha atual é obrigatória para confirmar a exclusão.',
             );
             return;
           }
@@ -263,38 +283,84 @@ class AuthNotifier extends Notifier<AuthState> {
 
       result.when(
         (success) async {
-          await _clearLocalData();
-          state = AuthState.unauthenticated();
+          await _finishLocalSignOut();
         },
         (failure) async {
-          state = AuthState.error(failure.message);
+          _accountDeletionInProgress = false;
+          if (!_disposed) state = AuthState.error(failure.message);
         },
       );
     } on FirebaseAuthException catch (e) {
+      _accountDeletionInProgress = false;
+      if (_disposed) return;
       if (e.code == 'wrong-password') {
         state = AuthState.error('Senha incorreta. Tente novamente.');
       } else if (e.code == 'requires-recent-login') {
         state = AuthState.error(
-          'Sessao expirada. Faca login novamente e tente de novo.',
+          'Sessão expirada. Faça login novamente e tente de novo.',
         );
       } else {
         state = AuthState.error(
-          e.message ?? 'Ocorreu um erro de reautenticacao.',
+          'Não foi possível confirmar sua autenticação. Tente novamente.',
         );
       }
-    } catch (e) {
-      state = AuthState.error('Erro ao deletar conta: $e');
+    } catch (_) {
+      _accountDeletionInProgress = false;
+      if (_disposed) return;
+      state = AuthState.error(
+        'Não foi possível excluir a conta. Tente novamente.',
+      );
     }
   }
 
-  Future<void> _clearLocalData() async {
+  Future<void> _finishLocalSignOut() async {
+    if (_disposed) return;
+    await _clearLocalData();
+    if (_disposed) return;
+
+    ref.invalidate(financeStreamProvider);
+    ref.invalidate(tasksStreamProvider);
+    ref.invalidate(habitsStreamProvider);
+    ref.invalidate(dashboardStateProvider);
+    ref.invalidate(checkInStreamProvider);
+
+    state.maybeWhen(
+      unauthenticated: () {},
+      orElse: () => state = AuthState.unauthenticated(),
+    );
+  }
+
+  Future<void> _clearLocalData() {
+    final running = _localCleanupInFlight;
+    if (running != null) return running;
+
+    late final Future<void> operation;
+    operation = _performLocalDataClear().whenComplete(() {
+      if (identical(_localCleanupInFlight, operation)) {
+        _localCleanupInFlight = null;
+      }
+    });
+    _localCleanupInFlight = operation;
+    return operation;
+  }
+
+  Future<void> _performLocalDataClear() async {
+    final secureStorage = _secureStorage;
+    final db = ref.read(databaseProvider);
+
     try {
-      await _secureStorage.deleteAll();
-      final db = ref.read(databaseProvider);
-      await db.clearAllData();
-    } catch (e) {
-      print("Erro ao limpar dados locais: $e");
+      await secureStorage.deleteAll();
+    } catch (_) {
+      // Os demais dados locais ainda precisam ser removidos.
     }
+
+    try {
+      await db.clearAllData();
+    } catch (_) {
+      // O cancelamento de notificações continua sendo necessário.
+    }
+
+    await NotificationService.instance.cancelAllNotifications();
   }
 }
 

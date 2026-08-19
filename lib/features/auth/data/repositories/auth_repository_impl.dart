@@ -5,239 +5,66 @@ import '../../../../core/errors/failure.dart';
 import '../../domain/entities/user_entity.dart';
 import '../../domain/repositories/auth_repository.dart';
 import '../models/user_model.dart';
+import '../remote/account_remote_data_source.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import '../../../../core/security/input_sanitizer.dart';
 
 class AuthRepositoryImpl implements AuthRepository {
   final fb.FirebaseAuth _firebaseAuth;
   final FirebaseFirestore _firestore;
+  final AccountRemoteDataSource _accountRemoteDataSource;
 
-  AuthRepositoryImpl(this._firebaseAuth, this._firestore);
-
-  // ===========================================================================
-  // EXCLUSÃO RECURSIVA DE UMA COLEÇÃO
-  // ===========================================================================
-  //
-  // O Firestore NÃO exclui subcoleções quando um documento pai é excluído.
-  //
-  // Esta função:
-  // 1. Busca todos os documentos da coleção.
-  // 2. Exclui documentos em batches de no máximo 450 operações.
-  // 3. Permite também excluir subcoleções conhecidas dentro dos documentos.
-  //
-  Future<void> _deleteCollection(
-    CollectionReference<Map<String, dynamic>> collection, {
-    List<String> nestedCollections = const [],
-  }) async {
-    while (true) {
-      final snapshot = await collection.limit(450).get();
-
-      if (snapshot.docs.isEmpty) {
-        break;
-      }
-
-      final batch = _firestore.batch();
-
-      for (final doc in snapshot.docs) {
-        // Exclui subcoleções conhecidas antes do documento pai.
-        for (final nestedName in nestedCollections) {
-          await _deleteCollection(doc.reference.collection(nestedName));
-        }
-
-        batch.delete(doc.reference);
-      }
-
-      await batch.commit();
-
-      // Se vieram menos de 450, não há mais documentos.
-      if (snapshot.docs.length < 450) {
-        break;
-      }
-    }
-  }
-
-  // ===========================================================================
-  // EXCLUSÃO DE TODAS AS SUBCOLEÇÕES DO USUÁRIO
-  // ===========================================================================
-  Future<void> _deleteUserFirestoreData(String uid) async {
-    final userDocRef = _firestore.collection('users').doc(uid);
-
-    // -------------------------------------------------------------------------
-    // Todas as subcoleções atualmente utilizadas pelo Life OS.
-    //
-    // IMPORTANTE:
-    // O Firestore não exclui automaticamente essas coleções quando
-    // users/{uid} é apagado.
-    // -------------------------------------------------------------------------
-    const userSubcollections = <String>[
-      // Produtividade
-      'tasks',
-      'habits',
-      'goals',
-
-      // Estudos
-      'study_info',
-      'subjects',
-      'review_queue',
-
-      // Focus
-      'focus_logs',
-
-      // Financeiro
-      'finance',
-      'transactions',
-
-      // Saúde
-      'health_info',
-      'medications',
-
-      // Check-in
-      'checkins',
-
-      // Notificações
-      'notifications',
-      // Privacy
-      'privacy',
-    ];
-
-    for (final collectionName in userSubcollections) {
-      await _deleteCollection(
-        userDocRef.collection(collectionName),
-        // Algumas estruturas podem possuir documentos com dados
-        // agrupados em subcoleções. Mantemos os nomes conhecidos para
-        // evitar documentos órfãos.
-        nestedCollections: const ['items', 'entries', 'logs', 'history'],
-      );
-    }
-
-    // -------------------------------------------------------------------------
-    // CIRCLES
-    // -------------------------------------------------------------------------
-    //
-    // Se o usuário for o único membro e também o administrador,
-    // o Circle pertence exclusivamente à conta e deve ser removido
-    // juntamente com suas subcoleções.
-    //
-    // Se houver outros membros, NÃO apagamos o Circle.
-    // Removemos somente os dados privados/ranking do usuário.
-    //
-
-    final userSnapshot = await userDocRef.get();
-    final userData = userSnapshot.data();
-
-    final activeCircleId = userData?['activeCircleId'] as String?;
-
-    if (activeCircleId != null && activeCircleId.trim().isNotEmpty) {
-      final circleId = activeCircleId.trim();
-
-      final circleRef = _firestore.collection('circles').doc(circleId);
-      final circleSnapshot = await circleRef.get();
-
-      if (circleSnapshot.exists) {
-        final circleData = circleSnapshot.data();
-
-        final adminId = circleData?['adminId'] as String?;
-        final memberCount = circleData?['memberCount'];
-
-        final isAdmin = adminId == uid;
-        final isLastMember = memberCount is num && memberCount <= 1;
-
-        // ================================================================
-        // CIRCLE EXCLUSIVO DO USUÁRIO
-        // ================================================================
-        //
-        // No seu caso do print:
-        // memberCount = 1
-        // adminId = uid
-        //
-        // Portanto podemos apagar o Circle inteiro.
-        //
-        if (isAdmin && isLastMember) {
-          // Remove desafios e quaisquer documentos dentro deles.
-          await _deleteCollection(
-            circleRef.collection('challenges'),
-            nestedCollections: const ['items', 'entries', 'logs', 'history'],
-          );
-
-          // Remove ranking.
-          await _deleteCollection(circleRef.collection('ranking'));
-
-          // Remove outras estruturas conhecidas do Circle,
-          // caso existam.
-          await _deleteCollection(circleRef.collection('members'));
-
-          await _deleteCollection(circleRef.collection('activities'));
-
-          // Finalmente remove o documento principal do Circle.
-          await circleRef.delete();
-        } else {
-          // ================================================================
-          // CIRCLE COMPARTILHADO
-          // ================================================================
-          //
-          // Nunca apagamos dados dos outros membros.
-          //
-          final rankingRef = circleRef.collection('ranking').doc(uid);
-
-          try {
-            await rankingRef.delete();
-          } on FirebaseException {
-            // Ranking é secundário.
-            // Não interrompe a exclusão da conta.
-          }
-        }
-      }
-    }
-    await userDocRef.delete();
-  }
+  AuthRepositoryImpl(
+    this._firebaseAuth,
+    this._firestore,
+    this._accountRemoteDataSource,
+  );
 
   @override
   Future<Result<void, Failure>> deleteAccount() async {
-    try {
-      final user = _firebaseAuth.currentUser;
-
-      if (user == null) {
-        return const Error(AuthFailure('Usuário não está autenticado'));
-      }
-
-      final uid = user.uid;
-
-      // =======================================================================
-      // FASE 1
-      // Dados do Firestore
-      // =======================================================================
-      //
-      // IMPORTANTE:
-      // Não excluímos o Firebase Auth antes desta etapa.
-      //
-      // Se ocorrer erro de permissão ou comunicação com o Firestore,
-      // o usuário do Auth continuará existindo e poderá tentar novamente.
-      //
-      await _deleteUserFirestoreData(uid);
-
-      // =======================================================================
-      // FASE 2
-      // Firebase Authentication
-      // =======================================================================
-      //
-      // A reautenticação já é realizada pelo AuthNotifier antes deste método.
-      //
-      await user.delete();
-
-      return const Success(null);
-    } on fb.FirebaseAuthException catch (e) {
-      return Error(
-        AuthFailure(e.message ?? 'Erro ao deletar conta', code: e.code),
+    final user = _firebaseAuth.currentUser;
+    if (user == null) {
+      return const Error(
+        AuthFailure('Usuário não está autenticado.', code: 'UNAUTHENTICATED'),
       );
-    } on FirebaseException catch (e) {
-      return Error(
-        AuthFailure(
-          e.message ?? 'Erro ao excluir dados da conta',
-          code: e.code,
+    }
+
+    try {
+      await _accountRemoteDataSource.deleteAccount();
+      await _signOutBestEffort();
+      return const Success(null);
+    } on AccountRemoteException catch (error) {
+      if (error.isAmbiguous && await _isAuthUserDeleted(user)) {
+        await _signOutBestEffort();
+        return const Success(null);
+      }
+      return Error(AuthFailure(error.message, code: error.code));
+    } catch (_) {
+      return const Error(
+        ServerFailure(
+          'Não foi possível excluir a conta. Tente novamente.',
+          code: 'ACCOUNT_DELETE_FAILED',
         ),
       );
-    } catch (e) {
-      return Error(ServerFailure('Erro inesperado ao excluir conta: $e'));
+    }
+  }
+
+  Future<bool> _isAuthUserDeleted(fb.User user) async {
+    try {
+      await user.reload();
+      return false;
+    } on fb.FirebaseAuthException catch (error) {
+      return error.code == 'user-not-found';
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<void> _signOutBestEffort() async {
+    try {
+      await _firebaseAuth.signOut();
+    } catch (_) {
+      // A exclusão confirmada no servidor não pode ser revertida localmente.
     }
   }
 
