@@ -4,24 +4,20 @@ const admin = require("firebase-admin");
 // Inicializa o Admin SDK
 admin.initializeApp();
 
-exports.cleanupUserData = functions.auth.user().onDelete(async (user) => {
-  const uid = user.uid;
-  const db = admin.firestore();
-  const userRef = db.collection("users").doc(uid);
+exports.cleanupUserData = functions
+    .runWith({
+      failurePolicy: true,
+    })
+    .auth.user().onDelete(async (user) => {
+      const db = admin.firestore();
+      const userRef = db.collection("users").doc(user.uid);
 
-  console.log(
-      `[v1] Iniciando exclusão em cascata para: ${uid}`,
-  );
-
-  try {
-    // Apaga o documento principal e as subcoleções
-    // ignorando limites do client-side
-    await db.recursiveDelete(userRef);
-
-    console.log(
-        `[v1] Erradicação concluída para o usuário: ${uid}`,
-    );
-  } catch (error) {
-    console.error(`[v1] Erro na exclusão:`, error);
-  }
-});
+      try {
+        // Apaga o documento principal e as subcoleções
+        // ignorando limites do client-side
+        await db.recursiveDelete(userRef);
+      } catch (_) {
+        console.error("[cleanupUserData] Falha na limpeza pós-exclusão.");
+        throw new Error("USER_DATA_CLEANUP_FAILED");
+      }
+    });
