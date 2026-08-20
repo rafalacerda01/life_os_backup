@@ -281,133 +281,19 @@ class AccountManagementScreen extends ConsumerWidget {
     final usesPasswordProvider =
         currentUser?.providerData.any((p) => p.providerId == 'password') ??
         false;
-    final passwordController = TextEditingController();
-    var obscureText = true;
-
-    await showDialog(
+    final result = await showDialog<_DeleteAccountDialogResult>(
       context: context,
-      builder: (dialogContext) => StatefulBuilder(
-        builder: (context, setState) {
-          return AlertDialog(
-            backgroundColor: const Color(0xFF11182E),
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(16),
-            ),
-            title: const Text(
-              'Excluir Conta',
-              style: TextStyle(
-                color: Colors.redAccent,
-                fontWeight: FontWeight.bold,
-              ),
-            ),
-            content: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text(
-                  'Esta acao e irreversivel. Todos os seus dados locais e na nuvem serao permanentemente removidos.',
-                  style: TextStyle(color: Colors.white70),
-                ),
-                if (usesPasswordProvider) ...[
-                  const SizedBox(height: 20),
-                  const Text(
-                    'Para sua seguranca, digite sua senha:',
-                    style: TextStyle(
-                      color: Colors.white,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-                  TextField(
-                    controller: passwordController,
-                    obscureText: obscureText,
-                    style: const TextStyle(color: Colors.white),
-                    decoration: InputDecoration(
-                      hintText: 'Sua senha',
-                      hintStyle: const TextStyle(color: Colors.white38),
-                      filled: true,
-                      fillColor: Colors.black26,
-                      contentPadding: const EdgeInsets.symmetric(
-                        horizontal: 16,
-                        vertical: 14,
-                      ),
-                      border: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(12),
-                        borderSide: BorderSide.none,
-                      ),
-                      suffixIcon: IconButton(
-                        icon: Icon(
-                          obscureText ? Icons.visibility_off : Icons.visibility,
-                          color: Colors.white54,
-                        ),
-                        onPressed: () {
-                          setState(() {
-                            obscureText = !obscureText;
-                          });
-                        },
-                      ),
-                    ),
-                  ),
-                ] else ...[
-                  const SizedBox(height: 20),
-                  const Text(
-                    'Sua conta sera confirmada novamente pelo provedor Google antes da exclusao.',
-                    style: TextStyle(color: Colors.white70),
-                  ),
-                ],
-              ],
-            ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.pop(dialogContext),
-                child: const Text(
-                  'Cancelar',
-                  style: TextStyle(color: Colors.white70),
-                ),
-              ),
-              ElevatedButton(
-                onPressed: () {
-                  final password = passwordController.text.trim();
-
-                  if (usesPasswordProvider && password.isEmpty) {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(
-                        content: Text(
-                          'A senha e obrigatoria para excluir a conta.',
-                        ),
-                        backgroundColor: Colors.redAccent,
-                      ),
-                    );
-                    return;
-                  }
-
-                  Navigator.pop(dialogContext);
-                  ref
-                      .read(authNotifierProvider.notifier)
-                      .deleteAccount(
-                        password: usesPasswordProvider ? password : null,
-                      );
-                },
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.redAccent,
-                  foregroundColor: Colors.white,
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                ),
-                child: const Text('Deletar Permanentemente'),
-              ),
-            ],
-          );
-        },
-      ),
+      builder: (_) =>
+          _DeleteAccountDialog(usesPasswordProvider: usesPasswordProvider),
     );
 
-    passwordController.dispose();
+    if (result == null) return;
+    ref
+        .read(authNotifierProvider.notifier)
+        .deleteAccount(password: result.password);
   }
 
   void _showLogoutDialog(BuildContext context, WidgetRef ref) {
-
     showDialog(
       context: context,
       builder: (dialogContext) => AlertDialog(
@@ -442,6 +328,154 @@ class AccountManagementScreen extends ConsumerWidget {
           ),
         ],
       ),
+    );
+  }
+}
+
+class _DeleteAccountDialogResult {
+  final String? password;
+
+  const _DeleteAccountDialogResult({required this.password});
+}
+
+class _DeleteAccountDialog extends StatefulWidget {
+  final bool usesPasswordProvider;
+
+  const _DeleteAccountDialog({required this.usesPasswordProvider});
+
+  @override
+  State<_DeleteAccountDialog> createState() => _DeleteAccountDialogState();
+}
+
+class _DeleteAccountDialogState extends State<_DeleteAccountDialog> {
+  late final TextEditingController _passwordController;
+  bool _obscureText = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _passwordController = TextEditingController();
+  }
+
+  @override
+  void dispose() {
+    FocusManager.instance.primaryFocus?.unfocus();
+    _passwordController.dispose();
+    super.dispose();
+  }
+
+  void _cancel() {
+    FocusScope.of(context).unfocus();
+    Navigator.pop(context);
+  }
+
+  void _confirm() {
+    final password = _passwordController.text.trim();
+    if (widget.usesPasswordProvider && password.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('A senha e obrigatoria para excluir a conta.'),
+          backgroundColor: Colors.redAccent,
+        ),
+      );
+      return;
+    }
+
+    FocusScope.of(context).unfocus();
+    Navigator.pop(
+      context,
+      _DeleteAccountDialogResult(
+        password: widget.usesPasswordProvider ? password : null,
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      backgroundColor: const Color(0xFF11182E),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      title: const Text(
+        'Excluir Conta',
+        style: TextStyle(color: Colors.redAccent, fontWeight: FontWeight.bold),
+      ),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            'Esta acao e irreversivel. Todos os seus dados locais e na nuvem serao permanentemente removidos.',
+            style: TextStyle(color: Colors.white70),
+          ),
+          if (widget.usesPasswordProvider) ...[
+            const SizedBox(height: 20),
+            const Text(
+              'Para sua seguranca, digite sua senha:',
+              style: TextStyle(
+                color: Colors.white,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            const SizedBox(height: 8),
+            TextField(
+              controller: _passwordController,
+              obscureText: _obscureText,
+              style: const TextStyle(color: Colors.white),
+              decoration: InputDecoration(
+                hintText: 'Sua senha',
+                hintStyle: const TextStyle(color: Colors.white38),
+                filled: true,
+                fillColor: Colors.black26,
+                contentPadding: const EdgeInsets.symmetric(
+                  horizontal: 16,
+                  vertical: 14,
+                ),
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: BorderSide.none,
+                ),
+                suffixIcon: IconButton(
+                  icon: Icon(
+                    _obscureText ? Icons.visibility_off : Icons.visibility,
+                    color: Colors.white54,
+                  ),
+                  onPressed: () {
+                    setState(() {
+                      _obscureText = !_obscureText;
+                    });
+                  },
+                ),
+              ),
+            ),
+          ] else ...[
+            const SizedBox(height: 20),
+            const Text(
+              'Sua conta sera confirmada novamente pelo provedor Google antes da exclusao.',
+              style: TextStyle(color: Colors.white70),
+            ),
+          ],
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: _cancel,
+          child: const Text(
+            'Cancelar',
+            style: TextStyle(color: Colors.white70),
+          ),
+        ),
+        ElevatedButton(
+          onPressed: _confirm,
+          style: ElevatedButton.styleFrom(
+            backgroundColor: Colors.redAccent,
+            foregroundColor: Colors.white,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(8),
+            ),
+          ),
+          child: const Text('Deletar Permanentemente'),
+        ),
+      ],
     );
   }
 }

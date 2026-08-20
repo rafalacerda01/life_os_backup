@@ -11,36 +11,37 @@ import 'package:life_os/core/router/router.dart';
 import 'package:life_os/firebase_options.dart';
 import 'package:timezone/data/latest.dart' as tz;
 
-void main() async {
-  WidgetsFlutterBinding.ensureInitialized();
-  tz.initializeTimeZones();
-  // 1. Inicialização síncrona obrigatória do núcleo do Firebase
-  await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
-
-  // 🚀 CÓDIGO ALTERADO: App Check agora é aguardado ANTES de construir a UI.
-  // Isso garante que nenhuma requisição do Riverpod bata no Firebase sem o token de segurança.
-  await _initAppCheckInBackground();
-
-  // 2. Configuração de coleta do Crashlytics
-  await FirebaseCrashlytics.instance
-      .setCrashlyticsCollectionEnabled(!kDebugMode)
-      .catchError((_) {});
-
-  // 3. Inicialização de localidade de datas
-  await initializeDateFormatting('pt_BR', null).catchError((error, stack) {
-    if (!kDebugMode) {
-      FirebaseCrashlytics.instance.recordError(
-        error,
-        stack,
-        fatal: true,
-        reason: 'Falha no initializeDateFormatting',
-      );
-    }
-  });
-
-  // Execução do aplicativo com tratamento global de erros
+void main() {
   runZonedGuarded(
-    () {
+    () async {
+      WidgetsFlutterBinding.ensureInitialized();
+      tz.initializeTimeZones();
+      // 1. Inicialização síncrona obrigatória do núcleo do Firebase
+      await Firebase.initializeApp(
+        options: DefaultFirebaseOptions.currentPlatform,
+      );
+
+      // 🚀 CÓDIGO ALTERADO: App Check agora é aguardado ANTES de construir a UI.
+      // Isso garante que nenhuma requisição do Riverpod bata no Firebase sem o token de segurança.
+      await _initAppCheckInBackground();
+
+      // 2. Configuração de coleta do Crashlytics
+      await FirebaseCrashlytics.instance
+          .setCrashlyticsCollectionEnabled(!kDebugMode)
+          .catchError((_) {});
+
+      // 3. Inicialização de localidade de datas
+      await initializeDateFormatting('pt_BR', null).catchError((error, stack) {
+        if (!kDebugMode) {
+          FirebaseCrashlytics.instance.recordError(
+            error,
+            stack,
+            fatal: true,
+            reason: 'Falha no initializeDateFormatting',
+          );
+        }
+      });
+
       FlutterError.onError = (errorDetails) {
         if (kDebugMode) {
           FlutterError.dumpErrorToConsole(errorDetails);
