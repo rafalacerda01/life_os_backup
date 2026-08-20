@@ -51,14 +51,9 @@ class DashboardRepository {
       }
 
       // 3. Cálculos de Saúde e Finanças (Scores)
-      double waterBonus = (healthData != null)
-          ? (healthData.waterIntakeMl / 3000) * 40
-          : 0;
-      double moodBonus =
-          (healthData?.mood == 'Radiante' || healthData?.mood == 'Focado')
-          ? 10
-          : 0;
-      double healthScore = (50.0 + waterBonus + moodBonus).clamp(0.0, 100.0);
+      final double waterScore = _calculateWaterScore(healthData);
+      final double moodScore = _calculateMoodScore(healthData);
+      double healthScore = (waterScore + moodScore).clamp(0.0, 100.0);
       double financialScore = financeBalance >= 0 ? 95.0 : 40.0;
 
       return DashboardModel(
@@ -78,7 +73,7 @@ class DashboardRepository {
       // Retorno de fallback seguro em caso de erro nos cálculos
       return const DashboardModel(
         productivityScore: 0.0,
-        healthScore: 50.0,
+        healthScore: 0.0,
         financialScore: 50.0,
         studyStreak: 0,
         studyReviewQueue: 0,
@@ -89,5 +84,44 @@ class DashboardRepository {
         transactionsCount: 0,
       );
     }
+  }
+
+  double _calculateWaterScore(dynamic healthData) {
+    final rawWaterIntake = healthData?.waterIntakeMl;
+    final waterIntakeMl = _readPositiveInt(rawWaterIntake, fallback: 0);
+
+    return ((waterIntakeMl.clamp(0, 3000) / 3000) * 50).toDouble();
+  }
+
+  double _calculateMoodScore(dynamic healthData) {
+    final mood = healthData?.mood?.toString().trim();
+
+    switch (mood) {
+      case 'Radiante':
+        return 50.0;
+      case 'Focado':
+        return 40.0;
+      case 'Neutro':
+        return 30.0;
+      case 'Cansado':
+        return 20.0;
+      case 'Estressado':
+        return 10.0;
+      case null:
+      case '':
+      case '—':
+      case 'Sem registro':
+        return 0.0;
+      default:
+        return 0.0;
+    }
+  }
+
+  int _readPositiveInt(dynamic value, {required int fallback}) {
+    if (value is num) {
+      return value.toInt();
+    }
+
+    return int.tryParse(value?.toString() ?? '') ?? fallback;
   }
 }
