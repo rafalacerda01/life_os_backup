@@ -39,13 +39,16 @@ class HabitsRepository {
   // ===========================================================================
 
   Future<void> addHabit(String title) async {
-    if (_auth.currentUser == null) return;
+    final user = _auth.currentUser;
+
+    if (user == null) return;
 
     try {
       final id = _uuid.v4();
       final dates = <String>[];
 
       await _db.transactionWithSync(
+        ownerUid: user.uid,
         localOperation: () async {
           await _db
               .into(_db.habits)
@@ -72,7 +75,9 @@ class HabitsRepository {
     String habitId,
     List<String> currentDates,
   ) async {
-    if (_auth.currentUser == null) return;
+    final user = _auth.currentUser;
+
+    if (user == null) return;
 
     try {
       final todayStr = DateTime.now().toIso8601String().split('T')[0];
@@ -86,6 +91,7 @@ class HabitsRepository {
       }
 
       await _db.transactionWithSync(
+        ownerUid: user.uid,
         localOperation: () async {
           await (_db.update(
             _db.habits,
@@ -127,10 +133,13 @@ class HabitsRepository {
 
   // 🚀 NOVO MÉTODO: Permite atualizar e alternar qualquer dia da semana na matriz interativa
   Future<void> updateHabitDates(String habitId, List<String> newDates) async {
-    if (_auth.currentUser == null) return;
+    final user = _auth.currentUser;
+
+    if (user == null) return;
 
     try {
       await _db.transactionWithSync(
+        ownerUid: user.uid,
         localOperation: () async {
           await (_db.update(
             _db.habits,
@@ -154,10 +163,13 @@ class HabitsRepository {
   }
 
   Future<void> deleteHabit(String habitId, String habitTitle) async {
-    if (_auth.currentUser == null) return;
+    final user = _auth.currentUser;
+
+    if (user == null) return;
 
     try {
       await _db.transactionWithSync(
+        ownerUid: user.uid,
         localOperation: () async {
           // 1. Exclui o hábito localmente.
           await (_db.delete(

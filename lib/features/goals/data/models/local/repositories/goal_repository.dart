@@ -47,7 +47,9 @@ class GoalRepository {
   // ===========================================================================
 
   Future<void> createGoal(String title, String period, int targetValue) async {
-    if (_auth.currentUser == null) {
+    final user = _auth.currentUser;
+
+    if (user == null) {
       return;
     }
 
@@ -57,6 +59,7 @@ class GoalRepository {
 
     try {
       await _db.transactionWithSync(
+        ownerUid: user.uid,
         localOperation: () async {
           await _db
               .into(_db.goals)
@@ -91,12 +94,15 @@ class GoalRepository {
   }
 
   Future<void> updateGoalProgress(String id, int newValue) async {
-    if (_auth.currentUser == null) {
+    final user = _auth.currentUser;
+
+    if (user == null) {
       return;
     }
 
     try {
       await _db.transactionWithSync(
+        ownerUid: user.uid,
         localOperation: () async {
           await (_db.update(_db.goals)..where((table) => table.id.equals(id)))
               .write(GoalsCompanion(currentValue: Value(newValue)));
@@ -113,7 +119,9 @@ class GoalRepository {
   }
 
   Future<void> resetGoalCycle(String id) async {
-    if (_auth.currentUser == null) {
+    final user = _auth.currentUser;
+
+    if (user == null) {
       return;
     }
 
@@ -121,6 +129,7 @@ class GoalRepository {
 
     try {
       await _db.transactionWithSync(
+        ownerUid: user.uid,
         localOperation: () async {
           await (_db.update(
             _db.goals,
@@ -146,12 +155,15 @@ class GoalRepository {
   }
 
   Future<void> removeGoal(String id) async {
-    if (_auth.currentUser == null) {
+    final user = _auth.currentUser;
+
+    if (user == null) {
       return;
     }
 
     try {
       await _db.transactionWithSync(
+        ownerUid: user.uid,
         localOperation: () async {
           await (_db.delete(
             _db.goals,

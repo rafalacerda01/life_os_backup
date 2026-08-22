@@ -5138,6 +5138,17 @@ class $SyncQueueTableTable extends SyncQueueTable
       'PRIMARY KEY AUTOINCREMENT',
     ),
   );
+  static const VerificationMeta _ownerUidMeta = const VerificationMeta(
+    'ownerUid',
+  );
+  @override
+  late final GeneratedColumn<String> ownerUid = GeneratedColumn<String>(
+    'owner_uid',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+  );
   static const VerificationMeta _collectionMeta = const VerificationMeta(
     'collection',
   );
@@ -5206,15 +5217,64 @@ class $SyncQueueTableTable extends SyncQueueTable
     ),
     defaultValue: const Constant(false),
   );
+  static const VerificationMeta _statusMeta = const VerificationMeta('status');
+  @override
+  late final GeneratedColumn<String> status = GeneratedColumn<String>(
+    'status',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    defaultValue: const Constant(SyncQueuePersistenceStatus.pending),
+  );
+  static const VerificationMeta _lastErrorCodeMeta = const VerificationMeta(
+    'lastErrorCode',
+  );
+  @override
+  late final GeneratedColumn<String> lastErrorCode = GeneratedColumn<String>(
+    'last_error_code',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+  );
+  static const VerificationMeta _attemptCountMeta = const VerificationMeta(
+    'attemptCount',
+  );
+  @override
+  late final GeneratedColumn<int> attemptCount = GeneratedColumn<int>(
+    'attempt_count',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    defaultValue: const Constant(0),
+  );
+  static const VerificationMeta _lastAttemptAtMeta = const VerificationMeta(
+    'lastAttemptAt',
+  );
+  @override
+  late final GeneratedColumn<int> lastAttemptAt = GeneratedColumn<int>(
+    'last_attempt_at',
+    aliasedName,
+    true,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+  );
   @override
   List<GeneratedColumn> get $columns => [
     id,
+    ownerUid,
     collection,
     docId,
     operationType,
     payloadJson,
     createdAt,
     isSynced,
+    status,
+    lastErrorCode,
+    attemptCount,
+    lastAttemptAt,
   ];
   @override
   String get aliasedName => _alias ?? actualTableName;
@@ -5230,6 +5290,12 @@ class $SyncQueueTableTable extends SyncQueueTable
     final data = instance.toColumns(true);
     if (data.containsKey('id')) {
       context.handle(_idMeta, id.isAcceptableOrUnknown(data['id']!, _idMeta));
+    }
+    if (data.containsKey('owner_uid')) {
+      context.handle(
+        _ownerUidMeta,
+        ownerUid.isAcceptableOrUnknown(data['owner_uid']!, _ownerUidMeta),
+      );
     }
     if (data.containsKey('collection')) {
       context.handle(
@@ -5283,6 +5349,39 @@ class $SyncQueueTableTable extends SyncQueueTable
         isSynced.isAcceptableOrUnknown(data['is_synced']!, _isSyncedMeta),
       );
     }
+    if (data.containsKey('status')) {
+      context.handle(
+        _statusMeta,
+        status.isAcceptableOrUnknown(data['status']!, _statusMeta),
+      );
+    }
+    if (data.containsKey('last_error_code')) {
+      context.handle(
+        _lastErrorCodeMeta,
+        lastErrorCode.isAcceptableOrUnknown(
+          data['last_error_code']!,
+          _lastErrorCodeMeta,
+        ),
+      );
+    }
+    if (data.containsKey('attempt_count')) {
+      context.handle(
+        _attemptCountMeta,
+        attemptCount.isAcceptableOrUnknown(
+          data['attempt_count']!,
+          _attemptCountMeta,
+        ),
+      );
+    }
+    if (data.containsKey('last_attempt_at')) {
+      context.handle(
+        _lastAttemptAtMeta,
+        lastAttemptAt.isAcceptableOrUnknown(
+          data['last_attempt_at']!,
+          _lastAttemptAtMeta,
+        ),
+      );
+    }
     return context;
   }
 
@@ -5296,6 +5395,10 @@ class $SyncQueueTableTable extends SyncQueueTable
         DriftSqlType.int,
         data['${effectivePrefix}id'],
       )!,
+      ownerUid: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}owner_uid'],
+      ),
       collection: attachedDatabase.typeMapping.read(
         DriftSqlType.string,
         data['${effectivePrefix}collection'],
@@ -5320,6 +5423,22 @@ class $SyncQueueTableTable extends SyncQueueTable
         DriftSqlType.bool,
         data['${effectivePrefix}is_synced'],
       )!,
+      status: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}status'],
+      )!,
+      lastErrorCode: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}last_error_code'],
+      ),
+      attemptCount: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}attempt_count'],
+      )!,
+      lastAttemptAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}last_attempt_at'],
+      ),
     );
   }
 
@@ -5335,6 +5454,12 @@ class SyncQueueTableData extends DataClass
   ///
   /// Autoincremental para preservar a ordem FIFO.
   final int id;
+
+  /// UID autenticado que originou a operação.
+  ///
+  /// Nullable somente para preservar e quarentenar linhas legadas, cujo
+  /// ownership não pode ser inferido de forma segura durante a migração.
+  final String? ownerUid;
 
   /// Coleção lógica do Firebase.
   ///
@@ -5368,37 +5493,76 @@ class SyncQueueTableData extends DataClass
 
   /// Indica se a operação já foi processada com sucesso.
   final bool isSynced;
+
+  /// Estado persistente da entrega remota.
+  final String status;
+
+  /// Código estável da última falha, sem mensagem ou payload sensível.
+  final String? lastErrorCode;
+
+  /// Quantidade de tentativas remotas realizadas.
+  final int attemptCount;
+
+  /// Timestamp Unix da última tentativa, em milissegundos.
+  final int? lastAttemptAt;
   const SyncQueueTableData({
     required this.id,
+    this.ownerUid,
     required this.collection,
     required this.docId,
     required this.operationType,
     required this.payloadJson,
     required this.createdAt,
     required this.isSynced,
+    required this.status,
+    this.lastErrorCode,
+    required this.attemptCount,
+    this.lastAttemptAt,
   });
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
     final map = <String, Expression>{};
     map['id'] = Variable<int>(id);
+    if (!nullToAbsent || ownerUid != null) {
+      map['owner_uid'] = Variable<String>(ownerUid);
+    }
     map['collection'] = Variable<String>(collection);
     map['doc_id'] = Variable<String>(docId);
     map['operation_type'] = Variable<String>(operationType);
     map['payload_json'] = Variable<String>(payloadJson);
     map['created_at'] = Variable<int>(createdAt);
     map['is_synced'] = Variable<bool>(isSynced);
+    map['status'] = Variable<String>(status);
+    if (!nullToAbsent || lastErrorCode != null) {
+      map['last_error_code'] = Variable<String>(lastErrorCode);
+    }
+    map['attempt_count'] = Variable<int>(attemptCount);
+    if (!nullToAbsent || lastAttemptAt != null) {
+      map['last_attempt_at'] = Variable<int>(lastAttemptAt);
+    }
     return map;
   }
 
   SyncQueueTableCompanion toCompanion(bool nullToAbsent) {
     return SyncQueueTableCompanion(
       id: Value(id),
+      ownerUid: ownerUid == null && nullToAbsent
+          ? const Value.absent()
+          : Value(ownerUid),
       collection: Value(collection),
       docId: Value(docId),
       operationType: Value(operationType),
       payloadJson: Value(payloadJson),
       createdAt: Value(createdAt),
       isSynced: Value(isSynced),
+      status: Value(status),
+      lastErrorCode: lastErrorCode == null && nullToAbsent
+          ? const Value.absent()
+          : Value(lastErrorCode),
+      attemptCount: Value(attemptCount),
+      lastAttemptAt: lastAttemptAt == null && nullToAbsent
+          ? const Value.absent()
+          : Value(lastAttemptAt),
     );
   }
 
@@ -5409,12 +5573,17 @@ class SyncQueueTableData extends DataClass
     serializer ??= driftRuntimeOptions.defaultSerializer;
     return SyncQueueTableData(
       id: serializer.fromJson<int>(json['id']),
+      ownerUid: serializer.fromJson<String?>(json['ownerUid']),
       collection: serializer.fromJson<String>(json['collection']),
       docId: serializer.fromJson<String>(json['docId']),
       operationType: serializer.fromJson<String>(json['operationType']),
       payloadJson: serializer.fromJson<String>(json['payloadJson']),
       createdAt: serializer.fromJson<int>(json['createdAt']),
       isSynced: serializer.fromJson<bool>(json['isSynced']),
+      status: serializer.fromJson<String>(json['status']),
+      lastErrorCode: serializer.fromJson<String?>(json['lastErrorCode']),
+      attemptCount: serializer.fromJson<int>(json['attemptCount']),
+      lastAttemptAt: serializer.fromJson<int?>(json['lastAttemptAt']),
     );
   }
   @override
@@ -5422,35 +5591,55 @@ class SyncQueueTableData extends DataClass
     serializer ??= driftRuntimeOptions.defaultSerializer;
     return <String, dynamic>{
       'id': serializer.toJson<int>(id),
+      'ownerUid': serializer.toJson<String?>(ownerUid),
       'collection': serializer.toJson<String>(collection),
       'docId': serializer.toJson<String>(docId),
       'operationType': serializer.toJson<String>(operationType),
       'payloadJson': serializer.toJson<String>(payloadJson),
       'createdAt': serializer.toJson<int>(createdAt),
       'isSynced': serializer.toJson<bool>(isSynced),
+      'status': serializer.toJson<String>(status),
+      'lastErrorCode': serializer.toJson<String?>(lastErrorCode),
+      'attemptCount': serializer.toJson<int>(attemptCount),
+      'lastAttemptAt': serializer.toJson<int?>(lastAttemptAt),
     };
   }
 
   SyncQueueTableData copyWith({
     int? id,
+    Value<String?> ownerUid = const Value.absent(),
     String? collection,
     String? docId,
     String? operationType,
     String? payloadJson,
     int? createdAt,
     bool? isSynced,
+    String? status,
+    Value<String?> lastErrorCode = const Value.absent(),
+    int? attemptCount,
+    Value<int?> lastAttemptAt = const Value.absent(),
   }) => SyncQueueTableData(
     id: id ?? this.id,
+    ownerUid: ownerUid.present ? ownerUid.value : this.ownerUid,
     collection: collection ?? this.collection,
     docId: docId ?? this.docId,
     operationType: operationType ?? this.operationType,
     payloadJson: payloadJson ?? this.payloadJson,
     createdAt: createdAt ?? this.createdAt,
     isSynced: isSynced ?? this.isSynced,
+    status: status ?? this.status,
+    lastErrorCode: lastErrorCode.present
+        ? lastErrorCode.value
+        : this.lastErrorCode,
+    attemptCount: attemptCount ?? this.attemptCount,
+    lastAttemptAt: lastAttemptAt.present
+        ? lastAttemptAt.value
+        : this.lastAttemptAt,
   );
   SyncQueueTableData copyWithCompanion(SyncQueueTableCompanion data) {
     return SyncQueueTableData(
       id: data.id.present ? data.id.value : this.id,
+      ownerUid: data.ownerUid.present ? data.ownerUid.value : this.ownerUid,
       collection: data.collection.present
           ? data.collection.value
           : this.collection,
@@ -5463,6 +5652,16 @@ class SyncQueueTableData extends DataClass
           : this.payloadJson,
       createdAt: data.createdAt.present ? data.createdAt.value : this.createdAt,
       isSynced: data.isSynced.present ? data.isSynced.value : this.isSynced,
+      status: data.status.present ? data.status.value : this.status,
+      lastErrorCode: data.lastErrorCode.present
+          ? data.lastErrorCode.value
+          : this.lastErrorCode,
+      attemptCount: data.attemptCount.present
+          ? data.attemptCount.value
+          : this.attemptCount,
+      lastAttemptAt: data.lastAttemptAt.present
+          ? data.lastAttemptAt.value
+          : this.lastAttemptAt,
     );
   }
 
@@ -5470,12 +5669,17 @@ class SyncQueueTableData extends DataClass
   String toString() {
     return (StringBuffer('SyncQueueTableData(')
           ..write('id: $id, ')
+          ..write('ownerUid: $ownerUid, ')
           ..write('collection: $collection, ')
           ..write('docId: $docId, ')
           ..write('operationType: $operationType, ')
           ..write('payloadJson: $payloadJson, ')
           ..write('createdAt: $createdAt, ')
-          ..write('isSynced: $isSynced')
+          ..write('isSynced: $isSynced, ')
+          ..write('status: $status, ')
+          ..write('lastErrorCode: $lastErrorCode, ')
+          ..write('attemptCount: $attemptCount, ')
+          ..write('lastAttemptAt: $lastAttemptAt')
           ..write(')'))
         .toString();
   }
@@ -5483,51 +5687,76 @@ class SyncQueueTableData extends DataClass
   @override
   int get hashCode => Object.hash(
     id,
+    ownerUid,
     collection,
     docId,
     operationType,
     payloadJson,
     createdAt,
     isSynced,
+    status,
+    lastErrorCode,
+    attemptCount,
+    lastAttemptAt,
   );
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
       (other is SyncQueueTableData &&
           other.id == this.id &&
+          other.ownerUid == this.ownerUid &&
           other.collection == this.collection &&
           other.docId == this.docId &&
           other.operationType == this.operationType &&
           other.payloadJson == this.payloadJson &&
           other.createdAt == this.createdAt &&
-          other.isSynced == this.isSynced);
+          other.isSynced == this.isSynced &&
+          other.status == this.status &&
+          other.lastErrorCode == this.lastErrorCode &&
+          other.attemptCount == this.attemptCount &&
+          other.lastAttemptAt == this.lastAttemptAt);
 }
 
 class SyncQueueTableCompanion extends UpdateCompanion<SyncQueueTableData> {
   final Value<int> id;
+  final Value<String?> ownerUid;
   final Value<String> collection;
   final Value<String> docId;
   final Value<String> operationType;
   final Value<String> payloadJson;
   final Value<int> createdAt;
   final Value<bool> isSynced;
+  final Value<String> status;
+  final Value<String?> lastErrorCode;
+  final Value<int> attemptCount;
+  final Value<int?> lastAttemptAt;
   const SyncQueueTableCompanion({
     this.id = const Value.absent(),
+    this.ownerUid = const Value.absent(),
     this.collection = const Value.absent(),
     this.docId = const Value.absent(),
     this.operationType = const Value.absent(),
     this.payloadJson = const Value.absent(),
     this.createdAt = const Value.absent(),
     this.isSynced = const Value.absent(),
+    this.status = const Value.absent(),
+    this.lastErrorCode = const Value.absent(),
+    this.attemptCount = const Value.absent(),
+    this.lastAttemptAt = const Value.absent(),
   });
   SyncQueueTableCompanion.insert({
     this.id = const Value.absent(),
+    this.ownerUid = const Value.absent(),
     required String collection,
     required String docId,
     required String operationType,
     required String payloadJson,
     required int createdAt,
     this.isSynced = const Value.absent(),
+    this.status = const Value.absent(),
+    this.lastErrorCode = const Value.absent(),
+    this.attemptCount = const Value.absent(),
+    this.lastAttemptAt = const Value.absent(),
   }) : collection = Value(collection),
        docId = Value(docId),
        operationType = Value(operationType),
@@ -5535,41 +5764,61 @@ class SyncQueueTableCompanion extends UpdateCompanion<SyncQueueTableData> {
        createdAt = Value(createdAt);
   static Insertable<SyncQueueTableData> custom({
     Expression<int>? id,
+    Expression<String>? ownerUid,
     Expression<String>? collection,
     Expression<String>? docId,
     Expression<String>? operationType,
     Expression<String>? payloadJson,
     Expression<int>? createdAt,
     Expression<bool>? isSynced,
+    Expression<String>? status,
+    Expression<String>? lastErrorCode,
+    Expression<int>? attemptCount,
+    Expression<int>? lastAttemptAt,
   }) {
     return RawValuesInsertable({
       if (id != null) 'id': id,
+      if (ownerUid != null) 'owner_uid': ownerUid,
       if (collection != null) 'collection': collection,
       if (docId != null) 'doc_id': docId,
       if (operationType != null) 'operation_type': operationType,
       if (payloadJson != null) 'payload_json': payloadJson,
       if (createdAt != null) 'created_at': createdAt,
       if (isSynced != null) 'is_synced': isSynced,
+      if (status != null) 'status': status,
+      if (lastErrorCode != null) 'last_error_code': lastErrorCode,
+      if (attemptCount != null) 'attempt_count': attemptCount,
+      if (lastAttemptAt != null) 'last_attempt_at': lastAttemptAt,
     });
   }
 
   SyncQueueTableCompanion copyWith({
     Value<int>? id,
+    Value<String?>? ownerUid,
     Value<String>? collection,
     Value<String>? docId,
     Value<String>? operationType,
     Value<String>? payloadJson,
     Value<int>? createdAt,
     Value<bool>? isSynced,
+    Value<String>? status,
+    Value<String?>? lastErrorCode,
+    Value<int>? attemptCount,
+    Value<int?>? lastAttemptAt,
   }) {
     return SyncQueueTableCompanion(
       id: id ?? this.id,
+      ownerUid: ownerUid ?? this.ownerUid,
       collection: collection ?? this.collection,
       docId: docId ?? this.docId,
       operationType: operationType ?? this.operationType,
       payloadJson: payloadJson ?? this.payloadJson,
       createdAt: createdAt ?? this.createdAt,
       isSynced: isSynced ?? this.isSynced,
+      status: status ?? this.status,
+      lastErrorCode: lastErrorCode ?? this.lastErrorCode,
+      attemptCount: attemptCount ?? this.attemptCount,
+      lastAttemptAt: lastAttemptAt ?? this.lastAttemptAt,
     );
   }
 
@@ -5578,6 +5827,9 @@ class SyncQueueTableCompanion extends UpdateCompanion<SyncQueueTableData> {
     final map = <String, Expression>{};
     if (id.present) {
       map['id'] = Variable<int>(id.value);
+    }
+    if (ownerUid.present) {
+      map['owner_uid'] = Variable<String>(ownerUid.value);
     }
     if (collection.present) {
       map['collection'] = Variable<String>(collection.value);
@@ -5597,6 +5849,18 @@ class SyncQueueTableCompanion extends UpdateCompanion<SyncQueueTableData> {
     if (isSynced.present) {
       map['is_synced'] = Variable<bool>(isSynced.value);
     }
+    if (status.present) {
+      map['status'] = Variable<String>(status.value);
+    }
+    if (lastErrorCode.present) {
+      map['last_error_code'] = Variable<String>(lastErrorCode.value);
+    }
+    if (attemptCount.present) {
+      map['attempt_count'] = Variable<int>(attemptCount.value);
+    }
+    if (lastAttemptAt.present) {
+      map['last_attempt_at'] = Variable<int>(lastAttemptAt.value);
+    }
     return map;
   }
 
@@ -5604,12 +5868,17 @@ class SyncQueueTableCompanion extends UpdateCompanion<SyncQueueTableData> {
   String toString() {
     return (StringBuffer('SyncQueueTableCompanion(')
           ..write('id: $id, ')
+          ..write('ownerUid: $ownerUid, ')
           ..write('collection: $collection, ')
           ..write('docId: $docId, ')
           ..write('operationType: $operationType, ')
           ..write('payloadJson: $payloadJson, ')
           ..write('createdAt: $createdAt, ')
-          ..write('isSynced: $isSynced')
+          ..write('isSynced: $isSynced, ')
+          ..write('status: $status, ')
+          ..write('lastErrorCode: $lastErrorCode, ')
+          ..write('attemptCount: $attemptCount, ')
+          ..write('lastAttemptAt: $lastAttemptAt')
           ..write(')'))
         .toString();
   }
@@ -8583,22 +8852,32 @@ typedef $$NotificationsTableTableProcessedTableManager =
 typedef $$SyncQueueTableTableCreateCompanionBuilder =
     SyncQueueTableCompanion Function({
       Value<int> id,
+      Value<String?> ownerUid,
       required String collection,
       required String docId,
       required String operationType,
       required String payloadJson,
       required int createdAt,
       Value<bool> isSynced,
+      Value<String> status,
+      Value<String?> lastErrorCode,
+      Value<int> attemptCount,
+      Value<int?> lastAttemptAt,
     });
 typedef $$SyncQueueTableTableUpdateCompanionBuilder =
     SyncQueueTableCompanion Function({
       Value<int> id,
+      Value<String?> ownerUid,
       Value<String> collection,
       Value<String> docId,
       Value<String> operationType,
       Value<String> payloadJson,
       Value<int> createdAt,
       Value<bool> isSynced,
+      Value<String> status,
+      Value<String?> lastErrorCode,
+      Value<int> attemptCount,
+      Value<int?> lastAttemptAt,
     });
 
 class $$SyncQueueTableTableFilterComposer
@@ -8612,6 +8891,11 @@ class $$SyncQueueTableTableFilterComposer
   });
   ColumnFilters<int> get id => $composableBuilder(
     column: $table.id,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get ownerUid => $composableBuilder(
+    column: $table.ownerUid,
     builder: (column) => ColumnFilters(column),
   );
 
@@ -8644,6 +8928,26 @@ class $$SyncQueueTableTableFilterComposer
     column: $table.isSynced,
     builder: (column) => ColumnFilters(column),
   );
+
+  ColumnFilters<String> get status => $composableBuilder(
+    column: $table.status,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get lastErrorCode => $composableBuilder(
+    column: $table.lastErrorCode,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get attemptCount => $composableBuilder(
+    column: $table.attemptCount,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get lastAttemptAt => $composableBuilder(
+    column: $table.lastAttemptAt,
+    builder: (column) => ColumnFilters(column),
+  );
 }
 
 class $$SyncQueueTableTableOrderingComposer
@@ -8657,6 +8961,11 @@ class $$SyncQueueTableTableOrderingComposer
   });
   ColumnOrderings<int> get id => $composableBuilder(
     column: $table.id,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get ownerUid => $composableBuilder(
+    column: $table.ownerUid,
     builder: (column) => ColumnOrderings(column),
   );
 
@@ -8689,6 +8998,26 @@ class $$SyncQueueTableTableOrderingComposer
     column: $table.isSynced,
     builder: (column) => ColumnOrderings(column),
   );
+
+  ColumnOrderings<String> get status => $composableBuilder(
+    column: $table.status,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get lastErrorCode => $composableBuilder(
+    column: $table.lastErrorCode,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get attemptCount => $composableBuilder(
+    column: $table.attemptCount,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get lastAttemptAt => $composableBuilder(
+    column: $table.lastAttemptAt,
+    builder: (column) => ColumnOrderings(column),
+  );
 }
 
 class $$SyncQueueTableTableAnnotationComposer
@@ -8702,6 +9031,9 @@ class $$SyncQueueTableTableAnnotationComposer
   });
   GeneratedColumn<int> get id =>
       $composableBuilder(column: $table.id, builder: (column) => column);
+
+  GeneratedColumn<String> get ownerUid =>
+      $composableBuilder(column: $table.ownerUid, builder: (column) => column);
 
   GeneratedColumn<String> get collection => $composableBuilder(
     column: $table.collection,
@@ -8726,6 +9058,24 @@ class $$SyncQueueTableTableAnnotationComposer
 
   GeneratedColumn<bool> get isSynced =>
       $composableBuilder(column: $table.isSynced, builder: (column) => column);
+
+  GeneratedColumn<String> get status =>
+      $composableBuilder(column: $table.status, builder: (column) => column);
+
+  GeneratedColumn<String> get lastErrorCode => $composableBuilder(
+    column: $table.lastErrorCode,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<int> get attemptCount => $composableBuilder(
+    column: $table.attemptCount,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<int> get lastAttemptAt => $composableBuilder(
+    column: $table.lastAttemptAt,
+    builder: (column) => column,
+  );
 }
 
 class $$SyncQueueTableTableTableManager
@@ -8766,38 +9116,58 @@ class $$SyncQueueTableTableTableManager
           updateCompanionCallback:
               ({
                 Value<int> id = const Value.absent(),
+                Value<String?> ownerUid = const Value.absent(),
                 Value<String> collection = const Value.absent(),
                 Value<String> docId = const Value.absent(),
                 Value<String> operationType = const Value.absent(),
                 Value<String> payloadJson = const Value.absent(),
                 Value<int> createdAt = const Value.absent(),
                 Value<bool> isSynced = const Value.absent(),
+                Value<String> status = const Value.absent(),
+                Value<String?> lastErrorCode = const Value.absent(),
+                Value<int> attemptCount = const Value.absent(),
+                Value<int?> lastAttemptAt = const Value.absent(),
               }) => SyncQueueTableCompanion(
                 id: id,
+                ownerUid: ownerUid,
                 collection: collection,
                 docId: docId,
                 operationType: operationType,
                 payloadJson: payloadJson,
                 createdAt: createdAt,
                 isSynced: isSynced,
+                status: status,
+                lastErrorCode: lastErrorCode,
+                attemptCount: attemptCount,
+                lastAttemptAt: lastAttemptAt,
               ),
           createCompanionCallback:
               ({
                 Value<int> id = const Value.absent(),
+                Value<String?> ownerUid = const Value.absent(),
                 required String collection,
                 required String docId,
                 required String operationType,
                 required String payloadJson,
                 required int createdAt,
                 Value<bool> isSynced = const Value.absent(),
+                Value<String> status = const Value.absent(),
+                Value<String?> lastErrorCode = const Value.absent(),
+                Value<int> attemptCount = const Value.absent(),
+                Value<int?> lastAttemptAt = const Value.absent(),
               }) => SyncQueueTableCompanion.insert(
                 id: id,
+                ownerUid: ownerUid,
                 collection: collection,
                 docId: docId,
                 operationType: operationType,
                 payloadJson: payloadJson,
                 createdAt: createdAt,
                 isSynced: isSynced,
+                status: status,
+                lastErrorCode: lastErrorCode,
+                attemptCount: attemptCount,
+                lastAttemptAt: lastAttemptAt,
               ),
           withReferenceMapper: (p0) => p0
               .map((e) => (e.readTable(table), BaseReferences(db, table, e)))

@@ -126,6 +126,7 @@ class TasksRepository {
 
     try {
       await _db.transactionWithSync(
+        ownerUid: user.uid,
         localOperation: () async {
           await _db
               .into(_db.taskTable)
@@ -171,6 +172,7 @@ class TasksRepository {
 
     try {
       await _db.transactionWithSync(
+        ownerUid: user.uid,
         localOperation: () async {
           await (_db.update(_db.taskTable)
                 ..where((table) => table.id.equals(taskId)))
@@ -218,6 +220,7 @@ class TasksRepository {
 
     try {
       await _db.transactionWithSync(
+        ownerUid: user.uid,
         localOperation: () async {
           await (_db.delete(
             _db.taskTable,

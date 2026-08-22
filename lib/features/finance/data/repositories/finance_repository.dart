@@ -22,6 +22,12 @@ class FinanceRepository {
     required String type,
     required String category,
   }) async {
+    final user = _auth.currentUser;
+
+    if (user == null) {
+      return;
+    }
+
     try {
       final cleanTitle = InputSanitizer.sanitize(title);
       final cleanCategory = InputSanitizer.sanitize(category);
@@ -37,6 +43,7 @@ class FinanceRepository {
       final createdAt = DateTime.now();
 
       await _db.transactionWithSync(
+        ownerUid: user.uid,
         localOperation: () async {
           await _db
               .into(_db.transactions)
@@ -69,6 +76,12 @@ class FinanceRepository {
   }
 
   Future<void> deleteTransaction(int localId) async {
+    final user = _auth.currentUser;
+
+    if (user == null) {
+      return;
+    }
+
     try {
       final transaction = await (_db.select(
         _db.transactions,
@@ -92,6 +105,7 @@ class FinanceRepository {
       }
 
       await _db.transactionWithSync(
+        ownerUid: user.uid,
         localOperation: () async {
           await _deleteLocalTransaction(localId);
         },

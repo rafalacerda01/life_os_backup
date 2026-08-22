@@ -12,19 +12,44 @@ class FakeSyncQueueStore implements SyncQueueStore {
   final List<SyncQueueTableData> items;
 
   final List<int> markedAsSynced = [];
+  final List<int> rejected = [];
+  final List<int> retried = [];
 
   FakeSyncQueueStore(this.items);
 
   @override
-  Future<List<SyncQueueTableData>> getPendingSyncItems() async {
+  Future<List<SyncQueueTableData>> getPendingSyncItems(String ownerUid) async {
     return List.unmodifiable(
-      items.where((item) => !markedAsSynced.contains(item.id)),
+      items.where(
+        (item) =>
+            !markedAsSynced.contains(item.id) && !rejected.contains(item.id),
+      ),
     );
   }
 
   @override
-  Future<int> markSyncItemAsSynced(int id) async {
+  Future<int> markSyncItemAsSucceeded(int id, String ownerUid) async {
     markedAsSynced.add(id);
+    return 1;
+  }
+
+  @override
+  Future<int> markSyncItemRejected(
+    int id,
+    String ownerUid,
+    String errorCode,
+  ) async {
+    rejected.add(id);
+    return 1;
+  }
+
+  @override
+  Future<int> markSyncItemRetryableFailure(
+    int id,
+    String ownerUid,
+    String errorCode,
+  ) async {
+    retried.add(id);
     return 1;
   }
 }
@@ -59,15 +84,19 @@ SyncQueueTableData createSyncItem({
   String docId = 'habit-1',
   String operationType = 'create',
   String payloadJson = '{"title":"Hábito"}',
+  String? ownerUid = 'user-123',
 }) {
   return SyncQueueTableData(
     id: id,
+    ownerUid: ownerUid,
     collection: collection,
     docId: docId,
     operationType: operationType,
     payloadJson: payloadJson,
     createdAt: DateTime.now().millisecondsSinceEpoch,
     isSynced: false,
+    status: SyncQueuePersistenceStatus.pending,
+    attemptCount: 0,
   );
 }
 
@@ -77,12 +106,15 @@ SyncQueueTableData createHealthSyncItem({
 }) {
   return SyncQueueTableData(
     id: id,
+    ownerUid: 'user-123',
     collection: 'health_info',
     docId: '2026-08-21',
     operationType: 'update',
     payloadJson: jsonEncode(payload),
     createdAt: DateTime.now().millisecondsSinceEpoch,
     isSynced: false,
+    status: SyncQueuePersistenceStatus.pending,
+    attemptCount: 0,
   );
 }
 
@@ -174,6 +206,91 @@ void main() {
       expect(store.markedAsSynced, isEmpty);
     });
 
+    test('não processa item pertencente a outro UID', () async {
+      final item = createSyncItem(ownerUid: 'user-a');
+      final store = FakeSyncQueueStore([item]);
+      final remote = FakeSyncRemoteDataSource(
+        (uid, item) => Future.value(const SyncOperationResult.success()),
+      );
+      final manager = SyncManager(
+        queueStore: store,
+        remoteDataSource: remote,
+        currentUserId: () => 'user-b',
+      );
+
+      await manager.processPendingItems();
+
+      expect(remote.processedItems, isEmpty);
+      expect(store.markedAsSynced, isEmpty);
+      expect(store.rejected, isEmpty);
+    });
+
+    test('não processa item legado sem ownership', () async {
+      final item = createSyncItem(ownerUid: null);
+      final store = FakeSyncQueueStore([item]);
+      final remote = FakeSyncRemoteDataSource(
+        (uid, item) => Future.value(const SyncOperationResult.success()),
+      );
+      final manager = SyncManager(
+        queueStore: store,
+        remoteDataSource: remote,
+        currentUserId: () => 'user-123',
+      );
+
+      await manager.processPendingItems();
+
+      expect(remote.processedItems, isEmpty);
+      expect(store.markedAsSynced, isEmpty);
+    });
+
+    test('troca de usuário durante processamento não confirma item', () async {
+      var currentUid = 'user-123';
+      final started = Completer<void>();
+      final release = Completer<void>();
+      final store = FakeSyncQueueStore([createSyncItem()]);
+      final remote = FakeSyncRemoteDataSource((uid, item) async {
+        started.complete();
+        await release.future;
+        return const SyncOperationResult.success();
+      });
+      final manager = SyncManager(
+        queueStore: store,
+        remoteDataSource: remote,
+        currentUserId: () => currentUid,
+      );
+
+      final processing = manager.processPendingItems();
+      await started.future;
+      currentUid = 'user-456';
+      release.complete();
+
+      expect(await processing, isFalse);
+      expect(store.markedAsSynced, isEmpty);
+    });
+
+    for (final testCase in <String, SyncOperationResult>{
+      'quotaExceeded': const SyncOperationResult.quotaExceeded(),
+      'invalidPayload': const SyncOperationResult.invalidPayload(),
+      'unsupportedOperation': const SyncOperationResult.unsupportedOperation(),
+    }.entries) {
+      test('${testCase.key} rejeita sem marcar sucesso', () async {
+        final store = FakeSyncQueueStore([createSyncItem()]);
+        final remote = FakeSyncRemoteDataSource(
+          (uid, item) async => testCase.value,
+        );
+        final manager = SyncManager(
+          queueStore: store,
+          remoteDataSource: remote,
+          currentUserId: () => 'user-123',
+        );
+
+        await manager.processPendingItems();
+
+        expect(store.rejected, [1]);
+        expect(store.markedAsSynced, isEmpty);
+      });
+    }
+
     test('terminaliza erro permanente e não o reprocessa', () async {
       final first = createSyncItem(id: 1);
       final second = createSyncItem(id: 2, docId: 'habit-2');
@@ -196,7 +313,8 @@ void main() {
 
       await manager.processPendingItems();
 
-      expect(store.markedAsSynced, [1, 2]);
+      expect(store.markedAsSynced, [2]);
+      expect(store.rejected, [1]);
       expect(remote.processedItems, [
         'user-123:habits:habit-1:create',
         'user-123:habits:habit-2:create',
@@ -204,7 +322,8 @@ void main() {
 
       await manager.processPendingItems();
 
-      expect(store.markedAsSynced, [1, 2]);
+      expect(store.markedAsSynced, [2]);
+      expect(store.rejected, [1]);
       expect(remote.processedItems, [
         'user-123:habits:habit-1:create',
         'user-123:habits:habit-2:create',
@@ -264,9 +383,9 @@ void main() {
         await firstStarted.future;
 
         store.items.add(water);
-        await manager.processPendingItems();
+        final secondRun = manager.processPendingItems();
         releaseFirst.complete();
-        await firstRun;
+        await Future.wait([firstRun, secondRun]);
 
         expect(store.markedAsSynced, [1, 2]);
         expect(remote.processedItems, [

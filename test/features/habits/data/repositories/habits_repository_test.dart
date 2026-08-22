@@ -11,7 +11,10 @@ import 'package:life_os/features/habits/data/repositories/habits_repository.dart
 
 class MockFirebaseAuth extends Mock implements FirebaseAuth {}
 
-class MockFirebaseUser extends Mock implements User {}
+class MockFirebaseUser extends Mock implements User {
+  @override
+  String get uid => 'user-123';
+}
 
 class MockFirebaseFirestore extends Mock implements FirebaseFirestore {}
 
@@ -57,7 +60,7 @@ void main() {
       expect(habits.single.title, 'Beber água');
       expect(habits.single.completedDates, '[]');
 
-      final pending = await db.getPendingSyncItems();
+      final pending = await db.getPendingSyncItems('user-123');
 
       expect(pending.length, 1);
 
@@ -83,7 +86,7 @@ void main() {
       await repository.addHabit('Hábito bloqueado');
 
       final habits = await db.select(db.habits).get();
-      final pending = await db.getPendingSyncItems();
+      final pending = await db.getPendingSyncItems('user-123');
 
       expect(habits, isEmpty);
       expect(pending, isEmpty);
@@ -123,7 +126,7 @@ void main() {
 
       final habits = await db.select(db.habits).get();
       final notifications = await db.select(db.notificationsTable).get();
-      final pending = await db.getPendingSyncItems();
+      final pending = await db.getPendingSyncItems('user-123');
 
       expect(habits, isEmpty);
       expect(notifications, isEmpty);

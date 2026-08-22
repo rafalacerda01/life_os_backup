@@ -10,7 +10,7 @@ class SyncManager {
   final SyncRemoteDataSource _remoteDataSource;
   final String? Function() _currentUserId;
 
-  bool _isProcessing = false;
+  Future<bool>? _processingFuture;
   bool _processAgain = false;
 
   SyncManager({
@@ -19,70 +19,94 @@ class SyncManager {
     required this._currentUserId,
   });
 
-  Future<void> processPendingItems() async {
-    if (_isProcessing) {
+  Future<bool> processPendingItems() {
+    final running = _processingFuture;
+
+    if (running != null) {
       _processAgain = true;
-      return;
+      return running;
     }
 
-    final uid = _currentUserId();
+    late final Future<bool> operation;
+    operation = _processPendingItems().whenComplete(() {
+      if (identical(_processingFuture, operation)) {
+        _processingFuture = null;
+      }
+    });
+    _processingFuture = operation;
+    return operation;
+  }
 
-    if (uid == null || uid.trim().isEmpty) {
-      return;
+  Future<bool> _processPendingItems() async {
+    final initialUid = _currentUserId()?.trim();
+
+    if (initialUid == null || initialUid.isEmpty) {
+      return false;
     }
-
-    _isProcessing = true;
 
     try {
       do {
         _processAgain = false;
-        final pendingItems = await _queueStore.getPendingSyncItems();
+        final pendingItems = await _queueStore.getPendingSyncItems(initialUid);
 
         for (final SyncQueueTableData item in pendingItems) {
-          final currentUid = _currentUserId();
+          final currentUid = _currentUserId()?.trim();
+          final ownerUid = item.ownerUid?.trim();
 
-          if (currentUid == null || currentUid != uid) {
-            return;
+          if (currentUid == null || currentUid != initialUid) {
+            return false;
           }
 
-          final result = await _remoteDataSource.process(uid, item);
+          if (ownerUid == null || ownerUid.isEmpty || ownerUid != currentUid) {
+            continue;
+          }
+
+          SyncOperationResult result;
+
+          try {
+            result = await _remoteDataSource.process(ownerUid, item);
+          } catch (_) {
+            result = const SyncOperationResult.retryable(
+              code: 'UNEXPECTED_SYNC_ERROR',
+            );
+          }
+
+          if (_currentUserId()?.trim() != ownerUid) {
+            return false;
+          }
 
           switch (result.status) {
             case SyncOperationStatus.success:
-              await _queueStore.markSyncItemAsSynced(item.id);
+              await _queueStore.markSyncItemAsSucceeded(item.id, ownerUid);
               break;
 
             case SyncOperationStatus.retryableError:
-              AppLogger.w(
-                'Operação de sync mantida pendente '
-                '${item.collection}/${item.docId}: '
-                '${result.code ?? 'RETRYABLE_ERROR'}',
+              final code = result.code ?? 'RETRYABLE_ERROR';
+              AppLogger.w('Operação de sync mantida pendente: $code');
+              await _queueStore.markSyncItemRetryableFailure(
+                item.id,
+                ownerUid,
+                code,
               );
-              return;
+              return false;
 
             case SyncOperationStatus.quotaExceeded:
             case SyncOperationStatus.permissionDenied:
             case SyncOperationStatus.invalidPayload:
             case SyncOperationStatus.unsupportedOperation:
-              AppLogger.w(
-                'Operação de sync rejeitada '
-                '${item.collection}/${item.docId}: '
-                '${result.code ?? 'SYNC_REJECTED'}',
-              );
-              await _queueStore.markSyncItemAsSynced(item.id);
-              continue;
+              final code = result.code ?? 'SYNC_REJECTED';
+              AppLogger.w('Operação de sync rejeitada: $code');
+              await _queueStore.markSyncItemRejected(item.id, ownerUid, code);
           }
         }
       } while (_processAgain);
-    } catch (error, stackTrace) {
-      AppLogger.e(
-        'Erro geral ao processar fila de sincronização.',
-        error,
-        stackTrace,
-      );
+    } catch (_) {
+      AppLogger.w('Falha inesperada ao processar a fila de sincronização.');
+      return false;
     } finally {
-      _isProcessing = false;
       _processAgain = false;
     }
+
+    return _currentUserId()?.trim() == initialUid;
   }
 }

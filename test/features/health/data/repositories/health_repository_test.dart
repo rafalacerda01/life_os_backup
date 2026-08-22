@@ -118,10 +118,25 @@ class _RecordingFirestore extends Fake implements FirebaseFirestore {
 
 class _NoopQueueStore implements SyncQueueStore {
   @override
-  Future<List<SyncQueueTableData>> getPendingSyncItems() async => const [];
+  Future<List<SyncQueueTableData>> getPendingSyncItems(String ownerUid) async =>
+      const [];
 
   @override
-  Future<int> markSyncItemAsSynced(int id) async => 0;
+  Future<int> markSyncItemAsSucceeded(int id, String ownerUid) async => 0;
+
+  @override
+  Future<int> markSyncItemRejected(
+    int id,
+    String ownerUid,
+    String errorCode,
+  ) async => 0;
+
+  @override
+  Future<int> markSyncItemRetryableFailure(
+    int id,
+    String ownerUid,
+    String errorCode,
+  ) async => 0;
 }
 
 class _NoopRemoteDataSource implements SyncRemoteDataSource {
@@ -145,8 +160,9 @@ class FakeSyncManager extends SyncManager {
       );
 
   @override
-  Future<void> processPendingItems() async {
+  Future<bool> processPendingItems() async {
     calls += 1;
+    return true;
   }
 }
 
@@ -247,7 +263,9 @@ void main() {
     await repository.updateMood('Radiante');
 
     final healthRow = await db.select(db.healthEntries).getSingle();
-    final pending = (await db.getPendingSyncItems()).cast<SyncQueueTableData>();
+    final pending = (await db.getPendingSyncItems(
+      'user-123',
+    )).cast<SyncQueueTableData>();
     final payload = jsonDecode(pending.single.payloadJson) as Map;
 
     expect(healthRow.docId, '2026-08-21');
@@ -262,7 +280,9 @@ void main() {
     await repository.addWater(500);
 
     final healthRow = await db.select(db.healthEntries).getSingle();
-    final pending = (await db.getPendingSyncItems()).cast<SyncQueueTableData>();
+    final pending = (await db.getPendingSyncItems(
+      'user-123',
+    )).cast<SyncQueueTableData>();
     final payload = jsonDecode(pending.single.payloadJson) as Map;
 
     expect(healthRow.waterIntakeMl, 750);
@@ -279,7 +299,9 @@ void main() {
     });
 
     final healthRow = await db.select(db.healthEntries).getSingle();
-    final pending = (await db.getPendingSyncItems()).cast<SyncQueueTableData>();
+    final pending = (await db.getPendingSyncItems(
+      'user-123',
+    )).cast<SyncQueueTableData>();
     final localCycle = jsonDecode(healthRow.menstrualCycleJson!) as Map;
     final payload = jsonDecode(pending.single.payloadJson) as Map;
 

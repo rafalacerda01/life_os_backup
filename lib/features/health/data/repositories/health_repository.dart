@@ -344,6 +344,7 @@ class HealthRepository {
       // =====================================================================
 
       await _db.transactionWithSync(
+        ownerUid: userId,
         localOperation: () async {
           await _db
               .into(_db.medications)
@@ -438,6 +439,7 @@ class HealthRepository {
       // atomicamente na SyncQueue.
       if (cleanDocId.isNotEmpty && cleanDocId != 'pending') {
         await _db.transactionWithSync(
+          ownerUid: userId,
           localOperation: deleteLocalMedication,
           collection: 'medications',
           docId: cleanDocId,
@@ -492,6 +494,7 @@ class HealthRepository {
       final now = companion.date.present ? companion.date.value : _now();
 
       await _db.transactionWithSync(
+        ownerUid: userId,
         localOperation: () async {
           await _upsertHealthEntry(
             docId: todayDocId,
@@ -521,6 +524,7 @@ class HealthRepository {
             error,
             stackTrace,
           );
+          return false;
         }),
       );
     } catch (e, stack) {

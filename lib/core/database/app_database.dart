@@ -46,7 +46,7 @@ class AppDatabase extends _$AppDatabase {
   // =========================================================================
 
   @override
-  int get schemaVersion => 7;
+  int get schemaVersion => 8;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -94,6 +94,22 @@ class AppDatabase extends _$AppDatabase {
       // -----------------------------------------------------------------
       if (from < 7) {
         await migrator.createTable(syncQueueTable);
+      } else if (from < 8) {
+        // ---------------------------------------------------------------
+        // V7 -> V8
+        // ---------------------------------------------------------------
+        await migrator.addColumn(syncQueueTable, syncQueueTable.ownerUid);
+        await migrator.addColumn(syncQueueTable, syncQueueTable.status);
+        await migrator.addColumn(syncQueueTable, syncQueueTable.lastErrorCode);
+        await migrator.addColumn(syncQueueTable, syncQueueTable.attemptCount);
+        await migrator.addColumn(syncQueueTable, syncQueueTable.lastAttemptAt);
+
+        // Linhas legadas sem ownership permanecem em quarentena. Somente o
+        // estado das operações já confirmadas pode ser inferido com segurança.
+        await customStatement(
+          "UPDATE sync_queue_table SET status = 'succeeded' "
+          'WHERE is_synced = 1',
+        );
       }
     },
   );
@@ -159,16 +175,22 @@ class AppDatabase extends _$AppDatabase {
   /// Queue:
   ///   CREATE / medications / abc123
   Future<int> insertSyncItem({
+    required String ownerUid,
     required String collection,
     required String docId,
     required String operationType,
     required String payloadJson,
     int? createdAt,
   }) async {
+    final cleanOwnerUid = ownerUid.trim();
     final cleanCollection = collection.trim();
     final cleanDocId = docId.trim();
     final cleanOperationType = operationType.trim();
     final cleanPayload = payloadJson.trim();
+
+    if (cleanOwnerUid.isEmpty) {
+      throw ArgumentError('O ownerUid da sincronização não pode estar vazio.');
+    }
 
     if (cleanCollection.isEmpty) {
       throw ArgumentError(
@@ -198,6 +220,7 @@ class AppDatabase extends _$AppDatabase {
 
     return into(syncQueueTable).insert(
       SyncQueueTableCompanion.insert(
+        ownerUid: Value(cleanOwnerUid),
         collection: cleanCollection,
         docId: cleanDocId,
         operationType: cleanOperationType,
@@ -210,9 +233,19 @@ class AppDatabase extends _$AppDatabase {
   /// Retorna todas as operações ainda pendentes.
   ///
   /// A ordem FIFO é preservada pelo ID autoincremental.
-  Future<List> getPendingSyncItems() {
+  Future<List> getPendingSyncItems(String ownerUid) {
+    final cleanOwnerUid = ownerUid.trim();
+
+    if (cleanOwnerUid.isEmpty) {
+      return Future.value(const []);
+    }
+
     return (select(syncQueueTable)
-          ..where((table) => table.isSynced.equals(false))
+          ..where(
+            (table) =>
+                table.ownerUid.equals(cleanOwnerUid) &
+                table.status.equals(SyncQueuePersistenceStatus.pending),
+          )
           ..orderBy([
             (table) =>
                 OrderingTerm(expression: table.id, mode: OrderingMode.asc),
@@ -231,18 +264,77 @@ class AppDatabase extends _$AppDatabase {
     )..where((table) => table.id.equals(id))).getSingleOrNull();
   }
 
-  /// Marca uma operação como sincronizada.
-  ///
-  /// A operação não é removida imediatamente.
-  /// Isso permite auditoria e evita que uma operação seja perdida
-  /// antes de o SyncManager confirmar o processamento.
-  Future<int> markSyncItemAsSynced(int id) {
-    if (id <= 0) {
-      return Future.value(0);
+  Future<int> markSyncItemAsSucceeded(int id, String ownerUid) {
+    return _updateSyncItemState(
+      id: id,
+      ownerUid: ownerUid,
+      status: SyncQueuePersistenceStatus.succeeded,
+      isSynced: true,
+    );
+  }
+
+  Future<int> markSyncItemRetryableFailure(
+    int id,
+    String ownerUid,
+    String errorCode,
+  ) {
+    return _updateSyncItemState(
+      id: id,
+      ownerUid: ownerUid,
+      status: SyncQueuePersistenceStatus.pending,
+      isSynced: false,
+      errorCode: errorCode,
+    );
+  }
+
+  Future<int> markSyncItemRejected(int id, String ownerUid, String errorCode) {
+    return _updateSyncItemState(
+      id: id,
+      ownerUid: ownerUid,
+      status: SyncQueuePersistenceStatus.rejected,
+      isSynced: false,
+      errorCode: errorCode,
+    );
+  }
+
+  Future<int> _updateSyncItemState({
+    required int id,
+    required String ownerUid,
+    required String status,
+    required bool isSynced,
+    String? errorCode,
+  }) async {
+    final cleanOwnerUid = ownerUid.trim();
+
+    if (id <= 0 || cleanOwnerUid.isEmpty) {
+      return 0;
     }
 
-    return (update(syncQueueTable)..where((table) => table.id.equals(id)))
-        .write(const SyncQueueTableCompanion(isSynced: Value(true)));
+    final item =
+        await (select(syncQueueTable)..where(
+              (table) =>
+                  table.id.equals(id) & table.ownerUid.equals(cleanOwnerUid),
+            ))
+            .getSingleOrNull();
+
+    if (item == null) {
+      return 0;
+    }
+
+    final cleanErrorCode = _sanitizeSyncErrorCode(errorCode);
+
+    return (update(syncQueueTable)..where(
+          (table) => table.id.equals(id) & table.ownerUid.equals(cleanOwnerUid),
+        ))
+        .write(
+          SyncQueueTableCompanion(
+            status: Value(status),
+            isSynced: Value(isSynced),
+            lastErrorCode: Value(cleanErrorCode),
+            attemptCount: Value(item.attemptCount + 1),
+            lastAttemptAt: Value(DateTime.now().millisecondsSinceEpoch),
+          ),
+        );
   }
 
   /// Remove definitivamente uma operação já processada.
@@ -260,9 +352,10 @@ class AppDatabase extends _$AppDatabase {
   ///
   /// Mantém operações pendentes intactas.
   Future<int> cleanupSyncedSyncItems() {
-    return (delete(
-      syncQueueTable,
-    )..where((table) => table.isSynced.equals(true))).go();
+    return (delete(syncQueueTable)..where(
+          (table) => table.status.equals(SyncQueuePersistenceStatus.succeeded),
+        ))
+        .go();
   }
 
   /// Remove todas as operações de sincronização de um documento.
@@ -279,21 +372,26 @@ class AppDatabase extends _$AppDatabase {
   /// O SyncManager pode decidir consolidar as operações antes
   /// do envio ao Firebase.
   Future<int> deleteSyncItemsForDocument({
+    required String ownerUid,
     required String collection,
     required String docId,
   }) {
+    final cleanOwnerUid = ownerUid.trim();
     final cleanCollection = collection.trim();
     final cleanDocId = docId.trim();
 
-    if (cleanCollection.isEmpty || cleanDocId.isEmpty) {
+    if (cleanOwnerUid.isEmpty ||
+        cleanCollection.isEmpty ||
+        cleanDocId.isEmpty) {
       return Future.value(0);
     }
 
     return (delete(syncQueueTable)..where(
           (table) =>
+              table.ownerUid.equals(cleanOwnerUid) &
               table.collection.equals(cleanCollection) &
               table.docId.equals(cleanDocId) &
-              table.isSynced.equals(false),
+              table.status.equals(SyncQueuePersistenceStatus.pending),
         ))
         .go();
   }
@@ -313,15 +411,21 @@ class AppDatabase extends _$AppDatabase {
   /// local antes de inserir a operação de sync.
   Future<T> transactionWithSync<T>({
     required Future<T> Function() localOperation,
+    required String ownerUid,
     required String collection,
     required String docId,
     required String operationType,
     required String payloadJson,
   }) async {
+    final cleanOwnerUid = ownerUid.trim();
     final cleanCollection = collection.trim();
     final cleanDocId = docId.trim();
     final cleanOperationType = operationType.trim();
     final cleanPayload = payloadJson.trim();
+
+    if (cleanOwnerUid.isEmpty) {
+      throw ArgumentError('O ownerUid da sincronização não pode estar vazio.');
+    }
 
     if (cleanCollection.isEmpty) {
       throw ArgumentError(
@@ -354,6 +458,7 @@ class AppDatabase extends _$AppDatabase {
 
       await into(syncQueueTable).insert(
         SyncQueueTableCompanion.insert(
+          ownerUid: Value(cleanOwnerUid),
           collection: cleanCollection,
           docId: cleanDocId,
           operationType: cleanOperationType,
@@ -461,6 +566,12 @@ class SyncQueueTable extends Table {
   /// Autoincremental para preservar a ordem FIFO.
   IntColumn get id => integer().autoIncrement()();
 
+  /// UID autenticado que originou a operação.
+  ///
+  /// Nullable somente para preservar e quarentenar linhas legadas, cujo
+  /// ownership não pode ser inferido de forma segura durante a migração.
+  TextColumn get ownerUid => text().nullable()();
+
   /// Coleção lógica do Firebase.
   ///
   /// Exemplos:
@@ -493,6 +604,36 @@ class SyncQueueTable extends Table {
 
   /// Indica se a operação já foi processada com sucesso.
   BoolColumn get isSynced => boolean().withDefault(const Constant(false))();
+
+  /// Estado persistente da entrega remota.
+  TextColumn get status =>
+      text().withDefault(const Constant(SyncQueuePersistenceStatus.pending))();
+
+  /// Código estável da última falha, sem mensagem ou payload sensível.
+  TextColumn get lastErrorCode => text().nullable()();
+
+  /// Quantidade de tentativas remotas realizadas.
+  IntColumn get attemptCount => integer().withDefault(const Constant(0))();
+
+  /// Timestamp Unix da última tentativa, em milissegundos.
+  IntColumn get lastAttemptAt => integer().nullable()();
+}
+
+abstract final class SyncQueuePersistenceStatus {
+  static const String pending = 'pending';
+  static const String succeeded = 'succeeded';
+  static const String rejected = 'rejected';
+}
+
+String? _sanitizeSyncErrorCode(String? value) {
+  final code = value?.trim().toUpperCase();
+
+  if (code == null || code.isEmpty) {
+    return null;
+  }
+
+  final sanitized = code.replaceAll(RegExp(r'[^A-Z0-9_-]'), '_');
+  return sanitized.length <= 80 ? sanitized : sanitized.substring(0, 80);
 }
 
 // =============================================================================

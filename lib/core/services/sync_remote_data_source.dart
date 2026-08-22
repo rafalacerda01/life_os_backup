@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -14,8 +15,22 @@ abstract interface class SyncRemoteDataSource {
 class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
   final FirebaseFirestore _firestore;
   final FirebaseAuth _auth;
+  final http.Client Function() _clientFactory;
+  final Future<String?> Function(User user, bool forceRefresh)?
+  _idTokenProvider;
+  final Duration _requestTimeout;
 
-  const FirestoreSyncRemoteDataSource(this._firestore, this._auth);
+  FirestoreSyncRemoteDataSource(
+    this._firestore,
+    this._auth, {
+    http.Client Function()? clientFactory,
+    Future<String?> Function(User user, bool forceRefresh)? idTokenProvider,
+    Duration requestTimeout = const Duration(seconds: 15),
+  }) : _clientFactory = clientFactory ?? http.Client.new,
+       // ignore: prefer_initializing_formals
+       _idTokenProvider = idTokenProvider,
+       // ignore: prefer_initializing_formals
+       _requestTimeout = requestTimeout;
 
   static const String _backendSyncUrl = String.fromEnvironment(
     'LIFE_OS_SYNC_BACKEND_URL',
@@ -54,15 +69,15 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
       // Obrigatoriamente passa pelo backend para enforcement de quota.
       // ----------------------------------------------------------------------
       if (collection == 'habits' && operationType == 'create') {
-        return _createHabitServerSide(item: item);
+        return _createHabitServerSide(expectedUid: uid, item: item);
       }
 
       if (collection == 'tasks' && operationType == 'create') {
-        return _createTaskServerSide(item: item);
+        return _createTaskServerSide(expectedUid: uid, item: item);
       }
 
       if (collection == 'tasks' && operationType == 'delete') {
-        return _deleteTaskServerSide(item: item);
+        return _deleteTaskServerSide(expectedUid: uid, item: item);
       }
 
       // ----------------------------------------------------------------------
@@ -71,11 +86,11 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
       // ----------------------------------------------------------------------
 
       if (collection == 'goals' && operationType == 'create') {
-        return _createGoalServerSide(item: item);
+        return _createGoalServerSide(expectedUid: uid, item: item);
       }
 
       if (collection == 'goals' && operationType == 'delete') {
-        return _deleteGoalServerSide(item: item);
+        return _deleteGoalServerSide(expectedUid: uid, item: item);
       }
 
       // ----------------------------------------------------------------------
@@ -84,11 +99,11 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
       // ----------------------------------------------------------------------
 
       if (collection == 'subjects' && operationType == 'create') {
-        return _createSubjectServerSide(item: item);
+        return _createSubjectServerSide(expectedUid: uid, item: item);
       }
 
       if (collection == 'subjects' && operationType == 'delete') {
-        return _deleteSubjectServerSide(item: item);
+        return _deleteSubjectServerSide(expectedUid: uid, item: item);
       }
 
       // ----------------------------------------------------------------------
@@ -97,11 +112,11 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
       // ----------------------------------------------------------------------
 
       if (collection == 'medications' && operationType == 'create') {
-        return _createMedicationServerSide(item: item);
+        return _createMedicationServerSide(expectedUid: uid, item: item);
       }
 
       if (collection == 'medications' && operationType == 'delete') {
-        return _deleteMedicationServerSide(item: item);
+        return _deleteMedicationServerSide(expectedUid: uid, item: item);
       }
 
       // ----------------------------------------------------------------------
@@ -110,11 +125,11 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
       // ----------------------------------------------------------------------
 
       if (collection == 'transactions' && operationType == 'create') {
-        return _createTransactionServerSide(item: item);
+        return _createTransactionServerSide(expectedUid: uid, item: item);
       }
 
       if (collection == 'transactions' && operationType == 'delete') {
-        return _deleteTransactionServerSide(item: item);
+        return _deleteTransactionServerSide(expectedUid: uid, item: item);
       }
       // ----------------------------------------------------------------------
       // DELETE DE HÁBITO
@@ -122,7 +137,7 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
       // pois precisa manter habitsCount consistente.
       // ----------------------------------------------------------------------
       if (collection == 'batch' && operationType == 'batch_delete') {
-        return _deleteHabitServerSide(item: item);
+        return _deleteHabitServerSide(expectedUid: uid, item: item);
       }
 
       // ----------------------------------------------------------------------
@@ -197,6 +212,7 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
   }
 
   Future<SyncOperationResult> _createTransactionServerSide({
+    required String expectedUid,
     required SyncQueueTableData item,
   }) async {
     final data = _decodePayload(item.payloadJson);
@@ -217,7 +233,7 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
       );
     }
 
-    return _postToSyncBackend({
+    return _postToSyncBackend(expectedUid, {
       'operation': 'create_transaction',
       'transactionId': item.docId,
       'title': title,
@@ -229,15 +245,17 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
   }
 
   Future<SyncOperationResult> _deleteTransactionServerSide({
+    required String expectedUid,
     required SyncQueueTableData item,
   }) async {
-    return _postToSyncBackend({
+    return _postToSyncBackend(expectedUid, {
       'operation': 'delete_transaction',
       'transactionId': item.docId,
     });
   }
 
   Future<SyncOperationResult> _createMedicationServerSide({
+    required String expectedUid,
     required SyncQueueTableData item,
   }) async {
     final data = _decodePayload(item.payloadJson);
@@ -256,7 +274,7 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
       );
     }
 
-    return _postToSyncBackend({
+    return _postToSyncBackend(expectedUid, {
       'operation': 'create_medication',
       'medicationId': item.docId,
       'name': name,
@@ -267,15 +285,17 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
   }
 
   Future<SyncOperationResult> _deleteMedicationServerSide({
+    required String expectedUid,
     required SyncQueueTableData item,
   }) async {
-    return _postToSyncBackend({
+    return _postToSyncBackend(expectedUid, {
       'operation': 'delete_medication',
       'medicationId': item.docId,
     });
   }
 
   Future<SyncOperationResult> _createSubjectServerSide({
+    required String expectedUid,
     required SyncQueueTableData item,
   }) async {
     final data = _decodePayload(item.payloadJson);
@@ -292,7 +312,7 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
       );
     }
 
-    return _postToSyncBackend({
+    return _postToSyncBackend(expectedUid, {
       'operation': 'create_subject',
       'subjectId': item.docId,
       'title': title,
@@ -302,15 +322,17 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
   }
 
   Future<SyncOperationResult> _deleteSubjectServerSide({
+    required String expectedUid,
     required SyncQueueTableData item,
   }) async {
-    return _postToSyncBackend({
+    return _postToSyncBackend(expectedUid, {
       'operation': 'delete_subject',
       'subjectId': item.docId,
     });
   }
 
   Future<SyncOperationResult> _createGoalServerSide({
+    required String expectedUid,
     required SyncQueueTableData item,
   }) async {
     final data = _decodePayload(item.payloadJson);
@@ -329,7 +351,7 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
       );
     }
 
-    return _postToSyncBackend({
+    return _postToSyncBackend(expectedUid, {
       'operation': 'create_goal',
       'goalId': item.docId,
       'title': title,
@@ -340,15 +362,17 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
   }
 
   Future<SyncOperationResult> _deleteGoalServerSide({
+    required String expectedUid,
     required SyncQueueTableData item,
   }) async {
-    return _postToSyncBackend({
+    return _postToSyncBackend(expectedUid, {
       'operation': 'delete_goal',
       'goalId': item.docId,
     });
   }
 
   Future<SyncOperationResult> _createTaskServerSide({
+    required String expectedUid,
     required SyncQueueTableData item,
   }) async {
     final data = _decodePayload(item.payloadJson);
@@ -363,7 +387,7 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
       );
     }
 
-    return _postToSyncBackend({
+    return _postToSyncBackend(expectedUid, {
       'operation': 'create_task',
       'taskId': item.docId,
       'title': title,
@@ -373,15 +397,17 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
   }
 
   Future<SyncOperationResult> _deleteTaskServerSide({
+    required String expectedUid,
     required SyncQueueTableData item,
   }) async {
-    return _postToSyncBackend({
+    return _postToSyncBackend(expectedUid, {
       'operation': 'delete_task',
       'taskId': item.docId,
     });
   }
 
   Future<SyncOperationResult> _createHabitServerSide({
+    required String expectedUid,
     required SyncQueueTableData item,
   }) async {
     final data = _decodePayload(item.payloadJson);
@@ -395,7 +421,7 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
       );
     }
 
-    return _postToSyncBackend({
+    return _postToSyncBackend(expectedUid, {
       'operation': 'create_habit',
       'habitId': item.docId,
       'title': title,
@@ -404,6 +430,7 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
   }
 
   Future<SyncOperationResult> _deleteHabitServerSide({
+    required String expectedUid,
     required SyncQueueTableData item,
   }) async {
     final data = _decodePayload(item.payloadJson);
@@ -428,45 +455,68 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
       );
     }
 
-    return _postToSyncBackend({
+    return _postToSyncBackend(expectedUid, {
       'operation': 'delete_habit',
       'habitId': item.docId,
     });
   }
 
   Future<SyncOperationResult> _postToSyncBackend(
+    String expectedUid,
     Map<String, dynamic> payload,
   ) async {
-    final user = _auth.currentUser;
-
-    if (user == null) {
-      return const SyncOperationResult.permissionDenied();
-    }
-
-    final token = await user.getIdToken();
+    final token = await _getIdToken(
+      expectedUid: expectedUid,
+      forceRefresh: false,
+    );
 
     if (token == null || token.trim().isEmpty) {
-      return const SyncOperationResult.permissionDenied();
+      return const SyncOperationResult.retryable(
+        code: 'AUTHENTICATION_REQUIRED',
+      );
     }
 
-    final client = http.Client();
+    final client = _clientFactory();
 
     try {
-      final response = await client.post(
-        Uri.parse(_backendSyncUrl),
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': 'Bearer $token',
-        },
-        body: jsonEncode(payload),
-      );
+      Future<http.Response> send(String idToken) {
+        return client
+            .post(
+              Uri.parse(_backendSyncUrl),
+              headers: {
+                'Content-Type': 'application/json',
+                'Authorization': 'Bearer $idToken',
+              },
+              body: jsonEncode(payload),
+            )
+            .timeout(_requestTimeout);
+      }
+
+      var response = await send(token);
+
+      if (response.statusCode == 401) {
+        final refreshedToken = await _getIdToken(
+          expectedUid: expectedUid,
+          forceRefresh: true,
+        );
+
+        if (refreshedToken == null || refreshedToken.trim().isEmpty) {
+          return const SyncOperationResult.retryable(
+            code: 'AUTHENTICATION_REQUIRED',
+          );
+        }
+
+        response = await send(refreshedToken);
+      }
 
       if (response.statusCode >= 200 && response.statusCode < 300) {
         return const SyncOperationResult.success();
       }
 
       if (response.statusCode == 401) {
-        return const SyncOperationResult.permissionDenied();
+        return const SyncOperationResult.retryable(
+          code: 'AUTHENTICATION_REQUIRED',
+        );
       }
 
       if (response.statusCode == 403) {
@@ -534,9 +584,30 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
         message: error.message,
         code: 'NETWORK_ERROR',
       );
+    } on TimeoutException {
+      return const SyncOperationResult.retryable(code: 'SYNC_TIMEOUT');
     } finally {
       client.close();
     }
+  }
+
+  Future<String?> _getIdToken({
+    required String expectedUid,
+    required bool forceRefresh,
+  }) async {
+    final user = _auth.currentUser;
+
+    if (user == null || user.uid != expectedUid) {
+      return null;
+    }
+
+    final provider = _idTokenProvider;
+
+    if (provider != null) {
+      return provider(user, forceRefresh);
+    }
+
+    return user.getIdToken(forceRefresh);
   }
 
   String _extractBackendMessage(String body) {
@@ -622,8 +693,12 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
   SyncOperationResult _mapFirebaseError(FirebaseException error) {
     switch (error.code) {
       case 'permission-denied':
-      case 'unauthenticated':
         return const SyncOperationResult.permissionDenied();
+
+      case 'unauthenticated':
+        return const SyncOperationResult.retryable(
+          code: 'AUTHENTICATION_REQUIRED',
+        );
 
       case 'invalid-argument':
       case 'failed-precondition':

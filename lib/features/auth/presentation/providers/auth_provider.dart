@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -13,6 +15,12 @@ import 'package:life_os/features/goals/presentation/goals_provider.dart';
 import 'package:life_os/features/checkin/presentation/providers/check_in_provider.dart';
 import 'package:life_os/features/health/presentation/providers/health_provider.dart';
 import 'package:life_os/features/focus/presentation/providers/providers/focus_provider.dart';
+import 'package:life_os/features/study/presentation/providers/study_provider.dart';
+import 'package:life_os/features/tasks/presentation/providers/tasks_notifier.dart';
+import 'package:life_os/features/ai_companion/presentation/providers/ai_companion_provider.dart';
+import 'package:life_os/features/ai_companion/presentation/providers/ai_consent_provider.dart';
+import 'package:life_os/features/circles/presentation/circles_provider.dart';
+import 'package:life_os/features/premium/presentation/premium_provider.dart';
 
 import 'package:life_os/features/dashboard/presentation/providers/dashboard_provider.dart';
 import 'package:life_os/features/auth/data/repositories/auth_repository_impl.dart';
@@ -65,7 +73,13 @@ class AuthNotifier extends Notifier<AuthState> {
       ref.read(secureStorageServiceProvider);
   bool _disposed = false;
   bool _accountDeletionInProgress = false;
+  bool _explicitSignOutInProgress = false;
+  bool _localCleanupRequired = false;
+  String? _activeLocalSessionUid;
   Future<void>? _localCleanupInFlight;
+  Future<void>? _hydrationInFlight;
+  String? _hydrationUid;
+  int _sessionGeneration = 0;
 
   @override
   AuthState build() {
@@ -77,17 +91,14 @@ class AuthNotifier extends Notifier<AuthState> {
   void _initializeAuthListener() {
     final auth = ref.read(firebaseAuthProvider);
 
-    checkCurrentUser();
+    unawaited(checkCurrentUser());
 
     final subscription = auth.authStateChanges().listen((firebaseUser) async {
       if (firebaseUser == null) {
-        if (_accountDeletionInProgress) return;
+        if (_accountDeletionInProgress || _explicitSignOutInProgress) return;
         await _finishLocalSignOut();
       } else if (!_accountDeletionInProgress) {
-        final token = await firebaseUser.getIdToken();
-        if (token != null) {
-          await _secureStorage.saveToken(token);
-        }
+        await _prepareAuthenticatedSession(firebaseUser);
       }
     });
 
@@ -97,46 +108,135 @@ class AuthNotifier extends Notifier<AuthState> {
     });
   }
 
-  // --- Função Helper para centralizar a Hidratação de todos os módulos ---
-  void _hydrateAllOfflineData() {
-    if (_disposed || _accountDeletionInProgress) return;
-    try {
-      ref.read(financeRepositoryProvider).syncTransactionsFromFirestore();
-      ref.read(tasksRepositoryProvider).syncTasksFromFirebaseToLocal();
-      ref.read(habitsRepositoryProvider).syncHabitsFromFirebaseToLocal();
-      ref.read(goalRepositoryProvider).syncGoalsFromFirebaseToLocal();
-      ref.read(checkInRepositoryProvider).syncCheckinsFromFirebaseToLocal();
-      ref.read(healthRepositoryProvider).syncHealthFromFirebase();
-      ref.read(focusRepositoryProvider).syncFocusFromFirebaseToLocal();
+  void _scheduleHydration(String uid) {
+    final cleanUid = uid.trim();
 
-      ref.read(syncManagerProvider).processPendingItems();
-    } catch (e) {
-      print("Erro ao tentar hidratar dados na inicialização: $e");
+    if (cleanUid.isEmpty || _disposed || _accountDeletionInProgress) return;
+
+    if (_hydrationInFlight != null && _hydrationUid == cleanUid) return;
+
+    final generation = _sessionGeneration;
+    late final Future<void> operation;
+    operation = _hydrateAllOfflineData(cleanUid, generation).whenComplete(() {
+      if (identical(_hydrationInFlight, operation)) {
+        _hydrationInFlight = null;
+        _hydrationUid = null;
+      }
+    });
+    _hydrationInFlight = operation;
+    _hydrationUid = cleanUid;
+    unawaited(operation);
+  }
+
+  Future<void> _hydrateAllOfflineData(String uid, int generation) async {
+    if (!_isCurrentSession(uid, generation)) return;
+
+    try {
+      final queueDrained = await ref
+          .read(syncManagerProvider)
+          .processPendingItems();
+
+      if (!queueDrained || !_isCurrentSession(uid, generation)) return;
+
+      final pulls = <Future<void> Function()>[
+        ref.read(financeRepositoryProvider).syncTransactionsFromFirestore,
+        ref.read(tasksRepositoryProvider).syncTasksFromFirebaseToLocal,
+        ref.read(habitsRepositoryProvider).syncHabitsFromFirebaseToLocal,
+        ref.read(goalRepositoryProvider).syncGoalsFromFirebaseToLocal,
+        ref.read(checkInRepositoryProvider).syncCheckinsFromFirebaseToLocal,
+        ref.read(healthRepositoryProvider).syncHealthFromFirebase,
+        ref.read(focusRepositoryProvider).syncFocusFromFirebaseToLocal,
+      ];
+
+      for (final pull in pulls) {
+        if (!_isCurrentSession(uid, generation)) return;
+        await pull();
+      }
+    } catch (_) {
+      // A sessão permanece utilizável offline; a próxima entrada tenta de novo.
     }
+  }
+
+  bool _isCurrentSession(String uid, int generation) {
+    return !_disposed &&
+        !_accountDeletionInProgress &&
+        generation == _sessionGeneration &&
+        ref.read(firebaseAuthProvider).currentUser?.uid == uid;
+  }
+
+  Future<bool> _prepareAuthenticatedSession(User firebaseUser) async {
+    if (_disposed || _accountDeletionInProgress) return false;
+
+    final uid = firebaseUser.uid;
+    final localSessionUid = _activeLocalSessionUid;
+    final requiresLocalIsolation =
+        _localCleanupRequired ||
+        (localSessionUid != null && localSessionUid != uid);
+
+    if (requiresLocalIsolation) {
+      try {
+        await _clearLocalData();
+        _invalidateSessionProviders();
+      } catch (_) {
+        try {
+          await ref.read(firebaseAuthProvider).signOut();
+        } catch (_) {
+          // O estado de erro continua bloqueando a exposição da sessão.
+        }
+
+        if (!_disposed) {
+          state = AuthState.error(
+            'Não foi possível isolar os dados locais. Tente novamente.',
+          );
+        }
+        return false;
+      }
+    }
+
+    if (ref.read(firebaseAuthProvider).currentUser?.uid != uid) {
+      return false;
+    }
+
+    try {
+      final token = await firebaseUser.getIdToken();
+      if (token != null) {
+        await _secureStorage.saveToken(token);
+      }
+    } catch (_) {
+      if (!_disposed) {
+        state = AuthState.error('Não foi possível proteger a sessão local.');
+      }
+      return false;
+    }
+
+    final isPrepared =
+        !_disposed && ref.read(firebaseAuthProvider).currentUser?.uid == uid;
+
+    if (isPrepared) {
+      _activeLocalSessionUid = uid;
+    }
+
+    return isPrepared;
   }
 
   // --- Métodos de Autenticação e Perfil ---
   Future<void> checkCurrentUser() async {
     final result = await _repository.getCurrentUser();
-    result.when(
+    await result.when(
       (user) async {
         if (_disposed || _accountDeletionInProgress) return;
         final firebaseUser = ref.read(firebaseAuthProvider).currentUser;
-        if (firebaseUser != null) {
-          final token = await firebaseUser.getIdToken();
-          if (token != null) {
-            await _secureStorage.saveToken(token);
-          }
+        if (firebaseUser == null) {
+          await _finishLocalSignOut();
+          return;
         }
-        if (_disposed || _accountDeletionInProgress) return;
+        if (!await _prepareAuthenticatedSession(firebaseUser)) return;
         state = AuthState.authenticated(user);
-        _hydrateAllOfflineData();
+        _scheduleHydration(firebaseUser.uid);
       },
       (failure) async {
         if (_disposed || _accountDeletionInProgress) return;
-        await _secureStorage.deleteToken();
-        if (_disposed || _accountDeletionInProgress) return;
-        state = AuthState.unauthenticated();
+        await _finishLocalSignOut();
       },
     );
   }
@@ -148,15 +248,20 @@ class AuthNotifier extends Notifier<AuthState> {
       email,
       password,
     );
-    result.when((user) async {
-      final firebaseUser = ref.read(firebaseAuthProvider).currentUser;
-      final token = await firebaseUser?.getIdToken();
-      if (token != null) {
-        await _secureStorage.saveToken(token);
-      }
-      state = AuthState.authenticated(user);
-      _hydrateAllOfflineData();
-    }, (failure) => state = AuthState.error(failure.message));
+    await result.when(
+      (user) async {
+        final firebaseUser = ref.read(firebaseAuthProvider).currentUser;
+        if (firebaseUser == null ||
+            !await _prepareAuthenticatedSession(firebaseUser)) {
+          return;
+        }
+        state = AuthState.authenticated(user);
+        _scheduleHydration(firebaseUser.uid);
+      },
+      (failure) async {
+        state = AuthState.error(failure.message);
+      },
+    );
   }
 
   Future<void> register(String email, String password, String name) async {
@@ -167,30 +272,40 @@ class AuthNotifier extends Notifier<AuthState> {
       password,
       name,
     );
-    result.when((user) async {
-      final firebaseUser = ref.read(firebaseAuthProvider).currentUser;
-      final token = await firebaseUser?.getIdToken();
-      if (token != null) {
-        await _secureStorage.saveToken(token);
-      }
-      state = AuthState.authenticated(user);
-      _hydrateAllOfflineData();
-    }, (failure) => state = AuthState.error(failure.message));
+    await result.when(
+      (user) async {
+        final firebaseUser = ref.read(firebaseAuthProvider).currentUser;
+        if (firebaseUser == null ||
+            !await _prepareAuthenticatedSession(firebaseUser)) {
+          return;
+        }
+        state = AuthState.authenticated(user);
+        _scheduleHydration(firebaseUser.uid);
+      },
+      (failure) async {
+        state = AuthState.error(failure.message);
+      },
+    );
   }
 
   Future<void> signInWithGoogle() async {
     _accountDeletionInProgress = false;
     state = AuthState.loading();
     final result = await _repository.signInWithGoogle();
-    result.when((user) async {
-      final firebaseUser = ref.read(firebaseAuthProvider).currentUser;
-      final token = await firebaseUser?.getIdToken();
-      if (token != null) {
-        await _secureStorage.saveToken(token);
-      }
-      state = AuthState.authenticated(user);
-      _hydrateAllOfflineData();
-    }, (failure) => state = AuthState.error(failure.message));
+    await result.when(
+      (user) async {
+        final firebaseUser = ref.read(firebaseAuthProvider).currentUser;
+        if (firebaseUser == null ||
+            !await _prepareAuthenticatedSession(firebaseUser)) {
+          return;
+        }
+        state = AuthState.authenticated(user);
+        _scheduleHydration(firebaseUser.uid);
+      },
+      (failure) async {
+        state = AuthState.error(failure.message);
+      },
+    );
   }
 
   Future<void> updateDisplayName(String newName) async {
@@ -215,11 +330,55 @@ class AuthNotifier extends Notifier<AuthState> {
 
   Future<void> logout() async {
     state = AuthState.loading();
-    final result = await _repository.signOut();
 
-    result.when((_) async {
-      await _finishLocalSignOut();
-    }, (failure) => state = AuthState.error(failure.message));
+    try {
+      await _clearLocalData();
+    } catch (_) {
+      _localCleanupRequired = true;
+      if (!_disposed) {
+        state = AuthState.error(
+          'Não foi possível isolar os dados locais. Tente novamente.',
+        );
+      }
+      return;
+    }
+
+    _explicitSignOutInProgress = true;
+
+    try {
+      final result = await _repository.signOut();
+
+      await result.when(
+        (_) async {
+          try {
+            // Fecha a pequena janela entre a limpeza prévia e o sign-out.
+            await _clearLocalData();
+            if (!_disposed) {
+              _invalidateSessionProviders();
+              state = AuthState.unauthenticated();
+            }
+          } catch (_) {
+            _localCleanupRequired = true;
+            if (!_disposed) {
+              state = AuthState.error(
+                'Não foi possível isolar os dados locais. Tente novamente.',
+              );
+            }
+          }
+        },
+        (failure) async {
+          if (!_disposed) {
+            state = AuthState.error(failure.message);
+          }
+        },
+      );
+    } catch (_) {
+      if (!_disposed) {
+        state = AuthState.error('Não foi possível encerrar a sessão.');
+      }
+    } finally {
+      _explicitSignOutInProgress = false;
+    }
   }
 
   Future<void> resetPassword(String email) async {
@@ -281,7 +440,7 @@ class AuthNotifier extends Notifier<AuthState> {
 
       final result = await _repository.deleteAccount();
 
-      result.when(
+      await result.when(
         (success) async {
           await _finishLocalSignOut();
         },
@@ -315,19 +474,24 @@ class AuthNotifier extends Notifier<AuthState> {
 
   Future<void> _finishLocalSignOut() async {
     if (_disposed) return;
-    await _clearLocalData();
-    if (_disposed) return;
 
-    ref.invalidate(financeStreamProvider);
-    ref.invalidate(tasksStreamProvider);
-    ref.invalidate(habitsStreamProvider);
-    ref.invalidate(dashboardStateProvider);
-    ref.invalidate(checkInStreamProvider);
+    try {
+      await _clearLocalData();
+      if (_disposed) return;
 
-    state.maybeWhen(
-      unauthenticated: () {},
-      orElse: () => state = AuthState.unauthenticated(),
-    );
+      _invalidateSessionProviders();
+      state.maybeWhen(
+        unauthenticated: () {},
+        orElse: () => state = AuthState.unauthenticated(),
+      );
+    } catch (_) {
+      _localCleanupRequired = true;
+      if (!_disposed) {
+        state = AuthState.error(
+          'Não foi possível isolar os dados locais. Tente novamente.',
+        );
+      }
+    }
   }
 
   Future<void> _clearLocalData() {
@@ -345,22 +509,62 @@ class AuthNotifier extends Notifier<AuthState> {
   }
 
   Future<void> _performLocalDataClear() async {
+    _sessionGeneration += 1;
+    final hydration = _hydrationInFlight;
+
+    if (hydration != null) {
+      await hydration.timeout(const Duration(seconds: 20));
+    }
+
     final secureStorage = _secureStorage;
     final db = ref.read(databaseProvider);
+    var cleanupFailed = false;
 
     try {
       await secureStorage.deleteAll();
-    } catch (_) {
-      // Os demais dados locais ainda precisam ser removidos.
+    } on Object {
+      cleanupFailed = true;
     }
 
     try {
       await db.clearAllData();
-    } catch (_) {
-      // O cancelamento de notificações continua sendo necessário.
+    } on Object {
+      cleanupFailed = true;
     }
 
-    await NotificationService.instance.cancelAllNotifications();
+    try {
+      await NotificationService.instance.cancelAllNotifications();
+    } on Object {
+      cleanupFailed = true;
+    }
+
+    if (cleanupFailed) {
+      _localCleanupRequired = true;
+      throw StateError('LOCAL_DATA_ISOLATION_FAILED');
+    }
+
+    _localCleanupRequired = false;
+    _activeLocalSessionUid = null;
+  }
+
+  void _invalidateSessionProviders() {
+    ref.invalidate(financeStreamProvider);
+    ref.invalidate(tasksStreamProvider);
+    ref.invalidate(tasksProvider);
+    ref.invalidate(habitsStreamProvider);
+    ref.invalidate(goalsStreamProvider);
+    ref.invalidate(checkInStreamProvider);
+    ref.invalidate(healthStreamProvider);
+    ref.invalidate(medicationsStreamProvider);
+    ref.invalidate(studyStreamProvider);
+    ref.invalidate(subjectsStreamProvider);
+    ref.invalidate(flashcardStreamProvider);
+    ref.invalidate(focusProvider);
+    ref.invalidate(circlesProvider);
+    ref.invalidate(aiCompanionProvider);
+    ref.invalidate(aiConsentProvider);
+    ref.invalidate(premiumProvider);
+    ref.invalidate(dashboardStateProvider);
   }
 }
 

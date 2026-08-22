@@ -14,7 +14,10 @@ import 'package:mockito/mockito.dart';
 
 class MockFirebaseAuth extends Mock implements FirebaseAuth {}
 
-class MockFirebaseUser extends Mock implements User {}
+class MockFirebaseUser extends Mock implements User {
+  @override
+  String get uid => 'user-123';
+}
 
 class MockFirebaseFirestore extends Mock implements FirebaseFirestore {}
 
@@ -73,7 +76,8 @@ void main() {
     auth = MockFirebaseAuth();
     firestore = MockFirebaseFirestore();
     activityRemote = FakeActivityRemoteDataSource();
-    when(auth.currentUser).thenReturn(MockFirebaseUser());
+    final user = MockFirebaseUser();
+    when(auth.currentUser).thenReturn(user);
     tasks = TasksRepository(db, firestore, auth, activityRemote);
     habits = HabitsRepository(db, firestore, auth, activityRemote);
   });
@@ -92,7 +96,7 @@ void main() {
         await _settleCompetitiveCall();
 
         final task = (await db.select(db.taskTable).get()).single;
-        final pending = await db.getPendingSyncItems();
+        final pending = await db.getPendingSyncItems('user-123');
         expect(task.isCompleted, isTrue);
         expect(pending.single.collection, 'tasks');
         expect(pending.single.operationType, 'update');
@@ -124,7 +128,7 @@ void main() {
       await _settleCompetitiveCall();
 
       final task = (await db.select(db.taskTable).get()).single;
-      final pending = await db.getPendingSyncItems();
+      final pending = await db.getPendingSyncItems('user-123');
       expect(task.isCompleted, isTrue);
       expect(pending.single.operationType, 'update');
       expect(activityRemote.taskCalls, 1);
@@ -166,7 +170,7 @@ void main() {
         await _settleCompetitiveCall();
 
         final habit = (await db.select(db.habits).get()).single;
-        final pending = await db.getPendingSyncItems();
+        final pending = await db.getPendingSyncItems('user-123');
         expect(jsonDecode(habit.completedDates), contains(_today()));
         expect(pending.single.collection, 'habits');
         expect(pending.single.operationType, 'update');
@@ -201,7 +205,7 @@ void main() {
       await _settleCompetitiveCall();
 
       final habit = (await db.select(db.habits).get()).single;
-      final pending = await db.getPendingSyncItems();
+      final pending = await db.getPendingSyncItems('user-123');
       expect(jsonDecode(habit.completedDates), contains(_today()));
       expect(pending.single.operationType, 'update');
       expect(activityRemote.habitCalls, 1);

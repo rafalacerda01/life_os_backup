@@ -100,7 +100,9 @@ class StudyRepository {
     bool hasExam = false,
     DateTime? examDate,
   }) async {
-    if (_auth.currentUser == null) {
+    final user = _auth.currentUser;
+
+    if (user == null) {
       return;
     }
 
@@ -109,6 +111,7 @@ class StudyRepository {
 
     try {
       await _db.transactionWithSync(
+        ownerUid: user.uid,
         localOperation: () async {
           await _db
               .into(_db.subjects)
@@ -214,7 +217,9 @@ class StudyRepository {
   }
 
   Future<void> removeSubject(String id) async {
-    if (_auth.currentUser == null) {
+    final user = _auth.currentUser;
+
+    if (user == null) {
       return;
     }
 
@@ -234,6 +239,7 @@ class StudyRepository {
           .toInt();
 
       await _db.transactionWithSync(
+        ownerUid: user.uid,
         localOperation: () async {
           await (_db.delete(
             _db.flashcards,
@@ -769,10 +775,9 @@ class StudyRepository {
           .collection('review_queue')
           .doc(cardId);
 
-      batch.update(
-        reviewQueueRef,
-        {'lastReviewed': Timestamp.fromMillisecondsSinceEpoch(nowEpoch)},
-      );
+      batch.update(reviewQueueRef, {
+        'lastReviewed': Timestamp.fromMillisecondsSinceEpoch(nowEpoch),
+      });
 
       batch.set(
         _firestore
