@@ -5,6 +5,7 @@ import 'package:drift/drift.dart' as drift hide Column;
 import 'package:life_os/core/database/app_database.dart';
 import 'package:life_os/core/database/database_provider.dart';
 import 'package:life_os/core/services/notification_service.dart';
+import 'package:life_os/core/services/sync_manager_provider.dart';
 import 'package:life_os/features/health/data/models/health_model.dart';
 import 'package:life_os/features/health/data/repositories/health_repository.dart';
 
@@ -20,6 +21,7 @@ final healthRepositoryProvider = Provider<HealthRepository>((ref) {
     FirebaseFirestore.instance,
     FirebaseAuth.instance,
     db,
+    ref.watch(syncManagerProvider),
   );
 });
 

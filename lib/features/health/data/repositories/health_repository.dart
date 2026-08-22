@@ -10,6 +10,7 @@ import 'package:drift/drift.dart' as drift;
 import 'package:life_os/core/database/app_database.dart';
 import 'package:life_os/core/security/input_sanitizer.dart';
 import 'package:life_os/core/services/notification_service.dart';
+import 'package:life_os/core/services/sync_manager.dart';
 import 'package:life_os/core/utils/app_logger.dart';
 import 'package:life_os/features/health/data/models/health_model.dart';
 
@@ -18,10 +19,19 @@ class HealthRepository {
   final FirebaseFirestore _firestore;
   final FirebaseAuth _auth;
   final AppDatabase _db;
+  final SyncManager _syncManager;
+  final DateTime Function() _now;
 
   final Uuid _uuid = const Uuid();
 
-  HealthRepository(this._notifService, this._firestore, this._auth, this._db);
+  HealthRepository(
+    this._notifService,
+    this._firestore,
+    this._auth,
+    this._db,
+    this._syncManager, {
+    DateTime Function()? now,
+  }) : _now = now ?? DateTime.now;
 
   // ===========================================================================
   // CONSTANTES
@@ -39,7 +49,7 @@ class HealthRepository {
   // ===========================================================================
 
   String _getTodayDocId() {
-    return DateFormat('yyyy-MM-dd').format(DateTime.now());
+    return DateFormat('yyyy-MM-dd').format(_now());
   }
 
   String? _getUserId() {
@@ -85,7 +95,7 @@ class HealthRepository {
   }
 
   Map<String, dynamic> _sanitizeCycleData(Map<String, dynamic> cycleData) {
-    final now = DateTime.now();
+    final now = _now();
 
     final rawLastPeriodStart = cycleData['lastPeriodStart'];
 
@@ -167,6 +177,52 @@ class HealthRepository {
     return cleanMood;
   }
 
+  Map<String, dynamic>? _validCycleData(String? json) {
+    final cycleData = _decodeCycleData(json);
+
+    if (cycleData == null ||
+        cycleData['isEnabled'] is! bool ||
+        DateTime.tryParse(cycleData['lastPeriodStart']?.toString() ?? '') ==
+            null) {
+      return null;
+    }
+
+    final cycleLength = int.tryParse(
+      cycleData['cycleLengthDays']?.toString() ?? '',
+    );
+    final periodLength = int.tryParse(
+      cycleData['periodLengthDays']?.toString() ?? '',
+    );
+
+    if (cycleLength == null ||
+        cycleLength < 1 ||
+        cycleLength > 120 ||
+        periodLength == null ||
+        periodLength < 1 ||
+        periodLength > cycleLength) {
+      return null;
+    }
+
+    return _sanitizeCycleData(cycleData);
+  }
+
+  Map<String, dynamic>? _latestCycleData(List<HealthEntry> entries) {
+    Map<String, dynamic>? latestCycle;
+    DateTime? latestDate;
+
+    for (final entry in entries) {
+      final cycle = _validCycleData(entry.menstrualCycleJson);
+
+      if (cycle != null &&
+          (latestDate == null || entry.date.isAfter(latestDate))) {
+        latestCycle = cycle;
+        latestDate = entry.date;
+      }
+    }
+
+    return latestCycle;
+  }
+
   // ===========================================================================
   // 1. LEITURA — DRIFT / LOCAL FIRST
   // ===========================================================================
@@ -174,24 +230,37 @@ class HealthRepository {
   Stream<HealthModel> getHealthStream() {
     final todayDocId = _getTodayDocId();
 
-    return (_db.select(_db.healthEntries)
-          ..where((table) => table.docId.equals(todayDocId)))
-        .watchSingleOrNull()
-        .map((entry) {
-          if (entry == null) {
-            return HealthModel.initial();
-          }
+    return _db.select(_db.healthEntries).watch().map((entries) {
+      HealthEntry? todayEntry;
 
-          final decodedCycle = _decodeCycleData(entry.menstrualCycleJson);
+      for (final entry in entries) {
+        if (entry.docId == todayDocId) {
+          todayEntry = entry;
+          break;
+        }
+      }
 
-          return HealthModel(
-            mood: entry.mood,
-            waterIntakeMl: entry.waterIntakeMl.clamp(0, _maxWaterIntakeMl),
-            hasTakenPillToday: entry.hasTakenPillToday,
-            menstrualCycle: decodedCycle,
-            date: entry.date,
-          );
-        });
+      final todayCycle = _validCycleData(todayEntry?.menstrualCycleJson);
+      final menstrualCycle = todayCycle ?? _latestCycleData(entries);
+
+      if (todayEntry == null) {
+        return HealthModel(
+          mood: _defaultMood,
+          waterIntakeMl: 0,
+          hasTakenPillToday: false,
+          menstrualCycle: menstrualCycle,
+          date: _now(),
+        );
+      }
+
+      return HealthModel(
+        mood: todayEntry.mood,
+        waterIntakeMl: todayEntry.waterIntakeMl.clamp(0, _maxWaterIntakeMl),
+        hasTakenPillToday: todayEntry.hasTakenPillToday,
+        menstrualCycle: menstrualCycle,
+        date: todayEntry.date,
+      );
+    });
   }
 
   // ===========================================================================
@@ -208,24 +277,20 @@ class HealthRepository {
 
     try {
       final todayDocId = _getTodayDocId();
-      final now = DateTime.now();
+      final now = _now();
 
       final sanitizedCycleData = _sanitizeCycleData(cycleData);
 
-      await _upsertHealthEntry(
-        docId: todayDocId,
-        menstrualCycleJson: _encodeCycleData(sanitizedCycleData),
-        date: now,
-      );
-
-      unawaited(
-        _syncHealthDataToFirestore(
-          userId: userId,
-          firestoreData: <String, dynamic>{
-            'menstrualCycle': sanitizedCycleData,
-            'date': Timestamp.fromDate(now),
-          },
+      await _performDualWrite(
+        HealthEntriesCompanion(
+          docId: Value(todayDocId),
+          menstrualCycleJson: Value(_encodeCycleData(sanitizedCycleData)),
+          date: Value(now),
         ),
+        <String, dynamic>{
+          'menstrualCycle': sanitizedCycleData,
+          'date': now.toIso8601String(),
+        },
       );
     } catch (e, stack) {
       AppLogger.e('Erro ao atualizar ciclo menstrual.', e, stack);
@@ -423,26 +488,40 @@ class HealthRepository {
     }
 
     try {
-      await _upsertHealthEntry(
-        docId: _getTodayDocId(),
-        mood: companion.mood.present ? companion.mood.value : null,
-        waterIntakeMl: companion.waterIntakeMl.present
-            ? companion.waterIntakeMl.value
-            : null,
-        hasTakenPillToday: companion.hasTakenPillToday.present
-            ? companion.hasTakenPillToday.value
-            : null,
-        menstrualCycleJson: companion.menstrualCycleJson.present
-            ? companion.menstrualCycleJson.value
-            : null,
-        date: companion.date.present ? companion.date.value : DateTime.now(),
+      final todayDocId = _getTodayDocId();
+      final now = companion.date.present ? companion.date.value : _now();
+
+      await _db.transactionWithSync(
+        localOperation: () async {
+          await _upsertHealthEntry(
+            docId: todayDocId,
+            mood: companion.mood.present ? companion.mood.value : null,
+            waterIntakeMl: companion.waterIntakeMl.present
+                ? companion.waterIntakeMl.value
+                : null,
+            hasTakenPillToday: companion.hasTakenPillToday.present
+                ? companion.hasTakenPillToday.value
+                : null,
+            menstrualCycleJson: companion.menstrualCycleJson.present
+                ? companion.menstrualCycleJson.value
+                : null,
+            date: now,
+          );
+        },
+        collection: 'health_info',
+        docId: todayDocId,
+        operationType: 'update',
+        payloadJson: jsonEncode(firestoreData),
       );
 
       unawaited(
-        _syncHealthDataToFirestore(
-          userId: userId,
-          firestoreData: firestoreData,
-        ),
+        _syncManager.processPendingItems().catchError((error, stackTrace) {
+          AppLogger.e(
+            'Erro ao processar fila de sincronização da saúde.',
+            error,
+            stackTrace,
+          );
+        }),
       );
     } catch (e, stack) {
       AppLogger.e('Erro ao atualizar métrica de saúde local.', e, stack);
@@ -462,7 +541,7 @@ class HealthRepository {
       _db.healthEntries,
     )..where((table) => table.docId.equals(docId))).getSingleOrNull();
 
-    final now = date ?? DateTime.now();
+    final insertDate = date ?? DateTime.tryParse(docId) ?? _now();
 
     if (existing == null) {
       await _db
@@ -476,7 +555,7 @@ class HealthRepository {
               ),
               hasTakenPillToday: Value(hasTakenPillToday ?? false),
               menstrualCycleJson: Value(menstrualCycleJson),
-              date: now,
+              date: insertDate,
             ),
           );
     }
@@ -492,7 +571,7 @@ class HealthRepository {
       menstrualCycleJson: menstrualCycleJson == null
           ? const Value.absent()
           : Value(menstrualCycleJson),
-      date: Value(now),
+      date: date == null ? const Value.absent() : Value(date),
     );
 
     await (_db.update(
@@ -507,7 +586,7 @@ class HealthRepository {
       throw ArgumentError('O humor não pode estar vazio.');
     }
 
-    final now = DateTime.now();
+    final now = _now();
 
     // 🛡️ CORREÇÃO APLICADA AQUI (Envolvendo com Value(...))
     await _performDualWrite(
@@ -516,7 +595,7 @@ class HealthRepository {
         mood: Value(cleanMood),
         date: Value(now),
       ),
-      <String, dynamic>{'mood': cleanMood, 'date': Timestamp.fromDate(now)},
+      <String, dynamic>{'mood': cleanMood, 'date': now.toIso8601String()},
     );
   }
 
@@ -528,7 +607,7 @@ class HealthRepository {
       _maxWaterIntakeMl,
     );
 
-    final now = DateTime.now();
+    final now = _now();
 
     // 🛡️ CORREÇÃO APLICADA AQUI (Envolvendo com Value(...))
     await _performDualWrite(
@@ -539,13 +618,13 @@ class HealthRepository {
       ),
       <String, dynamic>{
         'waterIntakeMl': newWaterAmount,
-        'date': Timestamp.fromDate(now),
+        'date': now.toIso8601String(),
       },
     );
   }
 
   Future updatePillStatus(bool taken) async {
-    final now = DateTime.now();
+    final now = _now();
 
     // 🛡️ CORREÇÃO APLICADA AQUI (Envolvendo com Value(...))
     await _performDualWrite(
@@ -556,7 +635,7 @@ class HealthRepository {
       ),
       <String, dynamic>{
         'hasTakenPillToday': taken,
-        'date': Timestamp.fromDate(now),
+        'date': now.toIso8601String(),
       },
     );
   }
@@ -569,25 +648,12 @@ class HealthRepository {
       return;
     }
 
-    final todayDocId = _getTodayDocId();
-
-    final existing = await (_db.select(
-      _db.healthEntries,
-    )..where((table) => table.docId.equals(todayDocId))).getSingleOrNull();
-
-    Map<String, dynamic> cycleData = <String, dynamic>{};
-
-    if (existing?.menstrualCycleJson != null) {
-      cycleData =
-          _decodeCycleData(existing!.menstrualCycleJson) ?? <String, dynamic>{};
-    }
+    final entries = await _db.select(_db.healthEntries).get();
+    final cycleData = _latestCycleData(entries) ?? <String, dynamic>{};
 
     cycleData['isEnabled'] = enable;
 
-    cycleData.putIfAbsent(
-      'lastPeriodStart',
-      () => DateTime.now().toIso8601String(),
-    );
+    cycleData.putIfAbsent('lastPeriodStart', () => _now().toIso8601String());
 
     cycleData.putIfAbsent('cycleLengthDays', () => _defaultCycleLengthDays);
 
@@ -733,53 +799,44 @@ class HealthRepository {
   }) async {
     final data = doc.data();
 
+    final hasCycleData = data.containsKey('menstrualCycle');
     final cycleData = data['menstrualCycle'];
 
-    final Map<String, dynamic>? safeCycleData = cycleData is Map
+    final Map<String, dynamic>? safeCycleData = hasCycleData && cycleData is Map
         ? Map<String, dynamic>.from(cycleData)
         : null;
 
-    final date = _timestampToDate(data['date']) ?? DateTime.now();
+    final date = data.containsKey('date')
+        ? _timestampToDate(data['date']) ?? DateTime.tryParse(doc.id)
+        : null;
 
     final rawWater = data['waterIntakeMl'];
 
-    final waterIntake = rawWater is num
-        ? rawWater.toInt()
-        : int.tryParse(rawWater?.toString() ?? '') ?? 0;
+    final waterIntake = data.containsKey('waterIntakeMl')
+        ? rawWater is num
+              ? rawWater.toInt()
+              : int.tryParse(rawWater?.toString() ?? '')
+        : null;
 
-    final cleanMood = _sanitizeMood(data['mood']?.toString() ?? _defaultMood);
+    final cleanMood = data.containsKey('mood')
+        ? _sanitizeMood(data['mood']?.toString() ?? '')
+        : null;
+
+    final rawPillStatus = data['hasTakenPillToday'];
+    final pillStatus =
+        data.containsKey('hasTakenPillToday') && rawPillStatus is bool
+        ? rawPillStatus
+        : null;
 
     await _upsertHealthEntry(
       docId: doc.id,
       mood: cleanMood,
-      waterIntakeMl: waterIntake.clamp(0, _maxWaterIntakeMl),
-      hasTakenPillToday: data['hasTakenPillToday'] == true,
+      waterIntakeMl: waterIntake?.clamp(0, _maxWaterIntakeMl),
+      hasTakenPillToday: pillStatus,
       menstrualCycleJson: safeCycleData == null
           ? null
           : _encodeCycleData(_sanitizeCycleData(safeCycleData)),
       date: date,
     );
-  }
-
-  // ===========================================================================
-  // 6. FIREBASE — SAÚDE DIÁRIA
-  // ===========================================================================
-
-  Future _syncHealthDataToFirestore({
-    required String userId,
-    required Map<String, dynamic> firestoreData,
-  }) async {
-    try {
-      await _firestore
-          .collection('users')
-          .doc(userId)
-          .collection('health_info')
-          .doc(_getTodayDocId())
-          .set(firestoreData, SetOptions(merge: true));
-
-      AppLogger.i('Dados de saúde sincronizados com Firebase.');
-    } catch (e, stack) {
-      AppLogger.e('Sync Error: Atualizar métrica diária.', e, stack);
-    }
   }
 }

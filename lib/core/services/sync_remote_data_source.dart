@@ -137,16 +137,22 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
 
       switch (operationType) {
         case 'create':
-          final data = _decodePayload(item.payloadJson);
-
-          await documentRef.set(data);
-
-          return const SyncOperationResult.success();
-
         case 'update':
           final data = _decodePayload(item.payloadJson);
 
-          await documentRef.update(data);
+          if (collection == 'health_info') {
+            await documentRef.set(
+              _prepareHealthPayload(data),
+              SetOptions(merge: true),
+            );
+            return const SyncOperationResult.success();
+          }
+
+          if (operationType == 'create') {
+            await documentRef.set(data);
+          } else {
+            await documentRef.update(data);
+          }
 
           return const SyncOperationResult.success();
 
@@ -165,6 +171,12 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
         message: 'OperationType não suportado.',
       );
     } on FirebaseException catch (error) {
+      if (collection == 'health_info' &&
+          (error.code == 'permission-denied' ||
+              error.code == 'unauthenticated')) {
+        return SyncOperationResult.retryable(code: error.code.toUpperCase());
+      }
+
       if (operationType == 'update' && error.code == 'not-found') {
         return SyncOperationResult.invalidPayload(
           message:
@@ -585,6 +597,26 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
     }
 
     return Map<String, dynamic>.from(decoded);
+  }
+
+  Map<String, dynamic> _prepareHealthPayload(Map<String, dynamic> payload) {
+    final data = Map<String, dynamic>.from(payload);
+    final rawDate = data['date'];
+
+    if (rawDate == null || rawDate is Timestamp) {
+      return data;
+    }
+
+    if (rawDate is String) {
+      final parsedDate = DateTime.tryParse(rawDate);
+
+      if (parsedDate != null) {
+        data['date'] = Timestamp.fromDate(parsedDate);
+        return data;
+      }
+    }
+
+    throw const FormatException('Data de saúde inválida.');
   }
 
   SyncOperationResult _mapFirebaseError(FirebaseException error) {
