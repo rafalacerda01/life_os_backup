@@ -5,24 +5,20 @@ class SecureStorageService {
 
   final FlutterSecureStorage _secureStorage;
 
-  static const String _tokenKey = 'auth_access_token';
+  static const String tokenKey = 'auth_access_token';
 
   // Salvar o token com criptografia nativa de hardware (Keychain/EncryptedSharedPreferences)
   Future<void> saveToken(String token) async {
-    await _secureStorage.write(key: _tokenKey, value: token);
+    await _secureStorage.write(key: tokenKey, value: token);
   }
 
   // Ler o token salvo
   Future<String?> getToken() async {
-    return await _secureStorage.read(key: _tokenKey);
+    return await _secureStorage.read(key: tokenKey);
   }
 
   // Deletar o token (Logout do usuário)
   Future<void> deleteToken() async {
-    await _secureStorage.delete(key: _tokenKey);
-  }
-
-  Future<void> deleteAll() async {
-    await _secureStorage.deleteAll();
+    await _secureStorage.delete(key: tokenKey);
   }
 }

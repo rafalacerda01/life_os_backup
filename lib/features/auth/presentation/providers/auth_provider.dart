@@ -521,7 +521,7 @@ class AuthNotifier extends Notifier<AuthState> {
     var cleanupFailed = false;
 
     try {
-      await secureStorage.deleteAll();
+      await secureStorage.deleteToken();
     } on Object {
       cleanupFailed = true;
     }

@@ -4,7 +4,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../database/database_provider.dart';
 import '../database/app_database.dart';
-import '../db/db_key_manager.dart'; // 🚀 CÓDIGO INSERIDO: Import do gerenciador de chaves
+import '../db/db_key_manager.dart';
+import '../storage/secure_storage_service.dart';
 
 final authLogoutServiceProvider = Provider<AuthLogoutService>((ref) {
   return AuthLogoutService(
@@ -29,16 +30,17 @@ class AuthLogoutService {
       // 1. Limpa fisicamente todas as tabelas do Drift SQLite
       await database.clearAllData();
 
-      // 2. Limpa dados sensíveis no armazenamento seguro do dispositivo
-      await secureStorage.deleteAll();
+      // 2. Remove apenas a credencial de sessão. A chave técnica do banco
+      // precisa sobreviver enquanto o arquivo criptografado existir.
+      await secureStorage.delete(key: SecureStorageService.tokenKey);
 
-      // 3. 🚀 CÓDIGO INSERIDO: Limpa a chave em memória RAM (Memory State Leak Fix)
+      // 3. Limpa somente a cópia da chave mantida em memória.
       DbKeyManager.clearCache();
 
       // 4. Encerra a sessão no Firebase Auth
       await firebaseAuth.signOut();
-    } catch (e) {
-      throw Exception('Falha crítica ao limpar dados durante o logout: $e');
+    } catch (_) {
+      throw StateError('LOCAL_LOGOUT_CLEANUP_FAILED');
     }
   }
 }

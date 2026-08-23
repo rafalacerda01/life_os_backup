@@ -40,12 +40,12 @@ class DbKeyManager {
   ///
   /// 1. Retorna a chave em memória, se disponível.
   /// 2. Recupera a chave do armazenamento seguro.
-  /// 3. Caso não exista, gera uma nova chave criptograficamente segura.
+  /// 3. Caso não exista, só gera uma chave quando [allowCreate] for seguro.
   /// 4. Persiste a chave no armazenamento seguro.
   /// 5. Mantém a chave em cache somente durante a execução atual.
   ///
   /// A chave nunca deve ser hardcoded no código-fonte.
-  static Future<String> getEncryptionKey() {
+  static Future<String> getEncryptionKey({required bool allowCreate}) {
     final cachedKey = _cachedKey;
 
     if (cachedKey != null && _isValidKey(cachedKey)) {
@@ -58,7 +58,7 @@ class DbKeyManager {
       return ongoingFuture;
     }
 
-    final future = _loadOrCreateKey();
+    final future = _loadOrCreateKey(allowCreate: allowCreate);
 
     _keyFuture = future;
 
@@ -74,7 +74,7 @@ class DbKeyManager {
   // CARREGAMENTO / GERAÇÃO
   // ===========================================================================
 
-  static Future<String> _loadOrCreateKey() async {
+  static Future<String> _loadOrCreateKey({required bool allowCreate}) async {
     try {
       final storedKey = await _storage.read(key: _keyName);
 
@@ -102,8 +102,12 @@ class DbKeyManager {
       }
 
       // -----------------------------------------------------------------------
-      // Primeira execução — gerar chave
+      // Primeira execução ou migração plaintext validada — gerar chave
       // -----------------------------------------------------------------------
+
+      if (!allowCreate) {
+        throw StateError('A chave do banco existente não foi encontrada.');
+      }
 
       final newKey = _generateSecureKey();
 
@@ -124,8 +128,8 @@ class DbKeyManager {
       _cachedKey = newKey;
 
       return newKey;
-    } catch (e, stack) {
-      debugPrint('DbKeyManager: falha ao carregar chave: $e\n$stack');
+    } catch (_) {
+      debugPrint('DbKeyManager: falha ao carregar a chave técnica.');
 
       throw StateError(
         'Falha crítica ao recuperar a chave de criptografia '
@@ -201,8 +205,8 @@ class DbKeyManager {
       _cachedKey = null;
 
       await _storage.delete(key: _keyName);
-    } catch (e, stack) {
-      debugPrint('DbKeyManager: erro ao remover chave: $e\n$stack');
+    } catch (_) {
+      debugPrint('DbKeyManager: falha ao remover a chave técnica.');
 
       throw StateError('Não foi possível remover a chave de criptografia.');
     }

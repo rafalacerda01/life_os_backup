@@ -5,6 +5,7 @@ import 'package:drift/native.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
+import 'package:life_os/core/database/database_encryption.dart';
 import 'package:life_os/core/db/db_key_manager.dart';
 import 'package:life_os/features/checkin/data/local/checkin_table.dart';
 import 'package:life_os/features/finance/data/local/transaction_table.dart';
@@ -646,46 +647,16 @@ LazyDatabase _openConnection() {
 
     final file = File(p.join(dbFolder.path, 'life_os.sqlite'));
 
-    // -----------------------------------------------------------------------
-    // CHAVE DE CRIPTOGRAFIA
-    // -----------------------------------------------------------------------
-
-    final key = await DbKeyManager.getEncryptionKey();
-
-    if (key.trim().isEmpty) {
-      throw StateError('A chave de criptografia do banco de dados está vazia.');
-    }
-
-    // Evita quebra da instrução SQL caso a chave contenha aspas simples.
-    final sanitizedKey = key.replaceAll("'", "''");
-
-    // -----------------------------------------------------------------------
-    // DATABASE
-    // -----------------------------------------------------------------------
+    final key = await DatabaseEncryptionBootstrap().prepare(
+      databaseFile: file,
+      keyProvider: ({required allowCreate}) =>
+          DbKeyManager.getEncryptionKey(allowCreate: allowCreate),
+    );
 
     return NativeDatabase.createInBackground(
       file,
       setup: (database) {
-        // -------------------------------------------------------------------
-        // SQLCipher
-        // -------------------------------------------------------------------
-        //
-        // IMPORTANTE:
-        //
-        // PRAGMA key somente fornece criptografia real quando o SQLite
-        // utilizado pelo aplicativo foi compilado com suporte ao SQLCipher.
-        //
-        // O DbKeyManager sozinho NÃO transforma o SQLite padrão em banco
-        // criptografado.
-        //
-        // Mantemos estas instruções porque o projeto já possui a camada
-        // DbKeyManager preparada para esse cenário.
-        //
-        // -------------------------------------------------------------------
-
-        database.execute("PRAGMA key = '$sanitizedKey';");
-
-        database.execute('PRAGMA cipher_page_size = 4096;');
+        DatabaseEncryptionBootstrap.configureEncryptedConnection(database, key);
 
         // -------------------------------------------------------------------
         // Configurações do SQLite
