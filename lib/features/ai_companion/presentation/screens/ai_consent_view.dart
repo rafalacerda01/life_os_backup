@@ -43,28 +43,12 @@ class AiConsentView extends ConsumerWidget {
               ),
               const SizedBox(height: 24),
               const Text(
-                "Para fornecer insights personalizados sobre sua rotina, nossa IA precisa de contexto. Ao continuar, você concorda que o assistente analise temporariamente seus dados de:",
+                "Para gerar respostas personalizadas, o Companion IA pode analisar os dados que você já registrou no Life OS, incluindo humor, hidratação, nomes de medicamentos registrados, resumo financeiro e, quando disponível, informações do ciclo menstrual.",
                 style: TextStyle(
                   color: Colors.white70,
                   fontSize: 14,
                   height: 1.5,
                 ),
-              ),
-              const SizedBox(height: 24),
-              _buildConsentTopic(
-                Icons.favorite,
-                "Saúde",
-                "Humor e dados básicos para correlação de bem-estar.",
-              ),
-              _buildConsentTopic(
-                Icons.track_changes,
-                "Produtividade",
-                "Seu foco, metas e hábitos do dia.",
-              ),
-              _buildConsentTopic(
-                Icons.account_balance_wallet,
-                "Finanças",
-                "Métricas gerais para conselhos financeiros.",
               ),
               const SizedBox(height: 32),
               Container(
@@ -82,7 +66,7 @@ class AiConsentView extends ConsumerWidget {
                     SizedBox(width: 12),
                     Expanded(
                       child: Text(
-                        "Privacidade de Controle. O uso do companion com seus dados é opcional. Se você aceitar, o Life Os poderá utilizar os dados selecionados nesta tela para gerar insights personalizados. Se voc~e não aceitar, o Companion não terá acesso a esses dados.",
+                        "O uso desses dados pela IA é opcional. Você pode revogar seu consentimento a qualquer momento nas opções do Companion. Após a revogação, novas solicitações com seus dados não serão autorizadas até que você aceite novamente.",
                         style: TextStyle(
                           color: Colors.amberAccent,
                           fontSize: 12,
@@ -120,39 +104,6 @@ class AiConsentView extends ConsumerWidget {
             ],
           ),
         ),
-      ),
-    );
-  }
-
-  Widget _buildConsentTopic(IconData icon, String title, String desc) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 16.0),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Icon(icon, color: const Color(0xFFB026FF), size: 20),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  title,
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontWeight: FontWeight.bold,
-                    fontSize: 14,
-                  ),
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  desc,
-                  style: const TextStyle(color: Colors.white54, fontSize: 13),
-                ),
-              ],
-            ),
-          ),
-        ],
       ),
     );
   }

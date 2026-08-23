@@ -728,29 +728,64 @@ service cloud.firestore {
         && request.resource.data.updatedAt == request.time;
     }
 
-    function validPrivacyData(userId) {
-      return request.resource.data.keys().hasOnly([
+    function validPrivacySchema(data, userId) {
+      return data.keys().hasOnly([
           'accepted',
           'userId',
           'consentVersion',
           'acceptedAt',
+          'revokedAt',
           'updatedAt',
           'source'
         ])
-        && request.resource.data.keys().hasAll([
+        && data.keys().hasAll([
           'accepted',
           'userId',
           'consentVersion',
           'acceptedAt',
+          'revokedAt',
           'updatedAt',
           'source'
         ])
+        && data.accepted is bool
+        && data.userId == userId
+        && data.consentVersion == '1.0'
+        && data.acceptedAt is timestamp
+        && (data.revokedAt == null || data.revokedAt is timestamp)
+        && data.updatedAt is timestamp
+        && data.source == 'life_os_app';
+    }
+
+    function validPrivacyCreate(userId) {
+      return validPrivacySchema(request.resource.data, userId)
         && request.resource.data.accepted == true
-        && request.resource.data.userId == userId
-        && request.resource.data.consentVersion == '1.0'
-        && request.resource.data.acceptedAt is timestamp
+        && request.resource.data.acceptedAt == request.time
+        && request.resource.data.revokedAt == null
+        && request.resource.data.updatedAt == request.time;
+    }
+
+    function validPrivacyUpdate(userId) {
+      return validPrivacySchema(request.resource.data, userId)
+        && request.resource.data.userId == resource.data.userId
+        && request.resource.data.consentVersion == resource.data.consentVersion
+        && request.resource.data.source == resource.data.source
         && request.resource.data.updatedAt == request.time
-        && request.resource.data.source == 'life_os_app';
+        && (
+          (
+            resource.data.accepted == true
+            && request.resource.data.accepted == false
+            && request.resource.data.acceptedAt == resource.data.acceptedAt
+            && request.resource.data.revokedAt == request.time
+          )
+          ||
+          (
+            resource.data.accepted == false
+            && resource.data.revokedAt is timestamp
+            && request.resource.data.accepted == true
+            && request.resource.data.acceptedAt == request.time
+            && request.resource.data.revokedAt == null
+          )
+        );
     }
 
     // =========================================================================
@@ -916,9 +951,12 @@ service cloud.firestore {
 
       match /privacy/{privacyId} {
         allow read: if isOwner(userId);
-        allow create, update: if isOwner(userId)
+        allow create: if isOwner(userId)
           && privacyId == 'ai_consent'
-          && validPrivacyData(userId);
+          && validPrivacyCreate(userId);
+        allow update: if isOwner(userId)
+          && privacyId == 'ai_consent'
+          && validPrivacyUpdate(userId);
         allow delete: if false;
       }
     }

@@ -186,7 +186,52 @@ class _AICompanionScreenState extends ConsumerState<AICompanionScreen> {
           ),
         ],
       ),
+      actions: [
+        IconButton(
+          key: const ValueKey('revoke-ai-consent'),
+          tooltip: 'Revogar consentimento da IA',
+          onPressed: _confirmAndRevokeConsent,
+          icon: const Icon(Icons.privacy_tip_outlined, color: Colors.white70),
+        ),
+      ],
     );
+  }
+
+  Future<void> _confirmAndRevokeConsent() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Revogar consentimento da IA?'),
+        content: const Text(
+          'O Companion deixará de usar seus dados para gerar novas respostas. '
+          'Seus demais dados e históricos não serão apagados.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('Cancelar'),
+          ),
+          FilledButton(
+            key: const ValueKey('confirm-revoke-ai-consent'),
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text('Revogar consentimento'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true || !mounted) return;
+
+    try {
+      await ref.read(aiConsentProvider.notifier).revokeConsent();
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Não foi possível revogar o consentimento da IA.'),
+        ),
+      );
+    }
   }
 
   Widget _buildMessageBubble(dynamic message) {
