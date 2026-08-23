@@ -40,6 +40,8 @@ class CirclesState {
 
 class CirclesNotifier extends Notifier<CirclesState> {
   StreamSubscription<CircleEntity?>? _subscription;
+  String? _subscribedCircleId;
+  int _subscriptionGeneration = 0;
 
   @override
   CirclesState build() {
@@ -59,14 +61,17 @@ class CirclesNotifier extends Notifier<CirclesState> {
   }
 
   Future<void> joinCircle(String circleId) async {
+    final subscriptionGeneration = ++_subscriptionGeneration;
     await _subscription?.cancel();
     state = state.copyWith(isLoading: true);
 
+    _subscribedCircleId = circleId;
     _subscription = ref
         .read(circlesRepositoryProvider)
         .getCircleStream(circleId)
         .listen(
           (circle) {
+            if (subscriptionGeneration != _subscriptionGeneration) return;
             if (circle == null) {
               clearJoinedCircle();
             } else {
@@ -74,6 +79,7 @@ class CirclesNotifier extends Notifier<CirclesState> {
             }
           },
           onError: (Object error, StackTrace stackTrace) {
+            if (subscriptionGeneration != _subscriptionGeneration) return;
             AppLogger.e('Erro no stream do círculo', error, stackTrace);
             clearJoinedCircle();
           },
@@ -131,32 +137,33 @@ class CirclesNotifier extends Notifier<CirclesState> {
   }
 
   Future<void> deleteCircle(String circleId) async {
-    final previousState = state;
-
-    if (state.joinedCircle?.id == circleId) {
-      await _subscription?.cancel();
-      _subscription = null;
-    }
-
-    final updatedAvailable = state.availableCircles
-        .where((circle) => circle.id != circleId)
-        .toList();
-    final clearedJoined = state.joinedCircle?.id == circleId
-        ? null
-        : state.joinedCircle;
-
-    state = state.copyWith(
-      availableCircles: updatedAvailable,
-      joinedCircle: clearedJoined,
-      isLoading: false,
-    );
-
     try {
       await ref.read(circlesRepositoryProvider).deleteCircle(circleId);
     } catch (error, stackTrace) {
-      state = previousState;
       AppLogger.e('Erro ao deletar círculo', error, stackTrace);
       rethrow;
     }
+
+    if (_subscribedCircleId == circleId) {
+      final subscription = _subscription;
+      _subscription = null;
+      _subscribedCircleId = null;
+      _subscriptionGeneration += 1;
+      try {
+        await subscription?.cancel();
+      } catch (_) {
+        AppLogger.w('Falha ao cancelar observação local após excluir Circle.');
+      }
+    }
+
+    state = state.copyWith(
+      availableCircles: state.availableCircles
+          .where((circle) => circle.id != circleId)
+          .toList(),
+      joinedCircle: state.joinedCircle?.id == circleId
+          ? null
+          : state.joinedCircle,
+      isLoading: false,
+    );
   }
 }

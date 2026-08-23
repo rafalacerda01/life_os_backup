@@ -4,12 +4,19 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:life_os/core/utils/app_logger.dart';
+import 'package:life_os/features/circles/data/remote/circle_delete_remote_data_source.dart';
 import 'package:life_os/features/circles/domain/entities/challenge_entity.dart';
 import 'package:life_os/features/circles/domain/entities/circle_entity.dart';
 
-final circlesRepositoryProvider = Provider(
-  (ref) => CirclesRepository(FirebaseFirestore.instance, FirebaseAuth.instance),
-);
+final circlesRepositoryProvider = Provider((ref) {
+  final deleteRemote = CircleDeleteRemoteDataSource();
+  ref.onDispose(deleteRemote.close);
+  return CirclesRepository(
+    FirebaseFirestore.instance,
+    FirebaseAuth.instance,
+    deleteRemote,
+  );
+});
 
 class CirclesRepository {
   static const int _schemaVersion = 2;
@@ -24,8 +31,9 @@ class CirclesRepository {
 
   final FirebaseFirestore _firestore;
   final FirebaseAuth _auth;
+  final CircleDeleteGateway _deleteRemote;
 
-  CirclesRepository(this._firestore, this._auth);
+  CirclesRepository(this._firestore, this._auth, this._deleteRemote);
 
   String _normalizeMemberName(Object? value, String? fallbackValue) {
     final normalized = value is String ? value.trim() : '';
@@ -458,22 +466,7 @@ class CirclesRepository {
   Future<void> deleteCircle(String circleId) async {
     final user = _auth.currentUser;
     if (user == null) throw Exception('Usuário não autenticado');
-
-    final circleRef = _firestore.collection('circles').doc(circleId);
-    final challengesSnapshot = await circleRef.collection('challenges').get();
-    final batch = _firestore.batch();
-
-    for (final doc in challengesSnapshot.docs) {
-      batch.delete(doc.reference);
-    }
-
-    batch.delete(circleRef.collection('members').doc(user.uid));
-    batch.delete(circleRef);
-    batch.update(_firestore.collection('users').doc(user.uid), {
-      'activeCircleId': null,
-    });
-
-    await batch.commit();
+    await _deleteRemote.deleteCircle(circleId);
   }
 
   Future<void> leaveCircle(String circleId) async {
@@ -534,6 +527,9 @@ class CirclesRepository {
       final data = circleSnap.data() as Map<String, dynamic>;
       if (data['schemaVersion'] != _schemaVersion) {
         throw StateError('Este círculo usa uma versão incompatível');
+      }
+      if (data['deletionState'] != null) {
+        throw StateError('Este círculo está sendo excluído');
       }
 
       final memberCount = data['memberCount'];

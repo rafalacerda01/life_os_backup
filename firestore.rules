@@ -16,6 +16,10 @@ service cloud.firestore {
       return /databases/$(database)/documents/circles/$(circleId);
     }
 
+    function circleDeletionPath(circleId) {
+      return /databases/$(database)/documents/circle_deletions/$(circleId);
+    }
+
     function userPath(userId) {
       return /databases/$(database)/documents/users/$(userId);
     }
@@ -158,7 +162,8 @@ service cloud.firestore {
     }
 
     function validCircleCreate(circleId) {
-      return request.resource.data.keys().hasOnly([
+      return !exists(circleDeletionPath(circleId))
+        && request.resource.data.keys().hasOnly([
           'name',
           'description',
           'adminId',
@@ -207,6 +212,7 @@ service cloud.firestore {
     function isAtomicJoin(circleId) {
       return isSignedIn()
         && resource.data.schemaVersion == 2
+        && !resource.data.keys().hasAny(['deletionState'])
         && !isCircleMember(circleId)
         && resource.data.memberCount is int
         && resource.data.memberCount >= 1
@@ -237,6 +243,7 @@ service cloud.firestore {
     function isAtomicLeave(circleId) {
       return isSignedIn()
         && resource.data.schemaVersion == 2
+        && !resource.data.keys().hasAny(['deletionState'])
         && resource.data.adminId != request.auth.uid
         && resource.data.memberCount is int
         && resource.data.memberCount > 1
@@ -269,6 +276,9 @@ service cloud.firestore {
           )
           || (
             exists(circlePath(circleId))
+            && !get(circlePath(circleId)).data.keys().hasAny([
+              'deletionState'
+            ])
             && validNewMemberData(request.resource.data, 'member')
             && get(circlePath(circleId)).data.schemaVersion == 2
             && getAfter(circlePath(circleId)).data.memberCount ==
@@ -930,7 +940,7 @@ service cloud.firestore {
         || isAtomicJoin(circleId)
         || isAtomicLeave(circleId);
 
-      allow delete: if validCircleDelete(circleId);
+      allow delete: if false;
 
       match /members/{userId} {
 
@@ -952,12 +962,14 @@ service cloud.firestore {
 
         allow create: if isCircleAdmin(circleId)
           && isCircleMember(circleId)
+          && !get(circlePath(circleId)).data.keys().hasAny([
+            'deletionState'
+          ])
           && validChallengeCreate();
 
         allow update: if false;
 
-        allow delete: if isCircleAdmin(circleId)
-          && isCircleMember(circleId);
+        allow delete: if false;
 
         match /progress/{userId} {
           allow read: if isCircleMember(circleId);
@@ -968,6 +980,10 @@ service cloud.firestore {
           allow read, write: if false;
         }
       }
+    }
+
+    match /circle_deletions/{circleId} {
+      allow read, write: if false;
     }
 
     // =========================================================================

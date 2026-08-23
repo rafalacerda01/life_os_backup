@@ -4,7 +4,6 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:drift/drift.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:life_os/core/database/app_database.dart';
-import 'package:life_os/core/network/activity_remote_data_source.dart';
 import 'package:life_os/core/utils/app_logger.dart';
 import 'package:life_os/features/habits/data/models/habit_model.dart';
 import 'package:uuid/uuid.dart';
@@ -13,10 +12,9 @@ class HabitsRepository {
   final AppDatabase _db;
   final FirebaseFirestore _firestore;
   final FirebaseAuth _auth;
-  final ActivityRemoteDataSource _activityRemote;
   final _uuid = const Uuid();
 
-  HabitsRepository(this._db, this._firestore, this._auth, this._activityRemote);
+  HabitsRepository(this._db, this._firestore, this._auth);
 
   // ===========================================================================
   // 1. LEITURA (STREAMS LOCAIS)
@@ -90,6 +88,11 @@ class HabitsRepository {
         updatedDates.add(todayStr);
       }
 
+      final syncPayload = <String, dynamic>{
+        'completedDates': updatedDates,
+        if (!wasCompletedToday) 'competitiveCompletionId': _uuid.v4(),
+      };
+
       await _db.transactionWithSync(
         ownerUid: user.uid,
         localOperation: () async {
@@ -102,12 +105,8 @@ class HabitsRepository {
         collection: 'habits',
         docId: habitId,
         operationType: 'update',
-        payloadJson: jsonEncode({'completedDates': updatedDates}),
+        payloadJson: jsonEncode(syncPayload),
       );
-
-      if (!wasCompletedToday) {
-        unawaited(_reportCompetitiveCompletion(habitId));
-      }
     } catch (error, stackTrace) {
       AppLogger.e(
         'Erro ao alternar status do hábito localmente',
@@ -115,19 +114,6 @@ class HabitsRepository {
         stackTrace,
       );
       rethrow;
-    }
-  }
-
-  Future<void> _reportCompetitiveCompletion(String habitId) async {
-    try {
-      await _activityRemote.completeHabit(habitId: habitId);
-    } on ActivityRemoteException catch (error) {
-      AppLogger.w(
-        'Atividade competitiva de habito nao registrada '
-        '(status: ${error.statusCode ?? 'network'}, code: ${error.code}).',
-      );
-    } catch (_) {
-      AppLogger.w('Atividade competitiva de habito nao registrada.');
     }
   }
 

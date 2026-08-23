@@ -173,6 +173,56 @@ SyncQueueTableData createTaskItem() {
   );
 }
 
+SyncQueueTableData createTaskUpdateItem({bool isCompleted = true}) {
+  return SyncQueueTableData(
+    id: 3,
+    ownerUid: 'user-123',
+    collection: 'tasks',
+    docId: 'task-1',
+    operationType: 'update',
+    payloadJson: jsonEncode({'isCompleted': isCompleted}),
+    createdAt: DateTime.now().millisecondsSinceEpoch,
+    isSynced: false,
+    status: SyncQueuePersistenceStatus.pending,
+    attemptCount: 0,
+  );
+}
+
+SyncQueueTableData createHabitUpdateItem() {
+  return SyncQueueTableData(
+    id: 4,
+    ownerUid: 'user-123',
+    collection: 'habits',
+    docId: 'habit-1',
+    operationType: 'update',
+    payloadJson: jsonEncode({
+      'completedDates': ['2026-08-23'],
+    }),
+    createdAt: DateTime.now().millisecondsSinceEpoch,
+    isSynced: false,
+    status: SyncQueuePersistenceStatus.pending,
+    attemptCount: 0,
+  );
+}
+
+SyncQueueTableData createHabitCompletionItem() {
+  return SyncQueueTableData(
+    id: 5,
+    ownerUid: 'user-123',
+    collection: 'habits',
+    docId: 'habit-1',
+    operationType: 'update',
+    payloadJson: jsonEncode({
+      'completedDates': ['2026-08-23'],
+      'competitiveCompletionId': '7d287d4e-190f-42ab-90a8-a93696f8c462',
+    }),
+    createdAt: DateTime.now().millisecondsSinceEpoch,
+    isSynced: false,
+    status: SyncQueuePersistenceStatus.pending,
+    attemptCount: 0,
+  );
+}
+
 void main() {
   late _RecordingHealthDocumentReference healthDoc;
   late FirestoreSyncRemoteDataSource remote;
@@ -506,5 +556,162 @@ void main() {
     expect(result.shouldRetry, isTrue);
     expect(result.code, 'SYNC_TIMEOUT');
     expect(client.wasClosed, isTrue);
+  });
+
+  test('Task update competitivo é enviado somente pelo backend', () async {
+    late Map<String, dynamic> payload;
+    final client = _RecordingHttpClient((request) async {
+      payload = jsonDecode(await request.finalize().bytesToString());
+      return _jsonResponse(200);
+    });
+    final dataSource = FirestoreSyncRemoteDataSource(
+      _RecordingFirestore(
+        _RecordingUsersCollectionReference(
+          _RecordingUserDocumentReference(
+            _RecordingHealthCollectionReference(healthDoc),
+          ),
+        ),
+      ),
+      _FakeFirebaseAuth(_FakeFirebaseUser('user-123')),
+      clientFactory: () => client,
+      idTokenProvider: (_, _) async => 'token',
+    );
+
+    final result = await dataSource.process('user-123', createTaskUpdateItem());
+
+    expect(result.isSuccess, isTrue);
+    expect(payload, {
+      'operation': 'update_task',
+      'taskId': 'task-1',
+      'isCompleted': true,
+    });
+  });
+
+  test('Habit update normal não solicita atividade competitiva', () async {
+    late Map<String, dynamic> payload;
+    final client = _RecordingHttpClient((request) async {
+      payload = jsonDecode(await request.finalize().bytesToString());
+      return _jsonResponse(200);
+    });
+    final dataSource = FirestoreSyncRemoteDataSource(
+      _RecordingFirestore(
+        _RecordingUsersCollectionReference(
+          _RecordingUserDocumentReference(
+            _RecordingHealthCollectionReference(healthDoc),
+          ),
+        ),
+      ),
+      _FakeFirebaseAuth(_FakeFirebaseUser('user-123')),
+      clientFactory: () => client,
+      idTokenProvider: (_, _) async => 'token',
+    );
+
+    final result = await dataSource.process(
+      'user-123',
+      createHabitUpdateItem(),
+    );
+
+    expect(result.isSuccess, isTrue);
+    expect(payload, {
+      'operation': 'update_habit',
+      'habitId': 'habit-1',
+      'completedDates': ['2026-08-23'],
+    });
+  });
+
+  test('conclusão de Habit preserva idempotency key da SyncQueue', () async {
+    late Map<String, dynamic> payload;
+    final client = _RecordingHttpClient((request) async {
+      payload = jsonDecode(await request.finalize().bytesToString());
+      return _jsonResponse(200);
+    });
+    final dataSource = FirestoreSyncRemoteDataSource(
+      _RecordingFirestore(
+        _RecordingUsersCollectionReference(
+          _RecordingUserDocumentReference(
+            _RecordingHealthCollectionReference(healthDoc),
+          ),
+        ),
+      ),
+      _FakeFirebaseAuth(_FakeFirebaseUser('user-123')),
+      clientFactory: () => client,
+      idTokenProvider: (_, _) async => 'token',
+    );
+
+    final result = await dataSource.process(
+      'user-123',
+      createHabitCompletionItem(),
+    );
+
+    expect(result.isSuccess, isTrue);
+    expect(payload, {
+      'operation': 'update_habit_completion',
+      'habitId': 'habit-1',
+      'completedDates': ['2026-08-23'],
+      'competitiveCompletionId': '7d287d4e-190f-42ab-90a8-a93696f8c462',
+    });
+  });
+
+  test(
+    'falha retryable preserva o mesmo update competitivo para retry',
+    () async {
+      var attempts = 0;
+      final payloads = <Map<String, dynamic>>[];
+      final dataSource = FirestoreSyncRemoteDataSource(
+        _RecordingFirestore(
+          _RecordingUsersCollectionReference(
+            _RecordingUserDocumentReference(
+              _RecordingHealthCollectionReference(healthDoc),
+            ),
+          ),
+        ),
+        _FakeFirebaseAuth(_FakeFirebaseUser('user-123')),
+        clientFactory: () => _RecordingHttpClient((request) async {
+          attempts += 1;
+          payloads.add(jsonDecode(await request.finalize().bytesToString()));
+          return _jsonResponse(attempts == 1 ? 503 : 200);
+        }),
+        idTokenProvider: (_, _) async => 'token',
+      );
+      final item = createHabitCompletionItem();
+
+      final first = await dataSource.process('user-123', item);
+      final second = await dataSource.process('user-123', item);
+
+      expect(first.shouldRetry, isTrue);
+      expect(second.isSuccess, isTrue);
+      expect(payloads, hasLength(2));
+      expect(payloads[1], payloads[0]);
+    },
+  );
+
+  test('UUID competitivo inválido não inicia request remoto', () async {
+    var clientCreated = false;
+    final source = FirestoreSyncRemoteDataSource(
+      _RecordingFirestore(
+        _RecordingUsersCollectionReference(
+          _RecordingUserDocumentReference(
+            _RecordingHealthCollectionReference(healthDoc),
+          ),
+        ),
+      ),
+      _FakeFirebaseAuth(_FakeFirebaseUser('user-123')),
+      clientFactory: () {
+        clientCreated = true;
+        return _RecordingHttpClient((_) async => _jsonResponse(200));
+      },
+    );
+    final item = createHabitCompletionItem().copyWith(
+      payloadJson: jsonEncode({
+        'completedDates': ['2026-08-23'],
+        'competitiveCompletionId': 'not-a-uuid',
+      }),
+    );
+
+    final result = await source.process('user-123', item);
+
+    expect(result.isPermanentFailure, isTrue);
+    expect(result.code, 'INVALID_PAYLOAD');
+    expect(clientCreated, isFalse);
   });
 }

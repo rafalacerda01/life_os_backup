@@ -13,6 +13,11 @@ abstract interface class SyncRemoteDataSource {
 }
 
 class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
+  static final RegExp _uuidV4Pattern = RegExp(
+    r'^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$',
+    caseSensitive: false,
+  );
+
   final FirebaseFirestore _firestore;
   final FirebaseAuth _auth;
   final http.Client Function() _clientFactory;
@@ -72,8 +77,16 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
         return _createHabitServerSide(expectedUid: uid, item: item);
       }
 
+      if (collection == 'habits' && operationType == 'update') {
+        return _updateHabitServerSide(expectedUid: uid, item: item);
+      }
+
       if (collection == 'tasks' && operationType == 'create') {
         return _createTaskServerSide(expectedUid: uid, item: item);
+      }
+
+      if (collection == 'tasks' && operationType == 'update') {
+        return _updateTaskServerSide(expectedUid: uid, item: item);
       }
 
       if (collection == 'tasks' && operationType == 'delete') {
@@ -142,7 +155,7 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
 
       // ----------------------------------------------------------------------
       // OPERAÇÕES FIRESTORE NORMAIS
-      // UPDATE de hábito continua permitido pelas Rules.
+      // Updates competitivos de Task/Habit são tratados acima pelo backend.
       // ----------------------------------------------------------------------
       final documentRef = _firestore
           .collection('users')
@@ -396,6 +409,26 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
     });
   }
 
+  Future<SyncOperationResult> _updateTaskServerSide({
+    required String expectedUid,
+    required SyncQueueTableData item,
+  }) async {
+    final data = _decodePayload(item.payloadJson);
+    final isCompleted = data['isCompleted'];
+
+    if (data.length != 1 || isCompleted is! bool) {
+      return const SyncOperationResult.invalidPayload(
+        message: 'Payload de atualização de tarefa inválido.',
+      );
+    }
+
+    return _postToSyncBackend(expectedUid, {
+      'operation': 'update_task',
+      'taskId': item.docId,
+      'isCompleted': isCompleted,
+    });
+  }
+
   Future<SyncOperationResult> _deleteTaskServerSide({
     required String expectedUid,
     required SyncQueueTableData item,
@@ -425,6 +458,51 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
       'operation': 'create_habit',
       'habitId': item.docId,
       'title': title,
+      'completedDates': completedDates,
+    });
+  }
+
+  Future<SyncOperationResult> _updateHabitServerSide({
+    required String expectedUid,
+    required SyncQueueTableData item,
+  }) async {
+    final data = _decodePayload(item.payloadJson);
+    final completedDates = data['completedDates'];
+    final competitiveCompletionId = data['competitiveCompletionId'];
+
+    if (completedDates is! List ||
+        !completedDates.every((date) => date is String)) {
+      return const SyncOperationResult.invalidPayload(
+        message: 'Payload de atualização de hábito inválido.',
+      );
+    }
+
+    if (competitiveCompletionId != null) {
+      if (data.length != 2 ||
+          competitiveCompletionId is! String ||
+          !_uuidV4Pattern.hasMatch(competitiveCompletionId)) {
+        return const SyncOperationResult.invalidPayload(
+          message: 'Payload de conclusão competitiva inválido.',
+        );
+      }
+
+      return _postToSyncBackend(expectedUid, {
+        'operation': 'update_habit_completion',
+        'habitId': item.docId,
+        'completedDates': completedDates,
+        'competitiveCompletionId': competitiveCompletionId,
+      });
+    }
+
+    if (data.length != 1) {
+      return const SyncOperationResult.invalidPayload(
+        message: 'Payload de atualização de hábito inválido.',
+      );
+    }
+
+    return _postToSyncBackend(expectedUid, {
+      'operation': 'update_habit',
+      'habitId': item.docId,
       'completedDates': completedDates,
     });
   }
