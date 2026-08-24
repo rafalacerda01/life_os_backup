@@ -41,6 +41,11 @@ class AIAuthenticationException extends AICompanionException {
       );
 }
 
+class AIPremiumRequiredException extends AICompanionException {
+  const AIPremiumRequiredException()
+    : super('O Companion IA está disponível apenas para usuários Premium.');
+}
+
 class AIAppCheckException extends AICompanionException {
   const AIAppCheckException()
     : super(
@@ -282,6 +287,9 @@ class AICompanionRepository {
             throw const AIAppCheckException();
           }
           throw const AIAuthenticationException();
+
+        case 402:
+          throw const AIPremiumRequiredException();
 
         case 403:
           throw const AIAuthenticationException();

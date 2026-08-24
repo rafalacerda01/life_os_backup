@@ -131,6 +131,37 @@ void main() {
     });
   }
 
+  test(
+    'HTTP 402 usa erro Premium fixo sem expor resposta do backend',
+    () async {
+      const sensitiveMessage = 'mensagem interna sensível';
+      final client = MockClient(
+        (_) async => http.Response(
+          jsonEncode({'error': sensitiveMessage, 'code': 'PREMIUM_REQUIRED'}),
+          402,
+        ),
+      );
+      addTearDown(client.close);
+
+      await expectLater(
+        _repository(client: client).sendMessageToApi('Olá', const {}),
+        throwsA(
+          isA<AIPremiumRequiredException>()
+              .having(
+                (error) => error.message,
+                'message',
+                'O Companion IA está disponível apenas para usuários Premium.',
+              )
+              .having(
+                (error) => error.message,
+                'sanitized message',
+                isNot(contains(sensitiveMessage)),
+              ),
+        ),
+      );
+    },
+  );
+
   test('resposta 200 válida continua retornando reply', () async {
     final client = MockClient(
       (_) async => http.Response(jsonEncode({'reply': 'Tudo certo'}), 200),

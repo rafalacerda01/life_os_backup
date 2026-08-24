@@ -96,6 +96,8 @@ class AICompanionNotifier extends Notifier<AICompanionState> {
       if (e is AIAuthenticationException) {
         errorMessage =
             '🔐 Sua sessão expirou ou não é válida. Faça login novamente.';
+      } else if (e is AIPremiumRequiredException) {
+        errorMessage = '💎 O Companion IA é um recurso Premium.';
       } else if (e is AIConsentRequiredException) {
         errorMessage =
             '🔒 O consentimento é necessário para utilizar o Companion IA.';
