@@ -2,6 +2,30 @@ import 'package:flutter/foundation.dart';
 import 'package:logger/logger.dart';
 import 'package:firebase_crashlytics/firebase_crashlytics.dart';
 
+@immutable
+class SanitizedCrashReport {
+  const SanitizedCrashReport({
+    required this.error,
+    required this.reason,
+    required this.stackTrace,
+    required this.fatal,
+  });
+
+  final Object error;
+  final String reason;
+  final StackTrace? stackTrace;
+  final bool fatal;
+}
+
+class _SanitizedError implements Exception {
+  const _SanitizedError(this.errorType);
+
+  final String errorType;
+
+  @override
+  String toString() => 'HandledError:$errorType';
+}
+
 class AppLogger {
   AppLogger._(); // Construtor privado para evitar instanciamento
 
@@ -36,16 +60,51 @@ class AppLogger {
 
   /// Log de Erro: Imprime no console (em debug) e envia para o Crashlytics (em release).
   static void e(String message, [dynamic error, StackTrace? stackTrace]) {
-    // O pacote logger imprime no console apenas em Debug (DevelopmentFilter)
-    _logger.e(message, error: error, stackTrace: stackTrace);
+    _report(message, error, stackTrace, fatal: false);
+  }
 
-    // Em produção (Release), capturamos a falha e enviamos para a nuvem
+  /// Registra uma falha global sem enviar a mensagem bruta da exceção.
+  static void fatal(String reason, Object error, StackTrace? stackTrace) {
+    _report(reason, error, stackTrace, fatal: true);
+  }
+
+  @visibleForTesting
+  static SanitizedCrashReport sanitizeForCrashlytics({
+    required String reason,
+    required Object? error,
+    required StackTrace? stackTrace,
+    required bool fatal,
+  }) {
+    return SanitizedCrashReport(
+      error: _SanitizedError(error?.runtimeType.toString() ?? 'UnknownError'),
+      reason: reason,
+      stackTrace: stackTrace,
+      fatal: fatal,
+    );
+  }
+
+  static void _report(
+    String reason,
+    Object? error,
+    StackTrace? stackTrace, {
+    required bool fatal,
+  }) {
+    // DevelopmentFilter mantém erro e stack completos apenas no console local.
+    _logger.e(reason, error: error, stackTrace: stackTrace);
+
     if (!kDebugMode) {
+      final report = sanitizeForCrashlytics(
+        reason: reason,
+        error: error,
+        stackTrace: stackTrace,
+        fatal: fatal,
+      );
+
       FirebaseCrashlytics.instance.recordError(
-        error ?? Exception(message),
-        stackTrace,
-        reason: message,
-        fatal: false, // false porque o erro foi tratado por um try/catch seu
+        report.error,
+        report.stackTrace,
+        reason: report.reason,
+        fatal: report.fatal,
       );
     }
   }

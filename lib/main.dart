@@ -8,6 +8,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/date_symbol_data_local.dart';
 import 'package:life_os/core/router/router.dart';
+import 'package:life_os/core/utils/app_logger.dart';
 import 'package:life_os/firebase_options.dart';
 import 'package:timezone/data/latest.dart' as tz;
 
@@ -32,21 +33,18 @@ void main() {
 
       // 3. Inicialização de localidade de datas
       await initializeDateFormatting('pt_BR', null).catchError((error, stack) {
-        if (!kDebugMode) {
-          FirebaseCrashlytics.instance.recordError(
-            error,
-            stack,
-            fatal: true,
-            reason: 'Falha no initializeDateFormatting',
-          );
-        }
+        AppLogger.fatal('Falha no initializeDateFormatting', error, stack);
       });
 
       FlutterError.onError = (errorDetails) {
         if (kDebugMode) {
           FlutterError.dumpErrorToConsole(errorDetails);
         } else {
-          FirebaseCrashlytics.instance.recordFlutterFatalError(errorDetails);
+          AppLogger.fatal(
+            'Erro Flutter não tratado',
+            errorDetails.exception,
+            errorDetails.stack,
+          );
         }
       };
 
@@ -54,7 +52,7 @@ void main() {
         if (kDebugMode) {
           debugPrint('Erro assíncrono não tratado: $error');
         } else {
-          FirebaseCrashlytics.instance.recordError(error, stack, fatal: true);
+          AppLogger.fatal('Erro assíncrono não tratado', error, stack);
         }
         return true;
       };
@@ -66,7 +64,7 @@ void main() {
       if (kDebugMode) {
         debugPrint('Erro crítico capturado no Zone Guard: $error');
       } else {
-        FirebaseCrashlytics.instance.recordError(error, stack, fatal: true);
+        AppLogger.fatal('Erro crítico no Zone Guard', error, stack);
       }
     },
   );
@@ -86,11 +84,7 @@ Future<void> _initAppCheckInBackground() async {
     if (kDebugMode) {
       debugPrint('Aviso App Check (Ignorado em Debug): $e');
     } else {
-      FirebaseCrashlytics.instance.recordError(
-        e,
-        stack,
-        reason: 'Falha na inicialização do App Check',
-      );
+      AppLogger.e('Falha na inicialização do App Check', e, stack);
     }
   }
 }

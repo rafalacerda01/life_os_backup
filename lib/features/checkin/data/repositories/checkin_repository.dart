@@ -188,7 +188,7 @@ class CheckInRepository {
       // O registro continua no Drift com isSynced = false
       // e poderá ser enviado posteriormente.
       AppLogger.e(
-        'Erro ao sincronizar check-in: $checkInId',
+        'Erro ao sincronizar check-in.',
         error,
         stackTrace,
       );

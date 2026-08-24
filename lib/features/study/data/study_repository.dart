@@ -516,7 +516,7 @@ class StudyRepository {
               e.code == 'network-request-failed';
 
           if (!isTransient || attempt == maxAttempts) {
-            AppLogger.e('Study Firebase Pull falhou: ${e.code}', e, stack);
+            AppLogger.e('Study Firebase Pull falhou.', e, stack);
 
             return null;
           }
@@ -559,7 +559,7 @@ class StudyRepository {
               e.code == 'network-request-failed';
 
           if (!isTransient || attempt == maxAttempts) {
-            AppLogger.e('Study Firebase Pull falhou: ${e.code}', e, stack);
+            AppLogger.e('Study Firebase Pull falhou.', e, stack);
 
             return null;
           }
@@ -692,7 +692,7 @@ class StudyRepository {
                 );
           } catch (e, stack) {
             AppLogger.e(
-              'Erro ao sincronizar subject ${doc.id} do Firebase',
+              'Erro ao sincronizar subject do Firebase.',
               e,
               stack,
             );
@@ -736,7 +736,7 @@ class StudyRepository {
                 );
           } catch (e, stack) {
             AppLogger.e(
-              'Erro ao sincronizar flashcard ${doc.id} do Firebase',
+              'Erro ao sincronizar flashcard do Firebase.',
               e,
               stack,
             );

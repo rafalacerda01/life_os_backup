@@ -691,7 +691,7 @@ class HealthRepository {
         try {
           await _syncMedicationDocument(doc: doc);
         } catch (e, stack) {
-          AppLogger.e('Erro ao sincronizar medicamento ${doc.id}.', e, stack);
+          AppLogger.e('Erro ao sincronizar medicamento.', e, stack);
         }
       }
 
@@ -707,7 +707,7 @@ class HealthRepository {
         } catch (e, stack) {
           AppLogger.e(
             'Erro ao sincronizar registro '
-            'de saúde ${doc.id}.',
+            'de saúde.',
             e,
             stack,
           );
