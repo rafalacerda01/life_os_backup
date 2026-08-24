@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_app_check/firebase_app_check.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:http/http.dart' as http;
 import 'package:life_os/core/utils/app_logger.dart';
@@ -37,6 +38,13 @@ class AIAuthenticationException extends AICompanionException {
   const AIAuthenticationException()
     : super(
         'Sua sessão de autenticação é inválida ou expirou. Faça login novamente.',
+      );
+}
+
+class AIAppCheckException extends AICompanionException {
+  const AIAppCheckException()
+    : super(
+        'Não foi possível verificar a segurança deste aplicativo. Tente novamente.',
       );
 }
 
@@ -76,13 +84,24 @@ class AIConsentRequiredException extends AICompanionException {
 // REPOSITORY
 // ============================================================================
 
+typedef AIIdTokenProvider = Future<String?> Function();
+typedef AIAppCheckTokenProvider = Future<String?> Function();
+
 class AICompanionRepository {
   final http.Client client;
+  final AIIdTokenProvider _idTokenProvider;
+  final AIAppCheckTokenProvider _appCheckTokenProvider;
 
   static const Duration _networkTimeout = Duration(seconds: 15);
 
-  AICompanionRepository({http.Client? client})
-    : client = client ?? http.Client();
+  AICompanionRepository({
+    http.Client? client,
+    AIIdTokenProvider? idTokenProvider,
+    AIAppCheckTokenProvider? appCheckTokenProvider,
+  }) : client = client ?? http.Client(),
+       _idTokenProvider = idTokenProvider ?? _getFirebaseIdToken,
+       _appCheckTokenProvider =
+           appCheckTokenProvider ?? _getFirebaseAppCheckToken;
 
   // ==========================================================================
   // CONTEXTO DO SISTEMA
@@ -182,21 +201,21 @@ class AICompanionRepository {
     Map<String, dynamic> contextData,
   ) async {
     try {
-      final user = FirebaseAuth.instance.currentUser;
-
       // ----------------------------------------------------------------------
       // AUTENTICAÇÃO
       // ----------------------------------------------------------------------
 
-      if (user == null) {
-        throw const AIAuthenticationException();
-      }
-
-      final token = await user.getIdToken();
+      final token = await _idTokenProvider();
 
       if (token == null || token.isEmpty) {
         throw const AIAuthenticationException();
       }
+
+      // ----------------------------------------------------------------------
+      // APP CHECK
+      // ----------------------------------------------------------------------
+
+      final appCheckToken = await _getRequiredAppCheckToken();
 
       // ----------------------------------------------------------------------
       // ENDPOINT
@@ -214,6 +233,7 @@ class AICompanionRepository {
             headers: {
               'Content-Type': 'application/json',
               'Authorization': 'Bearer $token',
+              'X-Firebase-AppCheck': appCheckToken,
             },
             body: jsonEncode({"message": text, "context": contextData}),
           )
@@ -257,6 +277,10 @@ class AICompanionRepository {
           throw const AIBadRequestException();
 
         case 401:
+          final code = _responseCode(response.body);
+          if (code == 'APP_CHECK_REQUIRED' || code == 'APP_CHECK_INVALID') {
+            throw const AIAppCheckException();
+          }
           throw const AIAuthenticationException();
 
         case 403:
@@ -293,4 +317,42 @@ class AICompanionRepository {
       throw const AIServiceException();
     }
   }
+
+  Future<String> _getRequiredAppCheckToken() async {
+    try {
+      final token = await _appCheckTokenProvider();
+
+      if (token == null || token.trim().isEmpty) {
+        throw const AIAppCheckException();
+      }
+
+      return token;
+    } on AIAppCheckException {
+      rethrow;
+    } catch (_) {
+      throw const AIAppCheckException();
+    }
+  }
+
+  String? _responseCode(String body) {
+    try {
+      final decoded = jsonDecode(body);
+      if (decoded is Map<String, dynamic>) {
+        final code = decoded['code'];
+        return code is String ? code : null;
+      }
+    } catch (_) {
+      return null;
+    }
+
+    return null;
+  }
+}
+
+Future<String?> _getFirebaseIdToken() async {
+  return FirebaseAuth.instance.currentUser?.getIdToken();
+}
+
+Future<String?> _getFirebaseAppCheckToken() {
+  return FirebaseAppCheck.instance.getToken();
 }
