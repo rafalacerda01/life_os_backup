@@ -17,11 +17,13 @@ class NotificationsRepository {
   final FirebaseFirestore firestore;
   final FirebaseAuth auth;
   final NotificationDao? localDao;
+  final Future<void> Function(String id)? remoteDelete;
 
   NotificationsRepository({
     FirebaseFirestore? firestore,
     FirebaseAuth? auth,
     this.localDao,
+    this.remoteDelete,
   }) : firestore = firestore ?? FirebaseFirestore.instance,
        auth = auth ?? FirebaseAuth.instance;
 
@@ -74,6 +76,14 @@ class NotificationsRepository {
     return NotificationModel.fromDrift(row);
   }
 
+  Future<List<NotificationModel>> getLocalNotifications() async {
+    final dao = localDao;
+    if (dao == null) return const [];
+
+    final rows = await dao.getAllNotifications();
+    return rows.map(NotificationModel.fromDrift).toList();
+  }
+
   /// Salva primeiro no Drift e sincroniza em background.
   Future<void> saveLocalNotification(NotificationModel notification) async {
     final dao = localDao;
@@ -85,7 +95,10 @@ class NotificationsRepository {
       );
 
       if (shouldSync) {
-        unawaited(_saveToFirestore(notification));
+        final persisted = await dao.getNotificationById(notification.id);
+        if (persisted != null) {
+          unawaited(_saveToFirestore(NotificationModel.fromDrift(persisted)));
+        }
       }
     } catch (error, stackTrace) {
       AppLogger.e('Erro ao salvar notificação localmente', error, stackTrace);
@@ -106,13 +119,7 @@ class NotificationsRepository {
     if (dao == null) return;
 
     await dao.markAsCompleted(id);
-    unawaited(
-      _updateFirestoreState(id, {
-        'isRead': true,
-        'isCompleted': true,
-        'priority': 'completed',
-      }),
-    );
+    unawaited(_updateFirestoreState(id, {'isRead': true, 'isCompleted': true}));
   }
 
   Future<void> deleteNotification(String id) async {
@@ -120,7 +127,7 @@ class NotificationsRepository {
     if (dao == null) return;
 
     await dao.deleteNotification(id);
-    unawaited(_deleteFromFirestore(id));
+    unawaited((remoteDelete ?? _deleteFromFirestore)(id));
   }
 
   /// Hidrata o Drift a partir da nuvem sem destruir o estado local do usuário.

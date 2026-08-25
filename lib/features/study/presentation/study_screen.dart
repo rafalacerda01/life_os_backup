@@ -9,6 +9,17 @@ import 'package:life_os/features/premium/domain/services/quota_service.dart';
 import 'package:life_os/features/premium/presentation/plan_limits_provider.dart';
 import 'package:life_os/core/security/input_sanitizer.dart';
 
+String? validateSubjectExamDate({
+  required bool hasExam,
+  required DateTime? examDate,
+}) {
+  if (hasExam && examDate == null) {
+    return 'Selecione a data da prova.';
+  }
+
+  return null;
+}
+
 class StudyScreen extends ConsumerStatefulWidget {
   const StudyScreen({super.key});
 
@@ -191,6 +202,20 @@ class _StudyScreenState extends ConsumerState<StudyScreen> {
                         );
 
                         if (title.isEmpty) {
+                          return;
+                        }
+
+                        final examDateError = validateSubjectExamDate(
+                          hasExam: hasExam,
+                          examDate: selectedDate,
+                        );
+
+                        if (examDateError != null) {
+                          if (context.mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(content: Text(examDateError)),
+                            );
+                          }
                           return;
                         }
 

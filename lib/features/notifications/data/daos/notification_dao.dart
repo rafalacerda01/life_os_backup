@@ -43,8 +43,35 @@ class NotificationDao extends DatabaseAccessor<AppDatabase>
     final incomingModuleType = incoming.moduleType.value;
     final incomingRoute = incoming.route.value;
     final incomingDueDate = incoming.dueDate.value;
+    final incomingIsCompleted = incoming.isCompleted.value;
 
     final sameEventDay = _sameLocalDay(existing.dueDate, incomingDueDate);
+    final isHabitNotification =
+        incomingModuleType == 'habits' &&
+        incoming.id.value.startsWith('habit_');
+    final isDerivedHabitCompletion = isHabitNotification && incomingIsCompleted;
+    final wasDerivedHabitCompletion =
+        isHabitNotification && existing.priority == 'completed';
+
+    final bool nextIsRead;
+    final bool nextIsCompleted;
+
+    if (!sameEventDay) {
+      nextIsRead = isDerivedHabitCompletion;
+      nextIsCompleted = isDerivedHabitCompletion;
+    } else if (isDerivedHabitCompletion) {
+      nextIsRead = true;
+      nextIsCompleted = true;
+    } else if (wasDerivedHabitCompletion) {
+      // O hábito foi desmarcado no módulo de origem no mesmo dia.
+      nextIsRead = false;
+      nextIsCompleted = false;
+    } else {
+      // Interações manuais da Central permanecem preservadas.
+      nextIsRead = existing.isRead;
+      nextIsCompleted = existing.isCompleted;
+    }
+
     final changed =
         existing.title != incoming.title.value ||
         existing.description != incoming.description.value ||
@@ -52,7 +79,8 @@ class NotificationDao extends DatabaseAccessor<AppDatabase>
         existing.moduleType != incomingModuleType ||
         existing.route != incomingRoute ||
         existing.dueDate != incomingDueDate ||
-        (!sameEventDay && (existing.isRead || existing.isCompleted));
+        existing.isRead != nextIsRead ||
+        existing.isCompleted != nextIsCompleted;
 
     if (!changed) {
       return false;
@@ -69,10 +97,8 @@ class NotificationDao extends DatabaseAccessor<AppDatabase>
         route: Value(incomingRoute),
         dueDate: Value(incomingDueDate),
 
-        // Se o evento é do mesmo dia, preservamos a interação do usuário.
-        // Se mudou de dia, trata-se de uma nova ocorrência.
-        isRead: Value(sameEventDay ? existing.isRead : false),
-        isCompleted: Value(sameEventDay ? existing.isCompleted : false),
+        isRead: Value(nextIsRead),
+        isCompleted: Value(nextIsCompleted),
 
         // Não alteramos createdAt durante um upsert.
         // A data original da notificação deve permanecer preservada.
@@ -90,8 +116,8 @@ class NotificationDao extends DatabaseAccessor<AppDatabase>
   Future<void> markAsCompleted(String id) =>
       (update(notificationsTable)..where((t) => t.id.equals(id))).write(
         const NotificationsTableCompanion(
+          isRead: Value(true),
           isCompleted: Value(true),
-          priority: Value('completed'),
         ),
       );
 
