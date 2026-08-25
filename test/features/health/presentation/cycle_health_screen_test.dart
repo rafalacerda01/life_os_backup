@@ -4,6 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:go_router/go_router.dart';
 import 'package:life_os/features/health/data/models/health_model.dart';
 import 'package:life_os/features/health/presentation/cycle/cycle_health_screen.dart';
+import 'package:life_os/features/health/presentation/cycle/cycle_reminder_preferences.dart';
 import 'package:life_os/features/health/presentation/health_screen.dart';
 import 'package:life_os/features/health/presentation/providers/health_provider.dart';
 import 'package:life_os/features/premium/domain/services/plan_limits.dart';
@@ -48,6 +49,7 @@ void main() {
         healthStreamProvider.overrideWith((ref) => Stream.value(health)),
         medicationsStreamProvider.overrideWith((ref) => Stream.value(const [])),
         planLimitsProvider.overrideWithValue(PlanLimits.free),
+        cycleReminderUserIdProvider.overrideWith((ref) => Stream.value(null)),
       ],
       child: child,
     );
@@ -277,7 +279,7 @@ void main() {
       textScaleFactor: 1.3,
     );
 
-    expect(find.text('Configurar'), findsOneWidget);
+    expect(find.text('Configurar'), findsWidgets);
     expect(tester.takeException(), isNull);
   });
 }

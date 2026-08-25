@@ -5,6 +5,8 @@ import 'package:life_os/features/health/data/models/health_model.dart';
 import 'package:life_os/features/health/presentation/health_screen.dart';
 import 'package:life_os/features/health/presentation/providers/health_provider.dart';
 
+import 'cycle_reminder_section.dart';
+
 DateTime? estimatedNextPeriodDate(HealthModel health, DateTime now) {
   if (health.menstrualCycle?['isEnabled'] != true) return null;
 
@@ -78,6 +80,8 @@ class CycleHealthScreen extends ConsumerWidget {
                           const SizedBox(height: 16),
                           _AvailableRecordsCard(health: health),
                         ],
+                        const SizedBox(height: 16),
+                        const CycleReminderSection(),
                         const SizedBox(height: 16),
                         const _CycleDisclaimer(),
                       ],
