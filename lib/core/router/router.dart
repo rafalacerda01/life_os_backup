@@ -16,6 +16,7 @@ import 'package:life_os/features/home/presentation/screens/home_screen.dart';
 import 'package:life_os/features/home/presentation/screens/main_navigation_screen.dart';
 import 'package:life_os/features/study/presentation/study_screen.dart';
 import 'package:life_os/features/health/presentation/health_screen.dart';
+import 'package:life_os/features/health/presentation/cycle/cycle_health_screen.dart';
 import 'package:life_os/features/finance/presentation/finance_screen.dart';
 import 'package:life_os/features/habits/presentation/habits_screen.dart';
 import 'package:life_os/features/tasks/presentation/tasks_screen.dart';
@@ -87,6 +88,10 @@ final routerProvider = Provider<GoRouter>((ref) {
           GoRoute(
             path: '/health',
             builder: (context, state) => const HealthScreen(),
+          ),
+          GoRoute(
+            path: '/health/cycle',
+            builder: (context, state) => const CycleHealthScreen(),
           ),
           GoRoute(
             path: '/finance',

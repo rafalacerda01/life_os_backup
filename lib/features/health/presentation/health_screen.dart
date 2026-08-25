@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 import 'package:intl/intl.dart';
 import 'package:life_os/features/premium/domain/services/plan_limits.dart';
 import 'package:life_os/features/premium/domain/services/quota_service.dart';
@@ -626,7 +627,10 @@ class HealthScreen extends ConsumerWidget {
 
                         const SizedBox(height: 28),
 
-                        _MenstrualCycleWidget(health: health),
+                        CycleHealthSummaryCard(
+                          health: health,
+                          onTap: () => context.push('/health/cycle'),
+                        ),
                       ]),
                     ),
                   ),
@@ -1080,14 +1084,121 @@ class HealthScreen extends ConsumerWidget {
   }
 }
 
-class _MenstrualCycleWidget extends ConsumerWidget {
+class CycleHealthSummaryCard extends StatelessWidget {
+  const CycleHealthSummaryCard({
+    super.key,
+    required this.health,
+    required this.onTap,
+  });
+
+  final HealthModel health;
+  final VoidCallback onTap;
+
+  static const Color _surface = Color(0xFF11182E);
+  static const Color _primary = Color(0xFFB026FF);
+
+  @override
+  Widget build(BuildContext context) {
+    final cycleData = health.menstrualCycle;
+    final isConfigured = cycleData != null;
+    final isEnabled = cycleData?['isEnabled'] == true;
+
+    String summary;
+    if (!isConfigured) {
+      summary = 'Configure para acompanhar estimativas e registros.';
+    } else if (!isEnabled) {
+      summary = 'Acompanhamento desativado. Configure quando desejar.';
+    } else {
+      final cycleInfo = health.cyclePhaseInfo;
+      final day = (cycleInfo['day'] as num?)?.toInt() ?? 0;
+      final totalDays = (cycleInfo['totalDays'] as num?)?.toInt() ?? 0;
+      final phase = cycleInfo['name']?.toString() ?? 'Fase atual';
+      summary = day > 0 && totalDays > 0
+          ? 'Estimativa: dia $day de $totalDays · $phase'
+          : 'Complete a configuração para gerar estimativas.';
+    }
+
+    return Semantics(
+      button: true,
+      label: 'Abrir Saúde do ciclo',
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          key: const ValueKey('cycle-health-summary-card'),
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(22),
+          child: Ink(
+            padding: const EdgeInsets.all(18),
+            decoration: BoxDecoration(
+              color: _surface,
+              borderRadius: BorderRadius.circular(22),
+              border: Border.all(color: _primary.withOpacity(0.18)),
+            ),
+            child: Row(
+              children: [
+                Container(
+                  width: 46,
+                  height: 46,
+                  decoration: BoxDecoration(
+                    gradient: const LinearGradient(
+                      begin: Alignment.topLeft,
+                      end: Alignment.bottomRight,
+                      colors: [Color(0xFF5D0EFF), _primary],
+                    ),
+                    borderRadius: BorderRadius.circular(15),
+                  ),
+                  child: const Icon(
+                    Icons.calendar_month_rounded,
+                    color: Colors.white,
+                    size: 22,
+                  ),
+                ),
+                const SizedBox(width: 14),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        'Saúde do ciclo',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 16,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                      const SizedBox(height: 5),
+                      Text(
+                        summary,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: Colors.white60,
+                          fontSize: 12,
+                          height: 1.35,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 10),
+                const Icon(Icons.chevron_right_rounded, color: Colors.white54),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class CycleHealthDetails extends ConsumerWidget {
   final HealthModel health;
 
-  const _MenstrualCycleWidget({required this.health});
+  const CycleHealthDetails({super.key, required this.health});
 
   static const Color _background = Color(0xFF070B14);
   static const Color _surface = Color(0xFF11182E);
-  static const Color _pink = Colors.pinkAccent;
+  static const Color _pink = Color(0xFFB026FF);
   static const Color _purple = Colors.purpleAccent;
 
   void _showSnackBar(
@@ -1169,53 +1280,62 @@ class _MenstrualCycleWidget extends ConsumerWidget {
 
     const dayNames = ['Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb', 'Dom'];
 
-    return Row(
-      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-      children: List.generate(7, (index) {
-        final date = monday.add(Duration(days: index));
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      child: Row(
+        children: List.generate(7, (index) {
+          final date = monday.add(Duration(days: index));
 
-        final isToday =
-            date.year == now.year &&
-            date.month == now.month &&
-            date.day == now.day;
+          final isToday =
+              date.year == now.year &&
+              date.month == now.month &&
+              date.day == now.day;
 
-        return Column(
-          children: [
-            Text(
-              dayNames[index],
-              style: TextStyle(
-                fontSize: 9,
-                color: isToday ? _pink : Colors.white38,
-                fontWeight: isToday ? FontWeight.bold : FontWeight.normal,
-              ),
-            ),
-            const SizedBox(height: 7),
-            AnimatedContainer(
-              duration: const Duration(milliseconds: 200),
-              width: 32,
-              height: 32,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: isToday ? _pink.withOpacity(0.15) : Colors.transparent,
-                border: Border.all(
-                  color: isToday ? _pink : Colors.white10,
-                  width: isToday ? 1.7 : 1,
-                ),
-              ),
-              child: Center(
-                child: Text(
-                  '${date.day}',
+          return Padding(
+            padding: EdgeInsets.only(right: index == 6 ? 0 : 10),
+            child: Column(
+              children: [
+                Text(
+                  dayNames[index],
                   style: TextStyle(
-                    fontSize: 10,
-                    color: isToday ? Colors.white : Colors.white38,
+                    fontSize: 9,
+                    color: isToday ? _pink : Colors.white38,
                     fontWeight: isToday ? FontWeight.bold : FontWeight.normal,
                   ),
                 ),
-              ),
+                const SizedBox(height: 7),
+                AnimatedContainer(
+                  duration: const Duration(milliseconds: 200),
+                  width: 32,
+                  height: 32,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: isToday
+                        ? _pink.withOpacity(0.15)
+                        : Colors.transparent,
+                    border: Border.all(
+                      color: isToday ? _pink : Colors.white10,
+                      width: isToday ? 1.7 : 1,
+                    ),
+                  ),
+                  child: Center(
+                    child: Text(
+                      '${date.day}',
+                      style: TextStyle(
+                        fontSize: 10,
+                        color: isToday ? Colors.white : Colors.white38,
+                        fontWeight: isToday
+                            ? FontWeight.bold
+                            : FontWeight.normal,
+                      ),
+                    ),
+                  ),
+                ),
+              ],
             ),
-          ],
-        );
-      }),
+          );
+        }),
+      ),
     );
   }
 
@@ -1477,10 +1597,23 @@ class _MenstrualCycleWidget extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final cycleData = health.menstrualCycle;
-
     final isEnabled = cycleData != null && cycleData['isEnabled'] == true;
+    final cycleInfo = health.cyclePhaseInfo;
+    final currentDay = (cycleInfo['day'] as num?)?.toInt() ?? 0;
+    final totalDays = (cycleInfo['totalDays'] as num?)?.toInt() ?? 0;
+    final hasUsableEstimate = currentDay > 0 && totalDays > 0;
 
-    if (!isEnabled) {
+    if (!isEnabled || !hasUsableEstimate) {
+      final statusName = isEnabled
+          ? cycleInfo['name']?.toString() ?? 'Configuração incompleta'
+          : 'Saúde do ciclo';
+      final statusMessage = cycleData == null
+          ? 'Configure para acompanhar estimativas e registros.'
+          : !isEnabled
+          ? 'Acompanhamento desativado. Configure quando desejar.'
+          : cycleInfo['message']?.toString() ??
+                'Complete a configuração para gerar estimativas.';
+
       return Container(
         padding: const EdgeInsets.all(18),
         decoration: BoxDecoration(
@@ -1500,27 +1633,27 @@ class _MenstrualCycleWidget extends ConsumerWidget {
               child: const Icon(Icons.calendar_month_rounded, color: _pink),
             ),
             const SizedBox(width: 12),
-            const Expanded(
+            Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    'Ciclo menstrual',
-                    style: TextStyle(
+                    statusName,
+                    style: const TextStyle(
                       color: Colors.white,
                       fontWeight: FontWeight.w700,
                     ),
                   ),
-                  SizedBox(height: 3),
+                  const SizedBox(height: 3),
                   Text(
-                    'Ative para acompanhar seu ciclo',
-                    style: TextStyle(color: Colors.white38, fontSize: 11),
+                    statusMessage,
+                    style: const TextStyle(color: Colors.white38, fontSize: 11),
                   ),
                 ],
               ),
             ),
             TextButton(
-              onPressed: () => _toggleCycle(context, ref, true),
+              onPressed: () => _showCycleSettings(context, ref, cycleData),
               style: TextButton.styleFrom(
                 foregroundColor: _pink,
                 backgroundColor: _pink.withOpacity(0.08),
@@ -1529,7 +1662,7 @@ class _MenstrualCycleWidget extends ConsumerWidget {
                 ),
               ),
               child: const Text(
-                'Ativar',
+                'Configurar',
                 style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12),
               ),
             ),
@@ -1537,12 +1670,6 @@ class _MenstrualCycleWidget extends ConsumerWidget {
         ),
       );
     }
-
-    final cycleInfo = health.cyclePhaseInfo;
-
-    final currentDay = (cycleInfo['day'] as num?)?.toInt() ?? 1;
-
-    final totalDays = (cycleInfo['totalDays'] as num?)?.toInt() ?? 28;
 
     final phaseName = cycleInfo['name']?.toString() ?? 'Fase atual';
 
@@ -1585,7 +1712,7 @@ class _MenstrualCycleWidget extends ConsumerWidget {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      'CICLO MENSTRUAL',
+                      'ESTADO ATUAL',
                       style: TextStyle(
                         color: Colors.white,
                         fontSize: 12,
@@ -1651,7 +1778,7 @@ class _MenstrualCycleWidget extends ConsumerWidget {
                     ),
                     const SizedBox(height: 7),
                     Text(
-                      phaseName,
+                      '$phaseName · estimativa',
                       style: TextStyle(
                         color: phaseColor,
                         fontSize: 14,
