@@ -1,99 +1,82 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:shared_preferences/shared_preferences.dart';
+import 'package:life_os/core/services/notification_preferences.dart';
 import 'package:life_os/core/services/notification_service.dart';
+import 'package:life_os/features/notifications/domain/providers/notification_engine.dart';
 
-class NotificationsState {
-  final bool allNotifications;
-  final bool ankiReminders;
-  final bool focusAlerts;
-  final bool medicationReminders;
+final notificationServiceProvider = Provider<NotificationService>((ref) {
+  return NotificationService.instance;
+});
 
-  NotificationsState({
-    this.allNotifications = true,
-    this.ankiReminders = true,
-    this.focusAlerts = true,
-    this.medicationReminders = true,
-  });
+final notificationPreferencesChangedProvider = Provider<void Function()>((ref) {
+  return () => ref.invalidate(notificationEngineProvider);
+});
 
-  NotificationsState copyWith({
-    bool? allNotifications,
-    bool? ankiReminders,
-    bool? focusAlerts,
-    bool? medicationReminders,
-  }) {
-    return NotificationsState(
-      allNotifications: allNotifications ?? this.allNotifications,
-      ankiReminders: ankiReminders ?? this.ankiReminders,
-      focusAlerts: focusAlerts ?? this.focusAlerts,
-      medicationReminders: medicationReminders ?? this.medicationReminders,
-    );
-  }
-}
-
-class NotificationsNotifier extends Notifier<NotificationsState> {
-  static const _keyAll = 'all_notifications';
-  static const _keyAnki = 'anki_reminders';
-  static const _keyFocus = 'focus_alerts';
-  static const _keyMedication = 'medication_reminders';
-
-  final NotificationService _notificationService = NotificationService();
+class NotificationsNotifier extends AsyncNotifier<NotificationPreferences> {
+  NotificationPreferencesStore get _store =>
+      ref.read(notificationPreferencesStoreProvider);
 
   @override
-  NotificationsState build() {
-    _initAndLoad();
-    return NotificationsState();
-  }
-
-  Future<void> _initAndLoad() async {
-    await _notificationService.init();
-    final prefs = await SharedPreferences.getInstance();
-
-    state = NotificationsState(
-      allNotifications: prefs.getBool(_keyAll) ?? true,
-      ankiReminders: prefs.getBool(_keyAnki) ?? true,
-      focusAlerts: prefs.getBool(_keyFocus) ?? true,
-      medicationReminders: prefs.getBool(_keyMedication) ?? true,
-    );
-  }
-
-  Future<void> _savePreference(String key, bool value) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setBool(key, value);
-  }
+  Future<NotificationPreferences> build() => _store.load();
 
   Future<void> toggleAll(bool value) async {
-    await _savePreference(_keyAll, value);
-    state = state.copyWith(allNotifications: value);
+    state.requireValue;
+    final store = _store;
+    final notificationService = ref.read(notificationServiceProvider);
+    final refresh = ref.read(notificationPreferencesChangedProvider);
+
+    await store.save(NotificationPreferenceKeys.allNotifications, value);
+    final updated = await store.load();
+    if (!ref.mounted) return;
+
+    state = AsyncData(updated);
+    refresh();
 
     if (value) {
-      // Solicita as permissões do Android 13+ / iOS apenas quando o usuário ativa
-      await _notificationService.requestPermissions();
+      await notificationService.requestPermissions();
     } else {
-      // Cancela todos os alarmes agendados se o usuário desligar a chave geral
-      await _notificationService.cancelAllNotifications();
+      await notificationService.cancelAllNotifications();
     }
   }
 
-  void toggleAnki(bool value) {
-    _savePreference(_keyAnki, value);
-    state = state.copyWith(ankiReminders: value);
+  Future<void> toggleStudy(bool value) async {
+    await _toggleCategory(
+      key: NotificationPreferenceKeys.studyReminders,
+      value: value,
+    );
   }
 
-  void toggleFocus(bool value) {
-    _savePreference(_keyFocus, value);
-    state = state.copyWith(focusAlerts: value);
+  Future<void> toggleHabit(bool value) async {
+    await _toggleCategory(
+      key: NotificationPreferenceKeys.habitReminders,
+      value: value,
+    );
   }
 
-  void toggleMedication(bool value) {
-    _savePreference(_keyMedication, value);
-    state = state.copyWith(medicationReminders: value);
+  Future<void> toggleMedication(bool value) async {
+    await _toggleCategory(
+      key: NotificationPreferenceKeys.medicationReminders,
+      value: value,
+    );
+  }
 
-    // Aqui você pode adicionar lógica futura para cancelar alarmes específicos
-    // ex: se (value == false) _notificationService.cancelNotification(idDoRemedio);
+  Future<void> _toggleCategory({
+    required String key,
+    required bool value,
+  }) async {
+    state.requireValue;
+    final store = _store;
+    final refresh = ref.read(notificationPreferencesChangedProvider);
+
+    await store.save(key, value);
+    final updated = await store.load();
+    if (!ref.mounted) return;
+
+    state = AsyncData(updated);
+    refresh();
   }
 }
 
 final notificationsProvider =
-    NotifierProvider<NotificationsNotifier, NotificationsState>(() {
+    AsyncNotifierProvider<NotificationsNotifier, NotificationPreferences>(() {
       return NotificationsNotifier();
     });

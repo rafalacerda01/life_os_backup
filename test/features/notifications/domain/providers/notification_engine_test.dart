@@ -6,6 +6,7 @@ import 'package:drift/native.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:life_os/core/database/app_database.dart';
+import 'package:life_os/core/services/notification_preferences.dart';
 import 'package:life_os/features/notifications/data/repositories/notifications_repository.dart';
 import 'package:life_os/features/notifications/domain/models/notification_model.dart';
 import 'package:life_os/features/notifications/domain/providers/notification_engine.dart';
@@ -60,8 +61,15 @@ void main() {
     await db.closeDatabase();
   });
 
-  Future<void> sync() =>
-      reconciler.sync(repository: repository, db: db, today: today);
+  Future<void> sync({
+    NotificationPreferences preferences =
+        const NotificationPreferences.enabled(),
+  }) => reconciler.sync(
+    repository: repository,
+    db: db,
+    preferences: preferences,
+    today: today,
+  );
 
   Future<NotificationModel?> notification(String id) =>
       repository.getLocalNotification(id);
@@ -429,4 +437,161 @@ void main() {
 
     expect(await notification('focus_future'), isNotNull);
   });
+
+  test('chave geral desativada não gera nenhum módulo suportado', () async {
+    await insertSubject(id: 'blocked', examDate: tomorrow);
+    await insertMedication(id: 'blocked', startDate: yesterday);
+    await insertHabit(id: 'blocked');
+
+    await sync(
+      preferences: const NotificationPreferences(
+        allNotifications: false,
+        studyReminders: true,
+        habitReminders: true,
+        medicationReminders: true,
+      ),
+    );
+
+    expect(repository.savedIds, isEmpty);
+    expect(await repository.getLocalNotifications(), isEmpty);
+  });
+
+  test(
+    'chave geral remove derivados e preserva prefixo desconhecido',
+    () async {
+      await seedNotification(id: 'exam_existing', dueDate: tomorrow);
+      await seedNotification(
+        id: 'health_med_existing',
+        dueDate: tomorrow,
+        moduleType: 'health',
+      );
+      await seedNotification(
+        id: 'habit_existing',
+        dueDate: todayStart,
+        moduleType: 'habits',
+      );
+      await seedNotification(
+        id: 'custom_existing',
+        dueDate: tomorrow,
+        moduleType: 'general',
+      );
+
+      await sync(
+        preferences: const NotificationPreferences(
+          allNotifications: false,
+          studyReminders: true,
+          habitReminders: true,
+          medicationReminders: true,
+        ),
+      );
+
+      expect(await notification('exam_existing'), isNull);
+      expect(await notification('health_med_existing'), isNull);
+      expect(await notification('habit_existing'), isNull);
+      expect(await notification('custom_existing'), isNotNull);
+    },
+  );
+
+  test('estudos desativados removem somente exam', () async {
+    await insertMedication(id: 'kept', startDate: yesterday);
+    await insertHabit(id: 'kept');
+    await seedNotification(id: 'exam_existing', dueDate: tomorrow);
+
+    await sync(
+      preferences: const NotificationPreferences(
+        allNotifications: true,
+        studyReminders: false,
+        habitReminders: true,
+        medicationReminders: true,
+      ),
+    );
+
+    expect(await notification('exam_existing'), isNull);
+    expect(await notification('health_med_kept'), isNotNull);
+    expect(await notification('habit_kept'), isNotNull);
+  });
+
+  test('hábitos desativados removem somente habit', () async {
+    await insertSubject(id: 'kept', examDate: tomorrow);
+    await insertMedication(id: 'kept', startDate: yesterday);
+    await seedNotification(
+      id: 'habit_existing',
+      dueDate: todayStart,
+      moduleType: 'habits',
+    );
+
+    await sync(
+      preferences: const NotificationPreferences(
+        allNotifications: true,
+        studyReminders: true,
+        habitReminders: false,
+        medicationReminders: true,
+      ),
+    );
+
+    expect(await notification('habit_existing'), isNull);
+    expect(await notification('exam_kept'), isNotNull);
+    expect(await notification('health_med_kept'), isNotNull);
+  });
+
+  test('medicamentos desativados removem somente health_med', () async {
+    await insertSubject(id: 'kept', examDate: tomorrow);
+    await insertHabit(id: 'kept');
+    await seedNotification(
+      id: 'health_med_existing',
+      dueDate: tomorrow,
+      moduleType: 'health',
+    );
+
+    await sync(
+      preferences: const NotificationPreferences(
+        allNotifications: true,
+        studyReminders: true,
+        habitReminders: true,
+        medicationReminders: false,
+      ),
+    );
+
+    expect(await notification('health_med_existing'), isNull);
+    expect(await notification('exam_kept'), isNotNull);
+    expect(await notification('habit_kept'), isNotNull);
+  });
+
+  test('reabilitar categoria recria somente o evento ainda válido', () async {
+    await insertSubject(id: 'current', examDate: tomorrow);
+    const disabled = NotificationPreferences(
+      allNotifications: true,
+      studyReminders: false,
+      habitReminders: true,
+      medicationReminders: true,
+    );
+
+    await sync(preferences: disabled);
+    expect(await notification('exam_current'), isNull);
+
+    await sync();
+    expect(await notification('exam_current'), isNotNull);
+  });
+
+  test(
+    'preferências não reintroduzem ghost badge de hábito concluído',
+    () async {
+      await insertHabit(id: 'done-again', completedDates: ['2026-08-25']);
+      const disabled = NotificationPreferences(
+        allNotifications: true,
+        studyReminders: true,
+        habitReminders: false,
+        medicationReminders: true,
+      );
+
+      await sync(preferences: disabled);
+      await sync();
+
+      final result = await notification('habit_done-again');
+      expect(result, isNotNull);
+      expect(result!.priority, 'completed');
+      expect(result.isCompleted, isTrue);
+      expect(result.isRead, isTrue);
+    },
+  );
 }

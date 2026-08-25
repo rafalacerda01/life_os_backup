@@ -43,8 +43,7 @@ class NotificationsScreen extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    // Escuta o estado global de notificações
-    final state = ref.watch(notificationsProvider);
+    final preferences = ref.watch(notificationsProvider);
     final notifier = ref.read(notificationsProvider.notifier);
 
     return Scaffold(
@@ -57,38 +56,49 @@ class NotificationsScreen extends ConsumerWidget {
         ),
         elevation: 0,
       ),
-      body: ListView(
-        padding: const EdgeInsets.all(20),
-        children: [
-          _buildSettingCard(
-            title: "Notificações Gerais",
-            subtitle: "Habilitar todos os alertas do sistema",
-            value: state.allNotifications,
-            onChanged: (val) => notifier.toggleAll(val),
+      body: preferences.when(
+        loading: () => const Center(
+          child: CircularProgressIndicator(color: Color(0xFFB026FF)),
+        ),
+        error: (_, _) => const Center(
+          child: Text(
+            'Não foi possível carregar as preferências.',
+            style: TextStyle(color: Colors.white70),
           ),
-          const SizedBox(height: 10),
-          _buildSettingCard(
-            title: "Revisões do Anki",
-            subtitle: "Alertas para suas sessões de repetição",
-            value: state.ankiReminders,
-            enabled: state.allNotifications,
-            onChanged: (val) => notifier.toggleAnki(val),
-          ),
-          _buildSettingCard(
-            title: "Lembretes de Foco",
-            subtitle: "Alertas para seus blocos de trabalho",
-            value: state.focusAlerts,
-            enabled: state.allNotifications,
-            onChanged: (val) => notifier.toggleFocus(val),
-          ),
-          _buildSettingCard(
-            title: "Lembretes de Medicamentos",
-            subtitle: "Alertas para seus medicamentos diários",
-            value: state.medicationReminders,
-            enabled: state.allNotifications,
-            onChanged: (val) => notifier.toggleMedication(val),
-          ),
-        ],
+        ),
+        data: (state) => ListView(
+          padding: const EdgeInsets.all(20),
+          children: [
+            _buildSettingCard(
+              title: 'Notificações Gerais',
+              subtitle: 'Habilitar todos os alertas do Life OS',
+              value: state.allNotifications,
+              onChanged: notifier.toggleAll,
+            ),
+            const SizedBox(height: 10),
+            _buildSettingCard(
+              title: 'Provas e Estudos',
+              subtitle: 'Lembretes sobre provas e compromissos de estudo',
+              value: state.studyReminders,
+              enabled: state.allNotifications,
+              onChanged: notifier.toggleStudy,
+            ),
+            _buildSettingCard(
+              title: 'Hábitos',
+              subtitle: 'Lembretes da sua rotina diária',
+              value: state.habitReminders,
+              enabled: state.allNotifications,
+              onChanged: notifier.toggleHabit,
+            ),
+            _buildSettingCard(
+              title: 'Medicamentos',
+              subtitle: 'Lembretes dos seus tratamentos',
+              value: state.medicationReminders,
+              enabled: state.allNotifications,
+              onChanged: notifier.toggleMedication,
+            ),
+          ],
+        ),
       ),
     );
   }

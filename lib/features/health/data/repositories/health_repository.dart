@@ -9,6 +9,7 @@ import 'package:uuid/uuid.dart';
 import 'package:drift/drift.dart' as drift;
 import 'package:life_os/core/database/app_database.dart';
 import 'package:life_os/core/security/input_sanitizer.dart';
+import 'package:life_os/core/services/notification_preferences.dart';
 import 'package:life_os/core/services/notification_service.dart';
 import 'package:life_os/core/services/sync_manager.dart';
 import 'package:life_os/core/utils/app_logger.dart';
@@ -396,7 +397,7 @@ class HealthRepository {
           body: 'Está na hora de tomar: $cleanName',
           scheduledDate: startDate,
           repeatDaily: true,
-          preferenceKey: 'medication_reminders',
+          preferenceKey: NotificationPreferenceKeys.medicationReminders,
         );
 
         AppLogger.i('Notificação agendada para o medicamento $firestoreId.');
@@ -786,7 +787,7 @@ class HealthRepository {
         body: 'Está na hora de tomar: $name',
         scheduledDate: startDate,
         repeatDaily: true,
-        preferenceKey: 'medication_reminders',
+        preferenceKey: NotificationPreferenceKeys.medicationReminders,
       );
     } catch (e, stack) {
       AppLogger.e(

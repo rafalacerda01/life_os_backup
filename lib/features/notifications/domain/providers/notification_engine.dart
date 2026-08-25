@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:riverpod_annotation/riverpod_annotation.dart';
 import 'package:life_os/core/database/app_database.dart';
 import 'package:life_os/core/database/database_provider.dart';
+import 'package:life_os/core/services/notification_preferences.dart';
 import 'package:life_os/core/utils/app_logger.dart';
 import 'package:life_os/features/notifications/data/repositories/notifications_repository.dart';
 import 'package:life_os/features/notifications/domain/models/notification_model.dart';
@@ -20,13 +21,18 @@ class NotificationEngine extends _$NotificationEngine {
   Stream<List<NotificationModel>> build() {
     final repository = ref.watch(notificationsRepositoryProvider);
     final db = ref.read(databaseProvider);
+    final preferencesStore = ref.read(notificationPreferencesStoreProvider);
 
     ref.onDispose(() {
       _disposed = true;
       _bootstrapJob = null;
     });
 
-    _scheduleBootstrap(repository: repository, db: db);
+    _scheduleBootstrap(
+      repository: repository,
+      db: db,
+      preferencesStore: preferencesStore,
+    );
 
     return repository.watchLocalNotifications();
   }
@@ -34,6 +40,7 @@ class NotificationEngine extends _$NotificationEngine {
   void _scheduleBootstrap({
     required NotificationsRepository repository,
     required AppDatabase db,
+    required NotificationPreferencesStore preferencesStore,
   }) {
     final today = _startOfDay(DateTime.now());
 
@@ -45,7 +52,12 @@ class NotificationEngine extends _$NotificationEngine {
       return;
     }
 
-    final job = _bootstrap(today: today, repository: repository, db: db);
+    final job = _bootstrap(
+      today: today,
+      repository: repository,
+      db: db,
+      preferencesStore: preferencesStore,
+    );
 
     _bootstrapJob = job;
 
@@ -62,15 +74,25 @@ class NotificationEngine extends _$NotificationEngine {
     required DateTime today,
     required NotificationsRepository repository,
     required AppDatabase db,
+    required NotificationPreferencesStore preferencesStore,
   }) async {
     if (_disposed) return;
 
     try {
+      final preferences = await preferencesStore.load();
+
+      if (_disposed) return;
+
       await repository.syncNotificationsFromFirebaseToLocal();
 
       if (_disposed) return;
 
-      await syncExistingModules(repository: repository, db: db, today: today);
+      await syncExistingModules(
+        repository: repository,
+        db: db,
+        preferences: preferences,
+        today: today,
+      );
 
       if (_disposed) return;
 
@@ -94,6 +116,7 @@ class NotificationEngine extends _$NotificationEngine {
   Future<void> syncExistingModules({
     required NotificationsRepository repository,
     required AppDatabase db,
+    required NotificationPreferences preferences,
     DateTime? today,
   }) async {
     if (_disposed) return;
@@ -101,6 +124,7 @@ class NotificationEngine extends _$NotificationEngine {
     await const NotificationModuleReconciler().sync(
       repository: repository,
       db: db,
+      preferences: preferences,
       today: today,
       isCancelled: () => _disposed,
     );
@@ -139,6 +163,7 @@ class NotificationModuleReconciler {
   Future<void> sync({
     required NotificationsRepository repository,
     required AppDatabase db,
+    required NotificationPreferences preferences,
     DateTime? today,
     bool Function()? isCancelled,
   }) async {
@@ -150,6 +175,7 @@ class NotificationModuleReconciler {
       db: db,
       baseDay: baseDay,
       now: now,
+      enabled: preferences.allNotifications && preferences.studyReminders,
       isCancelled: isCancelled,
     );
     if (_isCancelled(isCancelled)) return;
@@ -159,6 +185,7 @@ class NotificationModuleReconciler {
       db: db,
       baseDay: baseDay,
       now: now,
+      enabled: preferences.allNotifications && preferences.medicationReminders,
       isCancelled: isCancelled,
     );
     if (_isCancelled(isCancelled)) return;
@@ -168,6 +195,7 @@ class NotificationModuleReconciler {
       db: db,
       baseDay: baseDay,
       now: now,
+      enabled: preferences.allNotifications && preferences.habitReminders,
       isCancelled: isCancelled,
     );
   }
@@ -177,11 +205,22 @@ class NotificationModuleReconciler {
     required AppDatabase db,
     required DateTime baseDay,
     required DateTime now,
+    required bool enabled,
     required bool Function()? isCancelled,
   }) async {
     final validIds = <String>{};
 
     try {
+      if (!enabled) {
+        await _deleteOrphans(
+          repository: repository,
+          prefix: 'exam_',
+          validIds: validIds,
+          isCancelled: isCancelled,
+        );
+        return;
+      }
+
       final subjects = await db.select(db.subjects).get();
       if (_isCancelled(isCancelled)) return;
 
@@ -237,11 +276,22 @@ class NotificationModuleReconciler {
     required AppDatabase db,
     required DateTime baseDay,
     required DateTime now,
+    required bool enabled,
     required bool Function()? isCancelled,
   }) async {
     final validIds = <String>{};
 
     try {
+      if (!enabled) {
+        await _deleteOrphans(
+          repository: repository,
+          prefix: 'health_med_',
+          validIds: validIds,
+          isCancelled: isCancelled,
+        );
+        return;
+      }
+
       final medications = await db.select(db.medications).get();
       if (_isCancelled(isCancelled)) return;
 
@@ -304,11 +354,22 @@ class NotificationModuleReconciler {
     required AppDatabase db,
     required DateTime baseDay,
     required DateTime now,
+    required bool enabled,
     required bool Function()? isCancelled,
   }) async {
     final validIds = <String>{};
 
     try {
+      if (!enabled) {
+        await _deleteOrphans(
+          repository: repository,
+          prefix: 'habit_',
+          validIds: validIds,
+          isCancelled: isCancelled,
+        );
+        return;
+      }
+
       final habits = await db.select(db.habits).get();
       if (_isCancelled(isCancelled)) return;
 

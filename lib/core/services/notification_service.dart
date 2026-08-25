@@ -2,17 +2,19 @@ import 'dart:io';
 import 'dart:math';
 
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:life_os/core/services/notification_preferences.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:timezone/data/latest_all.dart' as tz;
 import 'package:timezone/timezone.dart' as tz;
 
 class NotificationService {
-  NotificationService();
+  NotificationService({FlutterLocalNotificationsPlugin? notificationsPlugin})
+    : _notificationsPlugin =
+          notificationsPlugin ?? FlutterLocalNotificationsPlugin();
 
   static final NotificationService instance = NotificationService();
 
-  final FlutterLocalNotificationsPlugin _notificationsPlugin =
-      FlutterLocalNotificationsPlugin();
+  final FlutterLocalNotificationsPlugin _notificationsPlugin;
 
   bool _initialized = false;
 
@@ -111,17 +113,9 @@ class NotificationService {
     int? id,
   }) async {
     try {
+      if (!await _isEnabled(preferenceKey)) return;
+
       await init();
-
-      if (preferenceKey != null) {
-        final SharedPreferences prefs = await SharedPreferences.getInstance();
-
-        final bool isEnabled = prefs.getBool(preferenceKey) ?? true;
-
-        if (!isEnabled) {
-          return;
-        }
-      }
 
       const AndroidNotificationDetails androidDetails =
           AndroidNotificationDetails(
@@ -161,17 +155,11 @@ class NotificationService {
     bool repeatDaily = false,
   }) async {
     try {
+      final medicationPreference =
+          preferenceKey ?? NotificationPreferenceKeys.medicationReminders;
+      if (!await _isEnabled(medicationPreference)) return;
+
       await init();
-
-      if (preferenceKey != null) {
-        final SharedPreferences prefs = await SharedPreferences.getInstance();
-
-        final bool isEnabled = prefs.getBool(preferenceKey) ?? true;
-
-        if (!isEnabled) {
-          return;
-        }
-      }
 
       DateTime validDate = scheduledDate;
 
@@ -239,5 +227,17 @@ class NotificationService {
     } catch (_) {
       // Não propagar erro para o fluxo principal.
     }
+  }
+
+  Future<bool> _isEnabled(String? preferenceKey) async {
+    final preferences = await SharedPreferences.getInstance();
+    final allEnabled =
+        preferences.getBool(NotificationPreferenceKeys.allNotifications) ??
+        true;
+
+    if (!allEnabled) return false;
+    if (preferenceKey == null) return true;
+
+    return preferences.getBool(preferenceKey) ?? true;
   }
 }
