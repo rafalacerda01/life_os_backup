@@ -1,11 +1,11 @@
 import 'dart:async';
 import 'dart:convert';
 
-import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_app_check/firebase_app_check.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:http/http.dart' as http;
 import 'package:life_os/core/utils/app_logger.dart';
+import 'package:life_os/features/health/data/models/health_model.dart';
 
 // ============================================================================
 // EXCEÇÕES DO AI COMPANION
@@ -92,6 +92,185 @@ class AIConsentRequiredException extends AICompanionException {
 typedef AIIdTokenProvider = Future<String?> Function();
 typedef AIAppCheckTokenProvider = Future<String?> Function();
 
+enum AIRelevantDomain {
+  finance,
+  hydration,
+  moodWellbeing,
+  cycle,
+  medications,
+  productivity,
+  habits,
+  tasks,
+  study,
+  goals,
+  foodWellbeing,
+  lifeOs,
+}
+
+String normalizeAIMessage(String message) {
+  return message
+      .trim()
+      .toLowerCase()
+      .replaceAll(RegExp('[áàâãä]'), 'a')
+      .replaceAll(RegExp('[éèêë]'), 'e')
+      .replaceAll(RegExp('[íìîï]'), 'i')
+      .replaceAll(RegExp('[óòôõö]'), 'o')
+      .replaceAll(RegExp('[úùûü]'), 'u')
+      .replaceAll('ç', 'c');
+}
+
+bool _containsAnyTerm(String message, Iterable<String> terms) {
+  return terms.any(
+    (term) => RegExp(
+      '(?:^|[^a-z0-9])${RegExp.escape(term)}(?:\$|[^a-z0-9])',
+    ).hasMatch('$message '),
+  );
+}
+
+Set<AIRelevantDomain> detectAIRelevantDomains(String message) {
+  final normalized = normalizeAIMessage(message);
+  final domains = <AIRelevantDomain>{};
+
+  if (_containsAnyTerm(normalized, const [
+    'saldo',
+    'gasto',
+    'gastos',
+    'dinheiro',
+    'financa',
+    'financas',
+    'despesa',
+    'despesas',
+    'orcamento',
+    'transacao',
+    'transacoes',
+    'economizar',
+  ])) {
+    domains.add(AIRelevantDomain.finance);
+  }
+  if (_containsAnyTerm(normalized, const [
+    'agua',
+    'hidratacao',
+    'hidratar',
+    'sede',
+    'ml',
+  ])) {
+    domains.add(AIRelevantDomain.hydration);
+  }
+  if (_containsAnyTerm(normalized, const [
+    'humor',
+    'animo',
+    'estresse',
+    'energia',
+    'bem-estar',
+    'bem estar',
+    'cansaco',
+    'cansada',
+    'cansado',
+    'saude',
+  ])) {
+    domains.add(AIRelevantDomain.moodWellbeing);
+  }
+  if (_containsAnyTerm(normalized, const [
+    'menstruacao',
+    'menstrual',
+    'menstruada',
+    'ciclo',
+    'fase do ciclo',
+    'tpm',
+    'ovulacao',
+    'ovulando',
+    'lutea',
+    'folicular',
+  ])) {
+    domains.add(AIRelevantDomain.cycle);
+  }
+  if (_containsAnyTerm(normalized, const [
+    'medicamento',
+    'medicamentos',
+    'remedio',
+    'remedios',
+    'medicacao',
+    'comprimido',
+  ])) {
+    domains.add(AIRelevantDomain.medications);
+  }
+  if (_containsAnyTerm(normalized, const [
+    'rotina',
+    'produtividade',
+    'foco',
+    'disciplina',
+    'planejamento',
+    'organizacao',
+  ])) {
+    domains.add(AIRelevantDomain.productivity);
+  }
+  if (_containsAnyTerm(normalized, const ['habito', 'habitos'])) {
+    domains.add(AIRelevantDomain.habits);
+  }
+  if (_containsAnyTerm(normalized, const ['tarefa', 'tarefas'])) {
+    domains.add(AIRelevantDomain.tasks);
+  }
+  if (_containsAnyTerm(normalized, const ['estudo', 'estudos', 'estudar'])) {
+    domains.add(AIRelevantDomain.study);
+  }
+  if (_containsAnyTerm(normalized, const ['meta', 'metas', 'objetivo'])) {
+    domains.add(AIRelevantDomain.goals);
+  }
+  if (_containsAnyTerm(normalized, const [
+    'life os',
+    'companion',
+    'core',
+    'aplicativo',
+  ])) {
+    domains.add(AIRelevantDomain.lifeOs);
+  }
+
+  final hasFoodTerm = _containsAnyTerm(normalized, const [
+    'comer',
+    'alimentacao',
+    'lanche',
+    'fome',
+    'apetite',
+    'chocolate',
+    'doce',
+    'cafe',
+    'refeicao',
+    'bolo',
+  ]);
+  final isGeneralCooking =
+      hasFoodTerm &&
+      _containsAnyTerm(normalized, const [
+        'receita',
+        'como fazer',
+        'como faco',
+        'ingredientes',
+        'modo de preparo',
+        'passo a passo',
+        'assar',
+        'cozinhar',
+      ]);
+  const foodContextDomains = {
+    AIRelevantDomain.hydration,
+    AIRelevantDomain.moodWellbeing,
+    AIRelevantDomain.cycle,
+    AIRelevantDomain.productivity,
+    AIRelevantDomain.study,
+    AIRelevantDomain.habits,
+  };
+  final hasFoodContext =
+      domains.any(foodContextDomains.contains) ||
+      _containsAnyTerm(normalized, const ['fome', 'apetite']);
+
+  if (isGeneralCooking && !hasFoodContext) {
+    return const <AIRelevantDomain>{};
+  }
+  if (hasFoodTerm && hasFoodContext) {
+    domains.add(AIRelevantDomain.foodWellbeing);
+  }
+
+  return domains;
+}
+
 class AICompanionRepository {
   final http.Client client;
   final AIIdTokenProvider _idTokenProvider;
@@ -113,8 +292,9 @@ class AICompanionRepository {
   // ==========================================================================
 
   Future<Map<String, dynamic>> getSystemContext({
+    required String message,
     required bool hasConsent,
-    dynamic health,
+    HealthModel? health,
     List medications = const [],
     Map<String, dynamic>? finance,
   }) async {
@@ -130,71 +310,89 @@ class AICompanionRepository {
       throw const AIConsentRequiredException();
     }
 
-    final Map<String, dynamic> healthContext = {};
+    final domains = detectAIRelevantDomains(message);
+    final context = <String, dynamic>{};
 
-    // ------------------------------------------------------------------------
-    // 1. SAÚDE E MEDICAMENTOS
-    // ------------------------------------------------------------------------
-
-    if (health != null) {
-      healthContext["humor"] = health.mood.isNotEmpty
-          ? health.mood
-          : "Ainda não registrado";
-
-      healthContext["hidratacao"] = "${health.waterIntakeMl}ml";
-
-      healthContext["medicamentos"] = medications.isNotEmpty
-          ? medications.map((m) => m.name).join(', ')
-          : "Nenhum medicamento ativo";
-    } else {
-      healthContext["humor"] = "Dados indisponíveis";
-      healthContext["hidratacao"] = "0ml";
-      healthContext["medicamentos"] = "Dados indisponíveis";
-    }
-
-    // ------------------------------------------------------------------------
-    // 2. FINANÇAS
-    // ------------------------------------------------------------------------
-
-    healthContext["financas"] = finance ?? "Dados indisponíveis";
-
-    // ------------------------------------------------------------------------
-    // 3. DADOS EXTRAS DO USUÁRIO
-    // ------------------------------------------------------------------------
-
-    try {
-      final user = FirebaseAuth.instance.currentUser;
-
-      if (user != null) {
-        final userDoc = await FirebaseFirestore.instance
-            .collection('users')
-            .doc(user.uid)
-            .get()
-            .timeout(
-              _networkTimeout,
-              onTimeout: () => throw const AITimeoutException(),
-            );
-
-        if (userDoc.exists) {
-          healthContext["ciclo_menstrual"] =
-              userDoc.data()?['menstrualCycle'] ?? "Não rastreado";
-        }
+    if (domains.contains(AIRelevantDomain.finance)) {
+      final safeFinance = _minimizeFinance(finance);
+      if (safeFinance != null) {
+        context['financas'] = safeFinance;
       }
-    } catch (e, stack) {
-      AppLogger.e('Erro ao buscar contexto para IA', e, stack);
-
-      healthContext["ciclo_menstrual"] = "Erro ao carregar";
     }
 
-    // ------------------------------------------------------------------------
-    // METADADOS
-    // ------------------------------------------------------------------------
+    if (domains.contains(AIRelevantDomain.hydration) && health != null) {
+      context['hidratacao_ml'] = health.waterIntakeMl.clamp(0, 100000);
+    }
 
-    healthContext["data_coleta"] = DateTime.now().toIso8601String();
+    if (domains.contains(AIRelevantDomain.moodWellbeing) && health != null) {
+      final mood = health.mood.trim();
+      if (mood.isNotEmpty && mood != '—') {
+        context['humor'] = mood.length <= 80 ? mood : mood.substring(0, 80);
+      }
+    }
 
-    healthContext["status"] = "Online";
+    if (domains.contains(AIRelevantDomain.medications)) {
+      context['medicamentos_ativos'] = medications.length.clamp(0, 1000);
+    }
 
-    return healthContext;
+    if (domains.contains(AIRelevantDomain.cycle) && health != null) {
+      final cyclePhase = _normalizedCyclePhase(health);
+      if (cyclePhase != null) {
+        context['fase_ciclo'] = cyclePhase;
+      }
+    }
+
+    return context;
+  }
+
+  Map<String, num>? _minimizeFinance(Map<String, dynamic>? finance) {
+    if (finance == null) {
+      return null;
+    }
+
+    final balance = finance['saldo_atual'];
+    final income = finance['total_entradas'];
+    final expenses = finance['total_saidas'];
+    if (balance is! num ||
+        !balance.isFinite ||
+        income is! num ||
+        !income.isFinite ||
+        expenses is! num ||
+        !expenses.isFinite) {
+      return null;
+    }
+
+    return {
+      'saldo_atual': balance,
+      'total_entradas': income,
+      'total_saidas': expenses,
+    };
+  }
+
+  String? _normalizedCyclePhase(HealthModel health) {
+    final phaseInfo = health.cyclePhaseInfo;
+    if (phaseInfo['isEnabled'] != true) {
+      return null;
+    }
+
+    final name = phaseInfo['name'];
+    if (name is! String) {
+      return null;
+    }
+    if (name.startsWith('Fase Menstrual')) {
+      return 'menstrual';
+    }
+    if (name.startsWith('Fase Folicular')) {
+      return 'follicular';
+    }
+    if (name.startsWith('Fase Ovulatória')) {
+      return 'ovulatory';
+    }
+    if (name.startsWith('Fase Lútea')) {
+      return 'luteal';
+    }
+
+    return null;
   }
 
   // ==========================================================================

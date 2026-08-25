@@ -361,6 +361,17 @@ class _AICompanionScreenState extends ConsumerState<AICompanionScreen> {
       final medications = medicationsAsyncValue.asData?.value ?? [];
       final transactions = financeAsyncValue.asData?.value ?? [];
 
+      final now = DateTime.now();
+      final activeMedications = medications
+          .where((medication) {
+            final hasStarted = !medication.startDate.isAfter(now);
+            final hasNotEnded =
+                medication.endDate == null ||
+                !medication.endDate!.isBefore(now);
+            return hasStarted && hasNotEnded;
+          })
+          .toList(growable: false);
+
       // ----------------------------------------------------------------------
       // 3. CÁLCULO FINANCEIRO
       // ----------------------------------------------------------------------
@@ -393,9 +404,10 @@ class _AICompanionScreenState extends ConsumerState<AICompanionScreen> {
       final repository = ref.read(aiCompanionRepositoryProvider);
 
       final contextData = await repository.getSystemContext(
+        message: text,
         hasConsent: hasConsented,
         health: health,
-        medications: medications,
+        medications: activeMedications,
         finance: financeSummary,
       );
 
