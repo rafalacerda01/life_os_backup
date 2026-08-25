@@ -1,3 +1,47 @@
+import java.io.FileInputStream
+import java.util.Properties
+
+val keyProperties = Properties()
+val keyPropertiesFile = rootProject.file("key.properties")
+
+if (keyPropertiesFile.isFile) {
+    FileInputStream(keyPropertiesFile).use { keyProperties.load(it) }
+}
+
+fun releaseSigningProperty(name: String): String? =
+    keyProperties.getProperty(name)?.trim()?.takeIf { it.isNotEmpty() }
+
+fun validateReleaseSigning() {
+    if (!keyPropertiesFile.isFile) {
+        throw GradleException(
+            "Assinatura release não configurada: android/key.properties está ausente.",
+        )
+    }
+
+    val requiredProperties = listOf(
+        "keyAlias",
+        "keyPassword",
+        "storeFile",
+        "storePassword",
+    )
+    val missingProperties = requiredProperties.filter {
+        releaseSigningProperty(it) == null
+    }
+
+    if (missingProperties.isNotEmpty()) {
+        throw GradleException(
+            "Assinatura release não configurada: propriedades obrigatórias ausentes.",
+        )
+    }
+
+    val configuredStoreFile = file(releaseSigningProperty("storeFile")!!)
+    if (!configuredStoreFile.isFile) {
+        throw GradleException(
+            "Assinatura release não configurada: o keystore indicado não existe.",
+        )
+    }
+}
+
 plugins {
     id("com.android.application")
     id("com.google.gms.google-services")
@@ -25,10 +69,25 @@ android {
         versionName = flutter.versionName
     }
 
+    signingConfigs {
+        create("release") {
+            keyAlias = releaseSigningProperty("keyAlias")
+            keyPassword = releaseSigningProperty("keyPassword")
+            storeFile = releaseSigningProperty("storeFile")?.let { file(it) }
+            storePassword = releaseSigningProperty("storePassword")
+        }
+    }
+
     buildTypes {
         release {
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.getByName("release")
         }
+    }
+}
+
+tasks.matching { it.name == "validateSigningRelease" }.configureEach {
+    doFirst {
+        validateReleaseSigning()
     }
 }
 

@@ -50,3 +50,6 @@ app.*.map.json
 .env.*
 !.env.example
 .env*
+android/key.properties
+*.jks
+*.keystore
