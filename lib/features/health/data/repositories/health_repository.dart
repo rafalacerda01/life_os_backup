@@ -370,7 +370,7 @@ class HealthRepository {
         }),
       );
 
-      AppLogger.i('Medicamento $firestoreId salvo localmente com sucesso.');
+      AppLogger.i('Medicamento salvo localmente com sucesso.');
 
       // =====================================================================
       // 2. NOTIFICAÇÃO LOCAL
@@ -381,7 +381,9 @@ class HealthRepository {
       //
 
       try {
-        final permissionGranted = await _notifService.requestPermissions();
+        final permissionGranted = await _notifService.requestPermissions(
+          preferenceKey: NotificationPreferenceKeys.medicationReminders,
+        );
 
         if (!permissionGranted) {
           AppLogger.w(
@@ -391,7 +393,9 @@ class HealthRepository {
           return;
         }
 
-        await _notifService.scheduleMedicationNotification(
+        await _notifService.requestExactAlarmPermission();
+
+        final scheduled = await _notifService.scheduleMedicationNotification(
           id: _notificationIdForMedication(firestoreId),
           title: 'Hora do medicamento 💊',
           body: 'Está na hora de tomar: $cleanName',
@@ -400,14 +404,13 @@ class HealthRepository {
           preferenceKey: NotificationPreferenceKeys.medicationReminders,
         );
 
-        AppLogger.i('Notificação agendada para o medicamento $firestoreId.');
-      } catch (e, stack) {
-        AppLogger.e(
-          'Medicamento salvo, mas não foi possível '
-          'configurar a notificação.',
-          e,
-          stack,
-        );
+        if (scheduled) {
+          AppLogger.i('Lembrete de medicamento agendado com sucesso.');
+        } else {
+          AppLogger.w('Medicamento salvo sem lembrete local agendado.');
+        }
+      } catch (_) {
+        AppLogger.w('Medicamento salvo sem lembrete local agendado.');
       }
     } catch (e, stack) {
       AppLogger.e('Erro ao adicionar medicamento.', e, stack);
@@ -781,7 +784,7 @@ class HealthRepository {
         );
 
     try {
-      await _notifService.scheduleMedicationNotification(
+      final scheduled = await _notifService.scheduleMedicationNotification(
         id: _notificationIdForMedication(doc.id),
         title: 'Hora do medicamento 💊',
         body: 'Está na hora de tomar: $name',
@@ -789,13 +792,12 @@ class HealthRepository {
         repeatDaily: true,
         preferenceKey: NotificationPreferenceKeys.medicationReminders,
       );
-    } catch (e, stack) {
-      AppLogger.e(
-        'Medicamento sincronizado, mas não foi possível '
-        'agendar sua notificação.',
-        e,
-        stack,
-      );
+
+      if (!scheduled) {
+        AppLogger.w('Medicamento sincronizado sem lembrete local agendado.');
+      }
+    } catch (_) {
+      AppLogger.w('Medicamento sincronizado sem lembrete local agendado.');
     }
   }
 

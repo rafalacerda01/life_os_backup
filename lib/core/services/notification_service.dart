@@ -7,14 +7,42 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:timezone/data/latest_all.dart' as tz;
 import 'package:timezone/timezone.dart' as tz;
 
+DateTime nextDailyMedicationOccurrence(DateTime scheduledDate, DateTime now) {
+  if (!scheduledDate.isBefore(now)) return scheduledDate;
+
+  final todayAtScheduledTime = DateTime(
+    now.year,
+    now.month,
+    now.day,
+    scheduledDate.hour,
+    scheduledDate.minute,
+  );
+
+  if (!todayAtScheduledTime.isBefore(now)) return todayAtScheduledTime;
+
+  return DateTime(
+    now.year,
+    now.month,
+    now.day + 1,
+    scheduledDate.hour,
+    scheduledDate.minute,
+  );
+}
+
 class NotificationService {
-  NotificationService({FlutterLocalNotificationsPlugin? notificationsPlugin})
-    : _notificationsPlugin =
-          notificationsPlugin ?? FlutterLocalNotificationsPlugin();
+  NotificationService({
+    FlutterLocalNotificationsPlugin? notificationsPlugin,
+    AndroidFlutterLocalNotificationsPlugin? androidPlugin,
+    this.isAndroidOverride,
+  }) : _androidPluginOverride = androidPlugin,
+       _notificationsPlugin =
+           notificationsPlugin ?? FlutterLocalNotificationsPlugin();
 
   static final NotificationService instance = NotificationService();
 
   final FlutterLocalNotificationsPlugin _notificationsPlugin;
+  final AndroidFlutterLocalNotificationsPlugin? _androidPluginOverride;
+  final bool? isAndroidOverride;
 
   bool _initialized = false;
 
@@ -52,16 +80,14 @@ class NotificationService {
   // PERMISSÕES
   // ---------------------------------------------------------------------------
 
-  Future<bool> requestPermissions() async {
+  Future<bool> requestPermissions({String? preferenceKey}) async {
     try {
+      if (!await _isEnabled(preferenceKey)) return false;
+
       await init();
 
-      if (Platform.isAndroid) {
-        final AndroidFlutterLocalNotificationsPlugin? androidPlugin =
-            _notificationsPlugin
-                .resolvePlatformSpecificImplementation<
-                  AndroidFlutterLocalNotificationsPlugin
-                >();
+      if (_isAndroid) {
+        final androidPlugin = _androidPlugin;
 
         if (androidPlugin == null) {
           return false;
@@ -98,6 +124,26 @@ class NotificationService {
     } catch (_) {
       // A falha na permissão NÃO deve impedir o cadastro
       // de medicamentos ou qualquer outra operação do aplicativo.
+      return false;
+    }
+  }
+
+  Future<bool> requestExactAlarmPermission() async {
+    try {
+      await init();
+
+      if (!_isAndroid) return true;
+
+      final androidPlugin = _androidPlugin;
+      if (androidPlugin == null) return false;
+
+      final canSchedule = await androidPlugin.canScheduleExactNotifications();
+      if (canSchedule == true) return true;
+
+      await androidPlugin.requestExactAlarmsPermission();
+
+      return await androidPlugin.canScheduleExactNotifications() == true;
+    } catch (_) {
       return false;
     }
   }
@@ -146,7 +192,7 @@ class NotificationService {
   // NOTIFICAÇÃO DE MEDICAMENTO
   // ---------------------------------------------------------------------------
 
-  Future<void> scheduleMedicationNotification({
+  Future<bool> scheduleMedicationNotification({
     required int id,
     required String title,
     required String body,
@@ -157,14 +203,23 @@ class NotificationService {
     try {
       final medicationPreference =
           preferenceKey ?? NotificationPreferenceKeys.medicationReminders;
-      if (!await _isEnabled(medicationPreference)) return;
+      if (!await _isEnabled(medicationPreference)) return false;
 
       await init();
 
-      DateTime validDate = scheduledDate;
+      var scheduleMode = AndroidScheduleMode.exactAllowWhileIdle;
+      if (_isAndroid) {
+        scheduleMode = await _canScheduleExactNotifications()
+            ? AndroidScheduleMode.exactAllowWhileIdle
+            : AndroidScheduleMode.inexactAllowWhileIdle;
+      }
 
-      // Se o horário já passou hoje, agenda para amanhã.
-      if (validDate.isBefore(DateTime.now())) {
+      final now = DateTime.now();
+      DateTime validDate = repeatDaily
+          ? nextDailyMedicationOccurrence(scheduledDate, now)
+          : scheduledDate;
+
+      if (!repeatDaily && validDate.isBefore(now)) {
         validDate = validDate.add(const Duration(days: 1));
       }
 
@@ -189,15 +244,17 @@ class NotificationService {
         scheduledDate: tz.TZDateTime.from(validDate, tz.local),
         notificationDetails: notificationDetails,
 
-        // Mantém o agendamento exato.
-        androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
+        androidScheduleMode: scheduleMode,
 
         matchDateTimeComponents: repeatDaily ? DateTimeComponents.time : null,
       );
+
+      return true;
     } catch (_) {
       // O medicamento já foi salvo.
       // Uma falha no sistema de notificações não pode
       // cancelar ou quebrar o cadastro.
+      return false;
     }
   }
 
@@ -239,5 +296,22 @@ class NotificationService {
     if (preferenceKey == null) return true;
 
     return preferences.getBool(preferenceKey) ?? true;
+  }
+
+  bool get _isAndroid => isAndroidOverride ?? Platform.isAndroid;
+
+  AndroidFlutterLocalNotificationsPlugin? get _androidPlugin =>
+      _androidPluginOverride ??
+      _notificationsPlugin
+          .resolvePlatformSpecificImplementation<
+            AndroidFlutterLocalNotificationsPlugin
+          >();
+
+  Future<bool> _canScheduleExactNotifications() async {
+    try {
+      return await _androidPlugin?.canScheduleExactNotifications() == true;
+    } catch (_) {
+      return false;
+    }
   }
 }

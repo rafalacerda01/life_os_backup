@@ -10,8 +10,26 @@ import 'package:life_os/features/checkin/presentation/checkin_screen.dart';
 import 'package:life_os/features/health/data/models/health_model.dart';
 import 'package:life_os/features/health/presentation/providers/health_provider.dart';
 
+typedef MedicationAdder =
+    Future<void> Function(String name, DateTime startDate, int? durationDays);
+typedef MedicationTimePicker =
+    Future<TimeOfDay?> Function(BuildContext context);
+
+DateTime combineMedicationDateAndTime(DateTime date, TimeOfDay time) {
+  return DateTime(date.year, date.month, date.day, time.hour, time.minute);
+}
+
 class HealthScreen extends ConsumerWidget {
-  const HealthScreen({super.key});
+  const HealthScreen({
+    super.key,
+    this.medicationAdder,
+    this.medicationTimePicker,
+    this.clock,
+  });
+
+  final MedicationAdder? medicationAdder;
+  final MedicationTimePicker? medicationTimePicker;
+  final DateTime Function()? clock;
 
   static const Color _background = Color(0xFF070B14);
   static const Color _surface = Color(0xFF11182E);
@@ -81,7 +99,8 @@ class HealthScreen extends ConsumerWidget {
     final nameController = TextEditingController();
     final durationController = TextEditingController();
 
-    DateTime startDate = DateTime.now();
+    DateTime startDate = (clock ?? DateTime.now)();
+    TimeOfDay? reminderTime;
 
     showDialog<void>(
       context: parentContext,
@@ -185,6 +204,69 @@ class HealthScreen extends ConsumerWidget {
                         ),
                       ),
                     ),
+                    const SizedBox(height: 18),
+                    const Text(
+                      'Horário do lembrete',
+                      style: TextStyle(color: Colors.white54, fontSize: 12),
+                    ),
+                    const SizedBox(height: 8),
+                    InkWell(
+                      borderRadius: BorderRadius.circular(14),
+                      onTap: () async {
+                        FocusManager.instance.primaryFocus?.unfocus();
+
+                        final picker = medicationTimePicker;
+                        final picked = picker == null
+                            ? await showTimePicker(
+                                context: parentContext,
+                                initialTime: reminderTime ?? TimeOfDay.now(),
+                              )
+                            : await picker(parentContext);
+
+                        if (picked != null) {
+                          setModalState(() {
+                            reminderTime = picked;
+                          });
+                        }
+                      },
+                      child: Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 16,
+                          vertical: 14,
+                        ),
+                        decoration: BoxDecoration(
+                          color: _background,
+                          borderRadius: BorderRadius.circular(14),
+                          border: Border.all(color: Colors.white10),
+                        ),
+                        child: Row(
+                          children: [
+                            const Icon(
+                              Icons.schedule_rounded,
+                              color: _green,
+                              size: 18,
+                            ),
+                            const SizedBox(width: 10),
+                            Text(
+                              reminderTime?.format(modalContext) ??
+                                  'Selecionar horário',
+                              style: TextStyle(
+                                color: reminderTime == null
+                                    ? Colors.white54
+                                    : Colors.white,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                            const Spacer(),
+                            const Icon(
+                              Icons.chevron_right_rounded,
+                              color: Colors.white38,
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
                   ],
                 ),
               ),
@@ -245,6 +327,21 @@ class HealthScreen extends ConsumerWidget {
                       return;
                     }
 
+                    final selectedTime = reminderTime;
+                    if (selectedTime == null) {
+                      _showSnackBar(
+                        parentContext,
+                        'Selecione o horário do lembrete.',
+                        error: true,
+                      );
+                      return;
+                    }
+
+                    final scheduledStart = combineMedicationDateAndTime(
+                      startDate,
+                      selectedTime,
+                    );
+
                     final medicationsAsync = ref.read(
                       medicationsStreamProvider,
                     );
@@ -292,9 +389,18 @@ class HealthScreen extends ConsumerWidget {
                     final navigator = Navigator.of(dialogContext);
 
                     try {
-                      await ref
-                          .read(healthRepositoryProvider)
-                          .addMedication(cleanName, startDate, duration);
+                      final addMedication = medicationAdder;
+                      if (addMedication == null) {
+                        await ref
+                            .read(healthRepositoryProvider)
+                            .addMedication(cleanName, scheduledStart, duration);
+                      } else {
+                        await addMedication(
+                          cleanName,
+                          scheduledStart,
+                          duration,
+                        );
+                      }
 
                       if (dialogContext.mounted) {
                         navigator.pop();

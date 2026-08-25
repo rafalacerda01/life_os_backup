@@ -7,12 +7,14 @@ import 'package:drift/native.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:life_os/core/database/app_database.dart';
+import 'package:life_os/core/services/notification_preferences.dart';
 import 'package:life_os/core/services/notification_service.dart';
 import 'package:life_os/core/services/sync_manager.dart';
 import 'package:life_os/core/services/sync_operation_result.dart';
 import 'package:life_os/core/services/sync_queue_store.dart';
 import 'package:life_os/core/services/sync_remote_data_source.dart';
 import 'package:life_os/features/health/data/repositories/health_repository.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 class FakeFirebaseUser extends Fake implements User {
   @override
@@ -166,6 +168,54 @@ class FakeSyncManager extends SyncManager {
   }
 }
 
+class _RecordingNotificationService extends NotificationService {
+  bool notificationPermissionGranted = true;
+  bool exactPermissionGranted = true;
+  bool scheduleResult = true;
+  int notificationPermissionRequests = 0;
+  int platformPermissionRequests = 0;
+  int exactPermissionRequests = 0;
+  int scheduleCalls = 0;
+  String? lastPermissionPreferenceKey;
+
+  @override
+  Future<bool> requestPermissions({String? preferenceKey}) async {
+    notificationPermissionRequests += 1;
+    lastPermissionPreferenceKey = preferenceKey;
+
+    final preferences = await SharedPreferences.getInstance();
+    final allEnabled =
+        preferences.getBool(NotificationPreferenceKeys.allNotifications) ??
+        true;
+    final categoryEnabled = preferenceKey == null
+        ? true
+        : preferences.getBool(preferenceKey) ?? true;
+    if (!allEnabled || !categoryEnabled) return false;
+
+    platformPermissionRequests += 1;
+    return notificationPermissionGranted;
+  }
+
+  @override
+  Future<bool> requestExactAlarmPermission() async {
+    exactPermissionRequests += 1;
+    return exactPermissionGranted;
+  }
+
+  @override
+  Future<bool> scheduleMedicationNotification({
+    required int id,
+    required String title,
+    required String body,
+    required DateTime scheduledDate,
+    String? preferenceKey,
+    bool repeatDaily = false,
+  }) async {
+    scheduleCalls += 1;
+    return scheduleResult;
+  }
+}
+
 class _MutableClock {
   DateTime value;
 
@@ -180,17 +230,18 @@ void main() {
   late FakeFirebaseUser user;
   late _RecordingFirestore firestore;
   late FakeSyncManager syncManager;
+  late _RecordingNotificationService notificationService;
   late HealthRepository repository;
   late _MutableClock clock;
 
   void configureRepositoryWithHealthDocuments(
-    List<QueryDocumentSnapshot<Map<String, dynamic>>> healthDocuments,
-  ) {
+    List<QueryDocumentSnapshot<Map<String, dynamic>>> healthDocuments, {
+    List<QueryDocumentSnapshot<Map<String, dynamic>>> medicationDocuments =
+        const [],
+  }) {
     final medications = _RecordingCollectionReference(
       name: 'medications',
-      snapshot: _RecordingQuerySnapshot(
-        const <QueryDocumentSnapshot<Map<String, dynamic>>>[],
-      ),
+      snapshot: _RecordingQuerySnapshot(medicationDocuments),
     );
     final healthInfo = _RecordingCollectionReference(
       name: 'health_info',
@@ -207,7 +258,7 @@ void main() {
 
     firestore = _RecordingFirestore(usersCollection);
     repository = HealthRepository(
-      NotificationService(),
+      notificationService,
       firestore,
       auth,
       db,
@@ -217,10 +268,12 @@ void main() {
   }
 
   setUp(() {
+    SharedPreferences.setMockInitialValues(<String, Object>{});
     db = AppDatabase(executor: NativeDatabase.memory());
     user = FakeFirebaseUser();
     auth = FakeFirebaseAuth(user);
     syncManager = FakeSyncManager();
+    notificationService = _RecordingNotificationService();
     clock = _MutableClock(DateTime.utc(2026, 8, 21, 10));
 
     final emptyMedications = _RecordingCollectionReference(
@@ -246,7 +299,7 @@ void main() {
     firestore = _RecordingFirestore(emptyUsersCollection);
 
     repository = HealthRepository(
-      NotificationService(),
+      notificationService,
       firestore,
       auth,
       db,
@@ -457,4 +510,124 @@ void main() {
       expect(rebuilt.menstrualCycle?['periodLengthDays'], 7);
     },
   );
+
+  test('permissão normal negada preserva medicamento salvo', () async {
+    notificationService.notificationPermissionGranted = false;
+
+    await repository.addMedication(
+      'Medicamento de teste',
+      DateTime(2026, 8, 25, 21),
+      7,
+    );
+
+    expect(await db.select(db.medications).get(), hasLength(1));
+    expect(notificationService.notificationPermissionRequests, 1);
+    expect(notificationService.platformPermissionRequests, 1);
+    expect(
+      notificationService.lastPermissionPreferenceKey,
+      NotificationPreferenceKeys.medicationReminders,
+    );
+    expect(notificationService.exactPermissionRequests, 0);
+    expect(notificationService.scheduleCalls, 0);
+  });
+
+  test(
+    'preferência global off salva sem pedir permissões ou agendar',
+    () async {
+      SharedPreferences.setMockInitialValues(<String, Object>{
+        NotificationPreferenceKeys.allNotifications: false,
+        NotificationPreferenceKeys.medicationReminders: true,
+      });
+
+      await repository.addMedication(
+        'Medicamento de teste',
+        DateTime(2026, 8, 25, 21),
+        null,
+      );
+
+      expect(await db.select(db.medications).get(), hasLength(1));
+      expect(notificationService.platformPermissionRequests, 0);
+      expect(notificationService.exactPermissionRequests, 0);
+      expect(notificationService.scheduleCalls, 0);
+    },
+  );
+
+  test('preferência de medicamento off salva sem pedir ou agendar', () async {
+    SharedPreferences.setMockInitialValues(<String, Object>{
+      NotificationPreferenceKeys.allNotifications: true,
+      NotificationPreferenceKeys.medicationReminders: false,
+    });
+
+    await repository.addMedication(
+      'Medicamento de teste',
+      DateTime(2026, 8, 25, 21),
+      null,
+    );
+
+    expect(await db.select(db.medications).get(), hasLength(1));
+    expect(notificationService.platformPermissionRequests, 0);
+    expect(notificationService.exactPermissionRequests, 0);
+    expect(notificationService.scheduleCalls, 0);
+  });
+
+  test('preferências on preservam fluxo completo de permissões', () async {
+    await repository.addMedication(
+      'Medicamento de teste',
+      DateTime(2026, 8, 25, 21),
+      null,
+    );
+
+    expect(await db.select(db.medications).get(), hasLength(1));
+    expect(notificationService.platformPermissionRequests, 1);
+    expect(notificationService.exactPermissionRequests, 1);
+    expect(notificationService.scheduleCalls, 1);
+  });
+
+  test('exact negado preserva medicamento e ainda tenta fallback', () async {
+    notificationService.exactPermissionGranted = false;
+
+    await repository.addMedication(
+      'Medicamento de teste',
+      DateTime(2026, 8, 25, 21),
+      null,
+    );
+
+    expect(await db.select(db.medications).get(), hasLength(1));
+    expect(notificationService.exactPermissionRequests, 1);
+    expect(notificationService.scheduleCalls, 1);
+  });
+
+  test('schedule false preserva medicamento salvo', () async {
+    notificationService.scheduleResult = false;
+
+    await repository.addMedication(
+      'Medicamento de teste',
+      DateTime(2026, 8, 25, 21),
+      null,
+    );
+
+    expect(await db.select(db.medications).get(), hasLength(1));
+    expect(notificationService.scheduleCalls, 1);
+  });
+
+  test('hidratação agenda sem solicitar permissão exact', () async {
+    configureRepositoryWithHealthDocuments(
+      const [],
+      medicationDocuments: [
+        _RecordingQueryDocumentSnapshot('remote-medication', {
+          'name': 'Medicamento remoto',
+          'startDate': Timestamp.fromDate(DateTime(2026, 8, 25, 21)),
+          'durationDays': 7,
+          'endDate': Timestamp.fromDate(DateTime(2026, 9, 1, 21)),
+        }),
+      ],
+    );
+
+    await repository.syncHealthFromFirebase();
+
+    final medication = await db.select(db.medications).getSingle();
+    expect(medication.startDate, DateTime(2026, 8, 25, 21));
+    expect(notificationService.scheduleCalls, 1);
+    expect(notificationService.exactPermissionRequests, 0);
+  });
 }

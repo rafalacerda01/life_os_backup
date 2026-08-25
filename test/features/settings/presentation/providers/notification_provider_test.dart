@@ -10,7 +10,7 @@ class _RecordingNotificationService extends NotificationService {
   int cancelAllCalls = 0;
 
   @override
-  Future<bool> requestPermissions() async {
+  Future<bool> requestPermissions({String? preferenceKey}) async {
     permissionRequests += 1;
     return true;
   }
