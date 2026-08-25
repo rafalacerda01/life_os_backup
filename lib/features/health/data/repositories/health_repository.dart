@@ -14,6 +14,7 @@ import 'package:life_os/core/services/notification_service.dart';
 import 'package:life_os/core/services/sync_manager.dart';
 import 'package:life_os/core/utils/app_logger.dart';
 import 'package:life_os/features/health/data/models/health_model.dart';
+import 'package:life_os/features/health/services/medication_reminder_lifecycle.dart';
 
 class HealthRepository {
   final NotificationService _notifService;
@@ -55,22 +56,6 @@ class HealthRepository {
 
   String? _getUserId() {
     return _auth.currentUser?.uid;
-  }
-
-  /// Gera um ID determinístico e compatível com o limite de 32 bits
-  /// normalmente utilizado pelos IDs de notificações Android.
-  int _notificationIdForMedication(String medicationId) {
-    const int offsetBasis = 2166136261;
-    const int prime = 16777619;
-
-    var hash = offsetBasis;
-
-    for (final byte in utf8.encode(medicationId)) {
-      hash ^= byte;
-      hash = (hash * prime) & 0x7fffffff;
-    }
-
-    return hash == 0 ? 1 : hash;
   }
 
   Map<String, dynamic>? _decodeCycleData(String? json) {
@@ -396,7 +381,7 @@ class HealthRepository {
         await _notifService.requestExactAlarmPermission();
 
         final scheduled = await _notifService.scheduleMedicationNotification(
-          id: _notificationIdForMedication(firestoreId),
+          id: notificationIdForMedication(firestoreId),
           title: 'Hora do medicamento 💊',
           body: 'Está na hora de tomar: $cleanName',
           scheduledDate: startDate,
@@ -459,10 +444,10 @@ class HealthRepository {
       try {
         if (cleanDocId.isNotEmpty) {
           await _notifService.cancelNotification(
-            _notificationIdForMedication(cleanDocId),
+            notificationIdForMedication(cleanDocId),
           );
 
-          AppLogger.i('Notificação cancelada para o medicamento $cleanDocId.');
+          AppLogger.i('Notificação de medicamento cancelada.');
         }
       } catch (e, stack) {
         AppLogger.e(
@@ -785,7 +770,7 @@ class HealthRepository {
 
     try {
       final scheduled = await _notifService.scheduleMedicationNotification(
-        id: _notificationIdForMedication(doc.id),
+        id: notificationIdForMedication(doc.id),
         title: 'Hora do medicamento 💊',
         body: 'Está na hora de tomar: $name',
         scheduledDate: startDate,

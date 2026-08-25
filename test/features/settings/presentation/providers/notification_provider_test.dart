@@ -2,22 +2,53 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:life_os/core/services/notification_preferences.dart';
 import 'package:life_os/core/services/notification_service.dart';
+import 'package:life_os/features/health/services/medication_reminder_lifecycle.dart';
 import 'package:life_os/features/settings/presentation/providers/notification_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 class _RecordingNotificationService extends NotificationService {
   int permissionRequests = 0;
+  int exactPermissionRequests = 0;
   int cancelAllCalls = 0;
+  bool permissionGranted = true;
+  String? lastPreferenceKey;
 
   @override
   Future<bool> requestPermissions({String? preferenceKey}) async {
     permissionRequests += 1;
-    return true;
+    lastPreferenceKey = preferenceKey;
+    return permissionGranted;
+  }
+
+  @override
+  Future<bool> requestExactAlarmPermission() async {
+    exactPermissionRequests += 1;
+    return false;
   }
 
   @override
   Future<void> cancelAllNotifications() async {
     cancelAllCalls += 1;
+  }
+}
+
+class _RecordingMedicationLifecycle implements MedicationReminderLifecycle {
+  int cancelCalls = 0;
+  int rebuildCalls = 0;
+
+  @override
+  Future<void> cancelAllMedicationReminders() async {
+    cancelCalls += 1;
+  }
+
+  @override
+  Future<MedicationReminderRebuildResult> rebuildMedicationReminders() async {
+    rebuildCalls += 1;
+    return const MedicationReminderRebuildResult(
+      eligible: 1,
+      scheduled: 1,
+      failed: 0,
+    );
   }
 }
 
@@ -62,10 +93,12 @@ void main() {
 
   test('preferência individual sobrevive a all off e all on', () async {
     final service = _RecordingNotificationService();
+    final lifecycle = _RecordingMedicationLifecycle();
     var refreshes = 0;
     final container = ProviderContainer(
       overrides: [
         notificationServiceProvider.overrideWithValue(service),
+        medicationReminderLifecycleProvider.overrideWithValue(lifecycle),
         notificationPreferencesChangedProvider.overrideWithValue(
           () => refreshes += 1,
         ),
@@ -84,15 +117,23 @@ void main() {
     expect(state.studyReminders, isFalse);
     expect(stored.studyReminders, isFalse);
     expect(state.allNotifications, isTrue);
+    expect(state.medicationReminders, isTrue);
+    expect(state.habitReminders, isTrue);
     expect(refreshes, 3);
     expect(service.cancelAllCalls, 1);
     expect(service.permissionRequests, 1);
+    expect(service.exactPermissionRequests, 1);
+    expect(lifecycle.rebuildCalls, 1);
   });
 
   test('toggle persiste e solicita reconcile sem reiniciar provider', () async {
+    final service = _RecordingNotificationService();
+    final lifecycle = _RecordingMedicationLifecycle();
     var refreshes = 0;
     final container = ProviderContainer(
       overrides: [
+        notificationServiceProvider.overrideWithValue(service),
+        medicationReminderLifecycleProvider.overrideWithValue(lifecycle),
         notificationPreferencesChangedProvider.overrideWithValue(
           () => refreshes += 1,
         ),
@@ -114,6 +155,123 @@ void main() {
       container.read(notificationsProvider).requireValue.medicationReminders,
       isFalse,
     );
+    expect(
+      container.read(notificationsProvider).requireValue.studyReminders,
+      isTrue,
+    );
+    expect(
+      container.read(notificationsProvider).requireValue.habitReminders,
+      isTrue,
+    );
     expect(refreshes, 1);
+    expect(lifecycle.cancelCalls, 1);
+    expect(service.cancelAllCalls, 0);
+  });
+
+  test('toggle medication on pede permissões, rebuild e reconcile', () async {
+    SharedPreferences.setMockInitialValues(<String, Object>{
+      NotificationPreferenceKeys.allNotifications: true,
+      NotificationPreferenceKeys.medicationReminders: false,
+    });
+    final service = _RecordingNotificationService();
+    final lifecycle = _RecordingMedicationLifecycle();
+    var refreshes = 0;
+    final container = ProviderContainer(
+      overrides: [
+        notificationServiceProvider.overrideWithValue(service),
+        medicationReminderLifecycleProvider.overrideWithValue(lifecycle),
+        notificationPreferencesChangedProvider.overrideWithValue(
+          () => refreshes += 1,
+        ),
+      ],
+    );
+    addTearDown(container.dispose);
+    await container.read(notificationsProvider.future);
+
+    await container.read(notificationsProvider.notifier).toggleMedication(true);
+
+    expect(service.permissionRequests, 1);
+    expect(
+      service.lastPreferenceKey,
+      NotificationPreferenceKeys.medicationReminders,
+    );
+    expect(service.exactPermissionRequests, 1);
+    expect(lifecycle.rebuildCalls, 1);
+    expect(refreshes, 1);
+  });
+
+  test('permissão normal negada não pede exact nem executa rebuild', () async {
+    SharedPreferences.setMockInitialValues(<String, Object>{
+      NotificationPreferenceKeys.allNotifications: true,
+      NotificationPreferenceKeys.medicationReminders: false,
+    });
+    final service = _RecordingNotificationService()..permissionGranted = false;
+    final lifecycle = _RecordingMedicationLifecycle();
+    final container = ProviderContainer(
+      overrides: [
+        notificationServiceProvider.overrideWithValue(service),
+        medicationReminderLifecycleProvider.overrideWithValue(lifecycle),
+      ],
+    );
+    addTearDown(container.dispose);
+    await container.read(notificationsProvider.future);
+
+    await container.read(notificationsProvider.notifier).toggleMedication(true);
+
+    expect(
+      container.read(notificationsProvider).requireValue.medicationReminders,
+      isTrue,
+    );
+    expect(service.exactPermissionRequests, 0);
+    expect(lifecycle.rebuildCalls, 0);
+  });
+
+  test('exact negado não impede rebuild após ação explícita', () async {
+    SharedPreferences.setMockInitialValues(<String, Object>{
+      NotificationPreferenceKeys.allNotifications: true,
+      NotificationPreferenceKeys.medicationReminders: false,
+    });
+    final service = _RecordingNotificationService();
+    final lifecycle = _RecordingMedicationLifecycle();
+    final container = ProviderContainer(
+      overrides: [
+        notificationServiceProvider.overrideWithValue(service),
+        medicationReminderLifecycleProvider.overrideWithValue(lifecycle),
+      ],
+    );
+    addTearDown(container.dispose);
+    await container.read(notificationsProvider.future);
+
+    await container.read(notificationsProvider.notifier).toggleMedication(true);
+
+    expect(service.exactPermissionRequests, 1);
+    expect(lifecycle.rebuildCalls, 1);
+  });
+
+  test('toggle all on não reconstrói quando medication está false', () async {
+    SharedPreferences.setMockInitialValues(<String, Object>{
+      NotificationPreferenceKeys.allNotifications: false,
+      NotificationPreferenceKeys.medicationReminders: false,
+    });
+    final service = _RecordingNotificationService();
+    final lifecycle = _RecordingMedicationLifecycle();
+    final container = ProviderContainer(
+      overrides: [
+        notificationServiceProvider.overrideWithValue(service),
+        medicationReminderLifecycleProvider.overrideWithValue(lifecycle),
+      ],
+    );
+    addTearDown(container.dispose);
+    await container.read(notificationsProvider.future);
+
+    await container.read(notificationsProvider.notifier).toggleAll(true);
+
+    expect(service.permissionRequests, 1);
+    expect(service.exactPermissionRequests, 0);
+    expect(lifecycle.rebuildCalls, 0);
+    expect(
+      container.read(notificationsProvider).requireValue.medicationReminders,
+      isFalse,
+    );
   });
 }

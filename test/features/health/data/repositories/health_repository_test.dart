@@ -14,6 +14,7 @@ import 'package:life_os/core/services/sync_operation_result.dart';
 import 'package:life_os/core/services/sync_queue_store.dart';
 import 'package:life_os/core/services/sync_remote_data_source.dart';
 import 'package:life_os/features/health/data/repositories/health_repository.dart';
+import 'package:life_os/features/health/services/medication_reminder_lifecycle.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 class FakeFirebaseUser extends Fake implements User {
@@ -176,6 +177,7 @@ class _RecordingNotificationService extends NotificationService {
   int platformPermissionRequests = 0;
   int exactPermissionRequests = 0;
   int scheduleCalls = 0;
+  final List<int> cancelledIds = [];
   String? lastPermissionPreferenceKey;
 
   @override
@@ -213,6 +215,11 @@ class _RecordingNotificationService extends NotificationService {
   }) async {
     scheduleCalls += 1;
     return scheduleResult;
+  }
+
+  @override
+  Future<void> cancelNotification(int id) async {
+    cancelledIds.add(id);
   }
 }
 
@@ -609,6 +616,29 @@ void main() {
     expect(await db.select(db.medications).get(), hasLength(1));
     expect(notificationService.scheduleCalls, 1);
   });
+
+  test(
+    'deleteMedication mantém cancelamento individual pelo mesmo ID',
+    () async {
+      const firestoreId = 'medication-to-delete';
+      final localId = await db
+          .into(db.medications)
+          .insert(
+            MedicationsCompanion.insert(
+              firestoreId: firestoreId,
+              name: 'Medicamento de teste',
+              startDate: DateTime(2026, 8, 25, 21),
+            ),
+          );
+
+      await repository.deleteMedication(firestoreId, localId);
+
+      expect(await db.select(db.medications).get(), isEmpty);
+      expect(notificationService.cancelledIds, <int>[
+        notificationIdForMedication(firestoreId),
+      ]);
+    },
+  );
 
   test('hidratação agenda sem solicitar permissão exact', () async {
     configureRepositoryWithHealthDocuments(
