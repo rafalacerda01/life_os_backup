@@ -136,6 +136,8 @@ http.StreamedResponse _jsonResponse(int statusCode, [String body = '{}']) {
   );
 }
 
+Future<String?> _validAppCheckToken() async => 'firebase-app-check-token';
+
 SyncQueueTableData createHealthItem({
   required String operationType,
   required Map<String, dynamic> payload,
@@ -226,6 +228,28 @@ SyncQueueTableData createHabitCompletionItem() {
 void main() {
   late _RecordingHealthDocumentReference healthDoc;
   late FirestoreSyncRemoteDataSource remote;
+
+  FirestoreSyncRemoteDataSource serverDataSource({
+    required FirebaseAuth auth,
+    required http.Client Function() clientFactory,
+    required Future<String?> Function(User user, bool forceRefresh)
+    idTokenProvider,
+    required SyncAppCheckTokenProvider appCheckTokenProvider,
+  }) {
+    return FirestoreSyncRemoteDataSource(
+      _RecordingFirestore(
+        _RecordingUsersCollectionReference(
+          _RecordingUserDocumentReference(
+            _RecordingHealthCollectionReference(healthDoc),
+          ),
+        ),
+      ),
+      auth,
+      clientFactory: clientFactory,
+      idTokenProvider: idTokenProvider,
+      appCheckTokenProvider: appCheckTokenProvider,
+    );
+  }
 
   setUp(() {
     healthDoc = _RecordingHealthDocumentReference();
@@ -379,6 +403,7 @@ void main() {
       ),
       auth,
       clientFactory: () => client,
+      appCheckTokenProvider: _validAppCheckToken,
       idTokenProvider: (user, forceRefresh) async {
         expect(user.uid, 'user-123');
         expect(forceRefresh, isFalse);
@@ -390,6 +415,152 @@ void main() {
 
     expect(result.isSuccess, isTrue);
     expect(requestCount, 1);
+    expect(client.wasClosed, isTrue);
+  });
+
+  test(
+    'request server-side envia Auth e App Check somente em headers',
+    () async {
+      late Map<String, String> headers;
+      late String body;
+      final client = _RecordingHttpClient((request) async {
+        headers = Map<String, String>.from(request.headers);
+        body = await request.finalize().bytesToString();
+        return _jsonResponse(200);
+      });
+      final dataSource = serverDataSource(
+        auth: _FakeFirebaseAuth(_FakeFirebaseUser('user-123')),
+        clientFactory: () => client,
+        idTokenProvider: (_, _) async => 'firebase-id-token',
+        appCheckTokenProvider: () async => 'firebase-app-check-token',
+      );
+
+      final result = await dataSource.process('user-123', createTaskItem());
+
+      expect(result.isSuccess, isTrue);
+      expect(headers['Authorization'], 'Bearer firebase-id-token');
+      expect(headers['X-Firebase-AppCheck'], 'firebase-app-check-token');
+      expect(body, isNot(contains('firebase-id-token')));
+      expect(body, isNot(contains('firebase-app-check-token')));
+      expect(client.wasClosed, isTrue);
+    },
+  );
+
+  test('App Check null falha fechado sem criar client HTTP', () async {
+    var clientFactoryCalls = 0;
+    final dataSource = serverDataSource(
+      auth: _FakeFirebaseAuth(_FakeFirebaseUser('user-123')),
+      clientFactory: () {
+        clientFactoryCalls += 1;
+        return _RecordingHttpClient((_) async => _jsonResponse(200));
+      },
+      idTokenProvider: (_, _) async => 'firebase-id-token',
+      appCheckTokenProvider: () async => null,
+    );
+
+    final result = await dataSource.process('user-123', createTaskItem());
+
+    expect(result.shouldRetry, isTrue);
+    expect(result.code, 'APP_CHECK_REQUIRED');
+    expect(clientFactoryCalls, 0);
+  });
+
+  test('App Check vazio falha fechado sem criar client HTTP', () async {
+    var clientFactoryCalls = 0;
+    final dataSource = serverDataSource(
+      auth: _FakeFirebaseAuth(_FakeFirebaseUser('user-123')),
+      clientFactory: () {
+        clientFactoryCalls += 1;
+        return _RecordingHttpClient((_) async => _jsonResponse(200));
+      },
+      idTokenProvider: (_, _) async => 'firebase-id-token',
+      appCheckTokenProvider: () async => '   ',
+    );
+
+    final result = await dataSource.process('user-123', createTaskItem());
+
+    expect(result.shouldRetry, isTrue);
+    expect(result.code, 'APP_CHECK_REQUIRED');
+    expect(clientFactoryCalls, 0);
+  });
+
+  test('falha do provider App Check é sanitizada e não chama HTTP', () async {
+    const secret = 'APP-CHECK-SEGREDO-XYZ';
+    var clientFactoryCalls = 0;
+    final dataSource = serverDataSource(
+      auth: _FakeFirebaseAuth(_FakeFirebaseUser('user-123')),
+      clientFactory: () {
+        clientFactoryCalls += 1;
+        return _RecordingHttpClient((_) async => _jsonResponse(200));
+      },
+      idTokenProvider: (_, _) async => 'firebase-id-token',
+      appCheckTokenProvider: () async => throw StateError(secret),
+    );
+
+    final result = await dataSource.process('user-123', createTaskItem());
+
+    expect(result.shouldRetry, isTrue);
+    expect(result.code, 'APP_CHECK_REQUIRED');
+    expect(result.code, isNot(contains(secret)));
+    expect(result.message ?? '', isNot(contains(secret)));
+    expect(clientFactoryCalls, 0);
+  });
+
+  test('backend APP_CHECK_REQUIRED não renova Firebase ID Token', () async {
+    final forceRefreshCalls = <bool>[];
+    final client = _RecordingHttpClient(
+      (_) async => _jsonResponse(
+        401,
+        jsonEncode({
+          'code': 'APP_CHECK_REQUIRED',
+          'error': 'Verificação necessária.',
+        }),
+      ),
+    );
+    final dataSource = serverDataSource(
+      auth: _FakeFirebaseAuth(_FakeFirebaseUser('user-123')),
+      clientFactory: () => client,
+      idTokenProvider: (_, forceRefresh) async {
+        forceRefreshCalls.add(forceRefresh);
+        return 'firebase-id-token';
+      },
+      appCheckTokenProvider: _validAppCheckToken,
+    );
+
+    final result = await dataSource.process('user-123', createTaskItem());
+
+    expect(result.shouldRetry, isTrue);
+    expect(result.code, 'APP_CHECK_REQUIRED');
+    expect(forceRefreshCalls, [false]);
+    expect(client.wasClosed, isTrue);
+  });
+
+  test('backend APP_CHECK_INVALID não renova Firebase ID Token', () async {
+    final forceRefreshCalls = <bool>[];
+    final client = _RecordingHttpClient(
+      (_) async => _jsonResponse(
+        401,
+        jsonEncode({
+          'code': 'APP_CHECK_INVALID',
+          'error': 'Verificação inválida.',
+        }),
+      ),
+    );
+    final dataSource = serverDataSource(
+      auth: _FakeFirebaseAuth(_FakeFirebaseUser('user-123')),
+      clientFactory: () => client,
+      idTokenProvider: (_, forceRefresh) async {
+        forceRefreshCalls.add(forceRefresh);
+        return 'firebase-id-token';
+      },
+      appCheckTokenProvider: _validAppCheckToken,
+    );
+
+    final result = await dataSource.process('user-123', createTaskItem());
+
+    expect(result.shouldRetry, isTrue);
+    expect(result.code, 'APP_CHECK_INVALID');
+    expect(forceRefreshCalls, [false]);
     expect(client.wasClosed, isTrue);
   });
 
@@ -409,6 +580,7 @@ void main() {
         clientFactoryCalls += 1;
         return _RecordingHttpClient((request) async => _jsonResponse(200));
       },
+      appCheckTokenProvider: _validAppCheckToken,
       idTokenProvider: (user, forceRefresh) async {
         tokenProviderCalls += 1;
         return 'token-b';
@@ -445,6 +617,7 @@ void main() {
       ),
       auth,
       clientFactory: () => client,
+      appCheckTokenProvider: _validAppCheckToken,
       idTokenProvider: (user, forceRefresh) async {
         tokenUsers.add(user.uid);
         forceRefreshCalls.add(forceRefresh);
@@ -465,11 +638,14 @@ void main() {
 
   test('HTTP 401 renova token e repete a requisição somente uma vez', () async {
     var requestCount = 0;
+    var appCheckTokenCalls = 0;
     final forceRefreshCalls = <bool>[];
     final authorizations = <String?>[];
+    final appCheckHeaders = <String?>[];
     final client = _RecordingHttpClient((request) async {
       requestCount += 1;
       authorizations.add(request.headers['authorization']);
+      appCheckHeaders.add(request.headers['x-firebase-appcheck']);
       return _jsonResponse(requestCount == 1 ? 401 : 200);
     });
     final dataSource = FirestoreSyncRemoteDataSource(
@@ -482,6 +658,10 @@ void main() {
       ),
       _FakeFirebaseAuth(_FakeFirebaseUser('user-123')),
       clientFactory: () => client,
+      appCheckTokenProvider: () async {
+        appCheckTokenCalls += 1;
+        return 'firebase-app-check-token';
+      },
       idTokenProvider: (user, forceRefresh) async {
         expect(user.uid, 'user-123');
         forceRefreshCalls.add(forceRefresh);
@@ -495,6 +675,11 @@ void main() {
     expect(requestCount, 2);
     expect(forceRefreshCalls, [false, true]);
     expect(authorizations, ['Bearer stale-token', 'Bearer fresh-token']);
+    expect(appCheckTokenCalls, 1);
+    expect(appCheckHeaders, [
+      'firebase-app-check-token',
+      'firebase-app-check-token',
+    ]);
     expect(client.wasClosed, isTrue);
   });
 
@@ -515,6 +700,7 @@ void main() {
       ),
       _FakeFirebaseAuth(_FakeFirebaseUser('user-123')),
       clientFactory: () => client,
+      appCheckTokenProvider: _validAppCheckToken,
       idTokenProvider: (user, forceRefresh) async {
         expect(user.uid, 'user-123');
         forceRefreshCalls.add(forceRefresh);
@@ -544,6 +730,7 @@ void main() {
       ),
       _FakeFirebaseAuth(_FakeFirebaseUser('user-123')),
       clientFactory: () => client,
+      appCheckTokenProvider: _validAppCheckToken,
       idTokenProvider: (user, forceRefresh) async {
         expect(user.uid, 'user-123');
         return 'token';
@@ -574,6 +761,7 @@ void main() {
       ),
       _FakeFirebaseAuth(_FakeFirebaseUser('user-123')),
       clientFactory: () => client,
+      appCheckTokenProvider: _validAppCheckToken,
       idTokenProvider: (_, _) async => 'token',
     );
 
@@ -603,6 +791,7 @@ void main() {
       ),
       _FakeFirebaseAuth(_FakeFirebaseUser('user-123')),
       clientFactory: () => client,
+      appCheckTokenProvider: _validAppCheckToken,
       idTokenProvider: (_, _) async => 'token',
     );
 
@@ -635,6 +824,7 @@ void main() {
       ),
       _FakeFirebaseAuth(_FakeFirebaseUser('user-123')),
       clientFactory: () => client,
+      appCheckTokenProvider: _validAppCheckToken,
       idTokenProvider: (_, _) async => 'token',
     );
 
@@ -671,6 +861,7 @@ void main() {
           payloads.add(jsonDecode(await request.finalize().bytesToString()));
           return _jsonResponse(attempts == 1 ? 503 : 200);
         }),
+        appCheckTokenProvider: _validAppCheckToken,
         idTokenProvider: (_, _) async => 'token',
       );
       final item = createHabitCompletionItem();

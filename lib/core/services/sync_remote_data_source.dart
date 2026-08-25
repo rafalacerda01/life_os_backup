@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_app_check/firebase_app_check.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:http/http.dart' as http;
 import 'package:life_os/core/database/app_database.dart';
@@ -11,6 +12,8 @@ import 'sync_operation_result.dart';
 abstract interface class SyncRemoteDataSource {
   Future<SyncOperationResult> process(String uid, SyncQueueTableData item);
 }
+
+typedef SyncAppCheckTokenProvider = Future<String?> Function();
 
 class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
   static final RegExp _uuidV4Pattern = RegExp(
@@ -23,6 +26,7 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
   final http.Client Function() _clientFactory;
   final Future<String?> Function(User user, bool forceRefresh)?
   _idTokenProvider;
+  final SyncAppCheckTokenProvider _appCheckTokenProvider;
   final Duration _requestTimeout;
 
   FirestoreSyncRemoteDataSource(
@@ -30,10 +34,14 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
     this._auth, {
     http.Client Function()? clientFactory,
     Future<String?> Function(User user, bool forceRefresh)? idTokenProvider,
+    SyncAppCheckTokenProvider? appCheckTokenProvider,
     Duration requestTimeout = const Duration(seconds: 15),
   }) : _clientFactory = clientFactory ?? http.Client.new,
        // ignore: prefer_initializing_formals
        _idTokenProvider = idTokenProvider,
+       _appCheckTokenProvider =
+           appCheckTokenProvider ??
+           (() => FirebaseAppCheck.instance.getToken()),
        // ignore: prefer_initializing_formals
        _requestTimeout = requestTimeout;
 
@@ -554,6 +562,18 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
       );
     }
 
+    String? rawAppCheckToken;
+    try {
+      rawAppCheckToken = await _appCheckTokenProvider();
+    } catch (_) {
+      return const SyncOperationResult.retryable(code: 'APP_CHECK_REQUIRED');
+    }
+
+    final appCheckToken = rawAppCheckToken?.trim();
+    if (appCheckToken == null || appCheckToken.isEmpty) {
+      return const SyncOperationResult.retryable(code: 'APP_CHECK_REQUIRED');
+    }
+
     final client = _clientFactory();
 
     try {
@@ -564,6 +584,7 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
               headers: {
                 'Content-Type': 'application/json',
                 'Authorization': 'Bearer $idToken',
+                'X-Firebase-AppCheck': appCheckToken,
               },
               body: jsonEncode(payload),
             )
@@ -573,6 +594,11 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
       var response = await send(token);
 
       if (response.statusCode == 401) {
+        final backendCode = _extractBackendCode(response.body);
+        if (_isAppCheckCode(backendCode)) {
+          return SyncOperationResult.retryable(code: backendCode);
+        }
+
         final refreshedToken = await _getIdToken(
           expectedUid: expectedUid,
           forceRefresh: true,
@@ -592,6 +618,11 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
       }
 
       if (response.statusCode == 401) {
+        final backendCode = _extractBackendCode(response.body);
+        if (_isAppCheckCode(backendCode)) {
+          return SyncOperationResult.retryable(code: backendCode);
+        }
+
         return const SyncOperationResult.retryable(
           code: 'AUTHENTICATION_REQUIRED',
         );
@@ -718,6 +749,10 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
     }
 
     return null;
+  }
+
+  bool _isAppCheckCode(String? code) {
+    return code == 'APP_CHECK_REQUIRED' || code == 'APP_CHECK_INVALID';
   }
 
   bool _isQuotaExceededCode(String? code) {
