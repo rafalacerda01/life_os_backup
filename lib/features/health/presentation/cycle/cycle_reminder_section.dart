@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import 'cycle_reminder_notification_controller.dart';
 import 'cycle_reminder_preferences.dart';
 
 typedef CycleReminderTimePicker =
@@ -78,7 +79,7 @@ class CycleReminderSection extends ConsumerWidget {
         child: CycleReminderEditor(
           initialValue: preferences,
           onSave: (value) =>
-              ref.read(cycleReminderPreferencesProvider.notifier).save(value),
+              ref.read(cycleReminderNotificationControllerProvider).save(value),
         ),
       ),
     );
@@ -91,8 +92,11 @@ class CycleReminderSection extends ConsumerWidget {
   ) async {
     try {
       await ref
-          .read(cycleReminderPreferencesProvider.notifier)
-          .setEnabled(enabled);
+          .read(cycleReminderNotificationControllerProvider)
+          .setEnabled(
+            ref.read(cycleReminderPreferencesProvider).requireValue!,
+            enabled,
+          );
     } on Object {
       if (!context.mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(

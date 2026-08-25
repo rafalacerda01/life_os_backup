@@ -11,6 +11,11 @@ class _RecordingNotificationsPlugin extends Fake
   int showCalls = 0;
   int scheduleCalls = 0;
   AndroidScheduleMode? lastScheduleMode;
+  NotificationDetails? lastNotificationDetails;
+  DateTimeComponents? lastDateTimeComponents;
+  String? lastTitle;
+  String? lastBody;
+  final List<int> cancelledIds = <int>[];
   bool throwOnSchedule = false;
 
   @override
@@ -48,9 +53,18 @@ class _RecordingNotificationsPlugin extends Fake
   }) async {
     scheduleCalls += 1;
     lastScheduleMode = androidScheduleMode;
+    lastNotificationDetails = notificationDetails;
+    lastDateTimeComponents = matchDateTimeComponents;
+    lastTitle = title;
+    lastBody = body;
     if (throwOnSchedule) {
       throw StateError('private scheduling failure');
     }
+  }
+
+  @override
+  Future<void> cancel({required int id, String? tag}) async {
+    cancelledIds.add(id);
   }
 }
 
@@ -426,4 +440,57 @@ void main() {
     expect(scheduled, isFalse);
     expect(plugin.scheduleCalls, 1);
   });
+
+  test('cycle reminder usa canal neutro privado e exact disponível', () async {
+    final plugin = _RecordingNotificationsPlugin();
+    final service = NotificationService(
+      notificationsPlugin: plugin,
+      androidPlugin: _FakeAndroidNotificationsPlugin(capabilityResults: [true]),
+      isAndroidOverride: true,
+    );
+
+    final scheduled = await service.scheduleCycleReminderNotification(
+      id: 81,
+      title: 'Lembrete pessoal',
+      body: 'Você tem um lembrete programado.',
+      scheduledDate: DateTime(2026, 8, 26, 9),
+      matchDateTimeComponents: DateTimeComponents.time,
+    );
+
+    final android = plugin.lastNotificationDetails?.android;
+    expect(scheduled, isTrue);
+    expect(plugin.lastScheduleMode, AndroidScheduleMode.exactAllowWhileIdle);
+    expect(plugin.lastDateTimeComponents, DateTimeComponents.time);
+    expect(android?.channelId, 'cycle_personal_reminders_channel');
+    expect(android?.channelName, 'Lembretes pessoais');
+    expect(android?.visibility, NotificationVisibility.private);
+  });
+
+  test(
+    'cycle reminder mantém fallback inexact quando exact está negado',
+    () async {
+      final plugin = _RecordingNotificationsPlugin();
+      final service = NotificationService(
+        notificationsPlugin: plugin,
+        androidPlugin: _FakeAndroidNotificationsPlugin(
+          capabilityResults: [false],
+        ),
+        isAndroidOverride: true,
+      );
+
+      final scheduled = await service.scheduleCycleReminderNotification(
+        id: 82,
+        title: 'Lembrete pessoal',
+        body: 'Você tem um lembrete programado.',
+        scheduledDate: DateTime(2026, 8, 26, 9),
+        matchDateTimeComponents: DateTimeComponents.time,
+      );
+
+      expect(scheduled, isTrue);
+      expect(
+        plugin.lastScheduleMode,
+        AndroidScheduleMode.inexactAllowWhileIdle,
+      );
+    },
+  );
 }

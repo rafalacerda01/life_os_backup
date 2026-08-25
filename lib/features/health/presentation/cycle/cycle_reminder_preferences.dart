@@ -232,6 +232,21 @@ final cycleReminderUserIdProvider = StreamProvider<String?>((ref) {
       .distinct();
 });
 
+typedef CycleReminderUserIdReader = String? Function();
+
+final cycleReminderUserIdReaderProvider = Provider<CycleReminderUserIdReader>((
+  ref,
+) {
+  return () {
+    try {
+      final userId = FirebaseAuth.instance.currentUser?.uid.trim();
+      return userId == null || userId.isEmpty ? null : userId;
+    } on Object {
+      return null;
+    }
+  };
+});
+
 final cycleReminderPreferencesStoreProvider =
     Provider<CycleReminderPreferencesStore>((ref) {
       const storage = FlutterSecureStorage(
@@ -259,7 +274,7 @@ class CycleReminderPreferencesNotifier
     return ref.read(cycleReminderPreferencesStoreProvider).load(userId);
   }
 
-  Future<void> save(CycleReminderPreferences preferences) async {
+  Future<String> save(CycleReminderPreferences preferences) async {
     final userId = _currentUserId();
     if (userId == null) {
       throw StateError('CYCLE_REMINDER_SESSION_REQUIRED');
@@ -272,6 +287,7 @@ class CycleReminderPreferencesNotifier
     if (_currentUserId() == userId) {
       state = AsyncData(preferences);
     }
+    return userId;
   }
 
   Future<void> setEnabled(bool enabled) async {
@@ -281,9 +297,7 @@ class CycleReminderPreferencesNotifier
   }
 
   String? _currentUserId() {
-    return _normalizeUserId(
-      ref.read(cycleReminderUserIdProvider).asData?.value,
-    );
+    return _normalizeUserId(ref.read(cycleReminderUserIdReaderProvider)());
   }
 
   String? _normalizeUserId(String? userId) {

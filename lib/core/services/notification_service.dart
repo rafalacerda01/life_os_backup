@@ -258,6 +258,64 @@ class NotificationService {
     }
   }
 
+  Future<bool> scheduleCycleReminderNotification({
+    required int id,
+    required String title,
+    required String body,
+    required DateTime scheduledDate,
+    required DateTimeComponents matchDateTimeComponents,
+  }) async {
+    try {
+      if (!await _isEnabled(null)) return false;
+
+      await init();
+
+      var scheduleMode = AndroidScheduleMode.exactAllowWhileIdle;
+      if (_isAndroid) {
+        scheduleMode = await _canScheduleExactNotifications()
+            ? AndroidScheduleMode.exactAllowWhileIdle
+            : AndroidScheduleMode.inexactAllowWhileIdle;
+      }
+
+      const androidDetails = AndroidNotificationDetails(
+        'cycle_personal_reminders_channel',
+        'Lembretes pessoais',
+        channelDescription: 'Lembretes pessoais configurados no Life OS',
+        importance: Importance.max,
+        priority: Priority.high,
+        visibility: NotificationVisibility.private,
+      );
+      const notificationDetails = NotificationDetails(
+        android: androidDetails,
+        iOS: DarwinNotificationDetails(),
+      );
+
+      await _notificationsPlugin.zonedSchedule(
+        id: id,
+        title: title,
+        body: body,
+        scheduledDate: tz.TZDateTime.from(scheduledDate, tz.local),
+        notificationDetails: notificationDetails,
+        androidScheduleMode: scheduleMode,
+        matchDateTimeComponents: matchDateTimeComponents,
+      );
+
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<bool> cancelCycleReminderNotification(int id) async {
+    try {
+      await init();
+      await _notificationsPlugin.cancel(id: id);
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
   // ---------------------------------------------------------------------------
   // CANCELAR UMA NOTIFICAÇÃO
   // ---------------------------------------------------------------------------

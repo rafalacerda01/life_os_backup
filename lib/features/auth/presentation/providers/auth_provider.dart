@@ -7,6 +7,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:life_os/core/services/notification_service.dart';
 import 'package:life_os/core/services/sync_manager_provider.dart';
+import 'package:life_os/core/utils/app_logger.dart';
 // Imports dos providers de todos os módulos
 import 'package:life_os/features/finance/presentation/providers/finance_provider.dart';
 import 'package:life_os/features/tasks/presentation/providers/tasks_provider.dart';
@@ -14,6 +15,7 @@ import 'package:life_os/features/habits/presentation/providers/habits_provider.d
 import 'package:life_os/features/goals/presentation/goals_provider.dart';
 import 'package:life_os/features/checkin/presentation/providers/check_in_provider.dart';
 import 'package:life_os/features/health/presentation/providers/health_provider.dart';
+import 'package:life_os/features/health/services/cycle_reminder_session_reconciler.dart';
 import 'package:life_os/features/focus/presentation/providers/providers/focus_provider.dart';
 import 'package:life_os/features/study/presentation/providers/study_provider.dart';
 import 'package:life_os/features/tasks/presentation/providers/tasks_notifier.dart';
@@ -214,9 +216,21 @@ class AuthNotifier extends Notifier<AuthState> {
 
     if (isPrepared) {
       _activeLocalSessionUid = uid;
+      _restoreCycleReminderForPreparedSession(uid);
     }
 
     return isPrepared;
+  }
+
+  void _restoreCycleReminderForPreparedSession(String uid) {
+    try {
+      final reconciler = ref.read(cycleReminderSessionReconcilerProvider);
+      unawaited(reconciler.restoreForSession(uid));
+    } on Object {
+      AppLogger.w(
+        '[AuthSession] Falha ao iniciar restauração de lembrete local.',
+      );
+    }
   }
 
   // --- Métodos de Autenticação e Perfil ---

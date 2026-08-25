@@ -2,6 +2,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:life_os/core/services/notification_preferences.dart';
 import 'package:life_os/core/services/notification_service.dart';
+import 'package:life_os/features/health/presentation/cycle/cycle_reminder_preferences.dart';
+import 'package:life_os/features/health/services/cycle_reminder_notification_lifecycle.dart';
 import 'package:life_os/features/health/services/medication_reminder_lifecycle.dart';
 import 'package:life_os/features/settings/presentation/providers/notification_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -50,6 +52,58 @@ class _RecordingMedicationLifecycle implements MedicationReminderLifecycle {
       failed: 0,
     );
   }
+}
+
+class _MemoryCycleReminderStorage implements CycleReminderPreferencesStorage {
+  final Map<String, String> values = <String, String>{};
+
+  @override
+  Future<String?> read(String key) async => values[key];
+
+  @override
+  Future<void> write(String key, String value) async {
+    values[key] = value;
+  }
+}
+
+class _RecordingCycleLifecycle implements CycleReminderNotificationLifecycle {
+  int cancelCalls = 0;
+  int rebuildCalls = 0;
+  String? lastUserId;
+  CycleReminderPreferences? lastPreferences;
+
+  @override
+  Future<int> cancelAllCycleReminders(String userId) async {
+    cancelCalls += 1;
+    lastUserId = userId;
+    return 0;
+  }
+
+  @override
+  Future<CycleReminderRebuildResult> rebuildCycleReminders(
+    String userId,
+    CycleReminderPreferences preferences,
+  ) async {
+    rebuildCalls += 1;
+    lastUserId = userId;
+    lastPreferences = preferences;
+    return const CycleReminderRebuildResult(
+      eligible: 1,
+      scheduled: 1,
+      failed: 0,
+      cancellationFailed: 0,
+    );
+  }
+}
+
+CycleReminderPreferences _cyclePreferences({bool enabled = true}) {
+  return CycleReminderPreferences(
+    enabled: enabled,
+    type: CycleReminderType.personal,
+    hour: 9,
+    minute: 30,
+    frequency: CycleReminderFrequency.daily,
+  );
 }
 
 void main() {
@@ -273,5 +327,143 @@ void main() {
       container.read(notificationsProvider).requireValue.medicationReminders,
       isFalse,
     );
+  });
+
+  test(
+    'toggle all on reconstrói cycle habilitado para usuário atual',
+    () async {
+      SharedPreferences.setMockInitialValues(<String, Object>{
+        NotificationPreferenceKeys.allNotifications: false,
+        NotificationPreferenceKeys.medicationReminders: false,
+      });
+      final service = _RecordingNotificationService();
+      final medicationLifecycle = _RecordingMedicationLifecycle();
+      final cycleLifecycle = _RecordingCycleLifecycle();
+      final cycleStore = CycleReminderPreferencesStore(
+        _MemoryCycleReminderStorage(),
+      );
+      await cycleStore.save('user-a', _cyclePreferences());
+      final container = ProviderContainer(
+        overrides: [
+          notificationServiceProvider.overrideWithValue(service),
+          medicationReminderLifecycleProvider.overrideWithValue(
+            medicationLifecycle,
+          ),
+          cycleReminderNotificationLifecycleProvider.overrideWithValue(
+            cycleLifecycle,
+          ),
+          cycleReminderPreferencesStoreProvider.overrideWithValue(cycleStore),
+          cycleReminderUserIdReaderProvider.overrideWithValue(() => 'user-a'),
+        ],
+      );
+      addTearDown(container.dispose);
+      await container.read(notificationsProvider.future);
+
+      await container.read(notificationsProvider.notifier).toggleAll(true);
+
+      expect(service.permissionRequests, 1);
+      expect(service.exactPermissionRequests, 1);
+      expect(medicationLifecycle.rebuildCalls, 0);
+      expect(cycleLifecycle.rebuildCalls, 1);
+      expect(cycleLifecycle.lastUserId, 'user-a');
+      expect(cycleLifecycle.lastPreferences?.enabled, isTrue);
+    },
+  );
+
+  test('toggle all on não reconstrói cycle desabilitado', () async {
+    SharedPreferences.setMockInitialValues(<String, Object>{
+      NotificationPreferenceKeys.allNotifications: false,
+      NotificationPreferenceKeys.medicationReminders: false,
+    });
+    final service = _RecordingNotificationService();
+    final cycleLifecycle = _RecordingCycleLifecycle();
+    final cycleStore = CycleReminderPreferencesStore(
+      _MemoryCycleReminderStorage(),
+    );
+    await cycleStore.save('user-a', _cyclePreferences(enabled: false));
+    final container = ProviderContainer(
+      overrides: [
+        notificationServiceProvider.overrideWithValue(service),
+        medicationReminderLifecycleProvider.overrideWithValue(
+          _RecordingMedicationLifecycle(),
+        ),
+        cycleReminderNotificationLifecycleProvider.overrideWithValue(
+          cycleLifecycle,
+        ),
+        cycleReminderPreferencesStoreProvider.overrideWithValue(cycleStore),
+        cycleReminderUserIdReaderProvider.overrideWithValue(() => 'user-a'),
+      ],
+    );
+    addTearDown(container.dispose);
+    await container.read(notificationsProvider.future);
+
+    await container.read(notificationsProvider.notifier).toggleAll(true);
+
+    expect(service.permissionRequests, 1);
+    expect(service.exactPermissionRequests, 0);
+    expect(cycleLifecycle.rebuildCalls, 0);
+  });
+
+  test('toggle all on não reconstrói cycle inexistente', () async {
+    SharedPreferences.setMockInitialValues(<String, Object>{
+      NotificationPreferenceKeys.allNotifications: false,
+      NotificationPreferenceKeys.medicationReminders: false,
+    });
+    final service = _RecordingNotificationService();
+    final cycleLifecycle = _RecordingCycleLifecycle();
+    final container = ProviderContainer(
+      overrides: [
+        notificationServiceProvider.overrideWithValue(service),
+        medicationReminderLifecycleProvider.overrideWithValue(
+          _RecordingMedicationLifecycle(),
+        ),
+        cycleReminderNotificationLifecycleProvider.overrideWithValue(
+          cycleLifecycle,
+        ),
+        cycleReminderPreferencesStoreProvider.overrideWithValue(
+          CycleReminderPreferencesStore(_MemoryCycleReminderStorage()),
+        ),
+        cycleReminderUserIdReaderProvider.overrideWithValue(() => 'user-a'),
+      ],
+    );
+    addTearDown(container.dispose);
+    await container.read(notificationsProvider.future);
+
+    await container.read(notificationsProvider.notifier).toggleAll(true);
+
+    expect(service.exactPermissionRequests, 0);
+    expect(cycleLifecycle.rebuildCalls, 0);
+  });
+
+  test('toggle all on sem usuário não agenda cycle', () async {
+    SharedPreferences.setMockInitialValues(<String, Object>{
+      NotificationPreferenceKeys.allNotifications: false,
+      NotificationPreferenceKeys.medicationReminders: false,
+    });
+    final service = _RecordingNotificationService();
+    final cycleLifecycle = _RecordingCycleLifecycle();
+    final container = ProviderContainer(
+      overrides: [
+        notificationServiceProvider.overrideWithValue(service),
+        medicationReminderLifecycleProvider.overrideWithValue(
+          _RecordingMedicationLifecycle(),
+        ),
+        cycleReminderNotificationLifecycleProvider.overrideWithValue(
+          cycleLifecycle,
+        ),
+        cycleReminderPreferencesStoreProvider.overrideWithValue(
+          CycleReminderPreferencesStore(_MemoryCycleReminderStorage()),
+        ),
+        cycleReminderUserIdReaderProvider.overrideWithValue(() => null),
+      ],
+    );
+    addTearDown(container.dispose);
+    await container.read(notificationsProvider.future);
+
+    await container.read(notificationsProvider.notifier).toggleAll(true);
+
+    expect(service.permissionRequests, 1);
+    expect(service.exactPermissionRequests, 0);
+    expect(cycleLifecycle.rebuildCalls, 0);
   });
 }
