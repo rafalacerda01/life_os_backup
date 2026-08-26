@@ -17,7 +17,7 @@ final healthRepositoryProvider = Provider<HealthRepository>((ref) {
   final db = ref.watch(databaseProvider);
 
   return HealthRepository(
-    NotificationService(),
+    NotificationService.instance,
     FirebaseFirestore.instance,
     FirebaseAuth.instance,
     db,
