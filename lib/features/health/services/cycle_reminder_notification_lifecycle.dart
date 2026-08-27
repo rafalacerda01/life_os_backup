@@ -5,11 +5,14 @@ import 'package:life_os/core/services/notification_service.dart';
 import 'package:life_os/core/utils/app_logger.dart';
 import 'package:life_os/features/health/presentation/cycle/cycle_reminder_preferences.dart';
 
+import 'cycle_reminder_action_security.dart';
+
 const int _dailyCycleReminderSlot = 0;
 const int _lastWeekdayCycleReminderSlot = DateTime.sunday;
+const int cycleReminderSnoozeSlot = 8;
 
 int cycleReminderNotificationId(String userId, int slot) {
-  if (slot < _dailyCycleReminderSlot || slot > _lastWeekdayCycleReminderSlot) {
+  if (slot < _dailyCycleReminderSlot || slot > cycleReminderSnoozeSlot) {
     throw ArgumentError('CYCLE_REMINDER_SLOT_INVALID');
   }
 
@@ -23,9 +26,17 @@ int cycleReminderNotificationId(String userId, int slot) {
   return id == 0 ? 1 : id;
 }
 
-List<int> cycleReminderNotificationIds(String userId) {
+List<int> cycleReminderRecurringNotificationIds(String userId) {
   return List<int>.generate(
     _lastWeekdayCycleReminderSlot + 1,
+    (slot) => cycleReminderNotificationId(userId, slot),
+    growable: false,
+  );
+}
+
+List<int> cycleReminderNotificationIds(String userId) {
+  return List<int>.generate(
+    cycleReminderSnoozeSlot + 1,
     (slot) => cycleReminderNotificationId(userId, slot),
     growable: false,
   );
@@ -123,29 +134,42 @@ class CycleReminderRebuildResult {
   final int cancellationFailed;
 }
 
+typedef CycleReminderRebuildGuard = bool Function();
+
 abstract interface class CycleReminderNotificationLifecycle {
   Future<int> cancelAllCycleReminders(String userId);
 
   Future<CycleReminderRebuildResult> rebuildCycleReminders(
     String userId,
-    CycleReminderPreferences preferences,
-  );
+    CycleReminderPreferences preferences, {
+    CycleReminderRebuildGuard? shouldContinue,
+  });
 }
 
 class CycleReminderNotificationLifecycleService
     implements CycleReminderNotificationLifecycle {
   CycleReminderNotificationLifecycleService(
-    this._notificationService, {
+    this._notificationService,
+    this._actionTokenStore, {
     DateTime Function()? clock,
   }) : _clock = clock ?? DateTime.now;
 
   final NotificationService _notificationService;
+  final CycleReminderActionTokenReader _actionTokenStore;
   final DateTime Function() _clock;
 
   @override
   Future<int> cancelAllCycleReminders(String userId) async {
+    return _cancelIds(cycleReminderNotificationIds(userId));
+  }
+
+  Future<int> _cancelRecurringCycleReminders(String userId) {
+    return _cancelIds(cycleReminderRecurringNotificationIds(userId));
+  }
+
+  Future<int> _cancelIds(Iterable<int> ids) async {
     var failed = 0;
-    for (final id in cycleReminderNotificationIds(userId)) {
+    for (final id in ids) {
       try {
         final cancelled = await _notificationService
             .cancelCycleReminderNotification(id);
@@ -166,9 +190,10 @@ class CycleReminderNotificationLifecycleService
   @override
   Future<CycleReminderRebuildResult> rebuildCycleReminders(
     String userId,
-    CycleReminderPreferences preferences,
-  ) async {
-    final cancellationFailed = await cancelAllCycleReminders(userId);
+    CycleReminderPreferences preferences, {
+    CycleReminderRebuildGuard? shouldContinue,
+  }) async {
+    final cancellationFailed = await _cancelRecurringCycleReminders(userId);
     if (!preferences.enabled) {
       return CycleReminderRebuildResult(
         eligible: 0,
@@ -178,7 +203,43 @@ class CycleReminderNotificationLifecycleService
       );
     }
 
-    final payload = cycleReminderNotificationPayload(preferences);
+    final notificationContent = cycleReminderNotificationPayload(preferences);
+    final eligible = preferences.frequency == CycleReminderFrequency.daily
+        ? 1
+        : preferences.weekdays.length;
+    if (shouldContinue?.call() == false) {
+      return CycleReminderRebuildResult(
+        eligible: eligible,
+        scheduled: 0,
+        failed: 0,
+        cancellationFailed: cancellationFailed,
+      );
+    }
+    late final String actionPayload;
+    try {
+      final token = await _actionTokenStore.getOrCreate(userId);
+      actionPayload = const CycleReminderActionPayloadCodec().encode(
+        CycleReminderActionPayload(token),
+      );
+    } on Object {
+      AppLogger.w(
+        '[CycleReminderLifecycle] Token local indisponível para agendamento.',
+      );
+      return CycleReminderRebuildResult(
+        eligible: eligible,
+        scheduled: 0,
+        failed: eligible,
+        cancellationFailed: cancellationFailed,
+      );
+    }
+    if (shouldContinue?.call() == false) {
+      return CycleReminderRebuildResult(
+        eligible: eligible,
+        scheduled: 0,
+        failed: 0,
+        cancellationFailed: cancellationFailed,
+      );
+    }
     final now = _clock();
     var scheduled = 0;
     var failed = 0;
@@ -188,14 +249,16 @@ class CycleReminderNotificationLifecycleService
       required DateTime occurrence,
       required DateTimeComponents components,
     }) async {
+      if (shouldContinue?.call() == false) return;
       try {
         final didSchedule = await _notificationService
             .scheduleCycleReminderNotification(
               id: cycleReminderNotificationId(userId, slot),
-              title: payload.title,
-              body: payload.body,
+              title: notificationContent.title,
+              body: notificationContent.body,
               scheduledDate: occurrence,
               matchDateTimeComponents: components,
+              payload: actionPayload,
             );
         if (didSchedule) {
           scheduled += 1;
@@ -220,6 +283,7 @@ class CycleReminderNotificationLifecycleService
     } else {
       final weekdays = preferences.weekdays.toList()..sort();
       for (final weekday in weekdays) {
+        if (shouldContinue?.call() == false) break;
         await schedule(
           slot: weekday,
           occurrence: nextWeeklyCycleReminderOccurrence(
@@ -239,9 +303,7 @@ class CycleReminderNotificationLifecycleService
       );
     }
     return CycleReminderRebuildResult(
-      eligible: preferences.frequency == CycleReminderFrequency.daily
-          ? 1
-          : preferences.weekdays.length,
+      eligible: eligible,
       scheduled: scheduled,
       failed: failed,
       cancellationFailed: cancellationFailed,

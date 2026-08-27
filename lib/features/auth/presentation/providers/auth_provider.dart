@@ -15,6 +15,7 @@ import 'package:life_os/features/habits/presentation/providers/habits_provider.d
 import 'package:life_os/features/goals/presentation/goals_provider.dart';
 import 'package:life_os/features/checkin/presentation/providers/check_in_provider.dart';
 import 'package:life_os/features/health/presentation/providers/health_provider.dart';
+import 'package:life_os/features/health/services/cycle_reminder_action_coordinator.dart';
 import 'package:life_os/features/health/services/cycle_reminder_session_reconciler.dart';
 import 'package:life_os/features/focus/presentation/providers/providers/focus_provider.dart';
 import 'package:life_os/features/study/presentation/providers/study_provider.dart';
@@ -216,10 +217,30 @@ class AuthNotifier extends Notifier<AuthState> {
 
     if (isPrepared) {
       _activeLocalSessionUid = uid;
+      _notifyCycleReminderActionSessionPrepared(uid);
       _restoreCycleReminderForPreparedSession(uid);
     }
 
     return isPrepared;
+  }
+
+  void _notifyCycleReminderActionSessionPrepared(String uid) {
+    try {
+      final coordinator = ref.read(cycleReminderActionCoordinatorProvider);
+      unawaited(
+        coordinator.onSessionPrepared(uid).catchError((_) {
+          AppLogger.w(
+            '[AuthSession] Falha ao preparar ação de lembrete local.',
+          );
+        }),
+      );
+    } on Object {
+      AppLogger.w('[AuthSession] Falha ao iniciar ação de lembrete local.');
+    }
+  }
+
+  void _clearCycleReminderActionSession() {
+    ref.read(cycleReminderActionCoordinatorProvider).onSessionCleared();
   }
 
   void _restoreCycleReminderForPreparedSession(String uid) {
@@ -523,6 +544,8 @@ class AuthNotifier extends Notifier<AuthState> {
   }
 
   Future<void> _performLocalDataClear() async {
+    final previousLocalSessionUid = _activeLocalSessionUid;
+    _clearCycleReminderActionSession();
     _sessionGeneration += 1;
     final hydration = _hydrationInFlight;
 
@@ -533,6 +556,19 @@ class AuthNotifier extends Notifier<AuthState> {
     final secureStorage = _secureStorage;
     final db = ref.read(databaseProvider);
     var cleanupFailed = false;
+
+    if (previousLocalSessionUid != null) {
+      try {
+        final failedCancellations = await ref
+            .read(cycleReminderSessionCleanupProvider)
+            .cancelAfterCurrentMutations(previousLocalSessionUid);
+        if (failedCancellations > 0) {
+          cleanupFailed = true;
+        }
+      } on Object {
+        cleanupFailed = true;
+      }
+    }
 
     try {
       await secureStorage.deleteToken();

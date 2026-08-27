@@ -3,6 +3,8 @@ import 'package:life_os/core/services/notification_service.dart';
 import 'package:life_os/features/health/presentation/cycle/cycle_reminder_notification_controller.dart';
 import 'package:life_os/features/health/presentation/cycle/cycle_reminder_preferences.dart';
 import 'package:life_os/features/health/services/cycle_reminder_notification_lifecycle.dart';
+import 'package:life_os/features/health/services/cycle_reminder_operation_epoch.dart';
+import 'package:life_os/features/health/services/cycle_reminder_session_authority.dart';
 
 class _RecordingNotificationService extends NotificationService {
   _RecordingNotificationService(this.events);
@@ -58,8 +60,9 @@ class _RecordingLifecycle implements CycleReminderNotificationLifecycle {
   @override
   Future<CycleReminderRebuildResult> rebuildCycleReminders(
     String userId,
-    CycleReminderPreferences preferences,
-  ) async {
+    CycleReminderPreferences preferences, {
+    CycleReminderRebuildGuard? shouldContinue,
+  }) async {
     events.add('rebuild');
     rebuildCalls += 1;
     onRebuild?.call();
@@ -87,8 +90,11 @@ void main() {
   late List<String> events;
   late _RecordingNotificationService service;
   late _RecordingLifecycle lifecycle;
+  late CycleReminderOperationEpoch operationEpoch;
+  late CycleReminderSessionAuthority sessionAuthority;
   late CycleReminderPreferences? persisted;
   String? currentUserId = 'user-a';
+  var persistedOwnerUid = 'user-a';
   var globalEnabled = true;
 
   CycleReminderNotificationController controller() {
@@ -96,12 +102,13 @@ void main() {
       (preferences) async {
         events.add('persist');
         persisted = preferences;
-        return 'user-a';
+        return persistedOwnerUid;
       },
-      () => currentUserId,
+      () => sessionAuthority.admittedUserId(currentUserId),
       () async => globalEnabled,
       service,
       lifecycle,
+      operationEpoch,
     );
   }
 
@@ -109,8 +116,11 @@ void main() {
     events = <String>[];
     service = _RecordingNotificationService(events);
     lifecycle = _RecordingLifecycle(events);
+    operationEpoch = CycleReminderOperationEpoch();
+    sessionAuthority = CycleReminderSessionAuthority()..prepare('user-a');
     persisted = null;
     currentUserId = 'user-a';
+    persistedOwnerUid = 'user-a';
     globalEnabled = true;
   });
 
@@ -141,7 +151,13 @@ void main() {
     await controller().setEnabled(_preferences(enabled: false), true);
 
     expect(persisted?.enabled, isTrue);
-    expect(events, ['persist', 'permission', 'exact', 'rebuild']);
+    expect(events, [
+      'persist',
+      'cancel-cycle',
+      'permission',
+      'exact',
+      'rebuild',
+    ]);
   });
 
   test('permissão normal negada preserva enabled e não agenda', () async {
@@ -150,7 +166,7 @@ void main() {
     await controller().save(_preferences());
 
     expect(persisted?.enabled, isTrue);
-    expect(events, ['persist', 'permission', 'cancel-cycle']);
+    expect(events, ['persist', 'cancel-cycle', 'permission']);
     expect(service.exactRequests, 0);
     expect(lifecycle.rebuildCalls, 0);
   });
@@ -160,7 +176,13 @@ void main() {
 
     await controller().save(_preferences());
 
-    expect(events, ['persist', 'permission', 'exact', 'rebuild']);
+    expect(events, [
+      'persist',
+      'cancel-cycle',
+      'permission',
+      'exact',
+      'rebuild',
+    ]);
     expect(lifecycle.rebuildCalls, 1);
   });
 
@@ -174,6 +196,7 @@ void main() {
       expect(persisted?.enabled, isTrue);
       expect(events, [
         'persist',
+        'cancel-cycle',
         'permission',
         'exact',
         'rebuild',
@@ -182,16 +205,67 @@ void main() {
     },
   );
 
-  test('sessão ausente depois da persistência não agenda', () async {
-    currentUserId = null;
+  test('clear bloqueia save mesmo se Firebase ainda aponta para A', () async {
+    final generation = operationEpoch.snapshot('user-a');
+    sessionAuthority.clear();
 
-    await controller().save(_preferences());
+    await expectLater(
+      controller().save(_preferences()),
+      throwsA(isA<StateError>()),
+    );
 
-    expect(events, ['persist', 'cancel-cycle']);
+    expect(events, isEmpty);
+    expect(persisted, isNull);
+    expect(operationEpoch.snapshot('user-a'), generation);
     expect(service.permissionRequests, 0);
     expect(service.exactRequests, 0);
     expect(lifecycle.rebuildCalls, 0);
-    expect(lifecycle.cancelledUserIds, ['user-a']);
+    expect(lifecycle.cancelledUserIds, isEmpty);
+  });
+
+  test('troca A para B só admite save após prepare de B', () async {
+    sessionAuthority.clear();
+    currentUserId = 'user-b';
+    persistedOwnerUid = 'user-b';
+
+    await expectLater(
+      controller().save(_preferences()),
+      throwsA(isA<StateError>()),
+    );
+    expect(events, isEmpty);
+
+    sessionAuthority.prepare('user-b');
+    await controller().save(_preferences());
+
+    expect(events, contains('persist'));
+    expect(persisted, isNotNull);
+  });
+
+  test('logout e retorno a A exigem novo prepare de A', () async {
+    sessionAuthority.clear();
+
+    await expectLater(
+      controller().save(_preferences()),
+      throwsA(isA<StateError>()),
+    );
+    expect(events, isEmpty);
+
+    sessionAuthority.prepare('user-a');
+    await controller().save(_preferences());
+
+    expect(events, contains('persist'));
+  });
+
+  test('UID Firebase diferente do UID preparado bloqueia save', () async {
+    currentUserId = 'user-b';
+
+    await expectLater(
+      controller().save(_preferences()),
+      throwsA(isA<StateError>()),
+    );
+
+    expect(events, isEmpty);
+    expect(persisted, isNull);
   });
 
   test(
@@ -204,10 +278,11 @@ void main() {
           currentUserId = 'user-b';
           return 'user-a';
         },
-        () => currentUserId,
+        () => sessionAuthority.admittedUserId(currentUserId),
         () async => true,
         service,
         lifecycle,
+        operationEpoch,
       );
 
       await changingController.save(_preferences());
@@ -227,10 +302,10 @@ void main() {
 
     await controller().save(_preferences());
 
-    expect(events, ['persist', 'permission', 'cancel-cycle']);
+    expect(events, ['persist', 'cancel-cycle', 'permission', 'cancel-cycle']);
     expect(service.exactRequests, 0);
     expect(lifecycle.rebuildCalls, 0);
-    expect(lifecycle.cancelledUserIds, ['user-a']);
+    expect(lifecycle.cancelledUserIds, ['user-a', 'user-a']);
   });
 
   test('sessão muda durante exact, cancela owner e não faz rebuild', () async {
@@ -240,9 +315,15 @@ void main() {
 
     await controller().save(_preferences());
 
-    expect(events, ['persist', 'permission', 'exact', 'cancel-cycle']);
+    expect(events, [
+      'persist',
+      'cancel-cycle',
+      'permission',
+      'exact',
+      'cancel-cycle',
+    ]);
     expect(lifecycle.rebuildCalls, 0);
-    expect(lifecycle.cancelledUserIds, ['user-a']);
+    expect(lifecycle.cancelledUserIds, ['user-a', 'user-a']);
   });
 
   test(
@@ -256,21 +337,28 @@ void main() {
 
       expect(events, [
         'persist',
+        'cancel-cycle',
         'permission',
         'exact',
         'rebuild',
         'cancel-cycle',
       ]);
       expect(lifecycle.rebuildCalls, 1);
-      expect(lifecycle.cancelledUserIds, ['user-a']);
+      expect(lifecycle.cancelledUserIds, ['user-a', 'user-a']);
     },
   );
 
-  test('sessão estável conclui rebuild sem cancelamento extra', () async {
+  test('sessão estável remove snooze antes do rebuild recorrente', () async {
     await controller().save(_preferences());
 
-    expect(events, ['persist', 'permission', 'exact', 'rebuild']);
-    expect(lifecycle.cancelCalls, 0);
+    expect(events, [
+      'persist',
+      'cancel-cycle',
+      'permission',
+      'exact',
+      'rebuild',
+    ]);
+    expect(lifecycle.cancelCalls, 1);
   });
 
   test('controller nunca usa cancelAllNotifications', () async {

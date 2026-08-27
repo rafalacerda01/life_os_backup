@@ -2,6 +2,7 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:life_os/core/services/notification_service.dart';
 import 'package:life_os/features/health/presentation/cycle/cycle_reminder_preferences.dart';
+import 'package:life_os/features/health/services/cycle_reminder_action_security.dart';
 import 'package:life_os/features/health/services/cycle_reminder_notification_lifecycle.dart';
 
 class _ScheduledCycleReminder {
@@ -11,6 +12,7 @@ class _ScheduledCycleReminder {
     required this.body,
     required this.date,
     required this.components,
+    required this.payload,
   });
 
   final int id;
@@ -18,6 +20,29 @@ class _ScheduledCycleReminder {
   final String body;
   final DateTime date;
   final DateTimeComponents components;
+  final String payload;
+}
+
+class _FixedTokenStore implements CycleReminderActionTokenReader {
+  static const token = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+
+  @override
+  Future<String> getOrCreate(String userId) async => token;
+
+  @override
+  Future<String?> load(String userId) async => token;
+}
+
+class _FailingTokenStore implements CycleReminderActionTokenReader {
+  @override
+  Future<String> getOrCreate(String userId) {
+    throw StateError('private token failure');
+  }
+
+  @override
+  Future<String?> load(String userId) {
+    throw StateError('private token failure');
+  }
 }
 
 class _RecordingNotificationService extends NotificationService {
@@ -26,6 +51,7 @@ class _RecordingNotificationService extends NotificationService {
   final List<_ScheduledCycleReminder> schedules = <_ScheduledCycleReminder>[];
   final Set<int> failedCancellations = <int>{};
   final Set<int> failedSchedules = <int>{};
+  void Function()? onSchedule;
 
   @override
   Future<bool> cancelCycleReminderNotification(int id) async {
@@ -41,6 +67,7 @@ class _RecordingNotificationService extends NotificationService {
     required String body,
     required DateTime scheduledDate,
     required DateTimeComponents matchDateTimeComponents,
+    required String payload,
   }) async {
     events.add('schedule:$id');
     schedules.add(
@@ -50,8 +77,10 @@ class _RecordingNotificationService extends NotificationService {
         body: body,
         date: scheduledDate,
         components: matchDateTimeComponents,
+        payload: payload,
       ),
     );
+    onSchedule?.call();
     return !failedSchedules.contains(id);
   }
 }
@@ -87,8 +116,8 @@ void main() {
     final second = cycleReminderNotificationIds(userId);
 
     expect(first, second);
-    expect(first, hasLength(8));
-    expect(first.toSet(), hasLength(8));
+    expect(first, hasLength(9));
+    expect(first.toSet(), hasLength(9));
     expect(first.every((id) => id > 0), isTrue);
     expect(
       cycleReminderNotificationId(userId, 0),
@@ -96,9 +125,12 @@ void main() {
     );
   });
 
-  test('cancelamento tenta todos os oito slots', () async {
+  test('cancelamento tenta todos os nove slots', () async {
     final service = _RecordingNotificationService();
-    final lifecycle = CycleReminderNotificationLifecycleService(service);
+    final lifecycle = CycleReminderNotificationLifecycleService(
+      service,
+      _FixedTokenStore(),
+    );
 
     final failed = await lifecycle.cancelAllCycleReminders(userId);
 
@@ -109,12 +141,15 @@ void main() {
   test('falha em um cancelamento não interrompe os demais', () async {
     final service = _RecordingNotificationService();
     service.failedCancellations.add(cycleReminderNotificationId(userId, 3));
-    final lifecycle = CycleReminderNotificationLifecycleService(service);
+    final lifecycle = CycleReminderNotificationLifecycleService(
+      service,
+      _FixedTokenStore(),
+    );
 
     final failed = await lifecycle.cancelAllCycleReminders(userId);
 
     expect(failed, 1);
-    expect(service.cancellationAttempts, hasLength(8));
+    expect(service.cancellationAttempts, hasLength(9));
   });
 
   test(
@@ -123,6 +158,7 @@ void main() {
       final service = _RecordingNotificationService();
       final lifecycle = CycleReminderNotificationLifecycleService(
         service,
+        _FixedTokenStore(),
         clock: () => now,
       );
 
@@ -140,6 +176,12 @@ void main() {
       );
       expect(service.schedules.single.date, DateTime(2026, 8, 25, 9, 30));
       expect(service.schedules.single.components, DateTimeComponents.time);
+      expect(
+        const CycleReminderActionPayloadCodec()
+            .decode(service.schedules.single.payload)
+            ?.token,
+        _FixedTokenStore.token,
+      );
     },
   );
 
@@ -147,6 +189,7 @@ void main() {
     final service = _RecordingNotificationService();
     final lifecycle = CycleReminderNotificationLifecycleService(
       service,
+      _FixedTokenStore(),
       clock: () => DateTime(2026, 8, 25, 10),
     );
 
@@ -159,6 +202,7 @@ void main() {
     final service = _RecordingNotificationService();
     final lifecycle = CycleReminderNotificationLifecycleService(
       service,
+      _FixedTokenStore(),
       clock: () => now,
     );
 
@@ -186,33 +230,37 @@ void main() {
     expect(service.schedules.last.date, DateTime(2026, 8, 27, 9, 30));
   });
 
-  test(
-    'rebuild cancela todos os slots antes de agendar nova frequência',
-    () async {
-      final service = _RecordingNotificationService();
-      final lifecycle = CycleReminderNotificationLifecycleService(
-        service,
-        clock: () => now,
-      );
+  test('rebuild cancela somente recorrentes e preserva snooze', () async {
+    final service = _RecordingNotificationService();
+    final lifecycle = CycleReminderNotificationLifecycleService(
+      service,
+      _FixedTokenStore(),
+      clock: () => now,
+    );
 
-      await lifecycle.rebuildCycleReminders(
-        userId,
-        _preferences(
-          frequency: CycleReminderFrequency.specificWeekdays,
-          weekdays: const {DateTime.monday, DateTime.friday},
-        ),
-      );
-      service.events.clear();
-      await lifecycle.rebuildCycleReminders(userId, _preferences());
+    await lifecycle.rebuildCycleReminders(
+      userId,
+      _preferences(
+        frequency: CycleReminderFrequency.specificWeekdays,
+        weekdays: const {DateTime.monday, DateTime.friday},
+      ),
+    );
+    service.events.clear();
+    await lifecycle.rebuildCycleReminders(userId, _preferences());
 
-      expect(
-        service.events.take(8).every((event) => event.startsWith('cancel:')),
-        isTrue,
-      );
-      expect(service.events.skip(8), hasLength(1));
-      expect(service.events.last, startsWith('schedule:'));
-    },
-  );
+    expect(
+      service.events.take(8).every((event) => event.startsWith('cancel:')),
+      isTrue,
+    );
+    expect(service.events.skip(8), hasLength(1));
+    expect(service.events.last, startsWith('schedule:'));
+    expect(
+      service.cancellationAttempts,
+      isNot(
+        contains(cycleReminderNotificationId(userId, cycleReminderSnoozeSlot)),
+      ),
+    );
+  });
 
   test(
     'daily para specific também remove o slot diário antes do rebuild',
@@ -220,6 +268,7 @@ void main() {
       final service = _RecordingNotificationService();
       final lifecycle = CycleReminderNotificationLifecycleService(
         service,
+        _FixedTokenStore(),
         clock: () => now,
       );
 
@@ -251,6 +300,7 @@ void main() {
     );
     final lifecycle = CycleReminderNotificationLifecycleService(
       service,
+      _FixedTokenStore(),
       clock: () => now,
     );
 
@@ -265,6 +315,55 @@ void main() {
     expect(result.scheduled, 2);
     expect(result.failed, 1);
     expect(service.schedules, hasLength(3));
+  });
+
+  test(
+    'generation stale interrompe slots seguintes sem cancel tardio',
+    () async {
+      var current = true;
+      final service = _RecordingNotificationService()
+        ..onSchedule = () => current = false;
+      final lifecycle = CycleReminderNotificationLifecycleService(
+        service,
+        _FixedTokenStore(),
+        clock: () => now,
+      );
+
+      await lifecycle.rebuildCycleReminders(
+        userId,
+        _preferences(
+          frequency: CycleReminderFrequency.specificWeekdays,
+          weekdays: const {
+            DateTime.tuesday,
+            DateTime.thursday,
+            DateTime.friday,
+          },
+        ),
+        shouldContinue: () => current,
+      );
+
+      expect(service.schedules, hasLength(1));
+      expect(service.cancellationAttempts, hasLength(8));
+    },
+  );
+
+  test('token indisponível impede agendamento autenticável', () async {
+    final service = _RecordingNotificationService();
+    final lifecycle = CycleReminderNotificationLifecycleService(
+      service,
+      _FailingTokenStore(),
+      clock: () => now,
+    );
+
+    final result = await lifecycle.rebuildCycleReminders(
+      userId,
+      _preferences(),
+    );
+
+    expect(result.eligible, 1);
+    expect(result.scheduled, 0);
+    expect(result.failed, 1);
+    expect(service.schedules, isEmpty);
   });
 
   test('payload discreto nunca expõe tipo ou texto customizado', () {

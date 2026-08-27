@@ -1,11 +1,20 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:math';
 
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:life_os/core/services/notification_preferences.dart';
+import 'package:life_os/core/utils/app_logger.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:timezone/data/latest_all.dart' as tz;
 import 'package:timezone/timezone.dart' as tz;
+
+const String cycleReminderSnoozeActionId = 'cycle_reminder_snooze';
+const String cycleReminderActionCategoryId =
+    'life_os_personal_reminder_actions_v1';
+
+typedef NotificationResponseHandler =
+    Future<void> Function(NotificationResponse response);
 
 DateTime nextDailyMedicationOccurrence(DateTime scheduledDate, DateTime now) {
   if (!scheduledDate.isBefore(now)) return scheduledDate;
@@ -45,23 +54,54 @@ class NotificationService {
   final bool? isAndroidOverride;
 
   bool _initialized = false;
+  Future<void>? _initializationOperation;
+  NotificationResponseHandler? _notificationResponseHandler;
 
   // ---------------------------------------------------------------------------
   // INICIALIZAÇÃO
   // ---------------------------------------------------------------------------
 
-  Future<void> init() async {
-    if (_initialized) return;
+  Future<void> init() {
+    if (_initialized) return Future<void>.value();
 
+    final existingOperation = _initializationOperation;
+    if (existingOperation != null) return existingOperation;
+
+    late final Future<void> operation;
+    operation = _initializeOnce().whenComplete(() {
+      if (identical(_initializationOperation, operation)) {
+        _initializationOperation = null;
+      }
+    });
+    _initializationOperation = operation;
+    return operation;
+  }
+
+  Future<void> _initializeOnce() async {
     tz.initializeTimeZones();
 
     const AndroidInitializationSettings androidSettings =
         AndroidInitializationSettings('@mipmap/ic_launcher');
 
-    const DarwinInitializationSettings iosSettings =
-        DarwinInitializationSettings();
+    final DarwinInitializationSettings iosSettings =
+        DarwinInitializationSettings(
+          notificationCategories: <DarwinNotificationCategory>[
+            DarwinNotificationCategory(
+              cycleReminderActionCategoryId,
+              actions: <DarwinNotificationAction>[
+                DarwinNotificationAction.plain(
+                  cycleReminderSnoozeActionId,
+                  'Lembrar depois',
+                  options: <DarwinNotificationActionOption>{
+                    DarwinNotificationActionOption.foreground,
+                  },
+                ),
+              ],
+            ),
+          ],
+        );
 
-    const InitializationSettings initializationSettings =
+    final InitializationSettings initializationSettings =
         InitializationSettings(android: androidSettings, iOS: iosSettings);
 
     await _notificationsPlugin.initialize(
@@ -73,7 +113,21 @@ class NotificationService {
   }
 
   void _onNotificationResponse(NotificationResponse response) {
-    // Tratamento futuro de clique na notificação.
+    final handler = _notificationResponseHandler;
+    if (handler == null) return;
+    unawaited(
+      handler(response).catchError((_) {
+        AppLogger.w('[NotificationService] Falha no callback local.');
+      }),
+    );
+  }
+
+  void setNotificationResponseHandler(NotificationResponseHandler? handler) {
+    _notificationResponseHandler = handler;
+  }
+
+  Future<NotificationAppLaunchDetails?> getNotificationAppLaunchDetails() {
+    return _notificationsPlugin.getNotificationAppLaunchDetails();
   }
 
   // ---------------------------------------------------------------------------
@@ -264,6 +318,41 @@ class NotificationService {
     required String body,
     required DateTime scheduledDate,
     required DateTimeComponents matchDateTimeComponents,
+    required String payload,
+  }) async {
+    return _scheduleCycleReminder(
+      id: id,
+      title: title,
+      body: body,
+      scheduledDate: scheduledDate,
+      matchDateTimeComponents: matchDateTimeComponents,
+      payload: payload,
+    );
+  }
+
+  Future<bool> scheduleCycleReminderSnoozeNotification({
+    required int id,
+    required String title,
+    required String body,
+    required DateTime scheduledDate,
+    required String payload,
+  }) {
+    return _scheduleCycleReminder(
+      id: id,
+      title: title,
+      body: body,
+      scheduledDate: scheduledDate,
+      payload: payload,
+    );
+  }
+
+  Future<bool> _scheduleCycleReminder({
+    required int id,
+    required String title,
+    required String body,
+    required DateTime scheduledDate,
+    required String payload,
+    DateTimeComponents? matchDateTimeComponents,
   }) async {
     try {
       if (!await _isEnabled(null)) return false;
@@ -284,10 +373,20 @@ class NotificationService {
         importance: Importance.max,
         priority: Priority.high,
         visibility: NotificationVisibility.private,
+        actions: <AndroidNotificationAction>[
+          AndroidNotificationAction(
+            cycleReminderSnoozeActionId,
+            'Lembrar depois',
+            showsUserInterface: true,
+            cancelNotification: true,
+          ),
+        ],
       );
       const notificationDetails = NotificationDetails(
         android: androidDetails,
-        iOS: DarwinNotificationDetails(),
+        iOS: DarwinNotificationDetails(
+          categoryIdentifier: cycleReminderActionCategoryId,
+        ),
       );
 
       await _notificationsPlugin.zonedSchedule(
@@ -298,6 +397,7 @@ class NotificationService {
         notificationDetails: notificationDetails,
         androidScheduleMode: scheduleMode,
         matchDateTimeComponents: matchDateTimeComponents,
+        payload: payload,
       );
 
       return true;

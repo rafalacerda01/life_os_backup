@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:life_os/core/services/notification_preferences.dart';
@@ -15,8 +17,15 @@ class _RecordingNotificationsPlugin extends Fake
   DateTimeComponents? lastDateTimeComponents;
   String? lastTitle;
   String? lastBody;
+  String? lastPayload;
+  TZDateTime? lastScheduledDate;
+  InitializationSettings? initializationSettings;
+  DidReceiveNotificationResponseCallback? foregroundCallback;
+  DidReceiveBackgroundNotificationResponseCallback? backgroundCallback;
+  NotificationAppLaunchDetails? launchDetails;
   final List<int> cancelledIds = <int>[];
   bool throwOnSchedule = false;
+  Future<bool?> Function(int call)? initializeHandler;
 
   @override
   Future<bool?> initialize({
@@ -26,7 +35,18 @@ class _RecordingNotificationsPlugin extends Fake
     onDidReceiveBackgroundNotificationResponse,
   }) async {
     initializeCalls += 1;
+    initializationSettings = settings;
+    foregroundCallback = onDidReceiveNotificationResponse;
+    backgroundCallback = onDidReceiveBackgroundNotificationResponse;
+    final handler = initializeHandler;
+    if (handler != null) return handler(initializeCalls);
     return true;
+  }
+
+  @override
+  Future<NotificationAppLaunchDetails?>
+  getNotificationAppLaunchDetails() async {
+    return launchDetails;
   }
 
   @override
@@ -57,6 +77,8 @@ class _RecordingNotificationsPlugin extends Fake
     lastDateTimeComponents = matchDateTimeComponents;
     lastTitle = title;
     lastBody = body;
+    lastPayload = payload;
+    lastScheduledDate = scheduledDate;
     if (throwOnSchedule) {
       throw StateError('private scheduling failure');
     }
@@ -455,6 +477,7 @@ void main() {
       body: 'Você tem um lembrete programado.',
       scheduledDate: DateTime(2026, 8, 26, 9),
       matchDateTimeComponents: DateTimeComponents.time,
+      payload: 'private-action-payload',
     );
 
     final android = plugin.lastNotificationDetails?.android;
@@ -464,6 +487,31 @@ void main() {
     expect(android?.channelId, 'cycle_personal_reminders_channel');
     expect(android?.channelName, 'Lembretes pessoais');
     expect(android?.visibility, NotificationVisibility.private);
+    expect(android?.actions, hasLength(1));
+    final action = android!.actions!.single;
+    expect(action.id, cycleReminderSnoozeActionId);
+    expect(action.title, 'Lembrar depois');
+    expect(action.showsUserInterface, isTrue);
+    expect(action.cancelNotification, isTrue);
+    expect(
+      plugin.lastNotificationDetails?.iOS?.categoryIdentifier,
+      cycleReminderActionCategoryId,
+    );
+    expect(plugin.lastPayload, 'private-action-payload');
+    expect(plugin.backgroundCallback, isNull);
+
+    final categories =
+        plugin.initializationSettings?.iOS?.notificationCategories;
+    expect(categories, hasLength(1));
+    final category = categories!.single;
+    expect(category.identifier, cycleReminderActionCategoryId);
+    expect(category.actions, hasLength(1));
+    expect(category.actions.single.identifier, cycleReminderSnoozeActionId);
+    expect(category.actions.single.title, 'Lembrar depois');
+    expect(
+      category.actions.single.options,
+      contains(DarwinNotificationActionOption.foreground),
+    );
   });
 
   test(
@@ -484,6 +532,7 @@ void main() {
         body: 'Você tem um lembrete programado.',
         scheduledDate: DateTime(2026, 8, 26, 9),
         matchDateTimeComponents: DateTimeComponents.time,
+        payload: 'private-action-payload',
       );
 
       expect(scheduled, isTrue);
@@ -493,4 +542,233 @@ void main() {
       );
     },
   );
+
+  test('snooze cycle é one-shot exact sem pedir permissão', () async {
+    final plugin = _RecordingNotificationsPlugin();
+    final androidPlugin = _FakeAndroidNotificationsPlugin(
+      capabilityResults: [true],
+    );
+    final service = NotificationService(
+      notificationsPlugin: plugin,
+      androidPlugin: androidPlugin,
+      isAndroidOverride: true,
+    );
+
+    final scheduled = await service.scheduleCycleReminderSnoozeNotification(
+      id: 83,
+      title: 'Lembrete pessoal',
+      body: 'Você tem um lembrete programado.',
+      scheduledDate: DateTime(2026, 8, 26, 9, 15),
+      payload: 'private-action-payload',
+    );
+
+    expect(scheduled, isTrue);
+    expect(plugin.lastDateTimeComponents, isNull);
+    expect(plugin.lastScheduleMode, AndroidScheduleMode.exactAllowWhileIdle);
+    expect(androidPlugin.permissionRequests, 0);
+    expect(androidPlugin.notificationPermissionRequests, 0);
+  });
+
+  test('snooze cycle usa fallback inexact sem pedir permissão', () async {
+    final plugin = _RecordingNotificationsPlugin();
+    final androidPlugin = _FakeAndroidNotificationsPlugin(
+      capabilityResults: [false],
+    );
+    final service = NotificationService(
+      notificationsPlugin: plugin,
+      androidPlugin: androidPlugin,
+      isAndroidOverride: true,
+    );
+
+    await service.scheduleCycleReminderSnoozeNotification(
+      id: 84,
+      title: 'Lembrete pessoal',
+      body: 'Você tem um lembrete programado.',
+      scheduledDate: DateTime(2026, 8, 26, 9, 15),
+      payload: 'private-action-payload',
+    );
+
+    expect(plugin.lastScheduleMode, AndroidScheduleMode.inexactAllowWhileIdle);
+    expect(androidPlugin.permissionRequests, 0);
+  });
+
+  test('duas chamadas concorrentes compartilham um initialize', () async {
+    final initializeGate = Completer<bool?>();
+    final plugin = _RecordingNotificationsPlugin()
+      ..initializeHandler = (_) => initializeGate.future;
+    final service = NotificationService(notificationsPlugin: plugin);
+
+    final first = service.init();
+    final second = service.init();
+
+    expect(identical(first, second), isTrue);
+    expect(plugin.initializeCalls, 1);
+    initializeGate.complete(true);
+    await Future.wait([first, second]);
+  });
+
+  test('quatro chamadas concorrentes executam um initialize', () async {
+    final initializeGate = Completer<bool?>();
+    final plugin = _RecordingNotificationsPlugin()
+      ..initializeHandler = (_) => initializeGate.future;
+    final service = NotificationService(notificationsPlugin: plugin);
+
+    final operations = List<Future<void>>.generate(4, (_) => service.init());
+
+    expect(
+      operations.every((operation) => identical(operation, operations[0])),
+      isTrue,
+    );
+    expect(plugin.initializeCalls, 1);
+    initializeGate.complete(true);
+    await Future.wait(operations);
+  });
+
+  test('init depois do sucesso retorna sem novo initialize', () async {
+    final plugin = _RecordingNotificationsPlugin();
+    final service = NotificationService(notificationsPlugin: plugin);
+
+    await service.init();
+    await service.init();
+
+    expect(plugin.initializeCalls, 1);
+  });
+
+  test('falha concorrente é compartilhada e propagada aos callers', () async {
+    final initializeGate = Completer<bool?>();
+    final plugin = _RecordingNotificationsPlugin()
+      ..initializeHandler = (_) => initializeGate.future;
+    final service = NotificationService(notificationsPlugin: plugin);
+    final failure = StateError('initialize failed');
+
+    final first = service.init();
+    final second = service.init();
+    final observedFailures = Future.wait<Object?>([
+      first.then<Object?>((_) => null, onError: (Object error) => error),
+      second.then<Object?>((_) => null, onError: (Object error) => error),
+    ]);
+    initializeGate.completeError(failure);
+
+    expect(await observedFailures, [same(failure), same(failure)]);
+    expect(plugin.initializeCalls, 1);
+  });
+
+  test('init posterior pode tentar novamente após falha', () async {
+    final plugin = _RecordingNotificationsPlugin()
+      ..initializeHandler = (call) {
+        if (call == 1) {
+          return Future<bool?>.error(StateError('initialize failed'));
+        }
+        return Future<bool?>.value(true);
+      };
+    final service = NotificationService(notificationsPlugin: plugin);
+
+    await expectLater(service.init(), throwsStateError);
+    await service.init();
+    await service.init();
+
+    expect(plugin.initializeCalls, 2);
+  });
+
+  test('operação antiga não limpa retry novo em andamento', () async {
+    final firstGate = Completer<bool?>();
+    final retryGate = Completer<bool?>();
+    final retryStarted = Completer<void>();
+    final plugin = _RecordingNotificationsPlugin()
+      ..initializeHandler = (call) {
+        if (call == 1) return firstGate.future;
+        retryStarted.complete();
+        return retryGate.future;
+      };
+    final service = NotificationService(notificationsPlugin: plugin);
+    late Future<void> retry;
+
+    final firstObserved = service.init().catchError((Object _) {
+      retry = service.init();
+      return retry;
+    });
+    firstGate.completeError(StateError('initialize failed'));
+    await retryStarted.future;
+
+    final concurrentWithRetry = service.init();
+    expect(identical(concurrentWithRetry, retry), isTrue);
+    expect(plugin.initializeCalls, 2);
+
+    retryGate.complete(true);
+    await Future.wait([firstObserved, retry, concurrentWithRetry]);
+    expect(plugin.initializeCalls, 2);
+  });
+
+  test(
+    'callback foreground é encaminhado e background não é registrado',
+    () async {
+      final plugin = _RecordingNotificationsPlugin();
+      final service = NotificationService(notificationsPlugin: plugin);
+      final received = <NotificationResponse>[];
+      service.setNotificationResponseHandler((response) async {
+        received.add(response);
+      });
+      await service.init();
+
+      const response = NotificationResponse(
+        notificationResponseType:
+            NotificationResponseType.selectedNotificationAction,
+        id: 85,
+        actionId: cycleReminderSnoozeActionId,
+        payload: 'private-action-payload',
+      );
+      plugin.foregroundCallback!(response);
+      await Future<void>.delayed(Duration.zero);
+
+      expect(received, [response]);
+      expect(plugin.backgroundCallback, isNull);
+    },
+  );
+
+  test('handler substituído depois do init é usado imediatamente', () async {
+    final plugin = _RecordingNotificationsPlugin();
+    final service = NotificationService(notificationsPlugin: plugin);
+    var oldHandlerCalls = 0;
+    final received = Completer<NotificationResponse>();
+    service.setNotificationResponseHandler((_) async {
+      oldHandlerCalls += 1;
+    });
+    await service.init();
+    service.setNotificationResponseHandler((response) async {
+      received.complete(response);
+    });
+
+    const response = NotificationResponse(
+      notificationResponseType:
+          NotificationResponseType.selectedNotificationAction,
+      id: 87,
+      actionId: cycleReminderSnoozeActionId,
+      payload: 'private-action-payload',
+    );
+    plugin.foregroundCallback!(response);
+
+    expect(await received.future, response);
+    expect(oldHandlerCalls, 0);
+    expect(plugin.initializeCalls, 1);
+  });
+
+  test('launch details são expostos pelo owner do plugin', () async {
+    const response = NotificationResponse(
+      notificationResponseType:
+          NotificationResponseType.selectedNotificationAction,
+      id: 86,
+      actionId: cycleReminderSnoozeActionId,
+    );
+    final plugin = _RecordingNotificationsPlugin()
+      ..launchDetails = const NotificationAppLaunchDetails(
+        true,
+        notificationResponse: response,
+      );
+    final service = NotificationService(notificationsPlugin: plugin);
+
+    final details = await service.getNotificationAppLaunchDetails();
+
+    expect(details?.didNotificationLaunchApp, isTrue);
+    expect(details?.notificationResponse, response);
+  });
 }

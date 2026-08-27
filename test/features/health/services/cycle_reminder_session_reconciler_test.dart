@@ -4,6 +4,7 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:life_os/core/services/notification_service.dart';
 import 'package:life_os/features/health/presentation/cycle/cycle_reminder_preferences.dart';
+import 'package:life_os/features/health/services/cycle_reminder_action_security.dart';
 import 'package:life_os/features/health/services/cycle_reminder_notification_lifecycle.dart';
 import 'package:life_os/features/health/services/cycle_reminder_session_reconciler.dart';
 
@@ -27,8 +28,9 @@ class _RecordingLifecycle implements CycleReminderNotificationLifecycle {
   @override
   Future<CycleReminderRebuildResult> rebuildCycleReminders(
     String userId,
-    CycleReminderPreferences preferences,
-  ) async {
+    CycleReminderPreferences preferences, {
+    CycleReminderRebuildGuard? shouldContinue,
+  }) async {
     rebuildCalls += 1;
     rebuiltUserIds.add(userId);
     hasActiveReminder = true;
@@ -47,6 +49,7 @@ class _PermissionRecordingService extends NotificationService {
   int permissionRequests = 0;
   int exactRequests = 0;
   int schedules = 0;
+  final List<int> cancelledIds = <int>[];
 
   @override
   Future<bool> requestPermissions({String? preferenceKey}) async {
@@ -61,7 +64,10 @@ class _PermissionRecordingService extends NotificationService {
   }
 
   @override
-  Future<bool> cancelCycleReminderNotification(int id) async => true;
+  Future<bool> cancelCycleReminderNotification(int id) async {
+    cancelledIds.add(id);
+    return true;
+  }
 
   @override
   Future<bool> scheduleCycleReminderNotification({
@@ -70,10 +76,20 @@ class _PermissionRecordingService extends NotificationService {
     required String body,
     required DateTime scheduledDate,
     required DateTimeComponents matchDateTimeComponents,
+    required String payload,
   }) async {
     schedules += 1;
     return true;
   }
+}
+
+class _FixedTokenStore implements CycleReminderActionTokenReader {
+  @override
+  Future<String> getOrCreate(String userId) async =>
+      'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+
+  @override
+  Future<String?> load(String userId) => getOrCreate(userId);
 }
 
 CycleReminderPreferences _preferences({bool enabled = true}) {
@@ -115,6 +131,15 @@ void main() {
     expect(lifecycle.cancelCalls, 0);
   });
 
+  test('restore após clear é rejeitado antes de tocar o lifecycle', () async {
+    currentUserId = null;
+
+    await reconciler.restoreForSession(userA);
+
+    expect(lifecycle.rebuildCalls, 0);
+    expect(lifecycle.cancelCalls, 0);
+  });
+
   test('disabled cancela IDs sem rebuild', () async {
     storedPreferences = _preferences(enabled: false);
 
@@ -153,6 +178,7 @@ void main() {
     final service = _PermissionRecordingService();
     final realLifecycle = CycleReminderNotificationLifecycleService(
       service,
+      _FixedTokenStore(),
       clock: () => DateTime(2026, 8, 25, 8),
     );
     final silentReconciler = CycleReminderSessionReconciler(
@@ -167,6 +193,12 @@ void main() {
     expect(service.schedules, 1);
     expect(service.permissionRequests, 0);
     expect(service.exactRequests, 0);
+    expect(
+      service.cancelledIds,
+      isNot(
+        contains(cycleReminderNotificationId(userA, cycleReminderSnoozeSlot)),
+      ),
+    );
   });
 
   test('sessão muda durante load e não agenda UID antigo', () async {

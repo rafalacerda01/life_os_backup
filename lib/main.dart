@@ -9,6 +9,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/date_symbol_data_local.dart';
 import 'package:life_os/core/router/router.dart';
 import 'package:life_os/core/utils/app_logger.dart';
+import 'package:life_os/features/health/services/cycle_reminder_action_bootstrap.dart';
 import 'package:life_os/firebase_options.dart';
 import 'package:timezone/data/latest.dart' as tz;
 
@@ -94,6 +95,7 @@ class LifeOSApp extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    ref.watch(cycleReminderActionBootstrapProvider);
     final router = ref.watch(routerProvider);
 
     return MaterialApp.router(

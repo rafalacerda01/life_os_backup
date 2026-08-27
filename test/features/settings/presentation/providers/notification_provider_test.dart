@@ -4,6 +4,8 @@ import 'package:life_os/core/services/notification_preferences.dart';
 import 'package:life_os/core/services/notification_service.dart';
 import 'package:life_os/features/health/presentation/cycle/cycle_reminder_preferences.dart';
 import 'package:life_os/features/health/services/cycle_reminder_notification_lifecycle.dart';
+import 'package:life_os/features/health/services/cycle_reminder_operation_epoch.dart';
+import 'package:life_os/features/health/services/cycle_reminder_session_authority.dart';
 import 'package:life_os/features/health/services/medication_reminder_lifecycle.dart';
 import 'package:life_os/features/settings/presentation/providers/notification_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -82,8 +84,9 @@ class _RecordingCycleLifecycle implements CycleReminderNotificationLifecycle {
   @override
   Future<CycleReminderRebuildResult> rebuildCycleReminders(
     String userId,
-    CycleReminderPreferences preferences,
-  ) async {
+    CycleReminderPreferences preferences, {
+    CycleReminderRebuildGuard? shouldContinue,
+  }) async {
     rebuildCalls += 1;
     lastUserId = userId;
     lastPreferences = preferences;
@@ -466,4 +469,55 @@ void main() {
     expect(service.exactPermissionRequests, 0);
     expect(cycleLifecycle.rebuildCalls, 0);
   });
+
+  test(
+    'toggle global após clear persiste geral sem admitir mutação Cycle',
+    () async {
+      SharedPreferences.setMockInitialValues(<String, Object>{
+        NotificationPreferenceKeys.allNotifications: false,
+        NotificationPreferenceKeys.medicationReminders: false,
+      });
+      final service = _RecordingNotificationService();
+      final cycleLifecycle = _RecordingCycleLifecycle();
+      final cycleStore = CycleReminderPreferencesStore(
+        _MemoryCycleReminderStorage(),
+      );
+      await cycleStore.save('user-a', _cyclePreferences());
+      final sessionAuthority = CycleReminderSessionAuthority()
+        ..prepare('user-a');
+      String? firebaseUserId = 'user-a';
+      sessionAuthority.clear();
+      final operationEpoch = CycleReminderOperationEpoch();
+      final generation = operationEpoch.snapshot('user-a');
+      final container = ProviderContainer(
+        overrides: [
+          notificationServiceProvider.overrideWithValue(service),
+          medicationReminderLifecycleProvider.overrideWithValue(
+            _RecordingMedicationLifecycle(),
+          ),
+          cycleReminderNotificationLifecycleProvider.overrideWithValue(
+            cycleLifecycle,
+          ),
+          cycleReminderPreferencesStoreProvider.overrideWithValue(cycleStore),
+          cycleReminderOperationEpochProvider.overrideWithValue(operationEpoch),
+          cycleReminderUserIdReaderProvider.overrideWithValue(
+            () => sessionAuthority.admittedUserId(firebaseUserId),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+      await container.read(notificationsProvider.future);
+
+      await container.read(notificationsProvider.notifier).toggleAll(true);
+
+      expect(
+        (await const NotificationPreferencesStore().load()).allNotifications,
+        isTrue,
+      );
+      expect(cycleLifecycle.rebuildCalls, 0);
+      expect(cycleLifecycle.cancelCalls, 0);
+      expect(operationEpoch.snapshot('user-a'), generation);
+      expect(firebaseUserId, 'user-a');
+    },
+  );
 }

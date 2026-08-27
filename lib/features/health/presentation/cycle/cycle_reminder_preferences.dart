@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:life_os/features/health/services/cycle_reminder_session_authority.dart';
 
 enum CycleReminderType { pill, otherContraceptive, personal }
 
@@ -234,17 +235,24 @@ final cycleReminderUserIdProvider = StreamProvider<String?>((ref) {
 
 typedef CycleReminderUserIdReader = String? Function();
 
+final cycleReminderFirebaseUserIdReaderProvider =
+    Provider<CycleReminderUserIdReader>((ref) {
+      return () {
+        try {
+          final userId = FirebaseAuth.instance.currentUser?.uid.trim();
+          return userId == null || userId.isEmpty ? null : userId;
+        } on Object {
+          return null;
+        }
+      };
+    });
+
 final cycleReminderUserIdReaderProvider = Provider<CycleReminderUserIdReader>((
   ref,
 ) {
-  return () {
-    try {
-      final userId = FirebaseAuth.instance.currentUser?.uid.trim();
-      return userId == null || userId.isEmpty ? null : userId;
-    } on Object {
-      return null;
-    }
-  };
+  final sessionAuthority = ref.watch(cycleReminderSessionAuthorityProvider);
+  final firebaseUserId = ref.watch(cycleReminderFirebaseUserIdReaderProvider);
+  return () => sessionAuthority.admittedUserId(firebaseUserId());
 });
 
 final cycleReminderPreferencesStoreProvider =
