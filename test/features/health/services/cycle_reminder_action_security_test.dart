@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -7,6 +8,10 @@ class _MemoryTokenStorage implements CycleReminderActionTokenStorage {
   final Map<String, String> values = <String, String>{};
   bool throwOnRead = false;
   bool throwOnWrite = false;
+  int writeFailuresRemaining = 0;
+  int writeCalls = 0;
+  Completer<void>? firstWriteStarted;
+  Future<void>? writeGate;
 
   @override
   Future<String?> read(String key) async {
@@ -16,6 +21,17 @@ class _MemoryTokenStorage implements CycleReminderActionTokenStorage {
 
   @override
   Future<void> write(String key, String value) async {
+    writeCalls += 1;
+    final started = firstWriteStarted;
+    if (writeCalls == 1 && started != null && !started.isCompleted) {
+      started.complete();
+    }
+    final gate = writeGate;
+    if (gate != null) await gate;
+    if (writeFailuresRemaining > 0) {
+      writeFailuresRemaining -= 1;
+      throw StateError('private write failure');
+    }
     if (throwOnWrite) throw StateError('private write failure');
     values[key] = value;
   }
@@ -100,10 +116,85 @@ void main() {
     expect(generation, 2);
   });
 
+  test('rotate substitui T1 por T2 seguro para o mesmo UID', () async {
+    final storage = _MemoryTokenStorage();
+    var generation = 0;
+    final store = CycleReminderActionTokenStore(
+      storage,
+      randomBytes: (length) {
+        generation += 1;
+        return List<int>.filled(length, generation);
+      },
+    );
+
+    final first = await store.getOrCreate('user-a');
+    final rotated = await store.rotate('user-a');
+    final current = await store.getOrCreate('user-a');
+
+    expect(rotated, isNot(first));
+    expect(current, rotated);
+    expect(isValidCycleReminderActionToken(first), isTrue);
+    expect(isValidCycleReminderActionToken(rotated), isTrue);
+    expect(generation, 2);
+  });
+
+  test('getOrCreate concorrente não sobrescreve token rotacionado', () async {
+    final storage = _MemoryTokenStorage();
+    final firstWriteStarted = Completer<void>();
+    final releaseFirstWrite = Completer<void>();
+    storage
+      ..firstWriteStarted = firstWriteStarted
+      ..writeGate = releaseFirstWrite.future;
+    var generation = 0;
+    final store = CycleReminderActionTokenStore(
+      storage,
+      randomBytes: (length) {
+        generation += 1;
+        return List<int>.filled(length, generation);
+      },
+    );
+
+    final oldGetOrCreate = store.getOrCreate('user-a');
+    await firstWriteStarted.future;
+    final rotation = store.rotate('user-a');
+    releaseFirstWrite.complete();
+
+    final oldToken = await oldGetOrCreate;
+    final newToken = await rotation;
+    final storedToken = await store.load('user-a');
+
+    expect(newToken, isNot(oldToken));
+    expect(storedToken, newToken);
+    expect(await store.getOrCreate('user-a'), newToken);
+    expect(storage.writeCalls, 2);
+  });
+
+  test('falha de rotação propaga e retry posterior conclui', () async {
+    final storage = _MemoryTokenStorage();
+    var generation = 0;
+    final store = CycleReminderActionTokenStore(
+      storage,
+      randomBytes: (length) {
+        generation += 1;
+        return List<int>.filled(length, generation);
+      },
+    );
+    final first = await store.getOrCreate('user-a');
+    storage.writeFailuresRemaining = 1;
+
+    await expectLater(store.rotate('user-a'), throwsStateError);
+    expect(await store.load('user-a'), first);
+
+    final rotated = await store.rotate('user-a');
+    expect(rotated, isNot(first));
+    expect(await store.load('user-a'), rotated);
+  });
+
   test('UID vazio é rejeitado', () async {
     final store = CycleReminderActionTokenStore(_MemoryTokenStorage());
 
     expect(() => store.getOrCreate('  '), throwsArgumentError);
+    expect(() => store.rotate('  '), throwsArgumentError);
     await expectLater(store.load('  '), throwsArgumentError);
   });
 

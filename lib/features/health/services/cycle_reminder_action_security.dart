@@ -33,9 +33,14 @@ abstract interface class CycleReminderActionTokenReader {
   Future<String> getOrCreate(String userId);
 }
 
+abstract interface class CycleReminderActionTokenManager
+    implements CycleReminderActionTokenReader {
+  Future<String> rotate(String userId);
+}
+
 typedef CycleReminderSecureRandomBytes = List<int> Function(int length);
 
-class CycleReminderActionTokenStore implements CycleReminderActionTokenReader {
+class CycleReminderActionTokenStore implements CycleReminderActionTokenManager {
   CycleReminderActionTokenStore(
     this._storage, {
     CycleReminderSecureRandomBytes? randomBytes,
@@ -46,7 +51,7 @@ class CycleReminderActionTokenStore implements CycleReminderActionTokenReader {
 
   final CycleReminderActionTokenStorage _storage;
   final CycleReminderSecureRandomBytes _randomBytes;
-  final Map<String, Future<String>> _inFlight = <String, Future<String>>{};
+  final Map<String, Future<void>> _operationTails = <String, Future<void>>{};
 
   @override
   Future<String?> load(String userId) async {
@@ -61,23 +66,29 @@ class CycleReminderActionTokenStore implements CycleReminderActionTokenReader {
   @override
   Future<String> getOrCreate(String userId) {
     final normalizedUserId = _normalizeUserId(userId);
-    final existing = _inFlight[normalizedUserId];
-    if (existing != null) return existing;
+    return _runSerialized(
+      normalizedUserId,
+      () => _getOrCreate(normalizedUserId),
+    );
+  }
 
-    late final Future<String> operation;
-    operation = _getOrCreate(normalizedUserId).whenComplete(() {
-      if (identical(_inFlight[normalizedUserId], operation)) {
-        _inFlight.remove(normalizedUserId);
-      }
-    });
-    _inFlight[normalizedUserId] = operation;
-    return operation;
+  @override
+  Future<String> rotate(String userId) {
+    final normalizedUserId = _normalizeUserId(userId);
+    return _runSerialized(
+      normalizedUserId,
+      () => _generateAndStore(normalizedUserId),
+    );
   }
 
   Future<String> _getOrCreate(String userId) async {
     final existing = await load(userId);
     if (existing != null) return existing;
 
+    return _generateAndStore(userId);
+  }
+
+  Future<String> _generateAndStore(String userId) async {
     final bytes = _randomBytes(_tokenBytes);
     if (bytes.length != _tokenBytes ||
         bytes.any((value) => value < 0 || value > 255)) {
@@ -87,6 +98,20 @@ class CycleReminderActionTokenStore implements CycleReminderActionTokenReader {
     final token = base64Url.encode(bytes).replaceAll('=', '');
     await _storage.write(_keyFor(userId), token);
     return token;
+  }
+
+  Future<T> _runSerialized<T>(String userId, Future<T> Function() operation) {
+    final previous = _operationTails[userId] ?? Future<void>.value();
+    final result = previous.then<T>((_) => operation());
+
+    late final Future<void> tail;
+    tail = result.then<void>((_) {}, onError: (_, _) {}).whenComplete(() {
+      if (identical(_operationTails[userId], tail)) {
+        _operationTails.remove(userId);
+      }
+    });
+    _operationTails[userId] = tail;
+    return result;
   }
 
   String _keyFor(String userId) => '$_keyPrefix${_normalizeUserId(userId)}';
@@ -170,7 +195,7 @@ bool constantTimeTokenEquals(String first, String second) {
 }
 
 final cycleReminderActionTokenStoreProvider =
-    Provider<CycleReminderActionTokenReader>((ref) {
+    Provider<CycleReminderActionTokenManager>((ref) {
       const storage = FlutterSecureStorage(
         aOptions: AndroidOptions(encryptedSharedPreferences: true),
       );

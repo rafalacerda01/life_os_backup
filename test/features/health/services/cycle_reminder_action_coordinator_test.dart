@@ -15,7 +15,7 @@ import 'package:life_os/features/health/services/cycle_reminder_session_authorit
 class _TokenStore implements CycleReminderActionTokenReader {
   _TokenStore(this.token);
 
-  final String token;
+  String token;
   void Function()? onLoad;
   bool throwOnLoad = false;
 
@@ -39,6 +39,7 @@ class _ScheduledSnooze {
     required this.body,
     required this.date,
     required this.payload,
+    required this.includeDoneAction,
   });
 
   final int id;
@@ -46,6 +47,7 @@ class _ScheduledSnooze {
   final String body;
   final DateTime date;
   final String payload;
+  final bool includeDoneAction;
 }
 
 class _RecordingGateway implements CycleReminderActionNotificationGateway {
@@ -54,11 +56,12 @@ class _RecordingGateway implements CycleReminderActionNotificationGateway {
   void Function()? onSchedule;
   Completer<void>? scheduleStarted;
   Future<void>? scheduleGate;
+  bool cancelResult = true;
 
   @override
   Future<bool> cancel(int id) async {
     cancelledIds.add(id);
-    return true;
+    return cancelResult;
   }
 
   @override
@@ -68,6 +71,7 @@ class _RecordingGateway implements CycleReminderActionNotificationGateway {
     required String body,
     required DateTime scheduledDate,
     required String payload,
+    required bool includeDoneAction,
   }) async {
     scheduleStarted?.complete();
     final gate = scheduleGate;
@@ -79,6 +83,7 @@ class _RecordingGateway implements CycleReminderActionNotificationGateway {
         body: body,
         date: scheduledDate,
         payload: payload,
+        includeDoneAction: includeDoneAction,
       ),
     );
     onSchedule?.call();
@@ -107,13 +112,14 @@ class _RecordingLifecycle implements CycleReminderNotificationLifecycle {
 
 CycleReminderPreferences _preferences({
   bool enabled = true,
+  CycleReminderType type = CycleReminderType.personal,
   CycleReminderPrivacyMode privacyMode = CycleReminderPrivacyMode.discreet,
   String customTitle = '',
   String customBody = '',
 }) {
   return CycleReminderPreferences(
     enabled: enabled,
-    type: CycleReminderType.personal,
+    type: type,
     hour: 9,
     minute: 30,
     frequency: CycleReminderFrequency.daily,
@@ -144,6 +150,14 @@ void main() {
   late Completer<void>? preferencesLoadStarted;
   late Future<void>? preferencesLoadGate;
   late List<String> warnings;
+  late bool pillTaken;
+  late int pillWriterCalls;
+  late int pillLogicalMutations;
+  late List<String> pillExpectedUids;
+  late void Function()? onPillWrite;
+  late Completer<void>? pillWriteStarted;
+  late Future<void>? pillWriteGate;
+  late bool throwOnPillWrite;
 
   NotificationResponse responseFor({
     String? token,
@@ -173,6 +187,26 @@ void main() {
         return preferences;
       },
       loadGlobalNotifications: () async => globalEnabled,
+      markPillTaken: (expectedUid) async {
+        pillWriterCalls += 1;
+        pillExpectedUids.add(expectedUid);
+        onPillWrite?.call();
+        final started = pillWriteStarted;
+        if (started != null && !started.isCompleted) started.complete();
+        final gate = pillWriteGate;
+        if (gate != null) await gate;
+        if (throwOnPillWrite) throw StateError('private health failure');
+        if (currentUserId != expectedUid) return false;
+        if (!pillTaken) {
+          pillTaken = true;
+          pillLogicalMutations += 1;
+        }
+        return true;
+      },
+      readPillTaken: (expectedUid) async {
+        if (currentUserId != expectedUid) return null;
+        return pillTaken;
+      },
       operationEpoch: operationEpoch,
       sessionAuthority: sessionAuthority,
       mutationGate: mutationGate,
@@ -197,6 +231,14 @@ void main() {
     preferencesLoadStarted = null;
     preferencesLoadGate = null;
     warnings = <String>[];
+    pillTaken = false;
+    pillWriterCalls = 0;
+    pillLogicalMutations = 0;
+    pillExpectedUids = <String>[];
+    onPillWrite = null;
+    pillWriteStarted = null;
+    pillWriteGate = null;
+    throwOnPillWrite = false;
   });
 
   test('snooze válido substitui slot 8 e agenda para 15 minutos', () async {
@@ -341,6 +383,21 @@ void main() {
     expect(gateway.schedules.single.payload, isNot(contains('Corpo atual')));
   });
 
+  test('snooze usa tipo atual para expor Feito somente em pill', () async {
+    preferences = _preferences(type: CycleReminderType.pill);
+    final actionCoordinator = coordinator();
+    await actionCoordinator.onSessionPrepared(userA);
+
+    await actionCoordinator.handle(responseFor());
+    preferences = _preferences(type: CycleReminderType.personal);
+    await actionCoordinator.handle(responseFor());
+
+    expect(
+      gateway.schedules.map((schedule) => schedule.includeDoneAction),
+      <bool>[true, false],
+    );
+  });
+
   test(
     'action recebida antes do Auth fica somente pending em memória',
     () async {
@@ -438,11 +495,52 @@ void main() {
     final actionCoordinator = coordinator();
     await actionCoordinator.onSessionPrepared(userA);
     actionCoordinator.onSessionCleared();
+    tokenStore.token = tokenB;
 
     await actionCoordinator.onSessionPrepared(userA);
-    await actionCoordinator.handle(responseFor());
+    await actionCoordinator.handle(responseFor(token: tokenB));
 
     expect(gateway.schedules, hasLength(1));
+  });
+
+  test('snooze T1 após recovery e novo prepare A é rejeitado', () async {
+    final oldResponse = responseFor(token: tokenA);
+    final actionCoordinator = coordinator();
+    await actionCoordinator.onSessionPrepared(userA);
+    actionCoordinator.onSessionCleared();
+    tokenStore.token = tokenB;
+    await actionCoordinator.onSessionPrepared(userA);
+
+    await actionCoordinator.handle(oldResponse);
+
+    expect(gateway.schedules, isEmpty);
+    expect(gateway.cancelledIds, isEmpty);
+  });
+
+  test('snooze T2 após novo login A continua funcionando', () async {
+    final actionCoordinator = coordinator();
+    await actionCoordinator.onSessionPrepared(userA);
+    actionCoordinator.onSessionCleared();
+    tokenStore.token = tokenB;
+    await actionCoordinator.onSessionPrepared(userA);
+
+    await actionCoordinator.handle(responseFor(token: tokenB));
+
+    expect(gateway.schedules, hasLength(1));
+    expect(gateway.cancelledIds, <int>[
+      cycleReminderNotificationId(userA, cycleReminderSnoozeSlot),
+    ]);
+  });
+
+  test('cold start T1 pendente após recovery falha fechado', () async {
+    tokenStore.token = tokenB;
+    final actionCoordinator = coordinator();
+
+    await actionCoordinator.handle(responseFor(token: tokenA));
+    await actionCoordinator.onSessionPrepared(userA);
+
+    expect(gateway.schedules, isEmpty);
+    expect(gateway.cancelledIds, isEmpty);
   });
 
   test('lease antiga de A continua stale após novo prepare de A', () async {
@@ -524,5 +622,336 @@ void main() {
     expect(gateway.schedules, isEmpty);
     expect(gateway.cancelledIds, isEmpty);
     expect(lifecycle.cancelledUsers, isEmpty);
+  });
+
+  group('action Feito', () {
+    test('DONE T1 após recovery e novo prepare A não escreve', () async {
+      preferences = _preferences(type: CycleReminderType.pill);
+      final oldResponse = responseFor(
+        actionId: cycleReminderDoneActionId,
+        token: tokenA,
+      );
+      final actionCoordinator = coordinator();
+      await actionCoordinator.onSessionPrepared(userA);
+      actionCoordinator.onSessionCleared();
+      tokenStore.token = tokenB;
+      await actionCoordinator.onSessionPrepared(userA);
+
+      await actionCoordinator.handle(oldResponse);
+
+      expect(pillWriterCalls, 0);
+      expect(pillLogicalMutations, 0);
+      expect(gateway.cancelledIds, isEmpty);
+      expect(gateway.schedules, isEmpty);
+    });
+
+    test('DONE T2 após novo login A continua funcionando', () async {
+      preferences = _preferences(type: CycleReminderType.pill);
+      final actionCoordinator = coordinator();
+      await actionCoordinator.onSessionPrepared(userA);
+      actionCoordinator.onSessionCleared();
+      tokenStore.token = tokenB;
+      await actionCoordinator.onSessionPrepared(userA);
+
+      await actionCoordinator.handle(
+        responseFor(actionId: cycleReminderDoneActionId, token: tokenB),
+      );
+
+      expect(pillWriterCalls, 1);
+      expect(pillLogicalMutations, 1);
+      expect(gateway.cancelledIds, <int>[
+        cycleReminderNotificationId(userA, cycleReminderSnoozeSlot),
+      ]);
+    });
+
+    test('prepared A + Firebase A + pill marca Health de A', () async {
+      preferences = _preferences(type: CycleReminderType.pill);
+      final actionCoordinator = coordinator();
+      await actionCoordinator.onSessionPrepared(userA);
+
+      await actionCoordinator.handle(
+        responseFor(actionId: cycleReminderDoneActionId),
+      );
+
+      expect(pillTaken, isTrue);
+      expect(pillLogicalMutations, 1);
+      expect(pillExpectedUids, <String>[userA]);
+      expect(gateway.cancelledIds, <int>[
+        cycleReminderNotificationId(userA, cycleReminderSnoozeSlot),
+      ]);
+      expect(gateway.schedules, isEmpty);
+    });
+
+    test('Firebase mismatch e authority null falham fechado', () async {
+      preferences = _preferences(type: CycleReminderType.pill);
+      final mismatch = coordinator();
+      await mismatch.onSessionPrepared(userA);
+      currentUserId = userB;
+      await mismatch.handle(responseFor(actionId: cycleReminderDoneActionId));
+
+      currentUserId = userA;
+      sessionAuthority.clear();
+      final withoutAuthority = coordinator();
+      await withoutAuthority.handle(
+        responseFor(actionId: cycleReminderDoneActionId),
+      );
+
+      expect(pillWriterCalls, 0);
+      expect(gateway.cancelledIds, isEmpty);
+    });
+
+    test('callback antiga A após prepare B não escreve em B', () async {
+      preferences = _preferences(type: CycleReminderType.pill);
+      final actionCoordinator = coordinator();
+      await actionCoordinator.onSessionPrepared(userA);
+      actionCoordinator.onSessionCleared();
+      currentUserId = userB;
+      tokenStore = _TokenStore(tokenB);
+      await actionCoordinator.onSessionPrepared(userB);
+
+      await actionCoordinator.handle(
+        responseFor(actionId: cycleReminderDoneActionId),
+      );
+
+      expect(pillWriterCalls, 0);
+      expect(pillTaken, isFalse);
+    });
+
+    test(
+      'lease antiga A continua stale após logout e novo prepare A',
+      () async {
+        preferences = _preferences(type: CycleReminderType.pill);
+        final loadStarted = Completer<void>();
+        final releaseLoad = Completer<void>();
+        preferencesLoadStarted = loadStarted;
+        preferencesLoadGate = releaseLoad.future;
+        final actionCoordinator = coordinator();
+        await actionCoordinator.onSessionPrepared(userA);
+
+        final oldAction = actionCoordinator.handle(
+          responseFor(actionId: cycleReminderDoneActionId),
+        );
+        await loadStarted.future;
+        actionCoordinator.onSessionCleared();
+        await actionCoordinator.onSessionPrepared(userA);
+        releaseLoad.complete();
+        await oldAction;
+
+        expect(pillWriterCalls, 0);
+        expect(pillTaken, isFalse);
+      },
+    );
+
+    test('personal e mudança pill para personal rejeitam Feito', () async {
+      final personalCoordinator = coordinator();
+      await personalCoordinator.onSessionPrepared(userA);
+      await personalCoordinator.handle(
+        responseFor(actionId: cycleReminderDoneActionId),
+      );
+
+      final loadStarted = Completer<void>();
+      final releaseLoad = Completer<void>();
+      preferences = _preferences(type: CycleReminderType.pill);
+      preferencesLoadStarted = loadStarted;
+      preferencesLoadGate = releaseLoad.future;
+      final changedCoordinator = coordinator();
+      await changedCoordinator.onSessionPrepared(userA);
+      final changedAction = changedCoordinator.handle(
+        responseFor(actionId: cycleReminderDoneActionId),
+      );
+      await loadStarted.future;
+      preferences = _preferences(type: CycleReminderType.personal);
+      releaseLoad.complete();
+      await changedAction;
+
+      expect(pillWriterCalls, 0);
+      expect(gateway.cancelledIds, isEmpty);
+    });
+
+    test('token ou notification ID inválido não escreve Health', () async {
+      preferences = _preferences(type: CycleReminderType.pill);
+      final actionCoordinator = coordinator();
+      await actionCoordinator.onSessionPrepared(userA);
+
+      await actionCoordinator.handle(
+        responseFor(actionId: cycleReminderDoneActionId, token: tokenB),
+      );
+      await actionCoordinator.handle(
+        responseFor(actionId: cycleReminderDoneActionId, id: 999999),
+      );
+
+      expect(pillWriterCalls, 0);
+      expect(gateway.cancelledIds, isEmpty);
+    });
+
+    test('false vira true uma vez e callbacks duplicados são no-op', () async {
+      preferences = _preferences(type: CycleReminderType.pill);
+      final actionCoordinator = coordinator();
+      await actionCoordinator.onSessionPrepared(userA);
+      final response = responseFor(actionId: cycleReminderDoneActionId);
+
+      await Future.wait(<Future<void>>[
+        actionCoordinator.handle(response),
+        actionCoordinator.handle(response),
+      ]);
+
+      expect(pillTaken, isTrue);
+      expect(pillWriterCalls, 2);
+      expect(pillLogicalMutations, 1);
+    });
+
+    test('pill já true não cria nova mutação lógica', () async {
+      pillTaken = true;
+      preferences = _preferences(type: CycleReminderType.pill);
+      final actionCoordinator = coordinator();
+      await actionCoordinator.onSessionPrepared(userA);
+
+      await actionCoordinator.handle(
+        responseFor(actionId: cycleReminderDoneActionId),
+      );
+
+      expect(pillWriterCalls, 1);
+      expect(pillLogicalMutations, 0);
+    });
+
+    test('cold start e callback duplicado mantêm uma mutação lógica', () async {
+      preferences = _preferences(type: CycleReminderType.pill);
+      final response = responseFor(actionId: cycleReminderDoneActionId);
+      final actionCoordinator = coordinator();
+
+      await actionCoordinator.handle(response);
+      expect(pillWriterCalls, 0);
+      await actionCoordinator.onSessionPrepared(userA);
+      await actionCoordinator.handle(response);
+
+      expect(pillLogicalMutations, 1);
+    });
+
+    test('falha Health preserva snooze e produz warning sanitizado', () async {
+      preferences = _preferences(type: CycleReminderType.pill);
+      throwOnPillWrite = true;
+      final actionCoordinator = coordinator();
+      await actionCoordinator.onSessionPrepared(userA);
+
+      await actionCoordinator.handle(
+        responseFor(actionId: cycleReminderDoneActionId),
+      );
+
+      expect(gateway.cancelledIds, isEmpty);
+      expect(warnings, <String>[
+        '[CycleReminderAction] Ação local ignorada com segurança.',
+      ]);
+    });
+
+    test(
+      'falha ao cancelar slot 8 mantém Health e retry é idempotente',
+      () async {
+        preferences = _preferences(type: CycleReminderType.pill);
+        gateway.cancelResult = false;
+        final actionCoordinator = coordinator();
+        await actionCoordinator.onSessionPrepared(userA);
+        final response = responseFor(actionId: cycleReminderDoneActionId);
+
+        await actionCoordinator.handle(response);
+        gateway.cancelResult = true;
+        await actionCoordinator.handle(response);
+
+        expect(pillTaken, isTrue);
+        expect(pillLogicalMutations, 1);
+        expect(gateway.cancelledIds, <int>[
+          cycleReminderNotificationId(userA, cycleReminderSnoozeSlot),
+          cycleReminderNotificationId(userA, cycleReminderSnoozeSlot),
+        ]);
+      },
+    );
+
+    test('global OFF antes da escrita torna action stale', () async {
+      preferences = _preferences(type: CycleReminderType.pill);
+      final loadStarted = Completer<void>();
+      final releaseLoad = Completer<void>();
+      preferencesLoadStarted = loadStarted;
+      preferencesLoadGate = releaseLoad.future;
+      final actionCoordinator = coordinator();
+      await actionCoordinator.onSessionPrepared(userA);
+
+      final action = actionCoordinator.handle(
+        responseFor(actionId: cycleReminderDoneActionId),
+      );
+      await loadStarted.future;
+      globalEnabled = false;
+      operationEpoch.invalidate(userA);
+      releaseLoad.complete();
+      await action;
+
+      expect(pillWriterCalls, 0);
+    });
+
+    test(
+      'save concorrente muda type e Feito relê preferences no gate',
+      () async {
+        preferences = _preferences(type: CycleReminderType.pill);
+        operationEpoch.invalidate(userA);
+        final blockerStarted = Completer<void>();
+        final releaseBlocker = Completer<void>();
+        final blocker = mutationGate.run<void>(userA, () async {
+          blockerStarted.complete();
+          await releaseBlocker.future;
+          preferences = _preferences(type: CycleReminderType.personal);
+        });
+        await blockerStarted.future;
+        final actionCoordinator = coordinator();
+        await actionCoordinator.onSessionPrepared(userA);
+
+        final action = actionCoordinator.handle(
+          responseFor(actionId: cycleReminderDoneActionId),
+        );
+        releaseBlocker.complete();
+        await Future.wait<void>(<Future<void>>[blocker, action]);
+
+        expect(pillWriterCalls, 0);
+      },
+    );
+
+    test('Feito antes de snooze concorrente impede recriar slot 8', () async {
+      preferences = _preferences(type: CycleReminderType.pill);
+      final actionCoordinator = coordinator();
+      await actionCoordinator.onSessionPrepared(userA);
+
+      await Future.wait(<Future<void>>[
+        actionCoordinator.handle(
+          responseFor(actionId: cycleReminderDoneActionId),
+        ),
+        actionCoordinator.handle(
+          responseFor(actionId: cycleReminderSnoozeActionId),
+        ),
+      ]);
+
+      expect(pillLogicalMutations, 1);
+      expect(gateway.schedules, isEmpty);
+    });
+
+    test('troca A para B durante repository Future bloqueia mutação', () async {
+      preferences = _preferences(type: CycleReminderType.pill);
+      final writeStarted = Completer<void>();
+      final releaseWrite = Completer<void>();
+      pillWriteStarted = writeStarted;
+      pillWriteGate = releaseWrite.future;
+      final actionCoordinator = coordinator();
+      await actionCoordinator.onSessionPrepared(userA);
+
+      final action = actionCoordinator.handle(
+        responseFor(actionId: cycleReminderDoneActionId),
+      );
+      await writeStarted.future;
+      actionCoordinator.onSessionCleared();
+      currentUserId = userB;
+      await actionCoordinator.onSessionPrepared(userB);
+      releaseWrite.complete();
+      await action;
+
+      expect(pillTaken, isFalse);
+      expect(pillLogicalMutations, 0);
+      expect(gateway.cancelledIds, isEmpty);
+    });
   });
 }

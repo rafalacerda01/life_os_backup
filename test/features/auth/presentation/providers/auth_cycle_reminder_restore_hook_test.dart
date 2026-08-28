@@ -64,31 +64,28 @@ void main() {
   });
 
   test('cleanup invalida actions antes de qualquer limpeza crítica', () {
-    final methodStart = source.indexOf('Future<void> _performLocalDataClear()');
+    final methodStart = source.indexOf(
+      'Future<void> _performLocalDataClear(String? cleanupUserId)',
+    );
     final methodEnd = source.indexOf(
-      'void _invalidateSessionProviders()',
+      'Future<void> _recoverPendingLocalCleanup()',
       methodStart,
     );
     final method = source.substring(methodStart, methodEnd);
 
-    final ownerCapture = method.indexOf(
-      'final previousLocalSessionUid = _activeLocalSessionUid;',
-    );
     final actionClear = method.indexOf('_clearCycleReminderActionSession();');
     final generationInvalidation = method.indexOf('_sessionGeneration += 1;');
     final hydrationWait = method.indexOf('await hydration.timeout');
     final cycleCleanup = method.indexOf(
-      '.cancelAfterCurrentMutations(previousLocalSessionUid);',
+      '.cancelAfterCurrentMutations(cleanupUserId);',
     );
     final tokenCleanup = method.indexOf('await secureStorage.deleteToken();');
     final driftCleanup = method.indexOf('await db.clearAllData();');
     final notificationCleanup = method.indexOf(
       'await NotificationService.instance.cancelAllNotifications();',
     );
-    final ownerRelease = method.indexOf('_activeLocalSessionUid = null;');
 
-    expect(ownerCapture, greaterThanOrEqualTo(0));
-    expect(actionClear, greaterThan(ownerCapture));
+    expect(actionClear, greaterThanOrEqualTo(0));
     expect(generationInvalidation, greaterThan(actionClear));
     expect(hydrationWait, greaterThan(actionClear));
     expect(cycleCleanup, greaterThan(hydrationWait));
@@ -96,7 +93,49 @@ void main() {
     expect(tokenCleanup, greaterThan(actionClear));
     expect(driftCleanup, greaterThan(actionClear));
     expect(notificationCleanup, greaterThan(cycleCleanup));
-    expect(ownerRelease, greaterThan(notificationCleanup));
+  });
+
+  test('barreira durável antecede cleanup e recovery antecede prepare', () {
+    final clearStart = source.indexOf(
+      'Future<PendingAuthCleanup?> _clearLocalData({',
+    );
+    final criticalStart = source.indexOf(
+      'Future<void> _runCriticalLocalDataClear',
+      clearStart,
+    );
+    final clearMethod = source.substring(clearStart, criticalStart);
+    final barrierWrite = clearMethod.indexOf(
+      '.setPending(cleanupUserId, intent)',
+    );
+    final criticalCleanup = clearMethod.indexOf(
+      'await _runCriticalLocalDataClear(cleanupUserId);',
+    );
+
+    expect(barrierWrite, greaterThanOrEqualTo(0));
+    expect(criticalCleanup, greaterThan(barrierWrite));
+
+    final prepareStart = source.indexOf(
+      'Future<bool> _prepareAuthenticatedSession',
+    );
+    final prepareEnd = source.indexOf(
+      'void _notifyCycleReminderActionSessionPrepared',
+      prepareStart,
+    );
+    final prepare = source.substring(prepareStart, prepareEnd);
+    final recovery = prepare.indexOf('await _recoverPendingLocalCleanup();');
+    final authorityOpen = prepare.indexOf(
+      '_notifyCycleReminderActionSessionPrepared(uid);',
+    );
+
+    expect(recovery, greaterThanOrEqualTo(0));
+    expect(authorityOpen, greaterThan(recovery));
+  });
+
+  test('todos os clears usam o marker exato', () {
+    expect(source, isNot(contains('.clear(logoutUserId)')));
+    expect(source, isNot(contains('.clear(cleanupUserId)')));
+    expect(source, isNot(contains('.clear(pending.userId)')));
+    expect(RegExp(r'\.clearIfCurrent\(').allMatches(source), hasLength(3));
   });
 
   test('troca A para B aguarda cleanup antes do novo ownership local', () {

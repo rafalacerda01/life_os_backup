@@ -413,6 +413,8 @@ void main() {
     expect(scheduled, isTrue);
     expect(plugin.lastScheduleMode, AndroidScheduleMode.exactAllowWhileIdle);
     expect(androidPlugin.permissionRequests, 0);
+    expect(plugin.lastNotificationDetails?.android?.actions, isNull);
+    expect(plugin.lastNotificationDetails?.iOS?.categoryIdentifier, isNull);
   });
 
   test(
@@ -502,8 +504,10 @@ void main() {
 
     final categories =
         plugin.initializationSettings?.iOS?.notificationCategories;
-    expect(categories, hasLength(1));
-    final category = categories!.single;
+    expect(categories, hasLength(2));
+    final category = categories!.singleWhere(
+      (candidate) => candidate.identifier == cycleReminderActionCategoryId,
+    );
     expect(category.identifier, cycleReminderActionCategoryId);
     expect(category.actions, hasLength(1));
     expect(category.actions.single.identifier, cycleReminderSnoozeActionId);
@@ -511,6 +515,55 @@ void main() {
     expect(
       category.actions.single.options,
       contains(DarwinNotificationActionOption.foreground),
+    );
+    final pillCategory = categories.singleWhere(
+      (candidate) => candidate.identifier == cycleReminderPillActionCategoryId,
+    );
+    expect(pillCategory.actions.map((action) => action.identifier), <String>[
+      cycleReminderDoneActionId,
+      cycleReminderSnoozeActionId,
+    ]);
+    expect(
+      pillCategory.actions
+          .expand((action) => action.options)
+          .every(
+            (option) => option == DarwinNotificationActionOption.foreground,
+          ),
+      isTrue,
+    );
+  });
+
+  test('pill recurring mostra Feito e Lembrar depois em foreground', () async {
+    final plugin = _RecordingNotificationsPlugin();
+    final service = NotificationService(
+      notificationsPlugin: plugin,
+      androidPlugin: _FakeAndroidNotificationsPlugin(capabilityResults: [true]),
+      isAndroidOverride: true,
+    );
+
+    await service.scheduleCycleReminderNotification(
+      id: 811,
+      title: 'Lembrete pessoal',
+      body: 'Você tem um lembrete programado.',
+      scheduledDate: DateTime(2026, 8, 26, 9),
+      matchDateTimeComponents: DateTimeComponents.time,
+      payload: 'private-action-payload',
+      includeDoneAction: true,
+    );
+
+    final actions = plugin.lastNotificationDetails!.android!.actions!;
+    expect(actions.map((action) => action.id), <String>[
+      cycleReminderDoneActionId,
+      cycleReminderSnoozeActionId,
+    ]);
+    expect(actions.map((action) => action.title), <String>[
+      'Feito',
+      'Lembrar depois',
+    ]);
+    expect(actions.every((action) => action.showsUserInterface), isTrue);
+    expect(
+      plugin.lastNotificationDetails?.iOS?.categoryIdentifier,
+      cycleReminderPillActionCategoryId,
     );
   });
 
@@ -567,6 +620,45 @@ void main() {
     expect(plugin.lastScheduleMode, AndroidScheduleMode.exactAllowWhileIdle);
     expect(androidPlugin.permissionRequests, 0);
     expect(androidPlugin.notificationPermissionRequests, 0);
+    expect(
+      plugin.lastNotificationDetails!.android!.actions!.map(
+        (action) => action.id,
+      ),
+      <String>[cycleReminderSnoozeActionId],
+    );
+    expect(
+      plugin.lastNotificationDetails?.iOS?.categoryIdentifier,
+      cycleReminderActionCategoryId,
+    );
+  });
+
+  test('pill snooze preserva Feito e Lembrar depois', () async {
+    final plugin = _RecordingNotificationsPlugin();
+    final service = NotificationService(
+      notificationsPlugin: plugin,
+      androidPlugin: _FakeAndroidNotificationsPlugin(capabilityResults: [true]),
+      isAndroidOverride: true,
+    );
+
+    await service.scheduleCycleReminderSnoozeNotification(
+      id: 831,
+      title: 'Lembrete pessoal',
+      body: 'Você tem um lembrete programado.',
+      scheduledDate: DateTime(2026, 8, 26, 9, 15),
+      payload: 'private-action-payload',
+      includeDoneAction: true,
+    );
+
+    expect(
+      plugin.lastNotificationDetails!.android!.actions!.map(
+        (action) => action.id,
+      ),
+      <String>[cycleReminderDoneActionId, cycleReminderSnoozeActionId],
+    );
+    expect(
+      plugin.lastNotificationDetails?.iOS?.categoryIdentifier,
+      cycleReminderPillActionCategoryId,
+    );
   });
 
   test('snooze cycle usa fallback inexact sem pedir permissão', () async {

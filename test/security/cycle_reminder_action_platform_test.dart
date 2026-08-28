@@ -36,4 +36,32 @@ void main() {
     expect(service, isNot(contains("@pragma('vm:entry-point')")));
     expect(appDelegate, isNot(contains('setPluginRegistrantCallback')));
   });
+
+  test('Feito usa categoria neutra e actions foreground', () {
+    final service = File(
+      'lib/core/services/notification_service.dart',
+    ).readAsStringSync();
+
+    expect(
+      service,
+      contains("cycleReminderDoneActionId = 'cycle_reminder_done'"),
+    );
+    expect(service, contains("'life_os_pill_reminder_actions_v1'"));
+    expect(
+      RegExp(
+        r'cycleReminderDoneActionId,[\s\S]*?showsUserInterface: true',
+      ).hasMatch(service),
+      isTrue,
+    );
+    expect(
+      RegExp(
+        r'cycleReminderDoneActionId,[\s\S]*?DarwinNotificationActionOption\.foreground',
+      ).hasMatch(service),
+      isTrue,
+    );
+    expect(
+      service,
+      isNot(contains('onDidReceiveBackgroundNotificationResponse:')),
+    );
+  });
 }

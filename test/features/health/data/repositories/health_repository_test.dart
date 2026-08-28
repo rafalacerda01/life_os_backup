@@ -18,12 +18,16 @@ import 'package:life_os/features/health/services/medication_reminder_lifecycle.d
 import 'package:shared_preferences/shared_preferences.dart';
 
 class FakeFirebaseUser extends Fake implements User {
+  FakeFirebaseUser([this.userId = 'user-123']);
+
+  final String userId;
+
   @override
-  String get uid => 'user-123';
+  String get uid => userId;
 }
 
 class FakeFirebaseAuth extends Fake implements FirebaseAuth {
-  final User user;
+  User? user;
 
   FakeFirebaseAuth(this.user);
 
@@ -348,6 +352,104 @@ void main() {
     expect(healthRow.waterIntakeMl, 750);
     expect(payload, {'waterIntakeMl': 750, 'date': '2026-08-21T10:00:00.000Z'});
     expect(syncManager.calls, 1);
+  });
+
+  group('updatePillStatus expectedUid', () {
+    test('UID correto altera false para true e cria uma SyncQueue', () async {
+      final result = await repository.updatePillStatus(
+        true,
+        expectedUid: 'user-123',
+      );
+
+      final healthRow = await db.select(db.healthEntries).getSingle();
+      final pending = await db.getPendingSyncItems('user-123');
+      final payload = jsonDecode(pending.single.payloadJson) as Map;
+
+      expect(result, isTrue);
+      expect(healthRow.hasTakenPillToday, isTrue);
+      expect(pending, hasLength(1));
+      expect(payload, <String, dynamic>{
+        'hasTakenPillToday': true,
+        'date': '2026-08-21T10:00:00.000Z',
+      });
+      expect(syncManager.calls, 1);
+    });
+
+    test('UID diferente falha fechado sem Drift ou SyncQueue', () async {
+      final result = await repository.updatePillStatus(
+        true,
+        expectedUid: 'user-b',
+      );
+
+      expect(result, isFalse);
+      expect(await db.select(db.healthEntries).get(), isEmpty);
+      expect(await db.getPendingSyncItems('user-123'), isEmpty);
+      expect(await db.getPendingSyncItems('user-b'), isEmpty);
+      expect(syncManager.calls, 0);
+    });
+
+    test('Firebase user null falha fechado sem escrita', () async {
+      auth.user = null;
+
+      final result = await repository.updatePillStatus(
+        true,
+        expectedUid: 'user-123',
+      );
+
+      expect(result, isFalse);
+      expect(await db.select(db.healthEntries).get(), isEmpty);
+      expect(await db.getPendingSyncItems('user-123'), isEmpty);
+    });
+
+    test('estado já true é no-op sem timestamp ou queue redundante', () async {
+      expect(
+        await repository.updatePillStatus(true, expectedUid: 'user-123'),
+        isTrue,
+      );
+      final original = await db.select(db.healthEntries).getSingle();
+      clock.value = DateTime.utc(2026, 8, 21, 18);
+
+      expect(
+        await repository.updatePillStatus(true, expectedUid: 'user-123'),
+        isTrue,
+      );
+
+      final afterRetry = await db.select(db.healthEntries).getSingle();
+      expect(afterRetry.date, original.date);
+      expect(await db.getPendingSyncItems('user-123'), hasLength(1));
+      expect(syncManager.calls, 1);
+    });
+
+    test(
+      'duas chamadas concorrentes geram uma única mudança e queue',
+      () async {
+        final results = await Future.wait<bool>(<Future<bool>>[
+          repository.updatePillStatus(true, expectedUid: 'user-123'),
+          repository.updatePillStatus(true, expectedUid: 'user-123'),
+        ]);
+
+        expect(results, <bool>[true, true]);
+        expect(
+          (await db.select(db.healthEntries).getSingle()).hasTakenPillToday,
+          isTrue,
+        );
+        expect(await db.getPendingSyncItems('user-123'), hasLength(1));
+        expect(syncManager.calls, 1);
+      },
+    );
+
+    test('leitura diária também exige o mesmo UID esperado', () async {
+      await repository.updatePillStatus(true, expectedUid: 'user-123');
+
+      expect(
+        await repository.getPillStatusForToday(expectedUid: 'user-123'),
+        isTrue,
+      );
+      expect(
+        await repository.getPillStatusForToday(expectedUid: 'user-b'),
+        isNull,
+      );
+    });
   });
 
   test('ciclo menstrual salva localmente e entra na SyncQueue', () async {

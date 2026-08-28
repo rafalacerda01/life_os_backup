@@ -13,6 +13,7 @@ class _ScheduledCycleReminder {
     required this.date,
     required this.components,
     required this.payload,
+    required this.includeDoneAction,
   });
 
   final int id;
@@ -21,6 +22,7 @@ class _ScheduledCycleReminder {
   final DateTime date;
   final DateTimeComponents components;
   final String payload;
+  final bool includeDoneAction;
 }
 
 class _FixedTokenStore implements CycleReminderActionTokenReader {
@@ -68,6 +70,7 @@ class _RecordingNotificationService extends NotificationService {
     required DateTime scheduledDate,
     required DateTimeComponents matchDateTimeComponents,
     required String payload,
+    bool includeDoneAction = false,
   }) async {
     events.add('schedule:$id');
     schedules.add(
@@ -78,6 +81,7 @@ class _RecordingNotificationService extends NotificationService {
         date: scheduledDate,
         components: matchDateTimeComponents,
         payload: payload,
+        includeDoneAction: includeDoneAction,
       ),
     );
     onSchedule?.call();
@@ -196,6 +200,29 @@ void main() {
     await lifecycle.rebuildCycleReminders(userId, _preferences());
 
     expect(service.schedules.single.date, DateTime(2026, 8, 26, 9, 30));
+  });
+
+  test('lifecycle habilita Feito somente para recurring pill', () async {
+    final service = _RecordingNotificationService();
+    final lifecycle = CycleReminderNotificationLifecycleService(
+      service,
+      _FixedTokenStore(),
+      clock: () => now,
+    );
+
+    await lifecycle.rebuildCycleReminders(
+      userId,
+      _preferences(type: CycleReminderType.personal),
+    );
+    await lifecycle.rebuildCycleReminders(
+      userId,
+      _preferences(type: CycleReminderType.pill),
+    );
+
+    expect(
+      service.schedules.map((schedule) => schedule.includeDoneAction),
+      <bool>[false, true],
+    );
   });
 
   test('specific weekdays agenda somente dias selecionados', () async {

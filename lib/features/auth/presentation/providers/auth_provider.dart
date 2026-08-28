@@ -28,6 +28,7 @@ import 'package:life_os/features/premium/presentation/premium_provider.dart';
 import 'package:life_os/features/dashboard/presentation/providers/dashboard_provider.dart';
 import 'package:life_os/features/auth/data/repositories/auth_repository_impl.dart';
 import 'package:life_os/features/auth/data/remote/account_remote_data_source.dart';
+import 'package:life_os/features/auth/data/local/auth_cleanup_barrier.dart';
 import 'package:life_os/features/auth/domain/repositories/auth_repository.dart';
 import 'package:life_os/features/auth/presentation/providers/auth_state.dart';
 import 'package:life_os/core/storage/secure_storage_service.dart';
@@ -80,6 +81,8 @@ class AuthNotifier extends Notifier<AuthState> {
   bool _localCleanupRequired = false;
   String? _activeLocalSessionUid;
   Future<void>? _localCleanupInFlight;
+  String? _localCleanupInFlightUid;
+  Future<void>? _durableCleanupRecoveryInFlight;
   Future<void>? _hydrationInFlight;
   String? _hydrationUid;
   int _sessionGeneration = 0;
@@ -168,9 +171,30 @@ class AuthNotifier extends Notifier<AuthState> {
   }
 
   Future<bool> _prepareAuthenticatedSession(User firebaseUser) async {
-    if (_disposed || _accountDeletionInProgress) return false;
+    if (_disposed || _accountDeletionInProgress || _explicitSignOutInProgress) {
+      return false;
+    }
 
     final uid = firebaseUser.uid;
+    try {
+      await _recoverPendingLocalCleanup();
+    } catch (_) {
+      try {
+        await ref.read(firebaseAuthProvider).signOut();
+      } catch (_) {
+        // O estado de erro continua bloqueando a exposição da sessão.
+      }
+      if (!_disposed) {
+        state = AuthState.error(
+          'Não foi possível isolar os dados locais. Tente novamente.',
+        );
+      }
+      return false;
+    }
+
+    if (_disposed || _accountDeletionInProgress || _explicitSignOutInProgress) {
+      return false;
+    }
     final localSessionUid = _activeLocalSessionUid;
     final requiresLocalIsolation =
         _localCleanupRequired ||
@@ -179,6 +203,7 @@ class AuthNotifier extends Notifier<AuthState> {
     if (requiresLocalIsolation) {
       try {
         await _clearLocalData();
+        if (_localCleanupRequired) return false;
         _invalidateSessionProviders();
       } catch (_) {
         try {
@@ -365,9 +390,17 @@ class AuthNotifier extends Notifier<AuthState> {
 
   Future<void> logout() async {
     state = AuthState.loading();
+    final logoutUserId =
+        _activeLocalSessionUid ??
+        ref.read(firebaseAuthProvider).currentUser?.uid;
+    _explicitSignOutInProgress = true;
+    PendingAuthCleanup? logoutMarker;
 
     try {
-      await _clearLocalData();
+      logoutMarker = await _clearLocalData(
+        targetUserId: logoutUserId,
+        intent: AuthCleanupIntent.logout,
+      );
     } catch (_) {
       _localCleanupRequired = true;
       if (!_disposed) {
@@ -375,10 +408,9 @@ class AuthNotifier extends Notifier<AuthState> {
           'Não foi possível isolar os dados locais. Tente novamente.',
         );
       }
+      _explicitSignOutInProgress = false;
       return;
     }
-
-    _explicitSignOutInProgress = true;
 
     try {
       final result = await _repository.signOut();
@@ -387,7 +419,22 @@ class AuthNotifier extends Notifier<AuthState> {
         (_) async {
           try {
             // Fecha a pequena janela entre a limpeza prévia e o sign-out.
-            await _clearLocalData();
+            await _runCriticalLocalDataClear(null);
+            if (logoutUserId != null) {
+              if (ref.read(firebaseAuthProvider).currentUser?.uid ==
+                  logoutUserId) {
+                throw StateError('AUTH_SIGN_OUT_NOT_CONFIRMED');
+              }
+              final expectedMarker = logoutMarker;
+              if (expectedMarker == null ||
+                  !await ref
+                      .read(authCleanupBarrierProvider)
+                      .clearIfCurrent(expectedMarker)) {
+                throw StateError('AUTH_CLEANUP_BARRIER_CHANGED');
+              }
+            }
+            _localCleanupRequired = false;
+            _activeLocalSessionUid = null;
             if (!_disposed) {
               _invalidateSessionProviders();
               state = AuthState.unauthenticated();
@@ -402,12 +449,14 @@ class AuthNotifier extends Notifier<AuthState> {
           }
         },
         (failure) async {
+          _localCleanupRequired = true;
           if (!_disposed) {
             state = AuthState.error(failure.message);
           }
         },
       );
     } catch (_) {
+      _localCleanupRequired = true;
       if (!_disposed) {
         state = AuthState.error('Não foi possível encerrar a sessão.');
       }
@@ -511,6 +560,7 @@ class AuthNotifier extends Notifier<AuthState> {
     if (_disposed) return;
 
     try {
+      await _recoverPendingLocalCleanup();
       await _clearLocalData();
       if (_disposed) return;
 
@@ -529,22 +579,76 @@ class AuthNotifier extends Notifier<AuthState> {
     }
   }
 
-  Future<void> _clearLocalData() {
+  Future<PendingAuthCleanup?> _clearLocalData({
+    String? targetUserId,
+    AuthCleanupIntent intent = AuthCleanupIntent.isolation,
+  }) async {
+    final cleanupUserId = targetUserId ?? _activeLocalSessionUid;
+    PendingAuthCleanup? cleanupMarker;
+    if (cleanupUserId != null) {
+      _localCleanupRequired = true;
+      try {
+        cleanupMarker = await ref
+            .read(authCleanupBarrierProvider)
+            .setPending(cleanupUserId, intent);
+      } catch (_) {
+        _localCleanupRequired = true;
+        _clearCycleReminderActionSession();
+        throw StateError('LOCAL_CLEANUP_BARRIER_WRITE_FAILED');
+      }
+    }
+
+    await _runCriticalLocalDataClear(cleanupUserId);
+    _activeLocalSessionUid = null;
+
+    if (cleanupMarker != null && intent == AuthCleanupIntent.isolation) {
+      try {
+        if (cleanupMarker.requiresSignOut) {
+          _localCleanupRequired = true;
+          return cleanupMarker;
+        }
+        final wasCleared = await ref
+            .read(authCleanupBarrierProvider)
+            .clearIfCurrent(cleanupMarker);
+        if (!wasCleared) {
+          _localCleanupRequired = true;
+          throw StateError('AUTH_CLEANUP_BARRIER_CHANGED');
+        }
+      } catch (_) {
+        _localCleanupRequired = true;
+        throw StateError('LOCAL_CLEANUP_BARRIER_CLEAR_FAILED');
+      }
+    }
+
+    _localCleanupRequired = intent == AuthCleanupIntent.logout;
+    return cleanupMarker;
+  }
+
+  Future<void> _runCriticalLocalDataClear(String? cleanupUserId) {
     final running = _localCleanupInFlight;
-    if (running != null) return running;
+    if (running != null) {
+      final runningUserId = _localCleanupInFlightUid;
+      if (cleanupUserId != null &&
+          runningUserId != null &&
+          cleanupUserId != runningUserId) {
+        return Future<void>.error(StateError('LOCAL_CLEANUP_USER_CONFLICT'));
+      }
+      return running;
+    }
 
     late final Future<void> operation;
-    operation = _performLocalDataClear().whenComplete(() {
+    operation = _performLocalDataClear(cleanupUserId).whenComplete(() {
       if (identical(_localCleanupInFlight, operation)) {
         _localCleanupInFlight = null;
+        _localCleanupInFlightUid = null;
       }
     });
     _localCleanupInFlight = operation;
+    _localCleanupInFlightUid = cleanupUserId;
     return operation;
   }
 
-  Future<void> _performLocalDataClear() async {
-    final previousLocalSessionUid = _activeLocalSessionUid;
+  Future<void> _performLocalDataClear(String? cleanupUserId) async {
     _clearCycleReminderActionSession();
     _sessionGeneration += 1;
     final hydration = _hydrationInFlight;
@@ -557,11 +661,11 @@ class AuthNotifier extends Notifier<AuthState> {
     final db = ref.read(databaseProvider);
     var cleanupFailed = false;
 
-    if (previousLocalSessionUid != null) {
+    if (cleanupUserId != null) {
       try {
         final failedCancellations = await ref
             .read(cycleReminderSessionCleanupProvider)
-            .cancelAfterCurrentMutations(previousLocalSessionUid);
+            .cancelAfterCurrentMutations(cleanupUserId);
         if (failedCancellations > 0) {
           cleanupFailed = true;
         }
@@ -592,9 +696,58 @@ class AuthNotifier extends Notifier<AuthState> {
       _localCleanupRequired = true;
       throw StateError('LOCAL_DATA_ISOLATION_FAILED');
     }
+  }
 
-    _localCleanupRequired = false;
-    _activeLocalSessionUid = null;
+  Future<void> _recoverPendingLocalCleanup() {
+    final running = _durableCleanupRecoveryInFlight;
+    if (running != null) return running;
+
+    late final Future<void> operation;
+    operation = _performPendingLocalCleanupRecovery().whenComplete(() {
+      if (identical(_durableCleanupRecoveryInFlight, operation)) {
+        _durableCleanupRecoveryInFlight = null;
+      }
+    });
+    _durableCleanupRecoveryInFlight = operation;
+    return operation;
+  }
+
+  Future<void> _performPendingLocalCleanupRecovery() async {
+    final barrier = ref.read(authCleanupBarrierProvider);
+    PendingAuthCleanup? pending;
+    try {
+      pending = await barrier.readPending();
+    } catch (_) {
+      _localCleanupRequired = true;
+      _clearCycleReminderActionSession();
+      throw StateError('LOCAL_CLEANUP_BARRIER_READ_FAILED');
+    }
+    if (pending == null) return;
+
+    _localCleanupRequired = true;
+    try {
+      await _runCriticalLocalDataClear(pending.userId);
+      _activeLocalSessionUid = null;
+
+      final auth = ref.read(firebaseAuthProvider);
+      if (pending.requiresSignOut && auth.currentUser?.uid == pending.userId) {
+        await auth.signOut();
+        if (auth.currentUser?.uid == pending.userId) {
+          throw StateError('AUTH_SIGN_OUT_NOT_CONFIRMED');
+        }
+        await _runCriticalLocalDataClear(null);
+      }
+
+      final wasCleared = await barrier.clearIfCurrent(pending);
+      if (!wasCleared) {
+        throw StateError('AUTH_CLEANUP_BARRIER_CHANGED');
+      }
+      _localCleanupRequired = false;
+    } catch (_) {
+      _localCleanupRequired = true;
+      _clearCycleReminderActionSession();
+      throw StateError('LOCAL_CLEANUP_RECOVERY_FAILED');
+    }
   }
 
   void _invalidateSessionProviders() {

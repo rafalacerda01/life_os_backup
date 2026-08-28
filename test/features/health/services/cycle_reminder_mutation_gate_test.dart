@@ -417,7 +417,11 @@ void main() {
       final lifecycle = _GatedCycleLifecycle(state)..pauseNextRebuild();
       final epoch = CycleReminderOperationEpoch();
       final mutationGate = CycleReminderMutationGate();
-      final cleanup = CycleReminderSessionCleanup(mutationGate, lifecycle);
+      final cleanup = CycleReminderSessionCleanup(
+        mutationGate,
+        lifecycle,
+        rotateActionToken: (_) async {},
+      );
       final reconciler = CycleReminderSessionReconciler(
         loadCyclePreferences: (_) async => _preferences('antiga'),
         loadGlobalNotifications: () async => true,
@@ -464,7 +468,11 @@ void main() {
       final lifecycle = _GatedCycleLifecycle(state);
       final epoch = CycleReminderOperationEpoch();
       final mutationGate = CycleReminderMutationGate();
-      final cleanup = CycleReminderSessionCleanup(mutationGate, lifecycle);
+      final cleanup = CycleReminderSessionCleanup(
+        mutationGate,
+        lifecycle,
+        rotateActionToken: (_) async {},
+      );
       final authority = CycleReminderSessionAuthority()..prepare(_userA);
       const firebaseUserId = _userA;
       var persistCalls = 0;
@@ -521,7 +529,11 @@ void main() {
       final lifecycle = _GatedCycleLifecycle(state);
       final epoch = CycleReminderOperationEpoch();
       final mutationGate = CycleReminderMutationGate();
-      final cleanup = CycleReminderSessionCleanup(mutationGate, lifecycle);
+      final cleanup = CycleReminderSessionCleanup(
+        mutationGate,
+        lifecycle,
+        rotateActionToken: (_) async {},
+      );
       final reconciler = CycleReminderSessionReconciler(
         loadCyclePreferences: (_) async => _preferences('antiga'),
         loadGlobalNotifications: () async => true,
@@ -556,7 +568,11 @@ void main() {
     final lifecycle = _GatedCycleLifecycle(state)..pauseNextRebuild();
     final epoch = CycleReminderOperationEpoch();
     final mutationGate = CycleReminderMutationGate();
-    final cleanup = CycleReminderSessionCleanup(mutationGate, lifecycle);
+    final cleanup = CycleReminderSessionCleanup(
+      mutationGate,
+      lifecycle,
+      rotateActionToken: (_) async {},
+    );
     var currentUserId = _userA;
     final reconciler = CycleReminderSessionReconciler(
       loadCyclePreferences: (userId) async => _preferences(userId),

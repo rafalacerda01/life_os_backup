@@ -10,8 +10,11 @@ import 'package:timezone/data/latest_all.dart' as tz;
 import 'package:timezone/timezone.dart' as tz;
 
 const String cycleReminderSnoozeActionId = 'cycle_reminder_snooze';
+const String cycleReminderDoneActionId = 'cycle_reminder_done';
 const String cycleReminderActionCategoryId =
     'life_os_personal_reminder_actions_v1';
+const String cycleReminderPillActionCategoryId =
+    'life_os_pill_reminder_actions_v1';
 
 typedef NotificationResponseHandler =
     Future<void> Function(NotificationResponse response);
@@ -86,6 +89,25 @@ class NotificationService {
     final DarwinInitializationSettings iosSettings =
         DarwinInitializationSettings(
           notificationCategories: <DarwinNotificationCategory>[
+            DarwinNotificationCategory(
+              cycleReminderPillActionCategoryId,
+              actions: <DarwinNotificationAction>[
+                DarwinNotificationAction.plain(
+                  cycleReminderDoneActionId,
+                  'Feito',
+                  options: <DarwinNotificationActionOption>{
+                    DarwinNotificationActionOption.foreground,
+                  },
+                ),
+                DarwinNotificationAction.plain(
+                  cycleReminderSnoozeActionId,
+                  'Lembrar depois',
+                  options: <DarwinNotificationActionOption>{
+                    DarwinNotificationActionOption.foreground,
+                  },
+                ),
+              ],
+            ),
             DarwinNotificationCategory(
               cycleReminderActionCategoryId,
               actions: <DarwinNotificationAction>[
@@ -319,6 +341,7 @@ class NotificationService {
     required DateTime scheduledDate,
     required DateTimeComponents matchDateTimeComponents,
     required String payload,
+    bool includeDoneAction = false,
   }) async {
     return _scheduleCycleReminder(
       id: id,
@@ -327,6 +350,7 @@ class NotificationService {
       scheduledDate: scheduledDate,
       matchDateTimeComponents: matchDateTimeComponents,
       payload: payload,
+      includeDoneAction: includeDoneAction,
     );
   }
 
@@ -336,6 +360,7 @@ class NotificationService {
     required String body,
     required DateTime scheduledDate,
     required String payload,
+    bool includeDoneAction = false,
   }) {
     return _scheduleCycleReminder(
       id: id,
@@ -343,6 +368,7 @@ class NotificationService {
       body: body,
       scheduledDate: scheduledDate,
       payload: payload,
+      includeDoneAction: includeDoneAction,
     );
   }
 
@@ -353,6 +379,7 @@ class NotificationService {
     required DateTime scheduledDate,
     required String payload,
     DateTimeComponents? matchDateTimeComponents,
+    bool includeDoneAction = false,
   }) async {
     try {
       if (!await _isEnabled(null)) return false;
@@ -366,26 +393,44 @@ class NotificationService {
             : AndroidScheduleMode.inexactAllowWhileIdle;
       }
 
-      const androidDetails = AndroidNotificationDetails(
+      final actions = includeDoneAction
+          ? const <AndroidNotificationAction>[
+              AndroidNotificationAction(
+                cycleReminderDoneActionId,
+                'Feito',
+                showsUserInterface: true,
+                cancelNotification: true,
+              ),
+              AndroidNotificationAction(
+                cycleReminderSnoozeActionId,
+                'Lembrar depois',
+                showsUserInterface: true,
+                cancelNotification: true,
+              ),
+            ]
+          : const <AndroidNotificationAction>[
+              AndroidNotificationAction(
+                cycleReminderSnoozeActionId,
+                'Lembrar depois',
+                showsUserInterface: true,
+                cancelNotification: true,
+              ),
+            ];
+      final androidDetails = AndroidNotificationDetails(
         'cycle_personal_reminders_channel',
         'Lembretes pessoais',
         channelDescription: 'Lembretes pessoais configurados no Life OS',
         importance: Importance.max,
         priority: Priority.high,
         visibility: NotificationVisibility.private,
-        actions: <AndroidNotificationAction>[
-          AndroidNotificationAction(
-            cycleReminderSnoozeActionId,
-            'Lembrar depois',
-            showsUserInterface: true,
-            cancelNotification: true,
-          ),
-        ],
+        actions: actions,
       );
-      const notificationDetails = NotificationDetails(
+      final notificationDetails = NotificationDetails(
         android: androidDetails,
         iOS: DarwinNotificationDetails(
-          categoryIdentifier: cycleReminderActionCategoryId,
+          categoryIdentifier: includeDoneAction
+              ? cycleReminderPillActionCategoryId
+              : cycleReminderActionCategoryId,
         ),
       );
 

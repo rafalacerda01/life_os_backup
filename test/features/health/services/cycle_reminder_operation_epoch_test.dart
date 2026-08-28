@@ -85,6 +85,7 @@ class _GatedActionGateway implements CycleReminderActionNotificationGateway {
     required String body,
     required DateTime scheduledDate,
     required String payload,
+    required bool includeDoneAction,
   }) async {
     state.events.add('action-schedule-start:$id');
     final started = scheduleStarted;
@@ -237,6 +238,8 @@ CycleReminderActionCoordinator _coordinator({
     tokenStore: _FixedTokenStore(),
     loadPreferences: (_) async => preferences ?? _preferences(),
     loadGlobalNotifications: loadGlobalNotifications,
+    markPillTaken: (_) async => true,
+    readPillTaken: (_) async => false,
     operationEpoch: epoch,
     sessionAuthority: CycleReminderSessionAuthority(),
     mutationGate: mutationGate ?? CycleReminderMutationGate(),
@@ -329,7 +332,11 @@ void main() {
         ..scheduleStarted = Completer<void>()
         ..allowSchedule = Completer<void>();
       final lifecycle = _SharedCycleLifecycle(state);
-      final cleanup = CycleReminderSessionCleanup(mutationGate, lifecycle);
+      final cleanup = CycleReminderSessionCleanup(
+        mutationGate,
+        lifecycle,
+        rotateActionToken: (_) async {},
+      );
       final coordinator = _coordinator(
         epoch: epoch,
         gateway: gateway,
@@ -375,7 +382,11 @@ void main() {
         ..allowSchedule = Completer<void>()
         ..failingCancelCall = 2;
       final lifecycle = _SharedCycleLifecycle(state);
-      final cleanup = CycleReminderSessionCleanup(mutationGate, lifecycle);
+      final cleanup = CycleReminderSessionCleanup(
+        mutationGate,
+        lifecycle,
+        rotateActionToken: (_) async {},
+      );
       final coordinator = _coordinator(
         epoch: epoch,
         gateway: gateway,
@@ -412,7 +423,11 @@ void main() {
     final state = _NotificationState();
     final gateway = _GatedActionGateway(state);
     final lifecycle = _SharedCycleLifecycle(state);
-    final cleanup = CycleReminderSessionCleanup(mutationGate, lifecycle);
+    final cleanup = CycleReminderSessionCleanup(
+      mutationGate,
+      lifecycle,
+      rotateActionToken: (_) async {},
+    );
     final coordinator = _coordinator(
       epoch: epoch,
       gateway: gateway,
@@ -621,7 +636,11 @@ void main() {
     final state = _NotificationState();
     final gateway = _GatedActionGateway(state)..throwOnSchedule = true;
     final lifecycle = _SharedCycleLifecycle(state);
-    final cleanup = CycleReminderSessionCleanup(mutationGate, lifecycle);
+    final cleanup = CycleReminderSessionCleanup(
+      mutationGate,
+      lifecycle,
+      rotateActionToken: (_) async {},
+    );
     final coordinator = _coordinator(
       epoch: epoch,
       gateway: gateway,

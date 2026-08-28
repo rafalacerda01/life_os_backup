@@ -77,6 +77,7 @@ class _PermissionRecordingService extends NotificationService {
     required DateTime scheduledDate,
     required DateTimeComponents matchDateTimeComponents,
     required String payload,
+    bool includeDoneAction = false,
   }) async {
     schedules += 1;
     return true;

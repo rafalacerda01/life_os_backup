@@ -16,6 +16,12 @@ import 'package:life_os/core/utils/app_logger.dart';
 import 'package:life_os/features/health/data/models/health_model.dart';
 import 'package:life_os/features/health/services/medication_reminder_lifecycle.dart';
 
+enum _PillStatusMutation { updated, unchanged }
+
+class _HealthSessionChanged implements Exception {
+  const _HealthSessionChanged();
+}
+
 class HealthRepository {
   final NotificationService _notifService;
   final FirebaseFirestore _firestore;
@@ -56,6 +62,14 @@ class HealthRepository {
 
   String? _getUserId() {
     return _auth.currentUser?.uid;
+  }
+
+  bool _isCurrentUser(String expectedUid) => _getUserId() == expectedUid;
+
+  void _requireCurrentUser(String expectedUid) {
+    if (!_isCurrentUser(expectedUid)) {
+      throw const _HealthSessionChanged();
+    }
   }
 
   Map<String, dynamic>? _decodeCycleData(String? json) {
@@ -506,20 +520,24 @@ class HealthRepository {
         payloadJson: jsonEncode(firestoreData),
       );
 
-      unawaited(
-        _syncManager.processPendingItems().catchError((error, stackTrace) {
-          AppLogger.e(
-            'Erro ao processar fila de sincronização da saúde.',
-            error,
-            stackTrace,
-          );
-          return false;
-        }),
-      );
+      _schedulePendingHealthSync();
     } catch (e, stack) {
       AppLogger.e('Erro ao atualizar métrica de saúde local.', e, stack);
       rethrow;
     }
+  }
+
+  void _schedulePendingHealthSync() {
+    unawaited(
+      _syncManager.processPendingItems().catchError((error, stackTrace) {
+        AppLogger.e(
+          'Erro ao processar fila de sincronização da saúde.',
+          error,
+          stackTrace,
+        );
+        return false;
+      }),
+    );
   }
 
   Future _upsertHealthEntry({
@@ -616,21 +634,77 @@ class HealthRepository {
     );
   }
 
-  Future updatePillStatus(bool taken) async {
+  Future<bool?> getPillStatusForToday({required String expectedUid}) async {
+    final normalizedExpectedUid = expectedUid.trim();
+    if (normalizedExpectedUid.isEmpty ||
+        !_isCurrentUser(normalizedExpectedUid)) {
+      return null;
+    }
+
+    final todayDocId = _getTodayDocId();
+    final existing = await (_db.select(
+      _db.healthEntries,
+    )..where((table) => table.docId.equals(todayDocId))).getSingleOrNull();
+
+    if (!_isCurrentUser(normalizedExpectedUid)) return null;
+    return existing?.hasTakenPillToday ?? false;
+  }
+
+  Future<bool> updatePillStatus(bool taken, {String? expectedUid}) async {
+    final currentUid = _getUserId();
+    final normalizedExpectedUid = expectedUid?.trim();
+    if (currentUid == null ||
+        (expectedUid != null &&
+            (normalizedExpectedUid == null ||
+                normalizedExpectedUid.isEmpty ||
+                normalizedExpectedUid != currentUid))) {
+      return false;
+    }
+
+    final ownerUid = currentUid;
+    final todayDocId = _getTodayDocId();
     final now = _now();
 
-    // 🛡️ CORREÇÃO APLICADA AQUI (Envolvendo com Value(...))
-    await _performDualWrite(
-      HealthEntriesCompanion(
-        docId: Value(_getTodayDocId()),
-        hasTakenPillToday: Value(taken),
-        date: Value(now),
-      ),
-      <String, dynamic>{
-        'hasTakenPillToday': taken,
-        'date': now.toIso8601String(),
-      },
-    );
+    try {
+      final mutation = await _db.transaction<_PillStatusMutation>(() async {
+        _requireCurrentUser(ownerUid);
+        final existing = await (_db.select(
+          _db.healthEntries,
+        )..where((table) => table.docId.equals(todayDocId))).getSingleOrNull();
+        _requireCurrentUser(ownerUid);
+
+        if ((existing?.hasTakenPillToday ?? false) == taken) {
+          return _PillStatusMutation.unchanged;
+        }
+
+        await _upsertHealthEntry(
+          docId: todayDocId,
+          hasTakenPillToday: taken,
+          date: now,
+        );
+        _requireCurrentUser(ownerUid);
+
+        await _db.insertSyncItem(
+          ownerUid: ownerUid,
+          collection: 'health_info',
+          docId: todayDocId,
+          operationType: 'update',
+          payloadJson: jsonEncode(<String, dynamic>{
+            'hasTakenPillToday': taken,
+            'date': now.toIso8601String(),
+          }),
+        );
+        _requireCurrentUser(ownerUid);
+        return _PillStatusMutation.updated;
+      });
+
+      if (mutation == _PillStatusMutation.updated) {
+        _schedulePendingHealthSync();
+      }
+      return true;
+    } on _HealthSessionChanged {
+      return false;
+    }
   }
 
   Future toggleMenstrualCycleFeature(bool enable) async {

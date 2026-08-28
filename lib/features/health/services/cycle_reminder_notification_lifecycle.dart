@@ -259,6 +259,7 @@ class CycleReminderNotificationLifecycleService
               scheduledDate: occurrence,
               matchDateTimeComponents: components,
               payload: actionPayload,
+              includeDoneAction: preferences.type == CycleReminderType.pill,
             );
         if (didSchedule) {
           scheduled += 1;

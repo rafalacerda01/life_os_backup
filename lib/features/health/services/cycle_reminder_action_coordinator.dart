@@ -4,6 +4,7 @@ import 'package:life_os/core/services/notification_preferences.dart';
 import 'package:life_os/core/services/notification_service.dart';
 import 'package:life_os/core/utils/app_logger.dart';
 import 'package:life_os/features/health/presentation/cycle/cycle_reminder_preferences.dart';
+import 'package:life_os/features/health/presentation/providers/health_provider.dart';
 import 'package:life_os/features/settings/presentation/providers/notification_provider.dart';
 
 import 'cycle_reminder_action_security.dart';
@@ -18,6 +19,10 @@ const Duration cycleReminderSnoozeDuration = Duration(minutes: 15);
 typedef CycleReminderGlobalPreferenceLoader = Future<bool> Function();
 typedef CycleReminderActionPreferencesLoader =
     Future<CycleReminderPreferences?> Function(String userId);
+typedef CycleReminderPillStatusWriter =
+    Future<bool> Function(String expectedUid);
+typedef CycleReminderPillStatusReader =
+    Future<bool?> Function(String expectedUid);
 
 abstract interface class CycleReminderActionNotificationGateway {
   Future<bool> cancel(int id);
@@ -28,6 +33,7 @@ abstract interface class CycleReminderActionNotificationGateway {
     required String body,
     required DateTime scheduledDate,
     required String payload,
+    required bool includeDoneAction,
   });
 }
 
@@ -47,6 +53,7 @@ class NotificationServiceCycleReminderActionGateway
     required String body,
     required DateTime scheduledDate,
     required String payload,
+    required bool includeDoneAction,
   }) {
     return _service.scheduleCycleReminderSnoozeNotification(
       id: id,
@@ -54,6 +61,7 @@ class NotificationServiceCycleReminderActionGateway
       body: body,
       scheduledDate: scheduledDate,
       payload: payload,
+      includeDoneAction: includeDoneAction,
     );
   }
 }
@@ -73,6 +81,8 @@ class CycleReminderActionCoordinator
     required CycleReminderActionTokenReader tokenStore,
     required CycleReminderActionPreferencesLoader loadPreferences,
     required CycleReminderGlobalPreferenceLoader loadGlobalNotifications,
+    required CycleReminderPillStatusWriter markPillTaken,
+    required CycleReminderPillStatusReader readPillTaken,
     required CycleReminderOperationEpoch operationEpoch,
     required CycleReminderSessionAuthority sessionAuthority,
     required CycleReminderMutationGate mutationGate,
@@ -88,6 +98,8 @@ class CycleReminderActionCoordinator
       tokenStore,
       loadPreferences,
       loadGlobalNotifications,
+      markPillTaken,
+      readPillTaken,
       operationEpoch,
       sessionAuthority,
       mutationGate,
@@ -104,6 +116,8 @@ class CycleReminderActionCoordinator
     this._tokenStore,
     this._loadPreferences,
     this._loadGlobalNotifications,
+    this._markPillTaken,
+    this._readPillTaken,
     this._operationEpoch,
     this._sessionAuthority,
     this._mutationGate,
@@ -118,6 +132,8 @@ class CycleReminderActionCoordinator
   final CycleReminderActionTokenReader _tokenStore;
   final CycleReminderActionPreferencesLoader _loadPreferences;
   final CycleReminderGlobalPreferenceLoader _loadGlobalNotifications;
+  final CycleReminderPillStatusWriter _markPillTaken;
+  final CycleReminderPillStatusReader _readPillTaken;
   final CycleReminderOperationEpoch _operationEpoch;
   final CycleReminderSessionAuthority _sessionAuthority;
   final CycleReminderMutationGate _mutationGate;
@@ -133,7 +149,8 @@ class CycleReminderActionCoordinator
 
   @override
   Future<void> handle(NotificationResponse response) {
-    if (response.actionId != cycleReminderSnoozeActionId) {
+    if (response.actionId != cycleReminderSnoozeActionId &&
+        response.actionId != cycleReminderDoneActionId) {
       return Future<void>.value();
     }
 
@@ -202,32 +219,54 @@ class CycleReminderActionCoordinator
       return;
     }
 
-    final preferences = await _loadPreferences(userId);
-    if (!_isCurrentOperation(userId, generation)) return;
-
-    final globalEnabled = await _loadGlobalNotifications();
-    if (!_isCurrentOperation(userId, generation)) return;
-
-    if (preferences == null || !preferences.enabled || !globalEnabled) {
-      await _mutationGate.run(userId, () async {
-        if (!_isCurrentOperation(userId, generation)) return;
-        await _lifecycle.cancelAllCycleReminders(userId);
-      });
-      return;
-    }
-
-    final snoozeId = cycleReminderNotificationId(
-      userId,
-      cycleReminderSnoozeSlot,
-    );
-    final content = cycleReminderNotificationPayload(preferences);
-    final authenticatedPayload = _codec.encode(
-      CycleReminderActionPayload(storedToken),
-    );
-
     if (!_isCurrentOperation(userId, generation)) return;
     await _mutationGate.run(userId, () async {
       if (!_isCurrentOperation(userId, generation)) return;
+
+      final preferences = await _loadPreferences(userId);
+      if (!_isCurrentOperation(userId, generation)) return;
+
+      final globalEnabled = await _loadGlobalNotifications();
+      if (!_isCurrentOperation(userId, generation)) return;
+
+      if (preferences == null || !preferences.enabled || !globalEnabled) {
+        await _lifecycle.cancelAllCycleReminders(userId);
+        return;
+      }
+
+      final snoozeId = cycleReminderNotificationId(
+        userId,
+        cycleReminderSnoozeSlot,
+      );
+
+      if (response.actionId == cycleReminderDoneActionId) {
+        if (preferences.type != CycleReminderType.pill ||
+            !_isCurrentOperation(userId, generation)) {
+          return;
+        }
+
+        final completed = await _markPillTaken(userId);
+        if (!completed || !_isCurrentOperation(userId, generation)) return;
+
+        await _notificationGateway.cancel(snoozeId);
+        return;
+      }
+
+      if (preferences.type == CycleReminderType.pill) {
+        final alreadyTaken = await _readPillTaken(userId);
+        if (alreadyTaken == null || !_isCurrentOperation(userId, generation)) {
+          return;
+        }
+        if (alreadyTaken) {
+          await _notificationGateway.cancel(snoozeId);
+          return;
+        }
+      }
+
+      final content = cycleReminderNotificationPayload(preferences);
+      final authenticatedPayload = _codec.encode(
+        CycleReminderActionPayload(storedToken),
+      );
 
       await _notificationGateway.cancel(snoozeId);
       if (!_isCurrentOperation(userId, generation)) return;
@@ -238,6 +277,7 @@ class CycleReminderActionCoordinator
         body: content.body,
         scheduledDate: _clock().add(cycleReminderSnoozeDuration),
         payload: authenticatedPayload,
+        includeDoneAction: preferences.type == CycleReminderType.pill,
       );
 
       if (!_operationEpoch.isCurrent(userId, generation)) {
@@ -273,6 +313,12 @@ final cycleReminderActionCoordinatorProvider =
           final preferences = await notificationStore.load();
           return preferences.allNotifications;
         },
+        markPillTaken: (expectedUid) => ref
+            .read(healthRepositoryProvider)
+            .updatePillStatus(true, expectedUid: expectedUid),
+        readPillTaken: (expectedUid) => ref
+            .read(healthRepositoryProvider)
+            .getPillStatusForToday(expectedUid: expectedUid),
         operationEpoch: ref.watch(cycleReminderOperationEpochProvider),
         sessionAuthority: ref.watch(cycleReminderSessionAuthorityProvider),
         mutationGate: ref.watch(cycleReminderMutationGateProvider),
@@ -285,8 +331,12 @@ final cycleReminderActionCoordinatorProvider =
 
 final cycleReminderSessionCleanupProvider =
     Provider<CycleReminderSessionCleanup>((ref) {
+      final tokenStore = ref.watch(cycleReminderActionTokenStoreProvider);
       return CycleReminderSessionCleanup(
         ref.watch(cycleReminderMutationGateProvider),
         ref.watch(cycleReminderNotificationLifecycleProvider),
+        rotateActionToken: (userId) async {
+          await tokenStore.rotate(userId);
+        },
       );
     });
