@@ -14,6 +14,7 @@ import 'package:life_os/core/services/sync_manager.dart';
 import 'package:life_os/core/services/sync_operation_result.dart';
 import 'package:life_os/core/services/sync_queue_store.dart';
 import 'package:life_os/core/services/sync_remote_data_source.dart';
+import 'package:life_os/features/health/data/models/health_model.dart';
 import 'package:life_os/features/health/data/repositories/health_repository.dart';
 import 'package:life_os/features/health/services/medication_reminder_lifecycle.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -659,6 +660,157 @@ void main() {
     expect(restored.waterIntakeMl, 1500);
     expect(restored.hasTakenPillToday, isTrue);
     expect(restored.menstrualCycle?['cycleLengthDays'], 28);
+    expect(
+      restored.menstrualCycle?['lastPeriodStart'],
+      '2026-08-01T00:00:00.000',
+    );
+  });
+
+  test('ciclo remoto ausente preserva data local válida', () async {
+    await repository.updateCycleSettings({
+      'isEnabled': true,
+      'lastPeriodStart': '2026-08-01T00:00:00.000',
+      'cycleLengthDays': 28,
+      'periodLengthDays': 5,
+    }, expectedUid: 'user-123');
+    configureRepositoryWithHealthDocuments([
+      _RecordingQueryDocumentSnapshot('2026-08-21', {
+        'menstrualCycle': {
+          'isEnabled': true,
+          'cycleLengthDays': 30,
+          'periodLengthDays': 6,
+        },
+      }),
+    ]);
+
+    await repository.syncHealthFromFirebase();
+
+    final row = await db.select(db.healthEntries).getSingle();
+    final cycle = jsonDecode(row.menstrualCycleJson!) as Map;
+    expect(cycle['lastPeriodStart'], '2026-08-01T00:00:00.000');
+    expect(cycle['cycleLengthDays'], 30);
+    expect(cycle['periodLengthDays'], 6);
+  });
+
+  test('ciclo remoto ausente sem local não fabrica data', () async {
+    configureRepositoryWithHealthDocuments([
+      _RecordingQueryDocumentSnapshot('2026-08-21', {
+        'menstrualCycle': {
+          'isEnabled': true,
+          'cycleLengthDays': 28,
+          'periodLengthDays': 5,
+        },
+      }),
+    ]);
+
+    await repository.syncHealthFromFirebase();
+
+    final row = await db.select(db.healthEntries).getSingle();
+    final cycle = jsonDecode(row.menstrualCycleJson!) as Map;
+    final restored = await repository.getHealthStream().first;
+    expect(cycle.containsKey('lastPeriodStart'), isFalse);
+    expect(restored.menstrualCycle?['isEnabled'], isTrue);
+    expect(restored.cyclePhaseInfo['day'], 0);
+    expect(restored.cyclePhaseInfo['name'], 'Ciclo não configurado');
+  });
+
+  test('ciclo remoto inválido preserva data local válida', () async {
+    await repository.updateCycleSettings({
+      'isEnabled': true,
+      'lastPeriodStart': '2026-08-01T00:00:00.000',
+      'cycleLengthDays': 28,
+      'periodLengthDays': 5,
+    }, expectedUid: 'user-123');
+    configureRepositoryWithHealthDocuments([
+      _RecordingQueryDocumentSnapshot('2026-08-21', {
+        'menstrualCycle': {
+          'isEnabled': true,
+          'lastPeriodStart': 'not-a-date',
+          'cycleLengthDays': 31,
+          'periodLengthDays': 7,
+        },
+      }),
+    ]);
+
+    await repository.syncHealthFromFirebase();
+
+    final row = await db.select(db.healthEntries).getSingle();
+    final cycle = jsonDecode(row.menstrualCycleJson!) as Map;
+    expect(cycle['lastPeriodStart'], '2026-08-01T00:00:00.000');
+    expect(cycle['cycleLengthDays'], 31);
+    expect(cycle['periodLengthDays'], 7);
+  });
+
+  test('ciclo remoto inválido sem local permanece incompleto', () async {
+    configureRepositoryWithHealthDocuments([
+      _RecordingQueryDocumentSnapshot('2026-08-21', {
+        'mood': 'Tranquilo',
+        'waterIntakeMl': 1250,
+        'hasTakenPillToday': true,
+        'menstrualCycle': {
+          'isEnabled': true,
+          'lastPeriodStart': 'not-a-date',
+          'cycleLengthDays': 28,
+          'periodLengthDays': 5,
+        },
+      }),
+    ]);
+
+    await repository.syncHealthFromFirebase();
+
+    final row = await db.select(db.healthEntries).getSingle();
+    final cycle = jsonDecode(row.menstrualCycleJson!) as Map;
+    final restored = await repository.getHealthStream().first;
+    expect(cycle.containsKey('lastPeriodStart'), isFalse);
+    expect(restored.menstrualCycle?['isEnabled'], isTrue);
+    expect(restored.cyclePhaseInfo['day'], 0);
+    expect(restored.mood, 'Tranquilo');
+    expect(restored.waterIntakeMl, 1250);
+    expect(restored.hasTakenPillToday, isTrue);
+  });
+
+  test('string menstrual vazia não fabrica data', () async {
+    configureRepositoryWithHealthDocuments([
+      _RecordingQueryDocumentSnapshot('2026-08-21', {
+        'menstrualCycle': {
+          'isEnabled': true,
+          'lastPeriodStart': '',
+          'cycleLengthDays': 28,
+          'periodLengthDays': 5,
+        },
+      }),
+    ]);
+
+    await repository.syncHealthFromFirebase();
+
+    final row = await db.select(db.healthEntries).getSingle();
+    final cycle = jsonDecode(row.menstrualCycleJson!) as Map;
+    expect(cycle.containsKey('lastPeriodStart'), isFalse);
+  });
+
+  test('tipo menstrual inesperado não interrompe hidratação', () async {
+    configureRepositoryWithHealthDocuments([
+      _RecordingQueryDocumentSnapshot('2026-08-21', {
+        'mood': 'Focado',
+        'waterIntakeMl': 750,
+        'hasTakenPillToday': true,
+        'menstrualCycle': {
+          'isEnabled': true,
+          'lastPeriodStart': 20260801,
+          'cycleLengthDays': 28,
+          'periodLengthDays': 5,
+        },
+      }),
+    ]);
+
+    await repository.syncHealthFromFirebase();
+
+    final row = await db.select(db.healthEntries).getSingle();
+    final cycle = jsonDecode(row.menstrualCycleJson!) as Map;
+    expect(cycle.containsKey('lastPeriodStart'), isFalse);
+    expect(row.mood, 'Focado');
+    expect(row.waterIntakeMl, 750);
+    expect(row.hasTakenPillToday, isTrue);
   });
 
   test(
@@ -712,6 +864,7 @@ void main() {
     expect(restored.menstrualCycle?['isEnabled'], isFalse);
     expect(restored.menstrualCycle?['cycleLengthDays'], 1);
     expect(restored.menstrualCycle?['periodLengthDays'], 1);
+    expect(restored.menstrualCycle?.containsKey('lastPeriodStart'), isFalse);
     expect(restored.date, DateTime(2026, 8, 21));
   });
 

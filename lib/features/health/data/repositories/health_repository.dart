@@ -114,12 +114,15 @@ class HealthRepository {
     return jsonEncode(cycleData);
   }
 
-  Map<String, dynamic> _sanitizeCycleData(Map<String, dynamic> cycleData) {
+  Map<String, dynamic> _sanitizeCycleData(
+    Map<String, dynamic> cycleData, {
+    bool fallbackToCurrentDate = true,
+  }) {
     final now = _now();
 
     final rawLastPeriodStart = cycleData['lastPeriodStart'];
 
-    String lastPeriodStart;
+    String? lastPeriodStart;
 
     if (rawLastPeriodStart is DateTime) {
       lastPeriodStart = rawLastPeriodStart.toIso8601String();
@@ -127,8 +130,10 @@ class HealthRepository {
         rawLastPeriodStart.trim().isNotEmpty) {
       final parsed = DateTime.tryParse(rawLastPeriodStart.trim());
 
-      lastPeriodStart = parsed?.toIso8601String() ?? now.toIso8601String();
-    } else {
+      lastPeriodStart = parsed?.toIso8601String();
+    }
+
+    if (lastPeriodStart == null && fallbackToCurrentDate) {
       lastPeriodStart = now.toIso8601String();
     }
 
@@ -146,12 +151,45 @@ class HealthRepository {
       max: cycleLength,
     );
 
-    return <String, dynamic>{
+    final sanitized = <String, dynamic>{
       'isEnabled': cycleData['isEnabled'] == true,
-      'lastPeriodStart': lastPeriodStart,
       'cycleLengthDays': cycleLength,
       'periodLengthDays': periodLength,
     };
+
+    if (lastPeriodStart != null) {
+      sanitized['lastPeriodStart'] = lastPeriodStart;
+    }
+
+    return sanitized;
+  }
+
+  String? _validRemoteCycleDate(dynamic value) {
+    if (value is! String) return null;
+
+    final parsed = DateTime.tryParse(value.trim());
+    return parsed?.toIso8601String();
+  }
+
+  Map<String, dynamic> _mergeRehydratedCycleData(
+    Map<String, dynamic> remoteCycleData,
+    Map<String, dynamic>? localCycleData,
+  ) {
+    final merged = <String, dynamic>{...?localCycleData, ...remoteCycleData};
+    final remoteDate = _validRemoteCycleDate(
+      remoteCycleData['lastPeriodStart'],
+    );
+    final localDate = _validRemoteCycleDate(localCycleData?['lastPeriodStart']);
+
+    if (remoteDate != null) {
+      merged['lastPeriodStart'] = remoteDate;
+    } else if (localDate != null) {
+      merged['lastPeriodStart'] = localDate;
+    } else {
+      merged.remove('lastPeriodStart');
+    }
+
+    return _sanitizeCycleData(merged, fallbackToCurrentDate: false);
   }
 
   int _normalizePositiveInt(
@@ -200,10 +238,7 @@ class HealthRepository {
   Map<String, dynamic>? _validCycleData(String? json) {
     final cycleData = _decodeCycleData(json);
 
-    if (cycleData == null ||
-        cycleData['isEnabled'] is! bool ||
-        DateTime.tryParse(cycleData['lastPeriodStart']?.toString() ?? '') ==
-            null) {
+    if (cycleData == null || cycleData['isEnabled'] is! bool) {
       return null;
     }
 
@@ -223,7 +258,7 @@ class HealthRepository {
       return null;
     }
 
-    return _sanitizeCycleData(cycleData);
+    return _sanitizeCycleData(cycleData, fallbackToCurrentDate: false);
   }
 
   Map<String, dynamic>? _latestCycleData(List<HealthEntry> entries) {
@@ -925,10 +960,25 @@ class HealthRepository {
 
     final hasCycleData = data.containsKey('menstrualCycle');
     final cycleData = data['menstrualCycle'];
+    String? menstrualCycleJson;
 
-    final Map<String, dynamic>? safeCycleData = hasCycleData && cycleData is Map
-        ? Map<String, dynamic>.from(cycleData)
-        : null;
+    if (hasCycleData && cycleData is Map) {
+      final remoteCycleData = <String, dynamic>{};
+      for (final entry in cycleData.entries) {
+        final key = entry.key;
+        if (key is String) {
+          remoteCycleData[key] = entry.value;
+        }
+      }
+
+      final existing = await (_db.select(
+        _db.healthEntries,
+      )..where((table) => table.docId.equals(doc.id))).getSingleOrNull();
+      final localCycleData = _decodeCycleData(existing?.menstrualCycleJson);
+      menstrualCycleJson = _encodeCycleData(
+        _mergeRehydratedCycleData(remoteCycleData, localCycleData),
+      );
+    }
 
     final date = data.containsKey('date')
         ? _timestampToDate(data['date']) ?? DateTime.tryParse(doc.id)
@@ -957,9 +1007,7 @@ class HealthRepository {
       mood: cleanMood,
       waterIntakeMl: waterIntake?.clamp(0, _maxWaterIntakeMl),
       hasTakenPillToday: pillStatus,
-      menstrualCycleJson: safeCycleData == null
-          ? null
-          : _encodeCycleData(_sanitizeCycleData(safeCycleData)),
+      menstrualCycleJson: menstrualCycleJson,
       date: date,
     );
   }
