@@ -1,5 +1,6 @@
 // ignore_for_file: subtype_of_sealed_class, must_be_immutable
 
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -323,6 +324,18 @@ void main() {
     await db.closeDatabase();
   });
 
+  HealthRepository repositoryWithCheckpoint(Future<void> Function() callback) {
+    return HealthRepository(
+      notificationService,
+      firestore,
+      auth,
+      db,
+      syncManager,
+      now: clock.now,
+      beforeCycleSyncEnqueue: callback,
+    );
+  }
+
   test('updateMood salva localmente e enfileira o payload correto', () async {
     await repository.updateMood('Radiante');
 
@@ -452,13 +465,161 @@ void main() {
     });
   });
 
+  group('mutações Cycle vinculadas ao expectedUid', () {
+    final cycleData = <String, dynamic>{
+      'isEnabled': true,
+      'lastPeriodStart': '2026-08-01T00:00:00.000',
+      'cycleLengthDays': 30,
+      'periodLengthDays': 6,
+    };
+
+    test('settings estável persiste com owner A', () async {
+      final result = await repository.updateCycleSettings(
+        cycleData,
+        expectedUid: 'user-123',
+      );
+
+      final rows = await db.select(db.healthEntries).get();
+      final queue = await db.select(db.syncQueueTable).get();
+
+      expect(result, isTrue);
+      expect(rows, hasLength(1));
+      expect(queue, hasLength(1));
+      expect(queue.single.ownerUid, 'user-123');
+    });
+
+    test('settings rejeita Firebase B sem Drift ou SyncQueue', () async {
+      auth.user = FakeFirebaseUser('user-b');
+
+      final result = await repository.updateCycleSettings(
+        cycleData,
+        expectedUid: 'user-123',
+      );
+
+      expect(result, isFalse);
+      expect(await db.select(db.healthEntries).get(), isEmpty);
+      expect(await db.select(db.syncQueueTable).get(), isEmpty);
+    });
+
+    test(
+      'switch durante settings faz rollback e retry válido funciona',
+      () async {
+        final checkpointReached = Completer<void>();
+        final releaseCheckpoint = Completer<void>();
+        var checkpointCalls = 0;
+        final guardedRepository = repositoryWithCheckpoint(() async {
+          checkpointCalls += 1;
+          if (checkpointCalls != 1) return;
+          checkpointReached.complete();
+          await releaseCheckpoint.future;
+        });
+
+        final mutation = guardedRepository.updateCycleSettings(
+          cycleData,
+          expectedUid: 'user-123',
+        );
+        await checkpointReached.future;
+        auth.user = FakeFirebaseUser('user-b');
+        releaseCheckpoint.complete();
+
+        expect(await mutation, isFalse);
+        expect(await db.select(db.healthEntries).get(), isEmpty);
+        expect(await db.select(db.syncQueueTable).get(), isEmpty);
+
+        auth.user = FakeFirebaseUser('user-123');
+        expect(
+          await guardedRepository.updateCycleSettings(
+            cycleData,
+            expectedUid: 'user-123',
+          ),
+          isTrue,
+        );
+        expect(await db.select(db.healthEntries).get(), hasLength(1));
+        expect(
+          (await db.select(db.syncQueueTable).get()).single.ownerUid,
+          'user-123',
+        );
+      },
+    );
+
+    test('toggle estável persiste e mismatch falha fechado', () async {
+      expect(
+        await repository.toggleMenstrualCycleFeature(
+          true,
+          expectedUid: 'user-123',
+        ),
+        isTrue,
+      );
+      expect(await db.select(db.healthEntries).get(), hasLength(1));
+      expect(
+        (await db.select(db.syncQueueTable).get()).single.ownerUid,
+        'user-123',
+      );
+
+      await db.clearAllData();
+      auth.user = FakeFirebaseUser('user-b');
+
+      expect(
+        await repository.toggleMenstrualCycleFeature(
+          false,
+          expectedUid: 'user-123',
+        ),
+        isFalse,
+      );
+      expect(await db.select(db.healthEntries).get(), isEmpty);
+      expect(await db.select(db.syncQueueTable).get(), isEmpty);
+    });
+
+    test('switch durante toggle faz rollback integral', () async {
+      final checkpointReached = Completer<void>();
+      final releaseCheckpoint = Completer<void>();
+      final guardedRepository = repositoryWithCheckpoint(() async {
+        checkpointReached.complete();
+        await releaseCheckpoint.future;
+      });
+
+      final mutation = guardedRepository.toggleMenstrualCycleFeature(
+        true,
+        expectedUid: 'user-123',
+      );
+      await checkpointReached.future;
+      auth.user = FakeFirebaseUser('user-b');
+      releaseCheckpoint.complete();
+
+      expect(await mutation, isFalse);
+      expect(await db.select(db.healthEntries).get(), isEmpty);
+      expect(await db.select(db.syncQueueTable).get(), isEmpty);
+    });
+
+    test('switch durante pill faz rollback integral', () async {
+      final checkpointReached = Completer<void>();
+      final releaseCheckpoint = Completer<void>();
+      final guardedRepository = repositoryWithCheckpoint(() async {
+        checkpointReached.complete();
+        await releaseCheckpoint.future;
+      });
+
+      final mutation = guardedRepository.updatePillStatus(
+        true,
+        expectedUid: 'user-123',
+      );
+      await checkpointReached.future;
+      auth.user = FakeFirebaseUser('user-b');
+      releaseCheckpoint.complete();
+
+      expect(await mutation, isFalse);
+      expect(await db.select(db.healthEntries).get(), isEmpty);
+      expect(await db.select(db.syncQueueTable).get(), isEmpty);
+    });
+  });
+
   test('ciclo menstrual salva localmente e entra na SyncQueue', () async {
     await repository.updateCycleSettings({
       'isEnabled': true,
       'lastPeriodStart': '2026-08-01T00:00:00.000',
       'cycleLengthDays': 30,
       'periodLengthDays': 6,
-    });
+    }, expectedUid: 'user-123');
 
     final healthRow = await db.select(db.healthEntries).getSingle();
     final pending = (await db.getPendingSyncItems(
@@ -505,7 +666,7 @@ void main() {
     () async {
       await repository.updateMood('Radiante');
       await repository.addWater(750);
-      await repository.updatePillStatus(true);
+      await repository.updatePillStatus(true, expectedUid: 'user-123');
 
       configureRepositoryWithHealthDocuments([
         _RecordingQueryDocumentSnapshot('2026-08-21', {
@@ -559,13 +720,13 @@ void main() {
     () async {
       await repository.updateMood('Radiante');
       await repository.addWater(750);
-      await repository.updatePillStatus(true);
+      await repository.updatePillStatus(true, expectedUid: 'user-123');
       await repository.updateCycleSettings({
         'isEnabled': true,
         'lastPeriodStart': '2026-08-01T00:00:00.000',
         'cycleLengthDays': 30,
         'periodLengthDays': 6,
-      });
+      }, expectedUid: 'user-123');
 
       clock.value = DateTime.utc(2026, 8, 22, 9);
 

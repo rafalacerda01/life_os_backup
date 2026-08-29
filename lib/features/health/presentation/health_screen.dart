@@ -9,6 +9,7 @@ import 'package:life_os/core/security/input_sanitizer.dart';
 import 'package:life_os/core/utils/app_logger.dart';
 import 'package:life_os/features/checkin/presentation/checkin_screen.dart';
 import 'package:life_os/features/health/data/models/health_model.dart';
+import 'package:life_os/features/health/presentation/cycle/cycle_reminder_preferences.dart';
 import 'package:life_os/features/health/presentation/providers/health_provider.dart';
 
 typedef MedicationAdder =
@@ -1226,10 +1227,29 @@ class CycleHealthDetails extends ConsumerWidget {
   Future<void> _updatePillStatus(
     BuildContext context,
     WidgetRef ref,
+    String? expectedUid,
     bool value,
   ) async {
+    if (expectedUid == null) {
+      _showSnackBar(
+        context,
+        'Não foi possível atualizar o status.',
+        error: true,
+      );
+      return;
+    }
+
     try {
-      await ref.read(healthRepositoryProvider).updatePillStatus(value);
+      final updated = await ref
+          .read(healthRepositoryProvider)
+          .updatePillStatus(value, expectedUid: expectedUid);
+      if (!updated) {
+        _showSnackBar(
+          context,
+          'Não foi possível atualizar o status.',
+          error: true,
+        );
+      }
     } catch (e, stack) {
       AppLogger.e('Erro ao atualizar status da pílula', e, stack);
 
@@ -1244,12 +1264,33 @@ class CycleHealthDetails extends ConsumerWidget {
   Future<void> _toggleCycle(
     BuildContext context,
     WidgetRef ref,
+    String? expectedUid,
     bool enabled,
   ) async {
+    if (expectedUid == null) {
+      _showSnackBar(
+        context,
+        enabled
+            ? 'Não foi possível ativar o ciclo.'
+            : 'Não foi possível desativar o ciclo.',
+        error: true,
+      );
+      return;
+    }
+
     try {
-      await ref
+      final updated = await ref
           .read(healthRepositoryProvider)
-          .toggleMenstrualCycleFeature(enabled);
+          .toggleMenstrualCycleFeature(enabled, expectedUid: expectedUid);
+      if (!updated) {
+        _showSnackBar(
+          context,
+          enabled
+              ? 'Não foi possível ativar o ciclo.'
+              : 'Não foi possível desativar o ciclo.',
+          error: true,
+        );
+      }
     } catch (e, stack) {
       AppLogger.e(
         enabled
@@ -1342,6 +1383,7 @@ class CycleHealthDetails extends ConsumerWidget {
   void _showCycleSettings(
     BuildContext parentContext,
     WidgetRef ref,
+    String? expectedUid,
     Map<String, dynamic>? currentData,
   ) {
     final initialDateStr = currentData?['lastPeriodStart'];
@@ -1504,6 +1546,15 @@ class CycleHealthDetails extends ConsumerWidget {
                   onPressed: () async {
                     FocusManager.instance.primaryFocus?.unfocus();
 
+                    if (expectedUid == null) {
+                      _showSnackBar(
+                        parentContext,
+                        'Não foi possível salvar a configuração.',
+                        error: true,
+                      );
+                      return;
+                    }
+
                     final cycleLength = int.tryParse(
                       cycleController.text.trim(),
                     );
@@ -1548,9 +1599,23 @@ class CycleHealthDetails extends ConsumerWidget {
                     final navigator = Navigator.of(dialogContext);
 
                     try {
-                      await ref
+                      final updated = await ref
                           .read(healthRepositoryProvider)
-                          .updateCycleSettings(newCycleData);
+                          .updateCycleSettings(
+                            newCycleData,
+                            expectedUid: expectedUid,
+                          );
+
+                      if (!updated) {
+                        if (parentContext.mounted) {
+                          _showSnackBar(
+                            parentContext,
+                            'Não foi possível salvar a configuração.',
+                            error: true,
+                          );
+                        }
+                        return;
+                      }
 
                       if (dialogContext.mounted) {
                         navigator.pop();
@@ -1602,6 +1667,7 @@ class CycleHealthDetails extends ConsumerWidget {
     final currentDay = (cycleInfo['day'] as num?)?.toInt() ?? 0;
     final totalDays = (cycleInfo['totalDays'] as num?)?.toInt() ?? 0;
     final hasUsableEstimate = currentDay > 0 && totalDays > 0;
+    final expectedUid = ref.read(cycleReminderUserIdReaderProvider)();
 
     if (!isEnabled || !hasUsableEstimate) {
       final statusName = isEnabled
@@ -1653,7 +1719,8 @@ class CycleHealthDetails extends ConsumerWidget {
               ),
             ),
             TextButton(
-              onPressed: () => _showCycleSettings(context, ref, cycleData),
+              onPressed: () =>
+                  _showCycleSettings(context, ref, expectedUid, cycleData),
               style: TextButton.styleFrom(
                 foregroundColor: _pink,
                 backgroundColor: _pink.withOpacity(0.08),
@@ -1735,7 +1802,8 @@ class CycleHealthDetails extends ConsumerWidget {
                   color: Colors.white54,
                   size: 18,
                 ),
-                onPressed: () => _showCycleSettings(context, ref, cycleData),
+                onPressed: () =>
+                    _showCycleSettings(context, ref, expectedUid, cycleData),
                 tooltip: 'Configurar ciclo',
               ),
               IconButton(
@@ -1745,7 +1813,7 @@ class CycleHealthDetails extends ConsumerWidget {
                   color: Colors.white24,
                   size: 18,
                 ),
-                onPressed: () => _toggleCycle(context, ref, false),
+                onPressed: () => _toggleCycle(context, ref, expectedUid, false),
                 tooltip: 'Desativar ciclo',
               ),
             ],
@@ -1790,8 +1858,12 @@ class CycleHealthDetails extends ConsumerWidget {
               ),
               InkWell(
                 borderRadius: BorderRadius.circular(14),
-                onTap: () =>
-                    _updatePillStatus(context, ref, !health.hasTakenPillToday),
+                onTap: () => _updatePillStatus(
+                  context,
+                  ref,
+                  expectedUid,
+                  !health.hasTakenPillToday,
+                ),
                 child: Container(
                   padding: const EdgeInsets.symmetric(
                     horizontal: 13,

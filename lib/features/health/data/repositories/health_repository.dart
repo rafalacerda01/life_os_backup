@@ -29,17 +29,37 @@ class HealthRepository {
   final AppDatabase _db;
   final SyncManager _syncManager;
   final DateTime Function() _now;
+  final Future<void> Function()? _beforeCycleSyncEnqueue;
 
   final Uuid _uuid = const Uuid();
 
   HealthRepository(
+    NotificationService notifService,
+    FirebaseFirestore firestore,
+    FirebaseAuth auth,
+    AppDatabase db,
+    SyncManager syncManager, {
+    DateTime Function()? now,
+    Future<void> Function()? beforeCycleSyncEnqueue,
+  }) : this._(
+         notifService,
+         firestore,
+         auth,
+         db,
+         syncManager,
+         now ?? DateTime.now,
+         beforeCycleSyncEnqueue,
+       );
+
+  HealthRepository._(
     this._notifService,
     this._firestore,
     this._auth,
     this._db,
-    this._syncManager, {
-    DateTime Function()? now,
-  }) : _now = now ?? DateTime.now;
+    this._syncManager,
+    this._now,
+    this._beforeCycleSyncEnqueue,
+  );
 
   // ===========================================================================
   // CONSTANTES
@@ -267,13 +287,12 @@ class HealthRepository {
   // 2. ESCRITA — OFFLINE FIRST
   // ===========================================================================
 
-  Future updateCycleSettings(Map<String, dynamic> cycleData) async {
-    final userId = _getUserId();
-
-    if (userId == null) {
-      AppLogger.w('Tentativa de atualizar ciclo sem usuário autenticado.');
-      return;
-    }
+  Future<bool> updateCycleSettings(
+    Map<String, dynamic> cycleData, {
+    required String expectedUid,
+  }) async {
+    final ownerUid = expectedUid.trim();
+    if (ownerUid.isEmpty || !_isCurrentUser(ownerUid)) return false;
 
     try {
       final todayDocId = _getTodayDocId();
@@ -281,7 +300,8 @@ class HealthRepository {
 
       final sanitizedCycleData = _sanitizeCycleData(cycleData);
 
-      await _performDualWrite(
+      await _performCycleWrite(
+        ownerUid,
         HealthEntriesCompanion(
           docId: Value(todayDocId),
           menstrualCycleJson: Value(_encodeCycleData(sanitizedCycleData)),
@@ -292,6 +312,9 @@ class HealthRepository {
           'date': now.toIso8601String(),
         },
       );
+      return true;
+    } on _HealthSessionChanged {
+      return false;
     } catch (e, stack) {
       AppLogger.e('Erro ao atualizar ciclo menstrual.', e, stack);
       rethrow;
@@ -527,6 +550,38 @@ class HealthRepository {
     }
   }
 
+  Future<void> _performCycleWrite(
+    String expectedUid,
+    HealthEntriesCompanion companion,
+    Map<String, dynamic> syncData,
+  ) async {
+    _requireCurrentUser(expectedUid);
+    final todayDocId = _getTodayDocId();
+    final now = companion.date.present ? companion.date.value : _now();
+
+    await _db.transaction(() async {
+      _requireCurrentUser(expectedUid);
+      await _upsertHealthEntry(
+        docId: todayDocId,
+        menstrualCycleJson: companion.menstrualCycleJson.value,
+        date: now,
+      );
+
+      await _beforeCycleSyncEnqueue?.call();
+      _requireCurrentUser(expectedUid);
+      await _db.insertSyncItem(
+        ownerUid: expectedUid,
+        collection: 'health_info',
+        docId: todayDocId,
+        operationType: 'update',
+        payloadJson: jsonEncode(syncData),
+      );
+      _requireCurrentUser(expectedUid);
+    });
+
+    _schedulePendingHealthSync();
+  }
+
   void _schedulePendingHealthSync() {
     unawaited(
       _syncManager.processPendingItems().catchError((error, stackTrace) {
@@ -650,18 +705,19 @@ class HealthRepository {
     return existing?.hasTakenPillToday ?? false;
   }
 
-  Future<bool> updatePillStatus(bool taken, {String? expectedUid}) async {
+  Future<bool> updatePillStatus(
+    bool taken, {
+    required String expectedUid,
+  }) async {
     final currentUid = _getUserId();
-    final normalizedExpectedUid = expectedUid?.trim();
+    final normalizedExpectedUid = expectedUid.trim();
     if (currentUid == null ||
-        (expectedUid != null &&
-            (normalizedExpectedUid == null ||
-                normalizedExpectedUid.isEmpty ||
-                normalizedExpectedUid != currentUid))) {
+        normalizedExpectedUid.isEmpty ||
+        normalizedExpectedUid != currentUid) {
       return false;
     }
 
-    final ownerUid = currentUid;
+    final ownerUid = normalizedExpectedUid;
     final todayDocId = _getTodayDocId();
     final now = _now();
 
@@ -682,6 +738,8 @@ class HealthRepository {
           hasTakenPillToday: taken,
           date: now,
         );
+
+        await _beforeCycleSyncEnqueue?.call();
         _requireCurrentUser(ownerUid);
 
         await _db.insertSyncItem(
@@ -707,15 +765,15 @@ class HealthRepository {
     }
   }
 
-  Future toggleMenstrualCycleFeature(bool enable) async {
-    final userId = _getUserId();
-
-    if (userId == null) {
-      AppLogger.w('Tentativa de alterar ciclo sem usuário autenticado.');
-      return;
-    }
+  Future<bool> toggleMenstrualCycleFeature(
+    bool enable, {
+    required String expectedUid,
+  }) async {
+    final ownerUid = expectedUid.trim();
+    if (ownerUid.isEmpty || !_isCurrentUser(ownerUid)) return false;
 
     final entries = await _db.select(_db.healthEntries).get();
+    if (!_isCurrentUser(ownerUid)) return false;
     final cycleData = _latestCycleData(entries) ?? <String, dynamic>{};
 
     cycleData['isEnabled'] = enable;
@@ -726,7 +784,7 @@ class HealthRepository {
 
     cycleData.putIfAbsent('periodLengthDays', () => _defaultPeriodLengthDays);
 
-    await updateCycleSettings(cycleData);
+    return updateCycleSettings(cycleData, expectedUid: ownerUid);
   }
 
   // ===========================================================================
