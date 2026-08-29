@@ -432,6 +432,15 @@ class _CycleReminderEditorState extends State<CycleReminderEditor> {
       context: context,
       initialTime: const TimeOfDay(hour: 12, minute: 0),
       helpText: 'Escolha o horário do lembrete',
+      cancelText: 'Cancelar',
+      confirmText: 'OK',
+      builder: (pickerContext, child) {
+        final mediaQuery = MediaQuery.of(pickerContext);
+        return MediaQuery(
+          data: mediaQuery.copyWith(alwaysUse24HourFormat: true),
+          child: child!,
+        );
+      },
     );
   }
 

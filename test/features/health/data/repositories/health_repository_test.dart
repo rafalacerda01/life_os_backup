@@ -337,6 +337,21 @@ void main() {
     );
   }
 
+  Future<void> seedLocalCycle(Map<String, dynamic> cycleData) async {
+    await db
+        .into(db.healthEntries)
+        .insert(
+          HealthEntry(
+            docId: '2026-08-21',
+            mood: '—',
+            waterIntakeMl: 0,
+            hasTakenPillToday: false,
+            menstrualCycleJson: jsonEncode(cycleData),
+            date: clock.value,
+          ),
+        );
+  }
+
   test('updateMood salva localmente e enfileira o payload correto', () async {
     await repository.updateMood('Radiante');
 
@@ -543,7 +558,9 @@ void main() {
       },
     );
 
-    test('toggle estável persiste e mismatch falha fechado', () async {
+    test('toggle estável preserva configuração válida e owner A', () async {
+      await seedLocalCycle(<String, dynamic>{...cycleData, 'isEnabled': false});
+
       expect(
         await repository.toggleMenstrualCycleFeature(
           true,
@@ -551,7 +568,10 @@ void main() {
         ),
         isTrue,
       );
-      expect(await db.select(db.healthEntries).get(), hasLength(1));
+      final row = await db.select(db.healthEntries).getSingle();
+      final savedCycle = jsonDecode(row.menstrualCycleJson!) as Map;
+      expect(savedCycle['isEnabled'], isTrue);
+      expect(savedCycle['lastPeriodStart'], cycleData['lastPeriodStart']);
       expect(
         (await db.select(db.syncQueueTable).get()).single.ownerUid,
         'user-123',
@@ -571,7 +591,123 @@ void main() {
       expect(await db.select(db.syncQueueTable).get(), isEmpty);
     });
 
+    test('toggle true sem data falha sem Drift ou SyncQueue', () async {
+      final storedCycle = <String, dynamic>{
+        'isEnabled': false,
+        'cycleLengthDays': 28,
+        'periodLengthDays': 5,
+      };
+      await seedLocalCycle(storedCycle);
+
+      expect(
+        await repository.toggleMenstrualCycleFeature(
+          true,
+          expectedUid: 'user-123',
+        ),
+        isFalse,
+      );
+
+      final row = await db.select(db.healthEntries).getSingle();
+      expect(jsonDecode(row.menstrualCycleJson!), storedCycle);
+      expect(await db.select(db.syncQueueTable).get(), isEmpty);
+      expect(syncManager.calls, 0);
+    });
+
+    test('toggle true com data inválida não inventa data atual', () async {
+      final storedCycle = <String, dynamic>{
+        'isEnabled': false,
+        'lastPeriodStart': 'not-a-date',
+        'cycleLengthDays': 28,
+        'periodLengthDays': 5,
+      };
+      await seedLocalCycle(storedCycle);
+
+      expect(
+        await repository.toggleMenstrualCycleFeature(
+          true,
+          expectedUid: 'user-123',
+        ),
+        isFalse,
+      );
+
+      final row = await db.select(db.healthEntries).getSingle();
+      expect(jsonDecode(row.menstrualCycleJson!), storedCycle);
+      expect(row.menstrualCycleJson, isNot(contains('2026-08-21')));
+      expect(await db.select(db.syncQueueTable).get(), isEmpty);
+      expect(syncManager.calls, 0);
+    });
+
+    test(
+      'toggle false preserva configuração inválida sem inventar dados',
+      () async {
+        final invalidConfigurations = <Map<String, dynamic>>[
+          <String, dynamic>{
+            'isEnabled': true,
+            'cycleLengthDays': 28,
+            'periodLengthDays': 5,
+          },
+          <String, dynamic>{
+            'isEnabled': true,
+            'lastPeriodStart': 'not-a-date',
+            'cycleLengthDays': 28,
+            'periodLengthDays': 5,
+          },
+          <String, dynamic>{
+            'isEnabled': true,
+            'lastPeriodStart': '2026-08-01T00:00:00.000',
+            'cycleLengthDays': 0,
+            'periodLengthDays': 999,
+          },
+        ];
+
+        for (final storedCycle in invalidConfigurations) {
+          await db.clearAllData();
+          await seedLocalCycle(storedCycle);
+
+          expect(
+            await repository.toggleMenstrualCycleFeature(
+              false,
+              expectedUid: 'user-123',
+            ),
+            isTrue,
+          );
+
+          final expectedCycle = <String, dynamic>{
+            ...storedCycle,
+            'isEnabled': false,
+          };
+          final row = await db.select(db.healthEntries).getSingle();
+          final savedCycle = jsonDecode(row.menstrualCycleJson!) as Map;
+          final queue = await db.select(db.syncQueueTable).getSingle();
+          final payload = jsonDecode(queue.payloadJson) as Map;
+
+          expect(savedCycle, expectedCycle);
+          expect(payload['menstrualCycle'], expectedCycle);
+        }
+      },
+    );
+
+    test('toggle true exige durações semanticamente válidas', () async {
+      await seedLocalCycle(<String, dynamic>{
+        'isEnabled': false,
+        'lastPeriodStart': '2026-08-01T00:00:00.000',
+        'cycleLengthDays': 0,
+        'periodLengthDays': 5,
+      });
+
+      expect(
+        await repository.toggleMenstrualCycleFeature(
+          true,
+          expectedUid: 'user-123',
+        ),
+        isFalse,
+      );
+      expect(await db.select(db.syncQueueTable).get(), isEmpty);
+      expect(syncManager.calls, 0);
+    });
+
     test('switch durante toggle faz rollback integral', () async {
+      await seedLocalCycle(<String, dynamic>{...cycleData, 'isEnabled': false});
       final checkpointReached = Completer<void>();
       final releaseCheckpoint = Completer<void>();
       final guardedRepository = repositoryWithCheckpoint(() async {
@@ -588,7 +724,11 @@ void main() {
       releaseCheckpoint.complete();
 
       expect(await mutation, isFalse);
-      expect(await db.select(db.healthEntries).get(), isEmpty);
+      final row = await db.select(db.healthEntries).getSingle();
+      expect(
+        (jsonDecode(row.menstrualCycleJson!) as Map)['isEnabled'],
+        isFalse,
+      );
       expect(await db.select(db.syncQueueTable).get(), isEmpty);
     });
 

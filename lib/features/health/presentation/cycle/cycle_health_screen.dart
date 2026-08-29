@@ -27,6 +27,10 @@ class CycleHealthScreen extends ConsumerWidget {
   static const Color _background = Color(0xFF070B14);
   static const Color _surface = Color(0xFF11182E);
   static const Color _primary = Color(0xFFB026FF);
+  static const Color _rose = Color(0xFFFF6B9F);
+  static const Color _softRose = Color(0xFFFF9FBA);
+  static const Color _lilac = Color(0xFFC58CFF);
+  static const Color _turquoise = Color(0xFF58D6C7);
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -35,62 +39,69 @@ class CycleHealthScreen extends ConsumerWidget {
     return Scaffold(
       backgroundColor: _background,
       body: SafeArea(
-        child: Column(
-          children: [
-            _CycleHeader(onBack: () => Navigator.of(context).maybePop()),
-            Expanded(
-              child: healthAsync.when(
-                loading: () => const Center(
-                  child: CircularProgressIndicator(color: _primary),
-                ),
-                error: (_, _) => _CycleLoadError(
-                  onRetry: () => ref.invalidate(healthStreamProvider),
-                ),
-                data: (health) {
-                  final cycleInfo = health.cyclePhaseInfo;
-                  final day = (cycleInfo['day'] as num?)?.toInt() ?? 0;
-                  final totalDays =
-                      (cycleInfo['totalDays'] as num?)?.toInt() ?? 0;
-                  final isEnabled = health.menstrualCycle?['isEnabled'] == true;
-                  final hasUsableEstimate = day > 0 && totalDays > 0;
-
-                  return SingleChildScrollView(
-                    padding: const EdgeInsets.fromLTRB(20, 8, 20, 32),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        const Text(
-                          'Acompanhe seus registros com contexto e sem previsões absolutas.',
-                          style: TextStyle(
-                            color: Colors.white60,
-                            fontSize: 14,
-                            height: 1.45,
-                          ),
-                        ),
-                        const SizedBox(height: 20),
-                        CycleHealthDetails(health: health),
-                        if (hasUsableEstimate) ...[
-                          const SizedBox(height: 16),
-                          _NextPeriodEstimateCard(
-                            health: health,
-                            now: (clock ?? DateTime.now)(),
-                          ),
-                        ],
-                        if (isEnabled) ...[
-                          const SizedBox(height: 16),
-                          _AvailableRecordsCard(health: health),
-                        ],
-                        const SizedBox(height: 16),
-                        const CycleReminderSection(),
-                        const SizedBox(height: 16),
-                        const _CycleDisclaimer(),
-                      ],
-                    ),
-                  );
-                },
-              ),
+        child: DecoratedBox(
+          decoration: BoxDecoration(
+            gradient: RadialGradient(
+              center: const Alignment(0.85, -0.85),
+              radius: 1.15,
+              colors: [_primary.withOpacity(0.11), _background],
             ),
-          ],
+          ),
+          child: Column(
+            children: [
+              _CycleHeader(onBack: () => Navigator.of(context).maybePop()),
+              Expanded(
+                child: healthAsync.when(
+                  loading: () => const Center(
+                    child: CircularProgressIndicator(color: _primary),
+                  ),
+                  error: (_, _) => _CycleLoadError(
+                    onRetry: () => ref.invalidate(healthStreamProvider),
+                  ),
+                  data: (health) {
+                    final cycleInfo = health.cyclePhaseInfo;
+                    final day = (cycleInfo['day'] as num?)?.toInt() ?? 0;
+                    final totalDays =
+                        (cycleInfo['totalDays'] as num?)?.toInt() ?? 0;
+                    final isEnabled =
+                        health.menstrualCycle?['isEnabled'] == true;
+                    final hasUsableEstimate = day > 0 && totalDays > 0;
+
+                    return SingleChildScrollView(
+                      padding: const EdgeInsets.fromLTRB(20, 4, 20, 32),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          CycleHealthDetails(
+                            health: health,
+                            presentation:
+                                CycleHealthDetailsPresentation.dedicated,
+                          ),
+                          if (hasUsableEstimate) ...[
+                            const SizedBox(height: 16),
+                            _CycleMetricsCard(
+                              health: health,
+                              now: (clock ?? DateTime.now)(),
+                            ),
+                          ],
+                          if (isEnabled ||
+                              health.mood.trim().isNotEmpty ||
+                              health.waterIntakeMl > 0) ...[
+                            const SizedBox(height: 16),
+                            _AvailableRecordsCard(health: health),
+                          ],
+                          const SizedBox(height: 16),
+                          const CycleReminderSection(),
+                          const SizedBox(height: 16),
+                          const _CycleDisclaimer(),
+                        ],
+                      ),
+                    );
+                  },
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -105,7 +116,7 @@ class _CycleHeader extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.fromLTRB(12, 8, 20, 12),
+      padding: const EdgeInsets.fromLTRB(12, 10, 20, 16),
       child: Row(
         children: [
           IconButton(
@@ -122,14 +133,43 @@ class _CycleHeader extends StatelessWidget {
                   'Saúde do ciclo',
                   style: TextStyle(
                     color: Colors.white,
-                    fontSize: 24,
-                    fontWeight: FontWeight.w800,
+                    fontSize: 23,
+                    fontWeight: FontWeight.w900,
+                    letterSpacing: -0.4,
                   ),
                 ),
                 SizedBox(height: 2),
                 Text(
-                  'Estimativas com base nos seus registros',
+                  'Entenda seu ritmo',
                   style: TextStyle(color: Colors.white54, fontSize: 12),
+                ),
+              ],
+            ),
+          ),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 6),
+            decoration: BoxDecoration(
+              color: CycleHealthScreen._surface.withOpacity(0.72),
+              borderRadius: BorderRadius.circular(999),
+              border: Border.all(color: Colors.white10),
+            ),
+            child: const Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  Icons.lock_outline_rounded,
+                  color: CycleHealthScreen._lilac,
+                  size: 13,
+                ),
+                SizedBox(width: 5),
+                Text(
+                  'PRIVADO',
+                  style: TextStyle(
+                    color: Colors.white60,
+                    fontSize: 9,
+                    fontWeight: FontWeight.w800,
+                    letterSpacing: 0.8,
+                  ),
                 ),
               ],
             ),
@@ -140,8 +180,8 @@ class _CycleHeader extends StatelessWidget {
   }
 }
 
-class _NextPeriodEstimateCard extends StatelessWidget {
-  const _NextPeriodEstimateCard({required this.health, required this.now});
+class _CycleMetricsCard extends StatelessWidget {
+  const _CycleMetricsCard({required this.health, required this.now});
 
   final HealthModel health;
   final DateTime now;
@@ -149,6 +189,12 @@ class _NextPeriodEstimateCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final estimatedDate = estimatedNextPeriodDate(health, now);
+    final today = DateTime(now.year, now.month, now.day);
+    final daysUntil = estimatedDate?.difference(today).inDays;
+    final cycleLength = (health.menstrualCycle?['cycleLengthDays'] as num?)
+        ?.toInt();
+    final periodLength = (health.menstrualCycle?['periodLengthDays'] as num?)
+        ?.toInt();
 
     return Container(
       width: double.infinity,
@@ -156,55 +202,136 @@ class _NextPeriodEstimateCard extends StatelessWidget {
       decoration: BoxDecoration(
         color: CycleHealthScreen._surface,
         borderRadius: BorderRadius.circular(22),
-        border: Border.all(color: CycleHealthScreen._primary.withOpacity(0.16)),
+        border: Border.all(color: Colors.white10),
       ),
-      child: Row(
+      child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Container(
-            padding: const EdgeInsets.all(10),
-            decoration: BoxDecoration(
-              color: CycleHealthScreen._primary.withOpacity(0.10),
-              borderRadius: BorderRadius.circular(14),
-            ),
-            child: const Icon(
-              Icons.event_available_rounded,
-              color: CycleHealthScreen._primary,
+          const Text(
+            'VISÃO GERAL',
+            style: TextStyle(
+              color: Colors.white54,
+              fontSize: 10,
+              fontWeight: FontWeight.w800,
+              letterSpacing: 0.9,
             ),
           ),
-          const SizedBox(width: 14),
+          const SizedBox(height: 12),
+          _MetricTile(
+            icon: Icons.event_available_rounded,
+            color: CycleHealthScreen._rose,
+            label: 'Próxima menstruação',
+            value: daysUntil == null
+                ? 'Estimativa indisponível'
+                : daysUntil == 1
+                ? 'em 1 dia'
+                : 'em $daysUntil dias',
+            detail: estimatedDate == null
+                ? null
+                : '${DateFormat('dd/MM').format(estimatedDate)} · estimativa',
+          ),
+          const SizedBox(height: 10),
+          LayoutBuilder(
+            builder: (context, constraints) {
+              final tiles = [
+                _MetricTile(
+                  icon: Icons.sync_rounded,
+                  color: CycleHealthScreen._lilac,
+                  label: 'Duração do ciclo',
+                  value: cycleLength == null ? '—' : '$cycleLength dias',
+                  compact: true,
+                ),
+                _MetricTile(
+                  icon: Icons.water_drop_outlined,
+                  color: CycleHealthScreen._softRose,
+                  label: 'Duração do período',
+                  value: periodLength == null ? '—' : '$periodLength dias',
+                  compact: true,
+                ),
+              ];
+
+              if (constraints.maxWidth < 330) {
+                return Column(
+                  children: [
+                    tiles.first,
+                    const SizedBox(height: 10),
+                    tiles.last,
+                  ],
+                );
+              }
+
+              return Row(
+                children: [
+                  Expanded(child: tiles.first),
+                  const SizedBox(width: 10),
+                  Expanded(child: tiles.last),
+                ],
+              );
+            },
+          ),
+          const SizedBox(height: 12),
+          const Text(
+            'A data pode variar conforme o ciclo e os registros informados.',
+            style: TextStyle(color: Colors.white38, fontSize: 11, height: 1.4),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _MetricTile extends StatelessWidget {
+  const _MetricTile({
+    required this.icon,
+    required this.color,
+    required this.label,
+    required this.value,
+    this.detail,
+    this.compact = false,
+  });
+
+  final IconData icon;
+  final Color color;
+  final String label;
+  final String value;
+  final String? detail;
+  final bool compact;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: EdgeInsets.all(compact ? 13 : 15),
+      decoration: BoxDecoration(
+        color: CycleHealthScreen._background.withOpacity(0.72),
+        borderRadius: BorderRadius.circular(17),
+        border: Border.all(color: color.withOpacity(0.15)),
+      ),
+      child: Row(
+        children: [
+          Icon(icon, color: color, size: compact ? 18 : 21),
+          const SizedBox(width: 10),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const Text(
-                  'Próxima menstruação estimada',
-                  style: TextStyle(
-                    color: Colors.white,
-                    fontSize: 15,
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-                const SizedBox(height: 6),
                 Text(
-                  estimatedDate == null
-                      ? 'Complete os registros para visualizar uma estimativa.'
-                      : 'Por volta de ${DateFormat('dd/MM/yyyy').format(estimatedDate)}',
+                  label,
+                  style: const TextStyle(color: Colors.white54, fontSize: 10),
+                ),
+                const SizedBox(height: 3),
+                Text(
+                  value,
                   style: const TextStyle(
-                    color: CycleHealthScreen._primary,
-                    fontSize: 16,
-                    fontWeight: FontWeight.w700,
+                    color: Colors.white,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w800,
                   ),
                 ),
-                const SizedBox(height: 5),
-                const Text(
-                  'A data pode variar conforme o ciclo e os registros informados.',
-                  style: TextStyle(
-                    color: Colors.white54,
-                    fontSize: 12,
-                    height: 1.4,
-                  ),
-                ),
+                if (detail != null) ...[
+                  const SizedBox(height: 2),
+                  Text(detail!, style: TextStyle(color: color, fontSize: 11)),
+                ],
               ],
             ),
           ),
@@ -254,20 +381,39 @@ class _AvailableRecordsCard extends StatelessWidget {
             style: TextStyle(color: Colors.white54, fontSize: 12),
           ),
           const SizedBox(height: 14),
-          Column(
-            children: [
-              _RecordChip(
+          LayoutBuilder(
+            builder: (context, constraints) {
+              final moodCard = _RecordChip(
                 icon: Icons.sentiment_satisfied_alt_rounded,
+                color: CycleHealthScreen._lilac,
                 label: 'Humor',
                 value: mood,
-              ),
-              const SizedBox(height: 10),
-              _RecordChip(
+              );
+              final hydrationCard = _RecordChip(
                 icon: Icons.water_drop_rounded,
+                color: CycleHealthScreen._turquoise,
                 label: 'Hidratação',
                 value: hydration,
-              ),
-            ],
+              );
+
+              if (constraints.maxWidth < 330) {
+                return Column(
+                  children: [
+                    moodCard,
+                    const SizedBox(height: 10),
+                    hydrationCard,
+                  ],
+                );
+              }
+
+              return Row(
+                children: [
+                  Expanded(child: moodCard),
+                  const SizedBox(width: 10),
+                  Expanded(child: hydrationCard),
+                ],
+              );
+            },
           ),
         ],
       ),
@@ -278,11 +424,13 @@ class _AvailableRecordsCard extends StatelessWidget {
 class _RecordChip extends StatelessWidget {
   const _RecordChip({
     required this.icon,
+    required this.color,
     required this.label,
     required this.value,
   });
 
   final IconData icon;
+  final Color color;
   final String label;
   final String value;
 
@@ -299,7 +447,7 @@ class _RecordChip extends StatelessWidget {
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(icon, color: CycleHealthScreen._primary, size: 18),
+          Icon(icon, color: color, size: 18),
           const SizedBox(width: 8),
           Expanded(
             child: Column(
@@ -343,7 +491,7 @@ class _CycleDisclaimer extends StatelessWidget {
       child: const Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Icon(Icons.info_outline_rounded, color: Colors.white54, size: 19),
+          Icon(Icons.shield_outlined, color: Colors.white54, size: 19),
           SizedBox(width: 10),
           Expanded(
             child: Text(

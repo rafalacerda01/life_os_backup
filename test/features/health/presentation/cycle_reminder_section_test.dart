@@ -8,6 +8,7 @@ void main() {
     WidgetTester tester, {
     Future<void> Function(CycleReminderPreferences value)? onSave,
     Size size = const Size(800, 1000),
+    bool useDefaultTimePicker = false,
   }) async {
     tester.view.physicalSize = size;
     tester.view.devicePixelRatio = 1;
@@ -19,7 +20,9 @@ void main() {
         theme: ThemeData.dark(),
         home: Scaffold(
           body: CycleReminderEditor(
-            timePicker: (_) async => const TimeOfDay(hour: 21, minute: 0),
+            timePicker: useDefaultTimePicker
+                ? null
+                : (_) async => const TimeOfDay(hour: 21, minute: 0),
             onSave: onSave ?? (_) async {},
           ),
         ),
@@ -33,6 +36,24 @@ void main() {
     expect(find.text('Escolher horário'), findsOneWidget);
     expect(find.text('Você tem um lembrete programado.'), findsOneWidget);
     expect(find.text('Horário do seu lembrete.'), findsNothing);
+  });
+
+  testWidgets('picker padrão usa 24 horas e ações em português', (
+    tester,
+  ) async {
+    await pumpEditor(tester, useDefaultTimePicker: true);
+
+    await tester.tap(find.text('Escolher horário'));
+    await tester.pumpAndSettle();
+
+    final picker = find.byType(TimePickerDialog);
+    expect(picker, findsOneWidget);
+    expect(MediaQuery.alwaysUse24HourFormatOf(tester.element(picker)), isTrue);
+    expect(find.text('Escolha o horário do lembrete'), findsOneWidget);
+    expect(find.text('Cancelar'), findsOneWidget);
+    expect(find.text('OK'), findsOneWidget);
+    expect(find.text('AM'), findsNothing);
+    expect(find.text('PM'), findsNothing);
   });
 
   testWidgets('preview reflete Discreto, Informativo e Personalizado', (

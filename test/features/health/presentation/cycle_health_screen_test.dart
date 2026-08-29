@@ -1,14 +1,46 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:go_router/go_router.dart';
 import 'package:life_os/features/health/data/models/health_model.dart';
+import 'package:life_os/features/health/data/repositories/health_repository.dart';
 import 'package:life_os/features/health/presentation/cycle/cycle_health_screen.dart';
 import 'package:life_os/features/health/presentation/cycle/cycle_reminder_preferences.dart';
 import 'package:life_os/features/health/presentation/health_screen.dart';
 import 'package:life_os/features/health/presentation/providers/health_provider.dart';
 import 'package:life_os/features/premium/domain/services/plan_limits.dart';
 import 'package:life_os/features/premium/presentation/plan_limits_provider.dart';
+
+class _RecordingHealthRepository extends Fake implements HealthRepository {
+  _RecordingHealthRepository({this.onToggle});
+
+  final FutureOr<void> Function(bool enabled)? onToggle;
+  final List<bool> toggleValues = [];
+  final List<String> toggleExpectedUids = [];
+  final List<Map<String, dynamic>> settingsValues = [];
+
+  @override
+  Future<bool> toggleMenstrualCycleFeature(
+    bool enable, {
+    required String expectedUid,
+  }) async {
+    toggleValues.add(enable);
+    toggleExpectedUids.add(expectedUid);
+    await onToggle?.call(enable);
+    return true;
+  }
+
+  @override
+  Future<bool> updateCycleSettings(
+    Map<String, dynamic> cycleData, {
+    required String expectedUid,
+  }) async {
+    settingsValues.add(Map<String, dynamic>.from(cycleData));
+    return true;
+  }
+}
 
 void main() {
   final current = DateTime.now();
@@ -19,11 +51,13 @@ void main() {
     DateTime? lastPeriodStart,
     String? rawLastPeriodStart,
     bool omitLastPeriodStart = false,
+    int cycleLengthDays = 28,
+    int periodLengthDays = 5,
   }) {
     final menstrualCycle = <String, dynamic>{
       'isEnabled': enabled,
-      'cycleLengthDays': 28,
-      'periodLengthDays': 5,
+      'cycleLengthDays': cycleLengthDays,
+      'periodLengthDays': periodLengthDays,
     };
     if (!omitLastPeriodStart) {
       menstrualCycle['lastPeriodStart'] =
@@ -43,13 +77,21 @@ void main() {
   Widget withHealthOverrides({
     required HealthModel health,
     required Widget child,
+    HealthRepository? repository,
+    String? admittedUid = 'user-a',
+    Stream<HealthModel>? healthStream,
   }) {
     return ProviderScope(
       overrides: [
-        healthStreamProvider.overrideWith((ref) => Stream.value(health)),
+        healthStreamProvider.overrideWith(
+          (ref) => healthStream ?? Stream.value(health),
+        ),
+        if (repository != null)
+          healthRepositoryProvider.overrideWithValue(repository),
         medicationsStreamProvider.overrideWith((ref) => Stream.value(const [])),
         planLimitsProvider.overrideWithValue(PlanLimits.free),
         cycleReminderUserIdProvider.overrideWith((ref) => Stream.value(null)),
+        cycleReminderUserIdReaderProvider.overrideWithValue(() => admittedUid),
       ],
       child: child,
     );
@@ -60,6 +102,9 @@ void main() {
     HealthModel health, {
     Size? size,
     double textScaleFactor = 1,
+    HealthRepository? repository,
+    String? admittedUid = 'user-a',
+    Stream<HealthModel>? healthStream,
   }) async {
     if (size != null) {
       tester.view.physicalSize = size;
@@ -71,6 +116,9 @@ void main() {
     await tester.pumpWidget(
       withHealthOverrides(
         health: health,
+        repository: repository,
+        admittedUid: admittedUid,
+        healthStream: healthStream,
         child: MaterialApp(
           home: MediaQuery(
             data: MediaQueryData(
@@ -142,7 +190,7 @@ void main() {
       find.text('Configure para acompanhar estimativas e registros.'),
       findsOneWidget,
     );
-    expect(find.text('Próxima menstruação estimada'), findsNothing);
+    expect(find.text('Próxima menstruação'), findsNothing);
     expect(find.textContaining('Dia 0'), findsNothing);
   });
 
@@ -151,11 +199,9 @@ void main() {
   ) async {
     await pumpCycleScreen(tester, healthWithCycle(enabled: false));
 
-    expect(
-      find.text('Acompanhamento desativado. Configure quando desejar.'),
-      findsOneWidget,
-    );
-    expect(find.text('Próxima menstruação estimada'), findsNothing);
+    expect(find.text('Acompanhamento pausado'), findsOneWidget);
+    expect(find.text('Ativar acompanhamento'), findsOneWidget);
+    expect(find.text('Próxima menstruação'), findsNothing);
     expect(find.textContaining('Por volta de'), findsNothing);
   });
 
@@ -194,7 +240,7 @@ void main() {
 
       expect(find.text('Ciclo não configurado'), findsOneWidget);
       expect(find.textContaining('Dia 0'), findsNothing);
-      expect(find.text('Próxima menstruação estimada'), findsNothing);
+      expect(find.text('Próxima menstruação'), findsNothing);
       expect(find.textContaining('Por volta de'), findsNothing);
     }
   });
@@ -207,7 +253,7 @@ void main() {
 
     expect(find.text('Data inválida'), findsOneWidget);
     expect(find.textContaining('Dia 0'), findsNothing);
-    expect(find.text('Próxima menstruação estimada'), findsNothing);
+    expect(find.text('Próxima menstruação'), findsNothing);
     expect(find.textContaining('Por volta de'), findsNothing);
     expect(estimatedNextPeriodDate(health, now), isNull);
   });
@@ -226,13 +272,15 @@ void main() {
     );
     await pumpCycleScreen(tester, health);
 
-    expect(find.text('ESTADO ATUAL'), findsOneWidget);
+    expect(find.text('SEU CICLO HOJE'), findsOneWidget);
     expect(find.text('Dia 4'), findsOneWidget);
     expect(
       find.text('${health.cyclePhaseInfo['name']} · estimativa'),
       findsOneWidget,
     );
-    expect(find.text('Próxima menstruação estimada'), findsOneWidget);
+    expect(find.text('Próxima menstruação'), findsOneWidget);
+    expect(find.text('Duração do ciclo'), findsOneWidget);
+    expect(find.text('Duração do período'), findsOneWidget);
     expect(find.text('Registros disponíveis'), findsOneWidget);
     expect(find.text('Radiante'), findsOneWidget);
     expect(find.text('1500 ml hoje'), findsOneWidget);
@@ -249,6 +297,204 @@ void main() {
       findsOneWidget,
     );
   });
+
+  testWidgets(
+    'hero não desativa e fluxo explícito converge para pausa e reativação',
+    (tester) async {
+      final activeHealth = healthWithCycle(enabled: true);
+      final pausedHealth = healthWithCycle(enabled: false);
+      final healthController = StreamController<HealthModel>();
+      addTearDown(healthController.close);
+      final repository = _RecordingHealthRepository(
+        onToggle: (enabled) {
+          healthController.add(enabled ? activeHealth : pausedHealth);
+        },
+      );
+      healthController.add(activeHealth);
+
+      await pumpCycleScreen(
+        tester,
+        activeHealth,
+        repository: repository,
+        healthStream: healthController.stream,
+      );
+
+      expect(find.byIcon(Icons.power_settings_new_rounded), findsNothing);
+      await tester.tap(find.byKey(const ValueKey('cycle-hero-card')));
+      await tester.pump();
+      expect(repository.toggleValues, isEmpty);
+
+      await tester.tap(find.byKey(const ValueKey('cycle-configure-action')));
+      await tester.pumpAndSettle();
+      expect(find.text('Configurar ciclo'), findsWidgets);
+      expect(find.text('Desativar acompanhamento?'), findsNothing);
+
+      await tester.ensureVisible(
+        find.byKey(const ValueKey('cycle-deactivate-action')),
+      );
+      await tester.tap(find.byKey(const ValueKey('cycle-deactivate-action')));
+      await tester.pumpAndSettle();
+      expect(find.text('Desativar acompanhamento?'), findsOneWidget);
+      expect(repository.toggleValues, isEmpty);
+
+      await tester.tap(find.byKey(const ValueKey('cycle-deactivate-cancel')));
+      await tester.pumpAndSettle();
+      expect(repository.toggleValues, isEmpty);
+
+      await tester.tap(find.byKey(const ValueKey('cycle-deactivate-action')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('cycle-deactivate-confirm')));
+      await tester.pumpAndSettle();
+
+      expect(repository.toggleValues, [false]);
+      expect(repository.toggleExpectedUids, ['user-a']);
+
+      expect(find.byKey(const ValueKey('cycle-paused-state')), findsOneWidget);
+      expect(find.text('Acompanhamento pausado'), findsOneWidget);
+      expect(
+        find.textContaining('Seus dados continuam salvos.'),
+        findsOneWidget,
+      );
+      expect(find.text('Ativar acompanhamento'), findsOneWidget);
+
+      await tester.tap(find.byKey(const ValueKey('cycle-reactivate-action')));
+      await tester.pumpAndSettle();
+
+      expect(repository.toggleValues, [false, true]);
+      expect(repository.toggleExpectedUids, ['user-a', 'user-a']);
+      expect(find.byKey(const ValueKey('cycle-hero-card')), findsOneWidget);
+    },
+  );
+
+  testWidgets('enabled sem data pode cancelar desativação sem mutação', (
+    tester,
+  ) async {
+    final repository = _RecordingHealthRepository();
+    final enabledHealth = healthWithCycle(
+      enabled: true,
+      omitLastPeriodStart: true,
+    );
+
+    await pumpCycleScreen(tester, enabledHealth, repository: repository);
+    await tester.tap(find.byKey(const ValueKey('cycle-configure-action')));
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(
+      find.byKey(const ValueKey('cycle-deactivate-action')),
+    );
+    await tester.tap(find.byKey(const ValueKey('cycle-deactivate-action')));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Desativar acompanhamento?'), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('cycle-deactivate-cancel')));
+    await tester.pumpAndSettle();
+
+    expect(repository.toggleValues, isEmpty);
+    expect(find.byKey(const ValueKey('cycle-setup-state')), findsOneWidget);
+  });
+
+  testWidgets('enabled com data inválida pode confirmar desativação', (
+    tester,
+  ) async {
+    final activeHealth = healthWithCycle(
+      enabled: true,
+      rawLastPeriodStart: 'not-a-date',
+    );
+    final pausedHealth = healthWithCycle(
+      enabled: false,
+      rawLastPeriodStart: 'not-a-date',
+    );
+    final healthController = StreamController<HealthModel>();
+    addTearDown(healthController.close);
+    final repository = _RecordingHealthRepository(
+      onToggle: (enabled) {
+        if (!enabled) healthController.add(pausedHealth);
+      },
+    );
+    healthController.add(activeHealth);
+
+    await pumpCycleScreen(
+      tester,
+      activeHealth,
+      repository: repository,
+      healthStream: healthController.stream,
+    );
+    await tester.tap(find.byKey(const ValueKey('cycle-configure-action')));
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(
+      find.byKey(const ValueKey('cycle-deactivate-action')),
+    );
+    await tester.tap(find.byKey(const ValueKey('cycle-deactivate-action')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('cycle-deactivate-confirm')));
+    await tester.pumpAndSettle();
+
+    expect(repository.toggleValues, [false]);
+    expect(repository.toggleExpectedUids, ['user-a']);
+    expect(find.byKey(const ValueKey('cycle-paused-state')), findsOneWidget);
+  });
+
+  testWidgets('enabled com duração inválida mantém desativação disponível', (
+    tester,
+  ) async {
+    final repository = _RecordingHealthRepository();
+    final enabledHealth = healthWithCycle(
+      enabled: true,
+      cycleLengthDays: 0,
+      periodLengthDays: 999,
+    );
+
+    await pumpCycleScreen(tester, enabledHealth, repository: repository);
+    await tester.tap(find.byKey(const ValueKey('cycle-configure-action')));
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(
+      find.byKey(const ValueKey('cycle-deactivate-action')),
+    );
+
+    expect(
+      find.byKey(const ValueKey('cycle-deactivate-action')),
+      findsOneWidget,
+    );
+    expect(repository.toggleValues, isEmpty);
+  });
+
+  testWidgets('reativação sem data abre configuração sem mutação', (
+    tester,
+  ) async {
+    final repository = _RecordingHealthRepository();
+    final pausedHealth = healthWithCycle(
+      enabled: false,
+      omitLastPeriodStart: true,
+    );
+
+    await pumpCycleScreen(tester, pausedHealth, repository: repository);
+    await tester.tap(find.byKey(const ValueKey('cycle-reactivate-action')));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(AlertDialog), findsOneWidget);
+    expect(find.text('Configurar ciclo'), findsWidgets);
+    expect(repository.toggleValues, isEmpty);
+    expect(repository.settingsValues, isEmpty);
+  });
+
+  testWidgets(
+    'reativação com data inválida abre configuração sem inventar data',
+    (tester) async {
+      final repository = _RecordingHealthRepository();
+      final pausedHealth = healthWithCycle(
+        enabled: false,
+        rawLastPeriodStart: 'not-a-date',
+      );
+
+      await pumpCycleScreen(tester, pausedHealth, repository: repository);
+      await tester.tap(find.byKey(const ValueKey('cycle-reactivate-action')));
+      await tester.pumpAndSettle();
+
+      expect(find.byType(AlertDialog), findsOneWidget);
+      expect(find.text('Configurar ciclo'), findsWidgets);
+      expect(repository.toggleValues, isEmpty);
+      expect(repository.settingsValues, isEmpty);
+    },
+  );
 
   testWidgets('layout compacto com fonte ampliada não gera overflow', (
     tester,
@@ -279,7 +525,7 @@ void main() {
       textScaleFactor: 1.3,
     );
 
-    expect(find.text('Configurar'), findsWidgets);
+    expect(find.text('Configurar ciclo'), findsWidgets);
     expect(tester.takeException(), isNull);
   });
 }

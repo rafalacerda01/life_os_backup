@@ -171,6 +171,48 @@ class HealthRepository {
     return parsed?.toIso8601String();
   }
 
+  static bool isCycleConfigurationValid(
+    Map<String, dynamic>? cycleData, {
+    DateTime? now,
+  }) {
+    if (cycleData == null) return false;
+
+    final rawLastPeriodStart = cycleData['lastPeriodStart'];
+    final lastPeriodStart = rawLastPeriodStart is DateTime
+        ? rawLastPeriodStart
+        : rawLastPeriodStart is String
+        ? DateTime.tryParse(rawLastPeriodStart.trim())
+        : null;
+    if (lastPeriodStart == null) return false;
+
+    final referenceDate = now ?? DateTime.now();
+    final startDay = DateTime(
+      lastPeriodStart.year,
+      lastPeriodStart.month,
+      lastPeriodStart.day,
+    );
+    final today = DateTime(
+      referenceDate.year,
+      referenceDate.month,
+      referenceDate.day,
+    );
+    if (startDay.isAfter(today)) return false;
+
+    final cycleLength = int.tryParse(
+      cycleData['cycleLengthDays']?.toString() ?? '',
+    );
+    final periodLength = int.tryParse(
+      cycleData['periodLengthDays']?.toString() ?? '',
+    );
+
+    return cycleLength != null &&
+        cycleLength >= 1 &&
+        cycleLength <= 120 &&
+        periodLength != null &&
+        periodLength >= 1 &&
+        periodLength <= cycleLength;
+  }
+
   Map<String, dynamic> _mergeRehydratedCycleData(
     Map<String, dynamic> remoteCycleData,
     Map<String, dynamic>? localCycleData,
@@ -278,6 +320,24 @@ class HealthRepository {
     return latestCycle;
   }
 
+  Map<String, dynamic>? _latestStoredCycleData(List<HealthEntry> entries) {
+    Map<String, dynamic>? latestCycle;
+    DateTime? latestDate;
+
+    for (final entry in entries) {
+      final cycle = _decodeCycleData(entry.menstrualCycleJson);
+
+      if (cycle != null &&
+          cycle['isEnabled'] is bool &&
+          (latestDate == null || entry.date.isAfter(latestDate))) {
+        latestCycle = cycle;
+        latestDate = entry.date;
+      }
+    }
+
+    return latestCycle;
+  }
+
   // ===========================================================================
   // 1. LEITURA — DRIFT / LOCAL FIRST
   // ===========================================================================
@@ -328,22 +388,32 @@ class HealthRepository {
   }) async {
     final ownerUid = expectedUid.trim();
     if (ownerUid.isEmpty || !_isCurrentUser(ownerUid)) return false;
+    if (cycleData['isEnabled'] == true &&
+        !isCycleConfigurationValid(cycleData, now: _now())) {
+      return false;
+    }
 
+    final sanitizedCycleData = _sanitizeCycleData(cycleData);
+    return _persistCycleSettings(sanitizedCycleData, ownerUid);
+  }
+
+  Future<bool> _persistCycleSettings(
+    Map<String, dynamic> cycleData,
+    String ownerUid,
+  ) async {
     try {
       final todayDocId = _getTodayDocId();
       final now = _now();
-
-      final sanitizedCycleData = _sanitizeCycleData(cycleData);
 
       await _performCycleWrite(
         ownerUid,
         HealthEntriesCompanion(
           docId: Value(todayDocId),
-          menstrualCycleJson: Value(_encodeCycleData(sanitizedCycleData)),
+          menstrualCycleJson: Value(_encodeCycleData(cycleData)),
           date: Value(now),
         ),
         <String, dynamic>{
-          'menstrualCycle': sanitizedCycleData,
+          'menstrualCycle': cycleData,
           'date': now.toIso8601String(),
         },
       );
@@ -809,17 +879,20 @@ class HealthRepository {
 
     final entries = await _db.select(_db.healthEntries).get();
     if (!_isCurrentUser(ownerUid)) return false;
-    final cycleData = _latestCycleData(entries) ?? <String, dynamic>{};
+    final cycleData = enable
+        ? _latestCycleData(entries)
+        : _latestStoredCycleData(entries);
+    if (cycleData == null) return false;
+
+    if (enable && !isCycleConfigurationValid(cycleData, now: _now())) {
+      return false;
+    }
 
     cycleData['isEnabled'] = enable;
 
-    cycleData.putIfAbsent('lastPeriodStart', () => _now().toIso8601String());
-
-    cycleData.putIfAbsent('cycleLengthDays', () => _defaultCycleLengthDays);
-
-    cycleData.putIfAbsent('periodLengthDays', () => _defaultPeriodLengthDays);
-
-    return updateCycleSettings(cycleData, expectedUid: ownerUid);
+    return enable
+        ? updateCycleSettings(cycleData, expectedUid: ownerUid)
+        : _persistCycleSettings(cycleData, ownerUid);
   }
 
   // ===========================================================================

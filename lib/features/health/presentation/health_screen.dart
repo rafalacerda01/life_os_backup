@@ -9,6 +9,7 @@ import 'package:life_os/core/security/input_sanitizer.dart';
 import 'package:life_os/core/utils/app_logger.dart';
 import 'package:life_os/features/checkin/presentation/checkin_screen.dart';
 import 'package:life_os/features/health/data/models/health_model.dart';
+import 'package:life_os/features/health/data/repositories/health_repository.dart';
 import 'package:life_os/features/health/presentation/cycle/cycle_reminder_preferences.dart';
 import 'package:life_os/features/health/presentation/providers/health_provider.dart';
 
@@ -1192,15 +1193,28 @@ class CycleHealthSummaryCard extends StatelessWidget {
   }
 }
 
+enum CycleHealthDetailsPresentation { embedded, dedicated }
+
 class CycleHealthDetails extends ConsumerWidget {
   final HealthModel health;
+  final CycleHealthDetailsPresentation presentation;
 
-  const CycleHealthDetails({super.key, required this.health});
+  const CycleHealthDetails({
+    super.key,
+    required this.health,
+    this.presentation = CycleHealthDetailsPresentation.embedded,
+  });
 
   static const Color _background = Color(0xFF070B14);
   static const Color _surface = Color(0xFF11182E);
   static const Color _pink = Color(0xFFB026FF);
   static const Color _purple = Colors.purpleAccent;
+  static const Color _rose = Color(0xFFFF6B9F);
+  static const Color _softRose = Color(0xFFFF9FBA);
+  static const Color _lilac = Color(0xFFC58CFF);
+  static const Color _softViolet = Color(0xFF9B72FF);
+  static const Color _turquoise = Color(0xFF58D6C7);
+  static const Color _warmPeach = Color(0xFFF2A56B);
 
   void _showSnackBar(
     BuildContext context,
@@ -1261,7 +1275,7 @@ class CycleHealthDetails extends ConsumerWidget {
     }
   }
 
-  Future<void> _toggleCycle(
+  Future<bool> _toggleCycle(
     BuildContext context,
     WidgetRef ref,
     String? expectedUid,
@@ -1275,7 +1289,7 @@ class CycleHealthDetails extends ConsumerWidget {
             : 'Não foi possível desativar o ciclo.',
         error: true,
       );
-      return;
+      return false;
     }
 
     try {
@@ -1290,7 +1304,9 @@ class CycleHealthDetails extends ConsumerWidget {
               : 'Não foi possível desativar o ciclo.',
           error: true,
         );
+        return false;
       }
+      return true;
     } catch (e, stack) {
       AppLogger.e(
         enabled
@@ -1307,6 +1323,7 @@ class CycleHealthDetails extends ConsumerWidget {
             : 'Não foi possível desativar o ciclo.',
         error: true,
       );
+      return false;
     }
   }
 
@@ -1380,12 +1397,50 @@ class CycleHealthDetails extends ConsumerWidget {
     );
   }
 
+  Future<bool> _confirmCycleDeactivation(BuildContext context) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (confirmationContext) => AlertDialog(
+        backgroundColor: _surface,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+        title: const Text(
+          'Desativar acompanhamento?',
+          style: TextStyle(color: Colors.white, fontWeight: FontWeight.w800),
+        ),
+        content: const Text(
+          'Suas configurações serão mantidas, mas as estimativas do ciclo '
+          'deixarão de ser exibidas. Você pode ativar novamente quando quiser.',
+          style: TextStyle(color: Colors.white70, height: 1.45),
+        ),
+        actions: [
+          TextButton(
+            key: const ValueKey('cycle-deactivate-cancel'),
+            onPressed: () => Navigator.pop(confirmationContext, false),
+            child: const Text('Cancelar'),
+          ),
+          FilledButton(
+            key: const ValueKey('cycle-deactivate-confirm'),
+            onPressed: () => Navigator.pop(confirmationContext, true),
+            style: FilledButton.styleFrom(
+              backgroundColor: _rose,
+              foregroundColor: Colors.black,
+            ),
+            child: const Text('Desativar'),
+          ),
+        ],
+      ),
+    );
+
+    return confirmed == true;
+  }
+
   void _showCycleSettings(
     BuildContext parentContext,
     WidgetRef ref,
     String? expectedUid,
-    Map<String, dynamic>? currentData,
-  ) {
+    Map<String, dynamic>? currentData, {
+    bool allowDeactivation = false,
+  }) {
     final initialDateStr = currentData?['lastPeriodStart'];
 
     DateTime tempDate;
@@ -1519,6 +1574,51 @@ class CycleHealthDetails extends ConsumerWidget {
                         ),
                       ],
                     ),
+                    if (allowDeactivation &&
+                        currentData?['isEnabled'] == true) ...[
+                      const SizedBox(height: 22),
+                      const Divider(color: Colors.white10),
+                      const SizedBox(height: 8),
+                      SizedBox(
+                        width: double.infinity,
+                        child: TextButton.icon(
+                          key: const ValueKey('cycle-deactivate-action'),
+                          onPressed: () async {
+                            FocusManager.instance.primaryFocus?.unfocus();
+                            final confirmed = await _confirmCycleDeactivation(
+                              parentContext,
+                            );
+                            if (!confirmed || !parentContext.mounted) return;
+
+                            final deactivated = await _toggleCycle(
+                              parentContext,
+                              ref,
+                              expectedUid,
+                              false,
+                            );
+                            if (deactivated && dialogContext.mounted) {
+                              Navigator.pop(dialogContext);
+                            }
+                          },
+                          style: TextButton.styleFrom(
+                            foregroundColor: _softRose,
+                            alignment: Alignment.centerLeft,
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 12,
+                              vertical: 12,
+                            ),
+                          ),
+                          icon: const Icon(
+                            Icons.pause_circle_outline_rounded,
+                            size: 19,
+                          ),
+                          label: const Text(
+                            'Desativar acompanhamento do ciclo',
+                            style: TextStyle(fontWeight: FontWeight.w600),
+                          ),
+                        ),
+                      ),
+                    ],
                   ],
                 ),
               ),
@@ -1659,6 +1759,385 @@ class CycleHealthDetails extends ConsumerWidget {
     });
   }
 
+  Color _phasePresentationColor(String phaseName) {
+    final normalized = phaseName.toLowerCase();
+    if (normalized.contains('menstrual')) return _rose;
+    if (normalized.contains('folicular')) return _lilac;
+    if (normalized.contains('ovula')) return _turquoise;
+    if (normalized.contains('lútea') ||
+        normalized.contains('lutea') ||
+        normalized.contains('luteal')) {
+      return _warmPeach;
+    }
+    return _softViolet;
+  }
+
+  Widget _buildDedicatedInactiveState(
+    BuildContext context,
+    WidgetRef ref,
+    String? expectedUid,
+    Map<String, dynamic>? cycleData,
+    Map<String, dynamic> cycleInfo,
+    bool isEnabled,
+  ) {
+    final isPaused = cycleData != null && !isEnabled;
+    final canReactivateDirectly =
+        isPaused && HealthRepository.isCycleConfigurationValid(cycleData);
+    final title = isPaused
+        ? 'Acompanhamento pausado'
+        : cycleInfo['name']?.toString() ?? 'Configure seu ciclo';
+    final message = isPaused
+        ? 'Seus dados continuam salvos. Ative quando quiser voltar a '
+              'acompanhar suas estimativas.'
+        : cycleData == null
+        ? 'Configure para acompanhar estimativas e registros.'
+        : cycleInfo['message']?.toString() ??
+              'Complete a configuração para gerar estimativas.';
+
+    return Container(
+      key: ValueKey(isPaused ? 'cycle-paused-state' : 'cycle-setup-state'),
+      width: double.infinity,
+      padding: const EdgeInsets.all(24),
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [
+            _surface,
+            _softViolet.withOpacity(0.10),
+            _rose.withOpacity(0.06),
+          ],
+        ),
+        borderRadius: BorderRadius.circular(28),
+        border: Border.all(color: _softViolet.withOpacity(0.22)),
+        boxShadow: [
+          BoxShadow(
+            color: _softViolet.withOpacity(0.08),
+            blurRadius: 28,
+            offset: const Offset(0, 14),
+          ),
+        ],
+      ),
+      child: Column(
+        children: [
+          Container(
+            width: 62,
+            height: 62,
+            decoration: BoxDecoration(
+              color: _softViolet.withOpacity(0.12),
+              shape: BoxShape.circle,
+              border: Border.all(color: _softViolet.withOpacity(0.26)),
+            ),
+            child: Icon(
+              isPaused ? Icons.pause_rounded : Icons.calendar_month_rounded,
+              color: _lilac,
+              size: 28,
+            ),
+          ),
+          const SizedBox(height: 18),
+          Text(
+            title,
+            textAlign: TextAlign.center,
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 20,
+              fontWeight: FontWeight.w800,
+            ),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            message,
+            textAlign: TextAlign.center,
+            style: const TextStyle(
+              color: Colors.white60,
+              fontSize: 13,
+              height: 1.5,
+            ),
+          ),
+          const SizedBox(height: 22),
+          SizedBox(
+            width: double.infinity,
+            child: FilledButton.icon(
+              key: ValueKey(
+                isPaused ? 'cycle-reactivate-action' : 'cycle-configure-action',
+              ),
+              onPressed: canReactivateDirectly
+                  ? () => _toggleCycle(context, ref, expectedUid, true)
+                  : () => _showCycleSettings(
+                      context,
+                      ref,
+                      expectedUid,
+                      cycleData,
+                      allowDeactivation: isEnabled,
+                    ),
+              style: FilledButton.styleFrom(
+                backgroundColor: _pink,
+                foregroundColor: Colors.white,
+                padding: const EdgeInsets.symmetric(vertical: 14),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(16),
+                ),
+              ),
+              icon: Icon(
+                isPaused ? Icons.play_arrow_rounded : Icons.tune_rounded,
+              ),
+              label: Text(
+                isPaused ? 'Ativar acompanhamento' : 'Configurar ciclo',
+                style: const TextStyle(fontWeight: FontWeight.w700),
+              ),
+            ),
+          ),
+          if (isPaused) ...[
+            const SizedBox(height: 8),
+            TextButton.icon(
+              key: const ValueKey('cycle-configure-action'),
+              onPressed: () =>
+                  _showCycleSettings(context, ref, expectedUid, cycleData),
+              icon: const Icon(Icons.settings_rounded, size: 18),
+              label: const Text('Ajustar configuração'),
+              style: TextButton.styleFrom(foregroundColor: Colors.white60),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _buildDedicatedHero(
+    BuildContext context,
+    WidgetRef ref,
+    String? expectedUid,
+    Map<String, dynamic> cycleData,
+    int currentDay,
+    int totalDays,
+    String phaseName,
+    String insight,
+  ) {
+    final phaseColor = _phasePresentationColor(phaseName);
+    final progress = (currentDay / totalDays).clamp(0.0, 1.0);
+
+    return Container(
+      key: const ValueKey('cycle-hero-card'),
+      width: double.infinity,
+      padding: const EdgeInsets.all(22),
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [
+            _surface,
+            _rose.withOpacity(0.10),
+            _softViolet.withOpacity(0.13),
+          ],
+          stops: const [0, 0.52, 1],
+        ),
+        borderRadius: BorderRadius.circular(28),
+        border: Border.all(color: phaseColor.withOpacity(0.28)),
+        boxShadow: [
+          BoxShadow(
+            color: phaseColor.withOpacity(0.09),
+            blurRadius: 34,
+            offset: const Offset(0, 16),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                width: 38,
+                height: 38,
+                decoration: BoxDecoration(
+                  color: phaseColor.withOpacity(0.13),
+                  shape: BoxShape.circle,
+                ),
+                child: Icon(
+                  Icons.calendar_month_rounded,
+                  color: phaseColor,
+                  size: 19,
+                ),
+              ),
+              const SizedBox(width: 11),
+              const Expanded(
+                child: Text(
+                  'SEU CICLO HOJE',
+                  style: TextStyle(
+                    color: Colors.white70,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w800,
+                    letterSpacing: 1.1,
+                  ),
+                ),
+              ),
+              IconButton(
+                key: const ValueKey('cycle-configure-action'),
+                onPressed: () => _showCycleSettings(
+                  context,
+                  ref,
+                  expectedUid,
+                  cycleData,
+                  allowDeactivation: true,
+                ),
+                tooltip: 'Configurar ciclo',
+                icon: const Icon(
+                  Icons.settings_rounded,
+                  color: Colors.white70,
+                  size: 20,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 14),
+          Center(
+            child: SizedBox(
+              width: 142,
+              height: 142,
+              child: Stack(
+                alignment: Alignment.center,
+                children: [
+                  SizedBox.expand(
+                    child: CircularProgressIndicator(
+                      value: progress,
+                      strokeWidth: 9,
+                      backgroundColor: Colors.white.withOpacity(0.07),
+                      valueColor: AlwaysStoppedAnimation<Color>(phaseColor),
+                      strokeCap: StrokeCap.round,
+                    ),
+                  ),
+                  Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        'Dia $currentDay',
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 25,
+                          fontWeight: FontWeight.w900,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        'de $totalDays',
+                        style: const TextStyle(
+                          color: Colors.white54,
+                          fontSize: 12,
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 16),
+          Center(
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 7),
+              decoration: BoxDecoration(
+                color: phaseColor.withOpacity(0.12),
+                borderRadius: BorderRadius.circular(999),
+                border: Border.all(color: phaseColor.withOpacity(0.25)),
+              ),
+              child: Text(
+                '$phaseName · estimativa',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  color: phaseColor,
+                  fontSize: 13,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(height: 22),
+          _buildWeekTracker(),
+          const SizedBox(height: 20),
+          Wrap(
+            spacing: 10,
+            runSpacing: 10,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              OutlinedButton.icon(
+                onPressed: () => _updatePillStatus(
+                  context,
+                  ref,
+                  expectedUid,
+                  !health.hasTakenPillToday,
+                ),
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: health.hasTakenPillToday
+                      ? _softRose
+                      : Colors.white70,
+                  side: BorderSide(
+                    color: health.hasTakenPillToday
+                        ? _softRose.withOpacity(0.45)
+                        : Colors.white12,
+                  ),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                ),
+                icon: Icon(
+                  health.hasTakenPillToday
+                      ? Icons.check_circle_rounded
+                      : Icons.medication_rounded,
+                  size: 18,
+                ),
+                label: Text(
+                  health.hasTakenPillToday ? 'Pílula OK' : 'Registrar pílula',
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 18),
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              color: _background.withOpacity(0.72),
+              borderRadius: BorderRadius.circular(18),
+              border: Border.all(color: _lilac.withOpacity(0.16)),
+            ),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Icon(Icons.auto_awesome_rounded, color: _lilac, size: 18),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        'INSIGHT DO DIA',
+                        style: TextStyle(
+                          color: _lilac,
+                          fontSize: 9,
+                          fontWeight: FontWeight.w900,
+                          letterSpacing: 0.9,
+                        ),
+                      ),
+                      const SizedBox(height: 5),
+                      Text(
+                        insight,
+                        style: const TextStyle(
+                          color: Colors.white70,
+                          fontSize: 12,
+                          height: 1.5,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final cycleData = health.menstrualCycle;
@@ -1670,6 +2149,17 @@ class CycleHealthDetails extends ConsumerWidget {
     final expectedUid = ref.read(cycleReminderUserIdReaderProvider)();
 
     if (!isEnabled || !hasUsableEstimate) {
+      if (presentation == CycleHealthDetailsPresentation.dedicated) {
+        return _buildDedicatedInactiveState(
+          context,
+          ref,
+          expectedUid,
+          cycleData,
+          cycleInfo,
+          isEnabled,
+        );
+      }
+
       final statusName = isEnabled
           ? cycleInfo['name']?.toString() ?? 'Configuração incompleta'
           : 'Saúde do ciclo';
@@ -1747,6 +2237,19 @@ class CycleHealthDetails extends ConsumerWidget {
     final phaseColor = cycleInfo['color'] is Color
         ? cycleInfo['color'] as Color
         : _pink;
+
+    if (presentation == CycleHealthDetailsPresentation.dedicated) {
+      return _buildDedicatedHero(
+        context,
+        ref,
+        expectedUid,
+        cycleData,
+        currentDay,
+        totalDays,
+        phaseName,
+        aiMessage,
+      );
+    }
 
     return Container(
       padding: const EdgeInsets.all(20),
