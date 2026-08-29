@@ -42,6 +42,26 @@ class _RecordingHealthRepository extends Fake implements HealthRepository {
   }
 }
 
+class _ReplayHealthStream {
+  _ReplayHealthStream(this.current);
+
+  HealthModel current;
+  final StreamController<HealthModel> _controller =
+      StreamController<HealthModel>.broadcast();
+
+  Stream<HealthModel> create() async* {
+    yield current;
+    yield* _controller.stream;
+  }
+
+  void add(HealthModel health) {
+    current = health;
+    _controller.add(health);
+  }
+
+  Future<void> close() => _controller.close();
+}
+
 void main() {
   final current = DateTime.now();
   final now = DateTime(current.year, current.month, current.day, 12);
@@ -79,12 +99,12 @@ void main() {
     required Widget child,
     HealthRepository? repository,
     String? admittedUid = 'user-a',
-    Stream<HealthModel>? healthStream,
+    Stream<HealthModel> Function()? healthStreamFactory,
   }) {
     return ProviderScope(
       overrides: [
         healthStreamProvider.overrideWith(
-          (ref) => healthStream ?? Stream.value(health),
+          (ref) => healthStreamFactory?.call() ?? Stream.value(health),
         ),
         if (repository != null)
           healthRepositoryProvider.overrideWithValue(repository),
@@ -92,6 +112,7 @@ void main() {
         planLimitsProvider.overrideWithValue(PlanLimits.free),
         cycleReminderUserIdProvider.overrideWith((ref) => Stream.value(null)),
         cycleReminderUserIdReaderProvider.overrideWithValue(() => admittedUid),
+        cyclePillTrackingVisibleProvider.overrideWithValue(false),
       ],
       child: child,
     );
@@ -104,7 +125,7 @@ void main() {
     double textScaleFactor = 1,
     HealthRepository? repository,
     String? admittedUid = 'user-a',
-    Stream<HealthModel>? healthStream,
+    Stream<HealthModel> Function()? healthStreamFactory,
   }) async {
     if (size != null) {
       tester.view.physicalSize = size;
@@ -118,7 +139,7 @@ void main() {
         health: health,
         repository: repository,
         admittedUid: admittedUid,
-        healthStream: healthStream,
+        healthStreamFactory: healthStreamFactory,
         child: MaterialApp(
           home: MediaQuery(
             data: MediaQueryData(
@@ -303,20 +324,19 @@ void main() {
     (tester) async {
       final activeHealth = healthWithCycle(enabled: true);
       final pausedHealth = healthWithCycle(enabled: false);
-      final healthController = StreamController<HealthModel>();
-      addTearDown(healthController.close);
+      final healthStream = _ReplayHealthStream(activeHealth);
+      addTearDown(healthStream.close);
       final repository = _RecordingHealthRepository(
         onToggle: (enabled) {
-          healthController.add(enabled ? activeHealth : pausedHealth);
+          healthStream.add(enabled ? activeHealth : pausedHealth);
         },
       );
-      healthController.add(activeHealth);
 
       await pumpCycleScreen(
         tester,
         activeHealth,
         repository: repository,
-        healthStream: healthController.stream,
+        healthStreamFactory: healthStream.create,
       );
 
       expect(find.byIcon(Icons.power_settings_new_rounded), findsNothing);
@@ -403,20 +423,19 @@ void main() {
       enabled: false,
       rawLastPeriodStart: 'not-a-date',
     );
-    final healthController = StreamController<HealthModel>();
-    addTearDown(healthController.close);
+    final healthStream = _ReplayHealthStream(activeHealth);
+    addTearDown(healthStream.close);
     final repository = _RecordingHealthRepository(
       onToggle: (enabled) {
-        if (!enabled) healthController.add(pausedHealth);
+        if (!enabled) healthStream.add(pausedHealth);
       },
     );
-    healthController.add(activeHealth);
 
     await pumpCycleScreen(
       tester,
       activeHealth,
       repository: repository,
-      healthStream: healthController.stream,
+      healthStreamFactory: healthStream.create,
     );
     await tester.tap(find.byKey(const ValueKey('cycle-configure-action')));
     await tester.pumpAndSettle();
@@ -527,5 +546,54 @@ void main() {
 
     expect(find.text('Configurar ciclo'), findsWidgets);
     expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('mount e resume atualizam o stream diário com segurança', (
+    tester,
+  ) async {
+    var currentTime = DateTime(2026, 8, 29, 23, 50);
+    var streamBuilds = 0;
+    final health = healthWithCycle(enabled: true);
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          healthStreamProvider.overrideWith((ref) {
+            streamBuilds += 1;
+            return Stream.value(health);
+          }),
+          medicationsStreamProvider.overrideWith(
+            (ref) => Stream.value(const []),
+          ),
+          planLimitsProvider.overrideWithValue(PlanLimits.free),
+          cycleReminderUserIdProvider.overrideWith((ref) => Stream.value(null)),
+          cycleReminderUserIdReaderProvider.overrideWithValue(() => 'user-a'),
+          cyclePillTrackingVisibleProvider.overrideWithValue(false),
+        ],
+        child: MaterialApp(home: CycleHealthScreen(clock: () => currentTime)),
+      ),
+    );
+
+    expect(tester.takeException(), isNull);
+    expect(streamBuilds, 1);
+
+    await tester.pump();
+    expect(tester.takeException(), isNull);
+    expect(streamBuilds, 2);
+
+    await tester.pumpAndSettle();
+    final initialBuilds = streamBuilds;
+
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await tester.pumpAndSettle();
+    expect(streamBuilds, initialBuilds);
+
+    currentTime = DateTime(2026, 8, 30, 8);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await tester.pumpAndSettle();
+
+    expect(streamBuilds, initialBuilds + 1);
   });
 }

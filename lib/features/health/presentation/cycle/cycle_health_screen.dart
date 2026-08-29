@@ -19,7 +19,7 @@ DateTime? estimatedNextPeriodDate(HealthModel health, DateTime now) {
   return today.add(Duration(days: totalDays - day + 1));
 }
 
-class CycleHealthScreen extends ConsumerWidget {
+class CycleHealthScreen extends ConsumerStatefulWidget {
   const CycleHealthScreen({super.key, this.clock});
 
   final DateTime Function()? clock;
@@ -33,7 +33,51 @@ class CycleHealthScreen extends ConsumerWidget {
   static const Color _turquoise = Color(0xFF58D6C7);
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<CycleHealthScreen> createState() => _CycleHealthScreenState();
+}
+
+class _CycleHealthScreenState extends ConsumerState<CycleHealthScreen>
+    with WidgetsBindingObserver {
+  static const Color _background = CycleHealthScreen._background;
+  static const Color _primary = CycleHealthScreen._primary;
+
+  late DateTime _activeDay;
+
+  DateTime get _now => (widget.clock ?? DateTime.now)();
+
+  DateTime _dateOnly(DateTime value) =>
+      DateTime(value.year, value.month, value.day);
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _activeDay = _dateOnly(_now);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      ref.invalidate(healthStreamProvider);
+    });
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state != AppLifecycleState.resumed || !mounted) return;
+
+    final resumedDay = _dateOnly(_now);
+    if (resumedDay == _activeDay) return;
+
+    _activeDay = resumedDay;
+    ref.invalidate(healthStreamProvider);
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final healthAsync = ref.watch(healthStreamProvider);
 
     return Scaffold(
@@ -79,10 +123,7 @@ class CycleHealthScreen extends ConsumerWidget {
                           ),
                           if (hasUsableEstimate) ...[
                             const SizedBox(height: 16),
-                            _CycleMetricsCard(
-                              health: health,
-                              now: (clock ?? DateTime.now)(),
-                            ),
+                            _CycleMetricsCard(health: health, now: _now),
                           ],
                           if (isEnabled ||
                               health.mood.trim().isNotEmpty ||

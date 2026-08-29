@@ -479,6 +479,34 @@ void main() {
         isNull,
       );
     });
+
+    test('registro diário não atravessa o dia e preserva histórico', () async {
+      clock.value = DateTime.utc(2026, 8, 29, 10);
+
+      expect(
+        await repository.updatePillStatus(true, expectedUid: 'user-123'),
+        isTrue,
+      );
+      final dayA = await (db.select(
+        db.healthEntries,
+      )..where((row) => row.docId.equals('2026-08-29'))).getSingle();
+      expect(dayA.hasTakenPillToday, isTrue);
+
+      clock.value = DateTime.utc(2026, 8, 30, 10);
+      final reopenedOnDayB = await repository.getHealthStream().first;
+
+      expect(reopenedOnDayB.hasTakenPillToday, isFalse);
+      final preservedDayA = await (db.select(
+        db.healthEntries,
+      )..where((row) => row.docId.equals('2026-08-29'))).getSingle();
+      expect(preservedDayA.hasTakenPillToday, isTrue);
+      expect(
+        await (db.select(
+          db.healthEntries,
+        )..where((row) => row.docId.equals('2026-08-30'))).getSingleOrNull(),
+        isNull,
+      );
+    });
   });
 
   group('mutações Cycle vinculadas ao expectedUid', () {

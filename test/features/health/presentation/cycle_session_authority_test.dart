@@ -76,6 +76,7 @@ void main() {
       ProviderScope(
         overrides: [
           healthRepositoryProvider.overrideWithValue(repository),
+          cyclePillTrackingVisibleProvider.overrideWithValue(true),
           cycleReminderUserIdReaderProvider.overrideWithValue(
             () => admittedUid,
           ),
@@ -102,7 +103,7 @@ void main() {
   ) async {
     await pumpDetails(tester);
 
-    await tester.tap(find.text('Registrar'));
+    await tester.tap(find.text('Registrar pílula'));
     await tester.pump();
     await tester.tap(find.byTooltip('Desativar ciclo'));
     await tester.pump();
@@ -120,7 +121,7 @@ void main() {
     admittedUid = null;
     await pumpDetails(tester);
 
-    await tester.tap(find.text('Registrar'));
+    await tester.tap(find.text('Registrar pílula'));
     await tester.pump();
 
     expect(repository.pillCalls, 0);
@@ -134,7 +135,7 @@ void main() {
     admittedUid = 'user-b';
     repository.activeUid = 'user-b';
 
-    await tester.tap(find.text('Registrar'));
+    await tester.tap(find.text('Registrar pílula'));
     await tester.pump();
     await tester.tap(find.byTooltip('Desativar ciclo'));
     await tester.pump();

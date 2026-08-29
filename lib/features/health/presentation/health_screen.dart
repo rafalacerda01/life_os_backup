@@ -1195,6 +1195,11 @@ class CycleHealthSummaryCard extends StatelessWidget {
 
 enum CycleHealthDetailsPresentation { embedded, dedicated }
 
+final cyclePillTrackingVisibleProvider = Provider<bool>((ref) {
+  final preferences = ref.watch(cycleReminderPreferencesProvider);
+  return preferences.asData?.value?.type == CycleReminderType.pill;
+});
+
 class CycleHealthDetails extends ConsumerWidget {
   final HealthModel health;
   final CycleHealthDetailsPresentation presentation;
@@ -1238,7 +1243,7 @@ class CycleHealthDetails extends ConsumerWidget {
       );
   }
 
-  Future<void> _updatePillStatus(
+  Future<bool> _updatePillStatus(
     BuildContext context,
     WidgetRef ref,
     String? expectedUid,
@@ -1250,7 +1255,7 @@ class CycleHealthDetails extends ConsumerWidget {
         'Não foi possível atualizar o status.',
         error: true,
       );
-      return;
+      return false;
     }
 
     try {
@@ -1263,16 +1268,138 @@ class CycleHealthDetails extends ConsumerWidget {
           'Não foi possível atualizar o status.',
           error: true,
         );
+        return false;
       }
-    } catch (e, stack) {
-      AppLogger.e('Erro ao atualizar status da pílula', e, stack);
+      return true;
+    } on Object {
+      AppLogger.w('[CycleDailyStatus] Falha ao atualizar registro diário.');
 
       _showSnackBar(
         context,
         'Não foi possível atualizar o status.',
         error: true,
       );
+      return false;
     }
+  }
+
+  Future<bool> _confirmPillUndo(BuildContext context) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (confirmationContext) => AlertDialog(
+        backgroundColor: _surface,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+        title: const Text(
+          'Desmarcar registro de hoje?',
+          style: TextStyle(color: Colors.white, fontWeight: FontWeight.w800),
+        ),
+        content: const Text(
+          'O registro de que a pílula foi tomada hoje será removido.',
+          style: TextStyle(color: Colors.white70, height: 1.45),
+        ),
+        actions: [
+          TextButton(
+            key: const ValueKey('cycle-pill-undo-cancel'),
+            onPressed: () => Navigator.pop(confirmationContext, false),
+            child: const Text('Cancelar'),
+          ),
+          FilledButton(
+            key: const ValueKey('cycle-pill-undo-confirm'),
+            onPressed: () => Navigator.pop(confirmationContext, true),
+            style: FilledButton.styleFrom(
+              backgroundColor: _rose,
+              foregroundColor: Colors.black,
+            ),
+            child: const Text('Desmarcar'),
+          ),
+        ],
+      ),
+    );
+
+    return confirmed == true;
+  }
+
+  Widget _buildDailyPillControl(
+    BuildContext context,
+    WidgetRef ref,
+    String? expectedUid, {
+    bool compact = false,
+  }) {
+    final takenToday = health.hasTakenPillToday;
+
+    return AnimatedSwitcher(
+      duration: const Duration(milliseconds: 300),
+      switchInCurve: Curves.easeOutCubic,
+      switchOutCurve: Curves.easeInCubic,
+      transitionBuilder: (child, animation) {
+        final scale = Tween<double>(begin: 0.97, end: 1).animate(animation);
+        return FadeTransition(
+          opacity: animation,
+          child: ScaleTransition(scale: scale, child: child),
+        );
+      },
+      child: DecoratedBox(
+        key: ValueKey<bool>(takenToday),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(15),
+          boxShadow: takenToday
+              ? [
+                  BoxShadow(
+                    color: _rose.withOpacity(0.16),
+                    blurRadius: 18,
+                    spreadRadius: 1,
+                  ),
+                ]
+              : null,
+        ),
+        child: OutlinedButton.icon(
+          key: const ValueKey('cycle-pill-daily-control'),
+          onPressed: () async {
+            if (!takenToday) {
+              await _updatePillStatus(context, ref, expectedUid, true);
+              return;
+            }
+
+            final confirmed = await _confirmPillUndo(context);
+            if (!confirmed || !context.mounted) return;
+            await _updatePillStatus(context, ref, expectedUid, false);
+          },
+          style: OutlinedButton.styleFrom(
+            foregroundColor: takenToday ? _softRose : Colors.white70,
+            backgroundColor: takenToday
+                ? _rose.withOpacity(0.10)
+                : _background.withOpacity(0.68),
+            side: BorderSide(
+              color: takenToday ? _softRose.withOpacity(0.55) : Colors.white12,
+            ),
+            padding: EdgeInsets.symmetric(
+              horizontal: compact ? 12 : 15,
+              vertical: compact ? 10 : 12,
+            ),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(15),
+            ),
+          ),
+          icon: Icon(
+            takenToday ? Icons.check_circle_rounded : Icons.medication_rounded,
+            size: compact ? 18 : 19,
+          ),
+          label: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                takenToday ? 'Tomada hoje' : 'Registrar pílula',
+                style: const TextStyle(fontWeight: FontWeight.w700),
+              ),
+              if (takenToday) ...[
+                const SizedBox(width: 6),
+                const Icon(Icons.auto_awesome_rounded, size: 13),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
   }
 
   Future<bool> _toggleCycle(
@@ -1779,6 +1906,7 @@ class CycleHealthDetails extends ConsumerWidget {
     Map<String, dynamic>? cycleData,
     Map<String, dynamic> cycleInfo,
     bool isEnabled,
+    bool showPillTracking,
   ) {
     final isPaused = cycleData != null && !isEnabled;
     final canReactivateDirectly =
@@ -1898,6 +2026,10 @@ class CycleHealthDetails extends ConsumerWidget {
               style: TextButton.styleFrom(foregroundColor: Colors.white60),
             ),
           ],
+          if (showPillTracking) ...[
+            const SizedBox(height: 16),
+            _buildDailyPillControl(context, ref, expectedUid),
+          ],
         ],
       ),
     );
@@ -1912,6 +2044,7 @@ class CycleHealthDetails extends ConsumerWidget {
     int totalDays,
     String phaseName,
     String insight,
+    bool showPillTracking,
   ) {
     final phaseColor = _phasePresentationColor(phaseName);
     final progress = (currentDay / totalDays).clamp(0.0, 1.0);
@@ -2059,36 +2192,8 @@ class CycleHealthDetails extends ConsumerWidget {
             runSpacing: 10,
             crossAxisAlignment: WrapCrossAlignment.center,
             children: [
-              OutlinedButton.icon(
-                onPressed: () => _updatePillStatus(
-                  context,
-                  ref,
-                  expectedUid,
-                  !health.hasTakenPillToday,
-                ),
-                style: OutlinedButton.styleFrom(
-                  foregroundColor: health.hasTakenPillToday
-                      ? _softRose
-                      : Colors.white70,
-                  side: BorderSide(
-                    color: health.hasTakenPillToday
-                        ? _softRose.withOpacity(0.45)
-                        : Colors.white12,
-                  ),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(14),
-                  ),
-                ),
-                icon: Icon(
-                  health.hasTakenPillToday
-                      ? Icons.check_circle_rounded
-                      : Icons.medication_rounded,
-                  size: 18,
-                ),
-                label: Text(
-                  health.hasTakenPillToday ? 'Pílula OK' : 'Registrar pílula',
-                ),
-              ),
+              if (showPillTracking)
+                _buildDailyPillControl(context, ref, expectedUid),
             ],
           ),
           const SizedBox(height: 18),
@@ -2147,6 +2252,7 @@ class CycleHealthDetails extends ConsumerWidget {
     final totalDays = (cycleInfo['totalDays'] as num?)?.toInt() ?? 0;
     final hasUsableEstimate = currentDay > 0 && totalDays > 0;
     final expectedUid = ref.read(cycleReminderUserIdReaderProvider)();
+    final showPillTracking = ref.watch(cyclePillTrackingVisibleProvider);
 
     if (!isEnabled || !hasUsableEstimate) {
       if (presentation == CycleHealthDetailsPresentation.dedicated) {
@@ -2157,6 +2263,7 @@ class CycleHealthDetails extends ConsumerWidget {
           cycleData,
           cycleInfo,
           isEnabled,
+          showPillTracking,
         );
       }
 
@@ -2248,6 +2355,7 @@ class CycleHealthDetails extends ConsumerWidget {
         totalDays,
         phaseName,
         aiMessage,
+        showPillTracking,
       );
     }
 
@@ -2359,57 +2467,13 @@ class CycleHealthDetails extends ConsumerWidget {
                   ],
                 ),
               ),
-              InkWell(
-                borderRadius: BorderRadius.circular(14),
-                onTap: () => _updatePillStatus(
+              if (showPillTracking)
+                _buildDailyPillControl(
                   context,
                   ref,
                   expectedUid,
-                  !health.hasTakenPillToday,
+                  compact: true,
                 ),
-                child: Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 13,
-                    vertical: 10,
-                  ),
-                  decoration: BoxDecoration(
-                    color: health.hasTakenPillToday
-                        ? _pink.withOpacity(0.10)
-                        : _background,
-                    borderRadius: BorderRadius.circular(14),
-                    border: Border.all(
-                      color: health.hasTakenPillToday
-                          ? _pink.withOpacity(0.7)
-                          : Colors.white10,
-                    ),
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(
-                        health.hasTakenPillToday
-                            ? Icons.check_circle_rounded
-                            : Icons.medication_rounded,
-                        color: health.hasTakenPillToday
-                            ? _pink
-                            : Colors.white38,
-                        size: 18,
-                      ),
-                      const SizedBox(width: 6),
-                      Text(
-                        health.hasTakenPillToday ? 'Pílula OK' : 'Registrar',
-                        style: TextStyle(
-                          color: health.hasTakenPillToday
-                              ? _pink
-                              : Colors.white54,
-                          fontSize: 11,
-                          fontWeight: FontWeight.w700,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
             ],
           ),
           const SizedBox(height: 16),
