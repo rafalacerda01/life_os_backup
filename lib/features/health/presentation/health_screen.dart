@@ -10,6 +10,7 @@ import 'package:life_os/core/utils/app_logger.dart';
 import 'package:life_os/features/checkin/presentation/checkin_screen.dart';
 import 'package:life_os/features/health/data/models/health_model.dart';
 import 'package:life_os/features/health/data/repositories/health_repository.dart';
+import 'package:life_os/features/health/presentation/cycle/cycle_daily_pill_control.dart';
 import 'package:life_os/features/health/presentation/cycle/cycle_reminder_preferences.dart';
 import 'package:life_os/features/health/presentation/providers/health_provider.dart';
 
@@ -1208,7 +1209,10 @@ class CycleHealthDetails extends ConsumerWidget {
     super.key,
     required this.health,
     this.presentation = CycleHealthDetailsPresentation.embedded,
+    this.showDailyPillControl = true,
   });
+
+  final bool showDailyPillControl;
 
   static const Color _background = Color(0xFF070B14);
   static const Color _surface = Color(0xFF11182E);
@@ -1220,6 +1224,7 @@ class CycleHealthDetails extends ConsumerWidget {
   static const Color _softViolet = Color(0xFF9B72FF);
   static const Color _turquoise = Color(0xFF58D6C7);
   static const Color _warmPeach = Color(0xFFF2A56B);
+  static const int _maximumCycleLengthDays = 120;
 
   void _showSnackBar(
     BuildContext context,
@@ -1241,165 +1246,6 @@ class CycleHealthDetails extends ConsumerWidget {
           ),
         ),
       );
-  }
-
-  Future<bool> _updatePillStatus(
-    BuildContext context,
-    WidgetRef ref,
-    String? expectedUid,
-    bool value,
-  ) async {
-    if (expectedUid == null) {
-      _showSnackBar(
-        context,
-        'Não foi possível atualizar o status.',
-        error: true,
-      );
-      return false;
-    }
-
-    try {
-      final updated = await ref
-          .read(healthRepositoryProvider)
-          .updatePillStatus(value, expectedUid: expectedUid);
-      if (!updated) {
-        _showSnackBar(
-          context,
-          'Não foi possível atualizar o status.',
-          error: true,
-        );
-        return false;
-      }
-      return true;
-    } on Object {
-      AppLogger.w('[CycleDailyStatus] Falha ao atualizar registro diário.');
-
-      _showSnackBar(
-        context,
-        'Não foi possível atualizar o status.',
-        error: true,
-      );
-      return false;
-    }
-  }
-
-  Future<bool> _confirmPillUndo(BuildContext context) async {
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (confirmationContext) => AlertDialog(
-        backgroundColor: _surface,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
-        title: const Text(
-          'Desmarcar registro de hoje?',
-          style: TextStyle(color: Colors.white, fontWeight: FontWeight.w800),
-        ),
-        content: const Text(
-          'O registro de que a pílula foi tomada hoje será removido.',
-          style: TextStyle(color: Colors.white70, height: 1.45),
-        ),
-        actions: [
-          TextButton(
-            key: const ValueKey('cycle-pill-undo-cancel'),
-            onPressed: () => Navigator.pop(confirmationContext, false),
-            child: const Text('Cancelar'),
-          ),
-          FilledButton(
-            key: const ValueKey('cycle-pill-undo-confirm'),
-            onPressed: () => Navigator.pop(confirmationContext, true),
-            style: FilledButton.styleFrom(
-              backgroundColor: _rose,
-              foregroundColor: Colors.black,
-            ),
-            child: const Text('Desmarcar'),
-          ),
-        ],
-      ),
-    );
-
-    return confirmed == true;
-  }
-
-  Widget _buildDailyPillControl(
-    BuildContext context,
-    WidgetRef ref,
-    String? expectedUid, {
-    bool compact = false,
-  }) {
-    final takenToday = health.hasTakenPillToday;
-
-    return AnimatedSwitcher(
-      duration: const Duration(milliseconds: 300),
-      switchInCurve: Curves.easeOutCubic,
-      switchOutCurve: Curves.easeInCubic,
-      transitionBuilder: (child, animation) {
-        final scale = Tween<double>(begin: 0.97, end: 1).animate(animation);
-        return FadeTransition(
-          opacity: animation,
-          child: ScaleTransition(scale: scale, child: child),
-        );
-      },
-      child: DecoratedBox(
-        key: ValueKey<bool>(takenToday),
-        decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(15),
-          boxShadow: takenToday
-              ? [
-                  BoxShadow(
-                    color: _rose.withOpacity(0.16),
-                    blurRadius: 18,
-                    spreadRadius: 1,
-                  ),
-                ]
-              : null,
-        ),
-        child: OutlinedButton.icon(
-          key: const ValueKey('cycle-pill-daily-control'),
-          onPressed: () async {
-            if (!takenToday) {
-              await _updatePillStatus(context, ref, expectedUid, true);
-              return;
-            }
-
-            final confirmed = await _confirmPillUndo(context);
-            if (!confirmed || !context.mounted) return;
-            await _updatePillStatus(context, ref, expectedUid, false);
-          },
-          style: OutlinedButton.styleFrom(
-            foregroundColor: takenToday ? _softRose : Colors.white70,
-            backgroundColor: takenToday
-                ? _rose.withOpacity(0.10)
-                : _background.withOpacity(0.68),
-            side: BorderSide(
-              color: takenToday ? _softRose.withOpacity(0.55) : Colors.white12,
-            ),
-            padding: EdgeInsets.symmetric(
-              horizontal: compact ? 12 : 15,
-              vertical: compact ? 10 : 12,
-            ),
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(15),
-            ),
-          ),
-          icon: Icon(
-            takenToday ? Icons.check_circle_rounded : Icons.medication_rounded,
-            size: compact ? 18 : 19,
-          ),
-          label: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(
-                takenToday ? 'Tomada hoje' : 'Registrar pílula',
-                style: const TextStyle(fontWeight: FontWeight.w700),
-              ),
-              if (takenToday) ...[
-                const SizedBox(width: 6),
-                const Icon(Icons.auto_awesome_rounded, size: 13),
-              ],
-            ],
-          ),
-        ),
-      ),
-    );
   }
 
   Future<bool> _toggleCycle(
@@ -1798,6 +1644,15 @@ class CycleHealthDetails extends ConsumerWidget {
                       return;
                     }
 
+                    if (cycleLength > _maximumCycleLengthDays) {
+                      _showSnackBar(
+                        parentContext,
+                        'O ciclo deve ter no máximo 120 dias.',
+                        error: true,
+                      );
+                      return;
+                    }
+
                     if (periodLength == null || periodLength <= 0) {
                       _showSnackBar(
                         parentContext,
@@ -2028,7 +1883,7 @@ class CycleHealthDetails extends ConsumerWidget {
           ],
           if (showPillTracking) ...[
             const SizedBox(height: 16),
-            _buildDailyPillControl(context, ref, expectedUid),
+            CycleDailyPillControl(health: health),
           ],
         ],
       ),
@@ -2192,8 +2047,7 @@ class CycleHealthDetails extends ConsumerWidget {
             runSpacing: 10,
             crossAxisAlignment: WrapCrossAlignment.center,
             children: [
-              if (showPillTracking)
-                _buildDailyPillControl(context, ref, expectedUid),
+              if (showPillTracking) CycleDailyPillControl(health: health),
             ],
           ),
           const SizedBox(height: 18),
@@ -2252,7 +2106,8 @@ class CycleHealthDetails extends ConsumerWidget {
     final totalDays = (cycleInfo['totalDays'] as num?)?.toInt() ?? 0;
     final hasUsableEstimate = currentDay > 0 && totalDays > 0;
     final expectedUid = ref.read(cycleReminderUserIdReaderProvider)();
-    final showPillTracking = ref.watch(cyclePillTrackingVisibleProvider);
+    final showPillTracking =
+        showDailyPillControl && ref.watch(cyclePillTrackingVisibleProvider);
 
     if (!isEnabled || !hasUsableEstimate) {
       if (presentation == CycleHealthDetailsPresentation.dedicated) {
@@ -2468,12 +2323,7 @@ class CycleHealthDetails extends ConsumerWidget {
                 ),
               ),
               if (showPillTracking)
-                _buildDailyPillControl(
-                  context,
-                  ref,
-                  expectedUid,
-                  compact: true,
-                ),
+                CycleDailyPillControl(health: health, compact: true),
             ],
           ),
           const SizedBox(height: 16),

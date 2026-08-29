@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:life_os/features/health/data/models/health_model.dart';
 
+import 'cycle_daily_pill_control.dart';
 import 'cycle_reminder_notification_controller.dart';
 import 'cycle_reminder_preferences.dart';
 
@@ -8,10 +10,16 @@ typedef CycleReminderTimePicker =
     Future<TimeOfDay?> Function(BuildContext context);
 
 class CycleReminderSection extends ConsumerWidget {
-  const CycleReminderSection({super.key});
+  const CycleReminderSection({super.key, required this.health});
 
+  final HealthModel health;
+
+  static const Color _background = Color(0xFF070B14);
   static const Color _surface = Color(0xFF11182E);
   static const Color _primary = Color(0xFFB026FF);
+  static const Color _rose = Color(0xFFFF6B9F);
+  static const Color _lilac = Color(0xFFC58CFF);
+  static const Color _turquoise = Color(0xFF58D6C7);
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -21,9 +29,20 @@ class CycleReminderSection extends ConsumerWidget {
       width: double.infinity,
       padding: const EdgeInsets.all(18),
       decoration: BoxDecoration(
-        color: _surface,
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [_surface, _surface, _primary.withOpacity(0.07)],
+        ),
         borderRadius: BorderRadius.circular(22),
-        border: Border.all(color: _primary.withOpacity(0.16)),
+        border: Border.all(color: _primary.withOpacity(0.22)),
+        boxShadow: [
+          BoxShadow(
+            color: _primary.withOpacity(0.06),
+            blurRadius: 24,
+            offset: const Offset(0, 10),
+          ),
+        ],
       ),
       child: preferencesAsync.when(
         loading: () =>
@@ -32,11 +51,12 @@ class CycleReminderSection extends ConsumerWidget {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             const Text(
-              'Lembrete pessoal',
+              'ROTINA PESSOAL',
               style: TextStyle(
-                color: Colors.white,
-                fontSize: 16,
-                fontWeight: FontWeight.w700,
+                color: Colors.white54,
+                fontSize: 10,
+                fontWeight: FontWeight.w800,
+                letterSpacing: 1.1,
               ),
             ),
             const SizedBox(height: 6),
@@ -52,6 +72,7 @@ class CycleReminderSection extends ConsumerWidget {
           ],
         ),
         data: (preferences) => _CycleReminderSummary(
+          health: health,
           preferences: preferences,
           onConfigure: () => _openEditor(context, ref, preferences),
           onEnabledChanged: preferences == null
@@ -110,11 +131,13 @@ class CycleReminderSection extends ConsumerWidget {
 
 class _CycleReminderSummary extends StatelessWidget {
   const _CycleReminderSummary({
+    required this.health,
     required this.preferences,
     required this.onConfigure,
     required this.onEnabledChanged,
   });
 
+  final HealthModel health;
   final CycleReminderPreferences? preferences;
   final VoidCallback onConfigure;
   final ValueChanged<bool>? onEnabledChanged;
@@ -123,70 +146,325 @@ class _CycleReminderSummary extends StatelessWidget {
   Widget build(BuildContext context) {
     final value = preferences;
 
+    return AnimatedSwitcher(
+      duration: const Duration(milliseconds: 260),
+      switchInCurve: Curves.easeOutCubic,
+      switchOutCurve: Curves.easeInCubic,
+      child: value == null
+          ? _CycleReminderEmptyState(onConfigure: onConfigure)
+          : _ConfiguredCycleRoutine(
+              key: ValueKey('${value.type.name}-${value.enabled}'),
+              health: health,
+              preferences: value,
+              onConfigure: onConfigure,
+              onEnabledChanged: onEnabledChanged,
+            ),
+    );
+  }
+}
+
+class _CycleReminderEmptyState extends StatelessWidget {
+  const _CycleReminderEmptyState({required this.onConfigure});
+
+  final VoidCallback onConfigure;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      key: const ValueKey('cycle-reminder-empty'),
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const _RoutineEyebrow(),
+        const SizedBox(height: 16),
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Container(
+              width: 46,
+              height: 46,
+              decoration: BoxDecoration(
+                color: CycleReminderSection._primary.withOpacity(0.12),
+                borderRadius: BorderRadius.circular(15),
+              ),
+              child: const Icon(
+                Icons.notifications_none_rounded,
+                color: CycleReminderSection._lilac,
+              ),
+            ),
+            const SizedBox(width: 13),
+            const Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Crie uma rotina pessoal',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 16,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                  SizedBox(height: 5),
+                  Text(
+                    'Configure um lembrete discreto para acompanhar algo importante na sua rotina.',
+                    style: TextStyle(
+                      color: Colors.white54,
+                      fontSize: 12,
+                      height: 1.45,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 16),
+        FilledButton.icon(
+          key: const ValueKey('cycle-reminder-configure'),
+          onPressed: onConfigure,
+          style: FilledButton.styleFrom(
+            backgroundColor: CycleReminderSection._primary,
+            foregroundColor: Colors.white,
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(15),
+            ),
+          ),
+          icon: const Icon(Icons.add_rounded, size: 19),
+          label: const Text('Configurar lembrete'),
+        ),
+      ],
+    );
+  }
+}
+
+class _ConfiguredCycleRoutine extends StatelessWidget {
+  const _ConfiguredCycleRoutine({
+    super.key,
+    required this.health,
+    required this.preferences,
+    required this.onConfigure,
+    required this.onEnabledChanged,
+  });
+
+  final HealthModel health;
+  final CycleReminderPreferences preferences;
+  final VoidCallback onConfigure;
+  final ValueChanged<bool>? onEnabledChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final isPill = preferences.type == CycleReminderType.pill;
+    final statusLabel = preferences.enabled
+        ? 'Lembrete ativo'
+        : 'Notificações pausadas';
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Row(
           children: [
-            const Expanded(
-              child: Text(
-                'Lembrete pessoal',
-                style: TextStyle(
-                  color: Colors.white,
-                  fontSize: 16,
-                  fontWeight: FontWeight.w700,
-                ),
+            const Expanded(child: _RoutineEyebrow()),
+            TextButton.icon(
+              key: const ValueKey('cycle-reminder-adjust'),
+              onPressed: onConfigure,
+              style: TextButton.styleFrom(
+                foregroundColor: CycleReminderSection._lilac,
+                minimumSize: const Size(48, 48),
               ),
+              icon: const Icon(Icons.tune_rounded, size: 18),
+              label: const Text('Ajustar'),
             ),
-            if (value != null)
-              Switch(
-                value: value.enabled,
-                activeColor: CycleReminderSection._primary,
-                onChanged: onEnabledChanged,
-              ),
           ],
         ),
-        if (value == null) ...[
-          const SizedBox(height: 6),
-          const Text(
-            'Configure um lembrete privado no horário que você escolher.',
-            style: TextStyle(color: Colors.white54, fontSize: 12, height: 1.4),
-          ),
-        ] else ...[
-          Text(
-            value.enabled
-                ? value.type.label
-                : '${value.type.label} · Desativado',
-            style: const TextStyle(
-              color: Colors.white70,
-              fontSize: 13,
-              fontWeight: FontWeight.w600,
-            ),
-          ),
-          const SizedBox(height: 4),
-          Text(
-            '${_formatTime(value.hour, value.minute)} · ${value.frequency.summary(value.weekdays)}',
-            style: const TextStyle(color: Colors.white54, fontSize: 12),
-          ),
-          const SizedBox(height: 4),
-          Text(
-            'Privacidade: ${value.privacyMode.label}',
-            style: const TextStyle(color: Colors.white54, fontSize: 12),
-          ),
-        ],
         const SizedBox(height: 12),
-        Align(
-          alignment: Alignment.centerLeft,
-          child: FilledButton.tonal(
-            onPressed: onConfigure,
-            style: FilledButton.styleFrom(
-              foregroundColor: CycleReminderSection._primary,
-              backgroundColor: CycleReminderSection._primary.withOpacity(0.10),
-            ),
-            child: Text(value == null ? 'Configurar' : 'Editar'),
+        Container(
+          width: double.infinity,
+          padding: const EdgeInsets.all(15),
+          decoration: BoxDecoration(
+            color: CycleReminderSection._background.withOpacity(0.72),
+            borderRadius: BorderRadius.circular(18),
+            border: Border.all(color: Colors.white10),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Container(
+                    width: 40,
+                    height: 40,
+                    decoration: BoxDecoration(
+                      color: preferences.type.accent.withOpacity(0.13),
+                      borderRadius: BorderRadius.circular(13),
+                    ),
+                    child: Icon(
+                      preferences.type.icon,
+                      color: preferences.type.accent,
+                      size: 21,
+                    ),
+                  ),
+                  const SizedBox(width: 11),
+                  Expanded(
+                    child: Text(
+                      preferences.type.label,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 16,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 14),
+              LayoutBuilder(
+                builder: (context, constraints) => Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    _RoutineDetail(
+                      icon: Icons.schedule_rounded,
+                      label: _formatTime(preferences.hour, preferences.minute),
+                      maxWidth: constraints.maxWidth,
+                    ),
+                    _RoutineDetail(
+                      icon: Icons.repeat_rounded,
+                      label: preferences.frequency.summary(
+                        preferences.weekdays,
+                      ),
+                      maxWidth: constraints.maxWidth,
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 13),
+              Row(
+                children: [
+                  Semantics(
+                    label: statusLabel,
+                    child: Container(
+                      width: 8,
+                      height: 8,
+                      decoration: BoxDecoration(
+                        color: preferences.enabled
+                            ? CycleReminderSection._turquoise
+                            : Colors.white38,
+                        shape: BoxShape.circle,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      statusLabel,
+                      style: TextStyle(
+                        color: preferences.enabled
+                            ? Colors.white70
+                            : Colors.white54,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                  Tooltip(
+                    message: preferences.enabled
+                        ? 'Pausar notificações'
+                        : 'Ativar notificações',
+                    child: Switch(
+                      value: preferences.enabled,
+                      activeColor: CycleReminderSection._primary,
+                      onChanged: onEnabledChanged,
+                    ),
+                  ),
+                ],
+              ),
+              Row(
+                children: [
+                  const Icon(
+                    Icons.lock_outline_rounded,
+                    color: Colors.white38,
+                    size: 14,
+                  ),
+                  const SizedBox(width: 6),
+                  Flexible(
+                    child: Text(
+                      'Privacidade: ${preferences.privacyMode.label}',
+                      style: const TextStyle(
+                        color: Colors.white38,
+                        fontSize: 11,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ],
           ),
         ),
+        if (isPill) ...[
+          const SizedBox(height: 14),
+          CycleDailyPillControl(health: health),
+        ],
       ],
+    );
+  }
+}
+
+class _RoutineEyebrow extends StatelessWidget {
+  const _RoutineEyebrow();
+
+  @override
+  Widget build(BuildContext context) {
+    return const Text(
+      'ROTINA PESSOAL',
+      style: TextStyle(
+        color: Colors.white54,
+        fontSize: 10,
+        fontWeight: FontWeight.w800,
+        letterSpacing: 1.1,
+      ),
+    );
+  }
+}
+
+class _RoutineDetail extends StatelessWidget {
+  const _RoutineDetail({
+    required this.icon,
+    required this.label,
+    required this.maxWidth,
+  });
+
+  final IconData icon;
+  final String label;
+  final double maxWidth;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      constraints: BoxConstraints(maxWidth: maxWidth),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+      decoration: BoxDecoration(
+        color: Colors.white.withOpacity(0.045),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Colors.white10),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, color: CycleReminderSection._lilac, size: 15),
+          const SizedBox(width: 6),
+          Flexible(
+            child: Text(
+              label,
+              style: const TextStyle(
+                color: Colors.white70,
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -211,6 +489,9 @@ class _CycleReminderEditorState extends State<CycleReminderEditor> {
   static const Color _background = Color(0xFF0A0F1E);
   static const Color _surface = Color(0xFF11182E);
   static const Color _primary = Color(0xFFB026FF);
+  static const Color _rose = Color(0xFFFF6B9F);
+  static const Color _lilac = Color(0xFFC58CFF);
+  static const Color _turquoise = Color(0xFF58D6C7);
 
   late CycleReminderType? _type;
   late TimeOfDay? _time;
@@ -255,67 +536,122 @@ class _CycleReminderEditorState extends State<CycleReminderEditor> {
         borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
       ),
       child: SingleChildScrollView(
-        padding: const EdgeInsets.all(20),
+        padding: const EdgeInsets.fromLTRB(20, 12, 20, 28),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text(
-              'Lembrete pessoal',
-              style: TextStyle(
-                color: Colors.white,
-                fontSize: 22,
-                fontWeight: FontWeight.w800,
+            Center(
+              child: Container(
+                width: 42,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: Colors.white24,
+                  borderRadius: BorderRadius.circular(999),
+                ),
               ),
             ),
-            const SizedBox(height: 6),
-            const Text(
-              'Escolha cada detalhe do lembrete. Nenhum horário ou frequência é inferido.',
-              style: TextStyle(
-                color: Colors.white54,
-                fontSize: 12,
-                height: 1.4,
-              ),
+            const SizedBox(height: 18),
+            const Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                _EditorHeaderIcon(),
+                SizedBox(width: 13),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Lembrete pessoal',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 22,
+                          fontWeight: FontWeight.w800,
+                          letterSpacing: -0.3,
+                        ),
+                      ),
+                      SizedBox(height: 5),
+                      Text(
+                        'Escolha cada detalhe. Nenhum horário ou frequência é inferido.',
+                        style: TextStyle(
+                          color: Colors.white54,
+                          fontSize: 12,
+                          height: 1.4,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
             ),
-            const SizedBox(height: 22),
+            const SizedBox(height: 26),
             _label('Tipo'),
             Wrap(
-              spacing: 8,
-              runSpacing: 8,
+              spacing: 9,
+              runSpacing: 9,
               children: CycleReminderType.values
                   .map(
-                    (type) => ChoiceChip(
-                      label: Text(type.label),
+                    (type) => _selectionChip(
+                      label: type.label,
+                      icon: type.icon,
+                      accent: type.accent,
                       selected: _type == type,
-                      onSelected: (_) => setState(() => _type = type),
-                      selectedColor: _primary.withOpacity(0.28),
+                      onSelected: () => setState(() => _type = type),
                     ),
                   )
                   .toList(),
             ),
-            const SizedBox(height: 18),
+            const SizedBox(height: 22),
             _label('Horário'),
-            OutlinedButton.icon(
-              key: const ValueKey('cycle-reminder-time'),
-              onPressed: _pickTime,
-              icon: const Icon(Icons.schedule_rounded),
-              label: Text(
-                _time == null
-                    ? 'Escolher horário'
-                    : _formatTime(_time!.hour, _time!.minute),
+            SizedBox(
+              width: double.infinity,
+              child: OutlinedButton.icon(
+                key: const ValueKey('cycle-reminder-time'),
+                onPressed: _pickTime,
+                style: OutlinedButton.styleFrom(
+                  alignment: Alignment.centerLeft,
+                  foregroundColor: _time == null ? Colors.white60 : _lilac,
+                  backgroundColor: _surface,
+                  side: BorderSide(
+                    color: _time == null
+                        ? Colors.white12
+                        : _lilac.withOpacity(0.48),
+                  ),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 16,
+                    vertical: 15,
+                  ),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(17),
+                  ),
+                ),
+                icon: const Icon(Icons.schedule_rounded),
+                label: Text(
+                  _time == null
+                      ? 'Escolher horário'
+                      : _formatTime(_time!.hour, _time!.minute),
+                  style: TextStyle(
+                    fontSize: _time == null ? 14 : 20,
+                    fontWeight: FontWeight.w800,
+                    letterSpacing: _time == null ? 0 : 0.5,
+                  ),
+                ),
               ),
             ),
-            const SizedBox(height: 18),
+            const SizedBox(height: 22),
             _label('Frequência'),
             Wrap(
-              spacing: 8,
-              runSpacing: 8,
+              spacing: 9,
+              runSpacing: 9,
               children: CycleReminderFrequency.values
                   .map(
-                    (frequency) => ChoiceChip(
-                      label: Text(frequency.label),
+                    (frequency) => _selectionChip(
+                      label: frequency.label,
+                      icon: frequency == CycleReminderFrequency.daily
+                          ? Icons.today_rounded
+                          : Icons.date_range_rounded,
+                      accent: _turquoise,
                       selected: _frequency == frequency,
-                      onSelected: (_) => setState(() => _frequency = frequency),
-                      selectedColor: _primary.withOpacity(0.28),
+                      onSelected: () => setState(() => _frequency = frequency),
                     ),
                   )
                   .toList(),
@@ -327,9 +663,10 @@ class _CycleReminderEditorState extends State<CycleReminderEditor> {
                 runSpacing: 6,
                 children: List<Widget>.generate(7, (index) {
                   final day = index + 1;
+                  final selected = _weekdays.contains(day);
                   return FilterChip(
                     label: Text(_weekdayLabels[index]),
-                    selected: _weekdays.contains(day),
+                    selected: selected,
                     onSelected: (selected) {
                       setState(() {
                         if (selected) {
@@ -339,35 +676,26 @@ class _CycleReminderEditorState extends State<CycleReminderEditor> {
                         }
                       });
                     },
-                    selectedColor: _primary.withOpacity(0.28),
+                    selectedColor: _primary.withOpacity(0.24),
+                    backgroundColor: _surface,
+                    checkmarkColor: Colors.white,
+                    side: BorderSide(
+                      color: selected
+                          ? _lilac.withOpacity(0.85)
+                          : Colors.white12,
+                      width: selected ? 1.5 : 1,
+                    ),
+                    labelStyle: TextStyle(
+                      color: selected ? Colors.white : Colors.white60,
+                      fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
+                    ),
                   );
                 }),
               ),
             ],
-            const SizedBox(height: 18),
+            const SizedBox(height: 22),
             _label('Privacidade'),
-            ...CycleReminderPrivacyMode.values.map(
-              (mode) => Material(
-                color: Colors.transparent,
-                child: RadioListTile<CycleReminderPrivacyMode>(
-                  value: mode,
-                  groupValue: _privacyMode,
-                  onChanged: (value) {
-                    if (value != null) setState(() => _privacyMode = value);
-                  },
-                  contentPadding: EdgeInsets.zero,
-                  activeColor: _primary,
-                  title: Text(
-                    mode.label,
-                    style: const TextStyle(color: Colors.white, fontSize: 14),
-                  ),
-                  subtitle: Text(
-                    mode.description,
-                    style: const TextStyle(color: Colors.white54, fontSize: 11),
-                  ),
-                ),
-              ),
-            ),
+            ...CycleReminderPrivacyMode.values.map(_privacyOption),
             if (_privacyMode == CycleReminderPrivacyMode.custom) ...[
               const SizedBox(height: 8),
               TextField(
@@ -385,8 +713,8 @@ class _CycleReminderEditorState extends State<CycleReminderEditor> {
                 decoration: _inputDecoration('Mensagem personalizada'),
               ),
             ],
-            const SizedBox(height: 18),
-            _label('Preview'),
+            const SizedBox(height: 22),
+            _label('Prévia da notificação'),
             CycleReminderPreview(
               type: _type,
               privacyMode: _privacyMode,
@@ -408,12 +736,30 @@ class _CycleReminderEditorState extends State<CycleReminderEditor> {
                 onPressed: _saving ? null : _save,
                 style: FilledButton.styleFrom(
                   backgroundColor: _primary,
+                  foregroundColor: Colors.white,
                   padding: const EdgeInsets.symmetric(vertical: 15),
                   shape: RoundedRectangleBorder(
                     borderRadius: BorderRadius.circular(18),
                   ),
                 ),
-                child: Text(_saving ? 'Salvando...' : 'Salvar'),
+                child: AnimatedSwitcher(
+                  duration: const Duration(milliseconds: 220),
+                  child: _saving
+                      ? const SizedBox(
+                          key: ValueKey('cycle-reminder-saving'),
+                          width: 20,
+                          height: 20,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2.2,
+                            color: Colors.white,
+                          ),
+                        )
+                      : const Text(
+                          'Salvar lembrete',
+                          key: ValueKey('cycle-reminder-save-label'),
+                          style: TextStyle(fontWeight: FontWeight.w800),
+                        ),
+                ),
               ),
             ),
           ],
@@ -493,6 +839,103 @@ class _CycleReminderEditorState extends State<CycleReminderEditor> {
     }
   }
 
+  Widget _selectionChip({
+    required String label,
+    required IconData icon,
+    required Color accent,
+    required bool selected,
+    required VoidCallback onSelected,
+  }) {
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 240),
+      curve: Curves.easeOutCubic,
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(14),
+        boxShadow: selected
+            ? [
+                BoxShadow(
+                  color: accent.withOpacity(0.16),
+                  blurRadius: 15,
+                  spreadRadius: 1,
+                ),
+              ]
+            : null,
+      ),
+      child: ChoiceChip(
+        label: Text(label),
+        avatar: Icon(
+          selected ? Icons.check_rounded : icon,
+          size: 17,
+          color: selected ? Colors.white : Colors.white54,
+        ),
+        selected: selected,
+        showCheckmark: false,
+        onSelected: (_) => onSelected(),
+        selectedColor: accent.withOpacity(0.22),
+        backgroundColor: _surface,
+        side: BorderSide(
+          color: selected ? accent.withOpacity(0.9) : Colors.white12,
+          width: selected ? 1.6 : 1,
+        ),
+        labelStyle: TextStyle(
+          color: selected ? Colors.white : Colors.white60,
+          fontWeight: selected ? FontWeight.w800 : FontWeight.w500,
+        ),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+      ),
+    );
+  }
+
+  Widget _privacyOption(CycleReminderPrivacyMode mode) {
+    final selected = _privacyMode == mode;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 240),
+        curve: Curves.easeOutCubic,
+        decoration: BoxDecoration(
+          color: selected ? _primary.withOpacity(0.10) : _surface,
+          borderRadius: BorderRadius.circular(17),
+          border: Border.all(
+            color: selected ? _lilac.withOpacity(0.72) : Colors.white10,
+            width: selected ? 1.5 : 1,
+          ),
+        ),
+        child: Material(
+          color: Colors.transparent,
+          borderRadius: BorderRadius.circular(17),
+          clipBehavior: Clip.antiAlias,
+          child: RadioListTile<CycleReminderPrivacyMode>(
+            value: mode,
+            groupValue: _privacyMode,
+            onChanged: (value) {
+              if (value != null) setState(() => _privacyMode = value);
+            },
+            selected: selected,
+            contentPadding: const EdgeInsets.symmetric(horizontal: 10),
+            activeColor: _primary,
+            title: Text(
+              mode.label,
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 14,
+                fontWeight: selected ? FontWeight.w800 : FontWeight.w600,
+              ),
+            ),
+            subtitle: Text(
+              mode.description,
+              style: const TextStyle(
+                color: Colors.white54,
+                fontSize: 11,
+                height: 1.35,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   Widget _label(String text) => Padding(
     padding: const EdgeInsets.only(bottom: 9),
     child: Text(
@@ -513,6 +956,34 @@ class _CycleReminderEditorState extends State<CycleReminderEditor> {
       border: OutlineInputBorder(
         borderRadius: BorderRadius.circular(18),
         borderSide: BorderSide.none,
+      ),
+    );
+  }
+}
+
+class _EditorHeaderIcon extends StatelessWidget {
+  const _EditorHeaderIcon();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: 46,
+      height: 46,
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          colors: [
+            _CycleReminderEditorState._primary.withOpacity(0.24),
+            _CycleReminderEditorState._rose.withOpacity(0.14),
+          ],
+        ),
+        borderRadius: BorderRadius.circular(15),
+        border: Border.all(
+          color: _CycleReminderEditorState._lilac.withOpacity(0.35),
+        ),
+      ),
+      child: const Icon(
+        Icons.notifications_active_outlined,
+        color: _CycleReminderEditorState._lilac,
       ),
     );
   }
@@ -553,25 +1024,59 @@ class CycleReminderPreview extends StatelessWidget {
       width: double.infinity,
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
-        color: _CycleReminderEditorState._surface,
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [
+            _CycleReminderEditorState._surface,
+            _CycleReminderEditorState._primary.withOpacity(0.07),
+          ],
+        ),
         borderRadius: BorderRadius.circular(18),
-        border: Border.all(color: Colors.white10),
+        border: Border.all(
+          color: _CycleReminderEditorState._lilac.withOpacity(0.22),
+        ),
       ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
         children: [
-          Text(
-            title,
-            style: const TextStyle(
-              color: Colors.white,
-              fontSize: 14,
-              fontWeight: FontWeight.w700,
+          Container(
+            width: 38,
+            height: 38,
+            decoration: BoxDecoration(
+              color: _CycleReminderEditorState._primary.withOpacity(0.16),
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: const Icon(
+              Icons.notifications_none_rounded,
+              color: _CycleReminderEditorState._lilac,
+              size: 20,
             ),
           ),
-          const SizedBox(height: 4),
-          Text(
-            body,
-            style: const TextStyle(color: Colors.white60, fontSize: 12),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  title,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 14,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  body,
+                  style: const TextStyle(
+                    color: Colors.white60,
+                    fontSize: 12,
+                    height: 1.35,
+                  ),
+                ),
+              ],
+            ),
           ),
         ],
       ),
@@ -591,6 +1096,18 @@ extension on CycleReminderType {
     CycleReminderType.otherContraceptive => 'Lembrete de contraceptivo',
     CycleReminderType.personal => 'Lembrete pessoal',
   };
+
+  IconData get icon => switch (this) {
+    CycleReminderType.pill => Icons.medication_rounded,
+    CycleReminderType.otherContraceptive => Icons.health_and_safety_rounded,
+    CycleReminderType.personal => Icons.auto_awesome_rounded,
+  };
+
+  Color get accent => switch (this) {
+    CycleReminderType.pill => CycleReminderSection._rose,
+    CycleReminderType.otherContraceptive => CycleReminderSection._turquoise,
+    CycleReminderType.personal => CycleReminderSection._lilac,
+  };
 }
 
 extension on CycleReminderFrequency {
@@ -599,13 +1116,16 @@ extension on CycleReminderFrequency {
     CycleReminderFrequency.specificWeekdays => 'Dias específicos',
   };
 
-  String summary(Set<int> weekdays) => switch (this) {
-    CycleReminderFrequency.daily => 'Todos os dias',
-    CycleReminderFrequency.specificWeekdays =>
-      (weekdays.toList()..sort())
-          .map((day) => _weekdayLabels[day - 1])
-          .join(', '),
-  };
+  String summary(Set<int> weekdays) {
+    if (this == CycleReminderFrequency.daily) return 'Todos os dias';
+
+    final labels = (weekdays.toList()..sort())
+        .map((day) => _weekdayLabels[day - 1])
+        .toList();
+    if (labels.length < 2) return labels.join();
+
+    return '${labels.take(labels.length - 1).join(', ')} e ${labels.last}';
+  }
 }
 
 extension on CycleReminderPrivacyMode {

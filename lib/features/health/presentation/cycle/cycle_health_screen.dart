@@ -30,7 +30,6 @@ class CycleHealthScreen extends ConsumerStatefulWidget {
   static const Color _rose = Color(0xFFFF6B9F);
   static const Color _softRose = Color(0xFFFF9FBA);
   static const Color _lilac = Color(0xFFC58CFF);
-  static const Color _turquoise = Color(0xFF58D6C7);
 
   @override
   ConsumerState<CycleHealthScreen> createState() => _CycleHealthScreenState();
@@ -107,8 +106,6 @@ class _CycleHealthScreenState extends ConsumerState<CycleHealthScreen>
                     final day = (cycleInfo['day'] as num?)?.toInt() ?? 0;
                     final totalDays =
                         (cycleInfo['totalDays'] as num?)?.toInt() ?? 0;
-                    final isEnabled =
-                        health.menstrualCycle?['isEnabled'] == true;
                     final hasUsableEstimate = day > 0 && totalDays > 0;
 
                     return SingleChildScrollView(
@@ -120,19 +117,14 @@ class _CycleHealthScreenState extends ConsumerState<CycleHealthScreen>
                             health: health,
                             presentation:
                                 CycleHealthDetailsPresentation.dedicated,
+                            showDailyPillControl: false,
                           ),
                           if (hasUsableEstimate) ...[
                             const SizedBox(height: 16),
                             _CycleMetricsCard(health: health, now: _now),
                           ],
-                          if (isEnabled ||
-                              health.mood.trim().isNotEmpty ||
-                              health.waterIntakeMl > 0) ...[
-                            const SizedBox(height: 16),
-                            _AvailableRecordsCard(health: health),
-                          ],
                           const SizedBox(height: 16),
-                          const CycleReminderSection(),
+                          CycleReminderSection(health: health),
                           const SizedBox(height: 16),
                           const _CycleDisclaimer(),
                         ],
@@ -373,140 +365,6 @@ class _MetricTile extends StatelessWidget {
                   const SizedBox(height: 2),
                   Text(detail!, style: TextStyle(color: color, fontSize: 11)),
                 ],
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _AvailableRecordsCard extends StatelessWidget {
-  const _AvailableRecordsCard({required this.health});
-
-  final HealthModel health;
-
-  @override
-  Widget build(BuildContext context) {
-    final normalizedMood = health.mood.trim();
-    final mood = normalizedMood.isEmpty || normalizedMood == '—'
-        ? 'Não registrado'
-        : normalizedMood;
-    final hydration = health.waterIntakeMl > 0
-        ? '${health.waterIntakeMl} ml hoje'
-        : 'Não registrada hoje';
-
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(18),
-      decoration: BoxDecoration(
-        color: CycleHealthScreen._surface,
-        borderRadius: BorderRadius.circular(22),
-        border: Border.all(color: Colors.white10),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Text(
-            'Registros disponíveis',
-            style: TextStyle(
-              color: Colors.white,
-              fontSize: 15,
-              fontWeight: FontWeight.w700,
-            ),
-          ),
-          const SizedBox(height: 4),
-          const Text(
-            'Informações já registradas no módulo Saúde.',
-            style: TextStyle(color: Colors.white54, fontSize: 12),
-          ),
-          const SizedBox(height: 14),
-          LayoutBuilder(
-            builder: (context, constraints) {
-              final moodCard = _RecordChip(
-                icon: Icons.sentiment_satisfied_alt_rounded,
-                color: CycleHealthScreen._lilac,
-                label: 'Humor',
-                value: mood,
-              );
-              final hydrationCard = _RecordChip(
-                icon: Icons.water_drop_rounded,
-                color: CycleHealthScreen._turquoise,
-                label: 'Hidratação',
-                value: hydration,
-              );
-
-              if (constraints.maxWidth < 330) {
-                return Column(
-                  children: [
-                    moodCard,
-                    const SizedBox(height: 10),
-                    hydrationCard,
-                  ],
-                );
-              }
-
-              return Row(
-                children: [
-                  Expanded(child: moodCard),
-                  const SizedBox(width: 10),
-                  Expanded(child: hydrationCard),
-                ],
-              );
-            },
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _RecordChip extends StatelessWidget {
-  const _RecordChip({
-    required this.icon,
-    required this.color,
-    required this.label,
-    required this.value,
-  });
-
-  final IconData icon;
-  final Color color;
-  final String label;
-  final String value;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 11),
-      decoration: BoxDecoration(
-        color: CycleHealthScreen._background,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: Colors.white10),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(icon, color: color, size: 18),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  label,
-                  style: const TextStyle(color: Colors.white38, fontSize: 10),
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  value,
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 12,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
               ],
             ),
           ),

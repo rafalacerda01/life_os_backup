@@ -532,6 +532,27 @@ void main() {
       expect(queue.single.ownerUid, 'user-123');
     });
 
+    for (final limits in <(int, int)>[(28, 5), (1, 1), (120, 120)]) {
+      test(
+        'settings persiste limite válido ${limits.$1}/${limits.$2}',
+        () async {
+          final result = await repository.updateCycleSettings(<String, dynamic>{
+            ...cycleData,
+            'cycleLengthDays': limits.$1,
+            'periodLengthDays': limits.$2,
+          }, expectedUid: 'user-123');
+
+          final row = await db.select(db.healthEntries).getSingle();
+          final saved = jsonDecode(row.menstrualCycleJson!) as Map;
+
+          expect(result, isTrue);
+          expect(saved['cycleLengthDays'], limits.$1);
+          expect(saved['periodLengthDays'], limits.$2);
+          expect(await db.getPendingSyncItems('user-123'), hasLength(1));
+        },
+      );
+    }
+
     test('settings rejeita Firebase B sem Drift ou SyncQueue', () async {
       auth.user = FakeFirebaseUser('user-b');
 
@@ -544,6 +565,22 @@ void main() {
       expect(await db.select(db.healthEntries).get(), isEmpty);
       expect(await db.select(db.syncQueueTable).get(), isEmpty);
     });
+
+    test(
+      'settings rejeita ciclo acima de 120 sem Drift ou SyncQueue',
+      () async {
+        final result = await repository.updateCycleSettings(<String, dynamic>{
+          ...cycleData,
+          'cycleLengthDays': 121,
+          'periodLengthDays': 5,
+        }, expectedUid: 'user-123');
+
+        expect(result, isFalse);
+        expect(await db.select(db.healthEntries).get(), isEmpty);
+        expect(await db.select(db.syncQueueTable).get(), isEmpty);
+        expect(syncManager.calls, 0);
+      },
+    );
 
     test(
       'switch durante settings faz rollback e retry válido funciona',

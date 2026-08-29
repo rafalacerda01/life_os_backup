@@ -20,6 +20,7 @@ class _RecordingHealthRepository extends Fake implements HealthRepository {
   final List<bool> toggleValues = [];
   final List<String> toggleExpectedUids = [];
   final List<Map<String, dynamic>> settingsValues = [];
+  bool settingsResult = true;
 
   @override
   Future<bool> toggleMenstrualCycleFeature(
@@ -38,7 +39,7 @@ class _RecordingHealthRepository extends Fake implements HealthRepository {
     required String expectedUid,
   }) async {
     settingsValues.add(Map<String, dynamic>.from(cycleData));
-    return true;
+    return settingsResult;
   }
 }
 
@@ -60,6 +61,16 @@ class _ReplayHealthStream {
   }
 
   Future<void> close() => _controller.close();
+}
+
+class _StaticCycleReminderPreferencesNotifier
+    extends CycleReminderPreferencesNotifier {
+  _StaticCycleReminderPreferencesNotifier(this.preferences);
+
+  final CycleReminderPreferences preferences;
+
+  @override
+  Future<CycleReminderPreferences?> build() async => preferences;
 }
 
 void main() {
@@ -100,6 +111,7 @@ void main() {
     HealthRepository? repository,
     String? admittedUid = 'user-a',
     Stream<HealthModel> Function()? healthStreamFactory,
+    CycleReminderPreferences? reminderPreferences,
   }) {
     return ProviderScope(
       overrides: [
@@ -113,6 +125,10 @@ void main() {
         cycleReminderUserIdProvider.overrideWith((ref) => Stream.value(null)),
         cycleReminderUserIdReaderProvider.overrideWithValue(() => admittedUid),
         cyclePillTrackingVisibleProvider.overrideWithValue(false),
+        if (reminderPreferences != null)
+          cycleReminderPreferencesProvider.overrideWith(
+            () => _StaticCycleReminderPreferencesNotifier(reminderPreferences),
+          ),
       ],
       child: child,
     );
@@ -126,6 +142,7 @@ void main() {
     HealthRepository? repository,
     String? admittedUid = 'user-a',
     Stream<HealthModel> Function()? healthStreamFactory,
+    CycleReminderPreferences? reminderPreferences,
   }) async {
     if (size != null) {
       tester.view.physicalSize = size;
@@ -140,6 +157,7 @@ void main() {
         repository: repository,
         admittedUid: admittedUid,
         healthStreamFactory: healthStreamFactory,
+        reminderPreferences: reminderPreferences,
         child: MaterialApp(
           home: MediaQuery(
             data: MediaQueryData(
@@ -151,6 +169,30 @@ void main() {
         ),
       ),
     );
+    await tester.pumpAndSettle();
+  }
+
+  Future<void> openCycleSettings(
+    WidgetTester tester,
+    HealthModel health,
+    _RecordingHealthRepository repository,
+  ) async {
+    await pumpCycleScreen(tester, health, repository: repository);
+    await tester.tap(find.byKey(const ValueKey('cycle-configure-action')));
+    await tester.pumpAndSettle();
+    expect(find.text('Configurar ciclo'), findsWidgets);
+  }
+
+  Future<void> submitCycleDurations(
+    WidgetTester tester, {
+    required String cycle,
+    required String period,
+  }) async {
+    final fields = find.byType(TextField);
+    expect(fields, findsNWidgets(2));
+    await tester.enterText(fields.at(0), cycle);
+    await tester.enterText(fields.at(1), period);
+    await tester.tap(find.widgetWithText(ElevatedButton, 'Salvar'));
     await tester.pumpAndSettle();
   }
 
@@ -192,6 +234,152 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Destino Saúde do ciclo'), findsOneWidget);
+  });
+
+  testWidgets('configuração válida 28 e 5 chega ao repository', (tester) async {
+    final repository = _RecordingHealthRepository()..settingsResult = false;
+    await openCycleSettings(tester, healthWithCycle(enabled: true), repository);
+
+    await submitCycleDurations(tester, cycle: '28', period: '5');
+
+    expect(repository.settingsValues, hasLength(1));
+    expect(repository.settingsValues.single['cycleLengthDays'], 28);
+    expect(repository.settingsValues.single['periodLengthDays'], 5);
+  });
+
+  testWidgets('limite mínimo 1 e 1 chega ao repository', (tester) async {
+    final repository = _RecordingHealthRepository()..settingsResult = false;
+    await openCycleSettings(tester, healthWithCycle(enabled: true), repository);
+
+    await submitCycleDurations(tester, cycle: '1', period: '1');
+
+    expect(repository.settingsValues, hasLength(1));
+    expect(repository.settingsValues.single['cycleLengthDays'], 1);
+    expect(repository.settingsValues.single['periodLengthDays'], 1);
+  });
+
+  testWidgets('limite máximo 120 chega ao repository', (tester) async {
+    final repository = _RecordingHealthRepository()..settingsResult = false;
+    await openCycleSettings(tester, healthWithCycle(enabled: true), repository);
+
+    await submitCycleDurations(tester, cycle: '120', period: '120');
+
+    expect(repository.settingsValues, hasLength(1));
+    expect(repository.settingsValues.single['cycleLengthDays'], 120);
+    expect(repository.settingsValues.single['periodLengthDays'], 120);
+  });
+
+  testWidgets('ciclo 121 é rejeitado na UI sem chamar repository', (
+    tester,
+  ) async {
+    final repository = _RecordingHealthRepository();
+    await openCycleSettings(tester, healthWithCycle(enabled: true), repository);
+
+    await submitCycleDurations(tester, cycle: '121', period: '5');
+
+    expect(repository.settingsValues, isEmpty);
+    expect(find.text('O ciclo deve ter no máximo 120 dias.'), findsOneWidget);
+  });
+
+  testWidgets('ciclo 150 é rejeitado sem clamp silencioso', (tester) async {
+    final repository = _RecordingHealthRepository();
+    await openCycleSettings(tester, healthWithCycle(enabled: true), repository);
+
+    await submitCycleDurations(tester, cycle: '150', period: '5');
+
+    expect(repository.settingsValues, isEmpty);
+    expect(find.text('O ciclo deve ter no máximo 120 dias.'), findsOneWidget);
+    expect(
+      tester.widget<TextField>(find.byType(TextField).at(0)).controller?.text,
+      '150',
+    );
+  });
+
+  testWidgets('ciclo zero é rejeitado como duração inválida', (tester) async {
+    final repository = _RecordingHealthRepository();
+    await openCycleSettings(tester, healthWithCycle(enabled: true), repository);
+
+    await submitCycleDurations(tester, cycle: '0', period: '1');
+
+    expect(repository.settingsValues, isEmpty);
+    expect(find.text('Informe uma duração de ciclo válida.'), findsOneWidget);
+  });
+
+  testWidgets('ciclo não numérico é rejeitado', (tester) async {
+    final repository = _RecordingHealthRepository();
+    await openCycleSettings(tester, healthWithCycle(enabled: true), repository);
+
+    await submitCycleDurations(tester, cycle: 'abc', period: '1');
+
+    expect(repository.settingsValues, isEmpty);
+    expect(find.text('Informe uma duração de ciclo válida.'), findsOneWidget);
+  });
+
+  testWidgets('período zero é rejeitado', (tester) async {
+    final repository = _RecordingHealthRepository();
+    await openCycleSettings(tester, healthWithCycle(enabled: true), repository);
+
+    await submitCycleDurations(tester, cycle: '28', period: '0');
+
+    expect(repository.settingsValues, isEmpty);
+    expect(
+      find.text('Informe uma duração de menstruação válida.'),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('período maior que ciclo é rejeitado', (tester) async {
+    final repository = _RecordingHealthRepository();
+    await openCycleSettings(tester, healthWithCycle(enabled: true), repository);
+
+    await submitCycleDurations(tester, cycle: '28', period: '29');
+
+    expect(repository.settingsValues, isEmpty);
+    expect(
+      find.text('A menstruação não pode ser maior que o ciclo.'),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('cancelar configuração não produz mutação', (tester) async {
+    final repository = _RecordingHealthRepository();
+    await openCycleSettings(tester, healthWithCycle(enabled: true), repository);
+
+    await tester.tap(find.widgetWithText(TextButton, 'Cancelar'));
+
+    expect(repository.settingsValues, isEmpty);
+  });
+
+  testWidgets('primeira configuração mantém defaults 28 e 5', (tester) async {
+    final repository = _RecordingHealthRepository();
+    final emptyHealth = HealthModel(
+      mood: '—',
+      waterIntakeMl: 0,
+      hasTakenPillToday: false,
+      date: now,
+    );
+    await openCycleSettings(tester, emptyHealth, repository);
+
+    final fields = find.byType(TextField);
+    expect(tester.widget<TextField>(fields.at(0)).controller?.text, '28');
+    expect(tester.widget<TextField>(fields.at(1)).controller?.text, '5');
+    expect(repository.settingsValues, isEmpty);
+  });
+
+  testWidgets('configuração existente preserva valores sem alteração', (
+    tester,
+  ) async {
+    final repository = _RecordingHealthRepository();
+    await openCycleSettings(
+      tester,
+      healthWithCycle(enabled: true, cycleLengthDays: 35, periodLengthDays: 7),
+      repository,
+    );
+
+    final fields = find.byType(TextField);
+    expect(tester.widget<TextField>(fields.at(0)).controller?.text, '35');
+    expect(tester.widget<TextField>(fields.at(1)).controller?.text, '7');
+    expect(repository.settingsValues, isEmpty);
   });
 
   testWidgets('sem dados mostra estado vazio sem estimativa falsa', (
@@ -302,9 +490,35 @@ void main() {
     expect(find.text('Próxima menstruação'), findsOneWidget);
     expect(find.text('Duração do ciclo'), findsOneWidget);
     expect(find.text('Duração do período'), findsOneWidget);
-    expect(find.text('Registros disponíveis'), findsOneWidget);
-    expect(find.text('Radiante'), findsOneWidget);
-    expect(find.text('1500 ml hoje'), findsOneWidget);
+    expect(find.text('Registros disponíveis'), findsNothing);
+    expect(find.text('Radiante'), findsNothing);
+    expect(find.text('1500 ml hoje'), findsNothing);
+    expect(find.text('ROTINA PESSOAL'), findsOneWidget);
+    expect(find.text('Crie uma rotina pessoal'), findsOneWidget);
+  });
+
+  testWidgets('tracking da pílula aparece uma vez dentro da rotina pessoal', (
+    tester,
+  ) async {
+    await pumpCycleScreen(
+      tester,
+      healthWithCycle(enabled: true),
+      reminderPreferences: CycleReminderPreferences(
+        enabled: true,
+        type: CycleReminderType.pill,
+        hour: 21,
+        minute: 0,
+        frequency: CycleReminderFrequency.daily,
+      ),
+    );
+
+    expect(find.text('ROTINA PESSOAL'), findsOneWidget);
+    expect(find.text('Pílula'), findsOneWidget);
+    expect(find.text('Registrar pílula'), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('cycle-pill-daily-control')),
+      findsOneWidget,
+    );
   });
 
   testWidgets('linguagem é cautelosa e inclui disclaimer', (tester) async {
