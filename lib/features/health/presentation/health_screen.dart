@@ -224,6 +224,18 @@ class HealthScreen extends ConsumerWidget {
                             ? await showTimePicker(
                                 context: parentContext,
                                 initialTime: reminderTime ?? TimeOfDay.now(),
+                                builder: (pickerContext, child) {
+                                  final mediaQuery = MediaQuery.of(
+                                    pickerContext,
+                                  );
+                                  // The text parser checks MediaQuery, not just locale.
+                                  return MediaQuery(
+                                    data: mediaQuery.copyWith(
+                                      alwaysUse24HourFormat: true,
+                                    ),
+                                    child: child!,
+                                  );
+                                },
                               )
                             : await picker(parentContext);
 
