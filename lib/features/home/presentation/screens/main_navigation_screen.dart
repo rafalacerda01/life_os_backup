@@ -54,7 +54,7 @@ class MainNavigationScreen extends ConsumerWidget {
                 ref.read(authNotifierProvider.notifier).logout();
               },
               child: const Text(
-                "Encerrar Core",
+                "Encerrar sessão",
                 style: TextStyle(fontWeight: FontWeight.bold),
               ),
             ),
@@ -155,7 +155,7 @@ class MainNavigationScreen extends ConsumerWidget {
                 child: ListTile(
                   leading: Icon(Icons.insights, color: Color(0xFFB026FF)),
                   title: Text(
-                    "Analytics",
+                    "Análises",
                     style: TextStyle(color: Colors.white),
                   ),
                 ),
@@ -200,7 +200,7 @@ class MainNavigationScreen extends ConsumerWidget {
             BottomNavigationBarItem(
               icon: Icon(Icons.dashboard_outlined),
               activeIcon: Icon(Icons.dashboard),
-              label: 'Home',
+              label: 'Início',
             ),
             BottomNavigationBarItem(
               icon: Icon(Icons.local_library_outlined),
@@ -220,7 +220,7 @@ class MainNavigationScreen extends ConsumerWidget {
             BottomNavigationBarItem(
               icon: Icon(Icons.psychology_outlined),
               activeIcon: Icon(Icons.psychology),
-              label: 'AI',
+              label: 'IA',
             ),
           ],
         ),

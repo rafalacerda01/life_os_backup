@@ -38,7 +38,7 @@ class AICompanionNotifier extends Notifier<AICompanionState> {
       messages: [
         ChatMessage(
           text:
-              "Saudações, $userName. Sistema de IA do Life OS ativado. Como posso otimizar sua rotina, hábitos ou performance hoje? ⚡",
+              "Saudações, $userName. Sistema de IA do Life OS ativado. Como posso otimizar sua rotina, hábitos ou desempenho hoje? ⚡",
           isUser: false,
           timestamp: DateTime.now(),
         ),

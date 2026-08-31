@@ -255,7 +255,7 @@ class AccountManagementScreen extends ConsumerWidget {
                     borderRadius: BorderRadius.circular(8),
                   ),
                   child: Text(
-                    user.isPremium ? 'PREMIUM' : 'FREE',
+                    user.isPremium ? 'PREMIUM' : 'GRATUITO',
                     style: TextStyle(
                       fontSize: 10,
                       fontWeight: FontWeight.bold,

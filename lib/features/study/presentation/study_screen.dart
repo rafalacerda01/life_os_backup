@@ -729,7 +729,7 @@ class _StudyScreenState extends ConsumerState<StudyScreen> {
                           ),
                           subtitle: Text(
                             hasActiveStudies
-                                ? "Abrir timer de foco e estudos"
+                                ? "Abrir temporizador de foco e estudos"
                                 : "Adicione uma disciplina para desbloquear",
                             style: const TextStyle(
                               color: Colors.white38,

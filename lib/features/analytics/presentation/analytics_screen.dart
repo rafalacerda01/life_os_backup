@@ -225,7 +225,7 @@ class AnalyticsScreen extends ConsumerWidget {
                   ),
                   icon: const Icon(Icons.auto_awesome),
                   label: const Text(
-                    "Consultar AI Coach sobre Analytics",
+                    "Analisar meus dados com a IA",
                     style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
                   ),
                 ),

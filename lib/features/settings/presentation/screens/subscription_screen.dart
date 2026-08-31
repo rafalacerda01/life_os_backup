@@ -131,7 +131,7 @@ class SubscriptionScreen extends ConsumerWidget {
           ),
         ),
         const SizedBox(height: 16),
-        _buildFeatureItem("IA Companion Ilimitada"),
+        _buildFeatureItem("Acesso ao Companion IA"),
         _buildFeatureItem("Disciplinas Infinitas"),
         _buildFeatureItem("Métricas Avançadas de Evolução"),
         _buildFeatureItem("Sincronização em Tempo Real"),

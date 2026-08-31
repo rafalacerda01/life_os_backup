@@ -36,7 +36,7 @@ class PrivacyPolicyScreen extends StatelessWidget {
             const SizedBox(height: 20),
             _buildSection(
               "1. Visão Geral",
-              "O Life OS foi construído sob uma arquitetura de privacidade em primeiro lugar (Privacy-First). Seus dados de rotina, finanças, saúde, hábitos e estudos são tratados com rigor técnico de segurança, combinando armazenamento local criptografado e sincronização opcional em nuvem.",
+              "O Life OS foi construído sob uma arquitetura de privacidade em primeiro lugar. Seus dados de rotina, finanças, saúde, hábitos e estudos são tratados com rigor técnico de segurança, combinando armazenamento local criptografado e sincronização opcional em nuvem.",
             ),
             _buildSection(
               "2. Dados Coletados",

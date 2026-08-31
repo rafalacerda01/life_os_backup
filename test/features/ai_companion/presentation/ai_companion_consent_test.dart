@@ -65,6 +65,10 @@ void main() {
     );
     await tester.pumpAndSettle();
 
+    expect(find.text('Assistente de IA do Life OS'), findsOneWidget);
+    expect(find.text('Online • Core 3.5 Flash'), findsNothing);
+    expect(find.text('Converse com o Companion IA...'), findsOneWidget);
+    expect(find.text('Fale com o Core do sistema...'), findsNothing);
     expect(find.byKey(const ValueKey('revoke-ai-consent')), findsOneWidget);
     await tester.tap(find.byKey(const ValueKey('revoke-ai-consent')));
     await tester.pumpAndSettle();

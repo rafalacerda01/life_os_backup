@@ -57,7 +57,7 @@ class PremiumScreen extends ConsumerWidget {
                   Text(
                     premiumState.isPremium
                         ? "SISTEMA OPERACIONAL DESBLOQUEADO"
-                        : "NÍVEL DE ACESSO: FREE",
+                        : "NÍVEL DE ACESSO: GRATUITO",
                     style: const TextStyle(
                       color: Colors.white,
                       fontWeight: FontWeight.bold,
@@ -97,7 +97,7 @@ class PremiumScreen extends ConsumerWidget {
               true,
             ),
             _buildComparisonRow(
-              "Gráficos Analytics Semanais",
+              "Gráficos semanais de análise",
               "Básico",
               "Avançado",
               false,
@@ -182,7 +182,7 @@ class PremiumScreen extends ConsumerWidget {
             CircularProgressIndicator(color: Color(0xFF5D0EFF)),
             SizedBox(width: 20),
             Text(
-              "Handshake de Segurança...",
+              "Processando assinatura...",
               style: TextStyle(color: Colors.white),
             ),
           ],
@@ -215,7 +215,7 @@ class PremiumScreen extends ConsumerWidget {
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
               Text(
-                "Free: $freeVal",
+                "Gratuito: $freeVal",
                 style: const TextStyle(color: Colors.white38, fontSize: 12),
               ),
               Text(

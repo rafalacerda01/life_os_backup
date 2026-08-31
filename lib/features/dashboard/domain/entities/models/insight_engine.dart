@@ -65,7 +65,7 @@ class MorningMomentumRule implements InsightRule {
       id: id,
       title: "Manhã de Ouro",
       message: context.productivityScore > 80
-          ? "Você começou o dia voando! Aproveite esse estado de flow para liquidar a tarefa mais difícil."
+          ? "Você começou o dia voando! Aproveite essa concentração para concluir a tarefa mais difícil."
           : "Um novo dia, uma nova página em branco. Qual é a sua Única Coisa importante para hoje?",
       category: InsightCategory.productivity,
       priority: InsightPriority.medium,

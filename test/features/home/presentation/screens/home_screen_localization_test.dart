@@ -78,6 +78,20 @@ void main() {
         );
         await tester.pumpAndSettle();
 
+        expect(find.text('Sequência: 0 dias • Revisões: 0'), findsOneWidget);
+        expect(find.text('Pontuação geral do dia'), findsOneWidget);
+        expect(find.textContaining('Streak:'), findsNothing);
+        expect(find.text('Score geral do dia'), findsNothing);
+        expect(
+          find.byWidgetPredicate(
+            (widget) =>
+                widget is Semantics &&
+                widget.properties.label ==
+                    'Sugestão do dia: Resumo. Continue acompanhando sua rotina.',
+          ),
+          findsOneWidget,
+        );
+
         expect(platform.locale, const Locale('en', 'US'));
         expect(Intl.getCurrentLocale(), 'en_US');
         expect(NumberFormat('0.00').format(1234.56), '1234.56');

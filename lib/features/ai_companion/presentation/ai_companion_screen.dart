@@ -179,7 +179,7 @@ class _AICompanionScreenState extends ConsumerState<AICompanionScreen> {
                 ),
               ),
               Text(
-                "Online • Core 3.5 Flash",
+                "Assistente de IA do Life OS",
                 style: TextStyle(color: Colors.greenAccent, fontSize: 11),
               ),
             ],
@@ -283,7 +283,7 @@ class _AICompanionScreenState extends ConsumerState<AICompanionScreen> {
               maxLength: 300,
               style: const TextStyle(color: Colors.white),
               decoration: InputDecoration(
-                hintText: "Fale com o Core do sistema...",
+                hintText: "Converse com o Companion IA...",
                 hintStyle: const TextStyle(color: Colors.white38),
                 filled: true,
                 fillColor: const Color(0xFF070B14),

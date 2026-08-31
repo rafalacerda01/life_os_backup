@@ -488,6 +488,8 @@ void main() {
       findsOneWidget,
     );
     expect(find.text('Próxima menstruação'), findsOneWidget);
+    expect(find.text('SUGESTÃO DO DIA'), findsOneWidget);
+    expect(find.text('INSIGHT DO DIA'), findsNothing);
     expect(find.text('Duração do ciclo'), findsOneWidget);
     expect(find.text('Duração do período'), findsOneWidget);
     expect(find.text('Registros disponíveis'), findsNothing);

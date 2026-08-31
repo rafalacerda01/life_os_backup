@@ -48,7 +48,7 @@ class AppearanceScreen extends ConsumerWidget {
 
         // --- CARD DE ROADMAP DE TEMAS ---
         const Text(
-          "ROADMAP VISUAL",
+          "NOVIDADES PLANEJADAS",
           style: TextStyle(
             color: Colors.purpleAccent,
             fontWeight: FontWeight.bold,

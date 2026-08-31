@@ -203,7 +203,7 @@ class HomeScreen extends ConsumerWidget {
                 InfoCard(
                   title: "Progresso de estudo",
                   subtitle:
-                      "Streak: ${dashboard.studyStreak} dias • Revisões: ${dashboard.studyReviewQueue}",
+                      "Sequência: ${dashboard.studyStreak} dias • Revisões: ${dashboard.studyReviewQueue}",
                   value: "${(dashboard.studyProgress * 100).toInt()}%",
                   color: AppColors.study,
                   icon: Icons.school_rounded,
@@ -294,7 +294,7 @@ class _MainScoreCard extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           const Text(
-            "Score geral do dia",
+            "Pontuação geral do dia",
             style: TextStyle(
               color: AppColors.textMain,
               fontWeight: FontWeight.bold,
@@ -328,7 +328,7 @@ class PremiumInsightCard extends ConsumerWidget {
     final insight = ref.watch(currentInsightProvider);
 
     return Semantics(
-      label: 'Insight do dia: ${insight.title}. ${insight.message}',
+      label: 'Sugestão do dia: ${insight.title}. ${insight.message}',
       child: AnimatedSwitcher(
         duration: const Duration(milliseconds: 600),
         switchInCurve: Curves.easeOutExpo,

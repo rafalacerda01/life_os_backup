@@ -17,6 +17,15 @@ class _FreePremiumNotifier extends PremiumNotifier {
   );
 }
 
+class _PremiumTestNotifier extends PremiumNotifier {
+  @override
+  PremiumStatusEntity build() => const PremiumStatusEntity(
+    isPremium: true,
+    tier: PremiumTier.monthly,
+    activatedFeatures: ['AI Companion', 'Analytics Avançado'],
+  );
+}
+
 void main() {
   testWidgets('Analytics uses decimal commas without rescaling percentages', (
     tester,
@@ -69,5 +78,34 @@ void main() {
       expect(analytics.props, originalValues);
       expect(tester.takeException(), isNull);
     });
+  });
+
+  testWidgets('Analytics apresenta CTA da IA em pt-BR', (tester) async {
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          analyticsProvider.overrideWithValue(
+            const AnalyticsEntity(
+              productivityIndex: 0,
+              healthIndex: 0,
+              financeIndex: 0,
+              habitConsistency: 0,
+              weeklyEvolution: [],
+            ),
+          ),
+          premiumProvider.overrideWith(_PremiumTestNotifier.new),
+        ],
+        child: const MaterialApp(home: AnalyticsScreen()),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final cta = find.text('Analisar meus dados com a IA');
+    await tester.ensureVisible(cta);
+    await tester.pumpAndSettle();
+
+    expect(cta, findsOneWidget);
+    expect(find.text('Consultar AI Coach sobre Analytics'), findsNothing);
+    expect(tester.takeException(), isNull);
   });
 }

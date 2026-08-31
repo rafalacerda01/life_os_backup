@@ -772,7 +772,7 @@ class HealthScreen extends ConsumerWidget {
                 child: _SnapshotItem(
                   icon: Icons.auto_awesome_rounded,
                   color: _purple,
-                  label: 'Insight',
+                  label: 'Sugestão',
                   value: 'Disponível',
                 ),
               ),
@@ -2081,7 +2081,7 @@ class CycleHealthDetails extends ConsumerWidget {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       const Text(
-                        'INSIGHT DO DIA',
+                        'SUGESTÃO DO DIA',
                         style: TextStyle(
                           color: _lilac,
                           fontSize: 9,
@@ -2372,7 +2372,7 @@ class CycleHealthDetails extends ConsumerWidget {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       const Text(
-                        'INSIGHT DO DIA',
+                        'SUGESTÃO DO DIA',
                         style: TextStyle(
                           color: _purple,
                           fontSize: 9,
