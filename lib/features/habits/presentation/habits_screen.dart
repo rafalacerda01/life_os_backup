@@ -421,10 +421,11 @@ class HabitsScreen extends ConsumerWidget {
                                         final isCompleted = habit.completedDates
                                             .contains(dayStr);
                                         final isDayToday = dayStr == todayStr;
-                                        final dayLetter = DateFormat('E')
-                                            .format(day)
-                                            .substring(0, 1)
-                                            .toUpperCase();
+                                        final dayLetter =
+                                            DateFormat('E', 'pt_BR')
+                                                .format(day)
+                                                .substring(0, 1)
+                                                .toUpperCase();
 
                                         return GestureDetector(
                                           onTap: () async {
