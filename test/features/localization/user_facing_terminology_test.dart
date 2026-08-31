@@ -12,6 +12,7 @@ import 'package:life_os/features/auth/presentation/providers/auth_provider.dart'
 import 'package:life_os/features/auth/presentation/providers/auth_state.dart';
 import 'package:life_os/features/circles/data/repositories/circles_repository.dart';
 import 'package:life_os/features/circles/domain/entities/circle_entity.dart';
+import 'package:life_os/features/circles/presentation/circle_detail_screen.dart';
 import 'package:life_os/features/circles/presentation/circles_provider.dart';
 import 'package:life_os/features/circles/presentation/circles_screen.dart';
 import 'package:life_os/features/home/presentation/screens/main_navigation_screen.dart';
@@ -165,6 +166,8 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('NÍVEL DE ACESSO: GRATUITO'), findsOneWidget);
+    expect(find.text('Acesso Premium'), findsOneWidget);
+    expect(find.text('Acesso Cyber-Premium'), findsNothing);
     expect(find.text('Gráficos semanais de análise'), findsOneWidget);
     expect(find.textContaining('Gratuito:'), findsNWidgets(4));
     expect(find.textContaining('Free:'), findsNothing);
@@ -201,7 +204,28 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('Acesso ao Companion IA'), findsOneWidget);
     expect(find.textContaining('Ilimitada'), findsNothing);
-    expect(find.text('Plano PRO Ativo'), findsOneWidget);
+    expect(find.text('Plano Premium ativo'), findsOneWidget);
+    expect(find.text('Plano PRO Ativo'), findsNothing);
+  });
+
+  testWidgets('assinatura gratuita usa CTA Premium oficial', (tester) async {
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          authNotifierProvider.overrideWith(
+            () => _StaticAuthNotifier(_freeUser),
+          ),
+          premiumProvider.overrideWith(
+            () => _StaticPremiumNotifier(_freeStatus),
+          ),
+        ],
+        child: const MaterialApp(home: SubscriptionScreen()),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Assinar Premium'), findsOneWidget);
+    expect(find.text('Tornar-se PRO agora'), findsNothing);
   });
 
   testWidgets('badge de conta usa Gratuito e preserva Premium', (tester) async {
@@ -251,6 +275,10 @@ void main() {
     );
     expect(find.text('NOVIDADES PLANEJADAS'), findsOneWidget);
     expect(find.text('ROADMAP VISUAL'), findsNothing);
+    expect(find.textContaining('assinantes Premium'), findsOneWidget);
+    expect(find.textContaining('membros Pro'), findsNothing);
+    expect(find.textContaining('Cyber-Minimal'), findsOneWidget);
+    expect(find.textContaining('Deep Focus'), findsOneWidget);
 
     await tester.pumpWidget(const MaterialApp(home: PrivacyPolicyScreen()));
     expect(find.textContaining('(Privacy-First)'), findsNothing);
@@ -305,6 +333,58 @@ void main() {
     );
     expect(
       find.descendant(of: screen, matching: find.text('Admin')),
+      findsNothing,
+    );
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('detalhe do círculo usa badge Administrador sem overflow', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(360, 640);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    final circle = CircleEntity(
+      id: 'circle-detail',
+      name: 'Círculo de teste',
+      description: 'Descrição',
+      adminId: 'admin-a',
+      memberCount: 1,
+      memberLimit: 3,
+      schemaVersion: 2,
+      members: [
+        CircleMemberEntity(
+          userId: 'admin-a',
+          displayName: 'Nome de administrador bastante extenso',
+          photoUrl: null,
+          role: CircleMemberRole.admin,
+          joinedAt: DateTime(2026, 8, 31),
+        ),
+      ],
+      challenges: const [],
+    );
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          circlesProvider.overrideWith(() => _StaticCirclesNotifier(circle)),
+        ],
+        child: const MaterialApp(
+          home: CircleDetailScreen(circleId: 'circle-detail'),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final detail = find.byType(CircleDetailScreen);
+    expect(
+      find.descendant(of: detail, matching: find.text('Administrador')),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(of: detail, matching: find.text('Admin')),
       findsNothing,
     );
     expect(tester.takeException(), isNull);

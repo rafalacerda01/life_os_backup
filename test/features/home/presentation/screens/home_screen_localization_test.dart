@@ -4,6 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:intl/date_symbol_data_local.dart';
 import 'package:intl/intl.dart';
 import 'package:life_os/core/widgets/dashboard_components.dart';
+import 'package:life_os/features/auth/domain/entities/user_entity.dart';
 import 'package:life_os/features/auth/presentation/providers/auth_provider.dart';
 import 'package:life_os/features/auth/presentation/providers/auth_state.dart';
 import 'package:life_os/features/dashboard/data/models/dashboard_model.dart';
@@ -16,7 +17,17 @@ import 'package:life_os/features/notifications/domain/providers/notification_eng
 
 class _StaticAuthNotifier extends AuthNotifier {
   @override
-  AuthState build() => AuthState.unauthenticated();
+  AuthState build() => AuthState.authenticated(
+    const UserEntity(
+      uid: 'user-a',
+      email: 'user@example.test',
+      displayName: 'Usuário',
+      isPremium: true,
+      xp: 0,
+      level: 1,
+      streak: 0,
+    ),
+  );
 }
 
 void main() {
@@ -80,6 +91,8 @@ void main() {
 
         expect(find.text('Sequência: 0 dias • Revisões: 0'), findsOneWidget);
         expect(find.text('Pontuação geral do dia'), findsOneWidget);
+        expect(find.text('PREMIUM'), findsOneWidget);
+        expect(find.text('PRO'), findsNothing);
         expect(find.textContaining('Streak:'), findsNothing);
         expect(find.text('Score geral do dia'), findsNothing);
         expect(

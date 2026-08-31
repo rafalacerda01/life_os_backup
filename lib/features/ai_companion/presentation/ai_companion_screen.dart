@@ -496,7 +496,7 @@ class _AICompanionScreenState extends ConsumerState<AICompanionScreen> {
                     borderRadius: BorderRadius.circular(12),
                   ),
                 ),
-                child: const Text("Desbloquear com Plano PRO"),
+                child: const Text("Desbloquear com Premium"),
               ),
             ],
           ),

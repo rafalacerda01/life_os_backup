@@ -16,7 +16,7 @@ class PremiumScreen extends ConsumerWidget {
         backgroundColor: Colors.transparent,
         elevation: 0,
         title: const Text(
-          "Acesso Cyber-Premium",
+          "Acesso Premium",
           style: TextStyle(fontWeight: FontWeight.bold),
         ),
         actions: [

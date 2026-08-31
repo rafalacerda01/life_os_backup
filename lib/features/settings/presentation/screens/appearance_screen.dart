@@ -82,7 +82,7 @@ class AppearanceScreen extends ConsumerWidget {
                     ),
                     SizedBox(height: 4),
                     Text(
-                      "Estamos desenvolvendo os temas 'Cyber-Minimal' e 'Deep Focus'. O acesso antecipado será liberado para membros Pro.",
+                      "Estamos desenvolvendo os temas 'Cyber-Minimal' e 'Deep Focus'. O acesso antecipado será liberado para assinantes Premium.",
                       style: TextStyle(
                         color: Colors.white54,
                         fontSize: 13,

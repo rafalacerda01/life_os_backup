@@ -106,7 +106,7 @@ class HomeScreen extends ConsumerWidget {
                                     ),
                                   ),
                                   child: const Text(
-                                    "PRO",
+                                    "PREMIUM",
                                     style: TextStyle(
                                       color: AppColors.primary,
                                       fontSize: 10,

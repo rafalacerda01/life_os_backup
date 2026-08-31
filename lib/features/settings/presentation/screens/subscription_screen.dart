@@ -55,7 +55,7 @@ class SubscriptionScreen extends ConsumerWidget {
                       elevation: 2,
                     ),
                     child: const Text(
-                      "Tornar-se PRO agora",
+                      "Assinar Premium",
                       style: TextStyle(
                         color: Colors.white,
                         fontWeight: FontWeight.bold,
@@ -98,7 +98,7 @@ class SubscriptionScreen extends ConsumerWidget {
           ),
           const SizedBox(height: 16),
           Text(
-            isPremium ? "Plano PRO Ativo" : "Plano Gratuito",
+            isPremium ? "Plano Premium ativo" : "Plano Gratuito",
             style: const TextStyle(
               color: Colors.white,
               fontSize: 20,

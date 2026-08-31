@@ -17,6 +17,15 @@ class _PremiumTestNotifier extends PremiumNotifier {
   );
 }
 
+class _FreePremiumTestNotifier extends PremiumNotifier {
+  @override
+  PremiumStatusEntity build() => const PremiumStatusEntity(
+    isPremium: false,
+    tier: PremiumTier.free,
+    activatedFeatures: [],
+  );
+}
+
 class _AiCompanionTestNotifier extends AICompanionNotifier {
   @override
   AICompanionState build() =>
@@ -34,6 +43,19 @@ class _ConsentTestNotifier extends AiConsentNotifier {
 }
 
 void main() {
+  testWidgets('bloqueio Premium usa nomenclatura oficial', (tester) async {
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [premiumProvider.overrideWith(_FreePremiumTestNotifier.new)],
+        child: const MaterialApp(home: AICompanionScreen()),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Desbloquear com Premium'), findsOneWidget);
+    expect(find.text('Desbloquear com Plano PRO'), findsNothing);
+  });
+
   testWidgets('consentimento descreve somente dados usados atualmente', (
     tester,
   ) async {

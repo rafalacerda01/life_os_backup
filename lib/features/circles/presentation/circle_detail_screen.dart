@@ -258,7 +258,7 @@ class CircleDetailScreen extends ConsumerWidget {
           ),
           if (member.role == CircleMemberRole.admin)
             const Text(
-              'Admin',
+              'Administrador',
               style: TextStyle(color: AppColors.primary, fontSize: 12),
             ),
         ],
