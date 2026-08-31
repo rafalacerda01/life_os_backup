@@ -229,7 +229,11 @@ class HomeScreen extends ConsumerWidget {
                 InfoCard(
                   title: "Saldo atual",
                   subtitle: "Transações: ${dashboard.transactionsCount}",
-                  value: "R\$ ${dashboard.financeBalance.toStringAsFixed(2)}",
+                  value: NumberFormat.currency(
+                    locale: 'pt_BR',
+                    symbol: 'R\$',
+                    decimalDigits: 2,
+                  ).format(dashboard.financeBalance),
                   color: AppColors.finance,
                   icon: Icons.account_balance_wallet_rounded,
                   onTap: () => context.push('/finance'),

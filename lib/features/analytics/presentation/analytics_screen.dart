@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:intl/intl.dart';
 import 'package:life_os/features/analytics/presentation/analytics_provider.dart';
 import 'package:life_os/features/premium/presentation/premium_provider.dart';
 import 'package:life_os/features/ai_companion/presentation/providers/ai_companion_provider.dart';
@@ -260,7 +261,7 @@ class AnalyticsScreen extends ConsumerWidget {
                   ),
                 ),
                 Text(
-                  "${value.toStringAsFixed(1)}%",
+                  "${NumberFormat('0.0', 'pt_BR').format(value)}%",
                   style: TextStyle(
                     color: barColor,
                     fontWeight: FontWeight.bold,
