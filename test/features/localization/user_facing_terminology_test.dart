@@ -307,7 +307,7 @@ void main() {
       findsNothing,
     );
     expect(find.textContaining('conta autenticada'), findsOneWidget);
-    expect(find.textContaining('recursos compartilhados'), findsOneWidget);
+    expect(find.textContaining('recursos compartilhados'), findsWidgets);
     expect(find.textContaining('Firebase Analytics'), findsOneWidget);
     expect(find.textContaining('Firebase Crashlytics'), findsOneWidget);
     expect(
@@ -315,7 +315,6 @@ void main() {
       findsOneWidget,
     );
     expect(find.textContaining('mensagem bruta da exceção'), findsOneWidget);
-    expect(find.textContaining('Batch Commit'), findsOneWidget);
   });
 
   testWidgets('política qualifica dados, IA, sync e serviços técnicos', (
@@ -336,10 +335,7 @@ void main() {
     expect(find.textContaining('dados relacionados ao ciclo'), findsOneWidget);
     expect(find.textContaining('sua mensagem'), findsOneWidget);
     expect(find.textContaining('contexto relevante'), findsOneWidget);
-    expect(
-      find.textContaining('consentimento do Companion IA'),
-      findsOneWidget,
-    );
+    expect(find.textContaining('consentimento do Companion IA'), findsWidgets);
     expect(find.textContaining('de forma temporária'), findsNothing);
     expect(find.textContaining('Offline-First'), findsNothing);
     expect(
@@ -367,6 +363,53 @@ void main() {
     expect(find.textContaining('anonimizados'), findsNothing);
     expect(find.textContaining('Firebase Analytics'), findsOneWidget);
     expect(find.textContaining('Firebase Crashlytics'), findsOneWidget);
+  });
+
+  testWidgets('política descreve exclusão em etapas sem promessa absoluta', (
+    tester,
+  ) async {
+    await tester.pumpWidget(const MaterialApp(home: PrivacyPolicyScreen()));
+
+    expect(find.textContaining('controle total'), findsNothing);
+    expect(find.textContaining('limpeza atômica'), findsNothing);
+    expect(find.textContaining('atomicamente'), findsNothing);
+    expect(find.textContaining('Batch Commit'), findsNothing);
+    expect(find.textContaining('permanentemente todas'), findsNothing);
+    expect(find.textContaining('todas as suas subcoleções'), findsNothing);
+    expect(find.textContaining('apagando integralmente'), findsNothing);
+    expect(
+      find.textContaining('processada em etapas pelo servidor'),
+      findsOneWidget,
+    );
+    expect(find.textContaining('dados principais associados'), findsOneWidget);
+    expect(find.textContaining('referências aplicáveis'), findsOneWidget);
+    expect(
+      find.textContaining(
+        'referências aplicáveis em recursos compartilhados, como Círculos',
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.textContaining('dados locais associados à conta'),
+      findsOneWidget,
+    );
+    expect(find.textContaining('encerra a sessão'), findsOneWidget);
+    expect(find.textContaining('banco de dados Drift'), findsNothing);
+    expect(
+      find.textContaining('armazenamento local criptografado'),
+      findsOneWidget,
+    );
+    expect(find.textContaining('autenticação'), findsWidgets);
+    expect(
+      find.textContaining('comunicações protegidas por HTTPS'),
+      findsOneWidget,
+    );
+    expect(find.textContaining('controles de acesso'), findsWidgets);
+    expect(
+      find.textContaining('arquitetura de privacidade em primeiro lugar'),
+      findsNothing,
+    );
+    expect(find.textContaining('rigor técnico de segurança'), findsNothing);
   });
 
   testWidgets('badge Administrador cabe em viewport realista', (tester) async {

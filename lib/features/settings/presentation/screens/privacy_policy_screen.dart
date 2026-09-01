@@ -36,7 +36,7 @@ class PrivacyPolicyScreen extends StatelessWidget {
             const SizedBox(height: 20),
             _buildSection(
               "1. Visão Geral",
-              "O Life OS foi construído sob uma arquitetura de privacidade em primeiro lugar. Seus dados de rotina, finanças, saúde, hábitos e estudos são tratados com rigor técnico de segurança, combinando armazenamento local criptografado e sincronização em nuvem de dados compatíveis quando você está autenticado.",
+              "O Life OS utiliza armazenamento local criptografado, autenticação, comunicações protegidas por HTTPS e controles de acesso para tratar dados de rotina, finanças, saúde, hábitos e estudos. Quando você está autenticado, a sincronização em nuvem de dados compatíveis pode ocorrer.",
             ),
             _buildSection(
               "2. Dados Coletados",
@@ -60,7 +60,7 @@ class PrivacyPolicyScreen extends StatelessWidget {
             ),
             _buildSection(
               "6. Exclusão de Conta e Dados",
-              "Você possui controle total sobre suas informações. Ao acionar a opção de deletar a conta nas configurações do aplicativo, o Life OS executa uma limpeza atômica em lote (*Batch Commit*), removendo permanentemente todas as suas subcoleções na nuvem (finanças, saúde, check-ins, círculos) e apagando integralmente o banco de dados local do dispositivo.",
+              "Você pode gerenciar seus dados e as configurações disponíveis no Life OS, revogar o consentimento do Companion IA e solicitar a exclusão da conta. A exclusão é processada em etapas pelo servidor para remover a conta, os dados principais associados a ela e referências aplicáveis em recursos compartilhados, como Círculos. Após a confirmação do servidor, o aplicativo remove os dados locais associados à conta e encerra a sessão.",
             ),
             _buildSection(
               "7. Contato",
