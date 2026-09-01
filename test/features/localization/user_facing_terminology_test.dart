@@ -315,8 +315,58 @@ void main() {
       findsOneWidget,
     );
     expect(find.textContaining('mensagem bruta da exceção'), findsOneWidget);
-    expect(find.textContaining('Offline-First'), findsOneWidget);
     expect(find.textContaining('Batch Commit'), findsOneWidget);
+  });
+
+  testWidgets('política qualifica dados, IA, sync e serviços técnicos', (
+    tester,
+  ) async {
+    await tester.pumpWidget(const MaterialApp(home: PrivacyPolicyScreen()));
+
+    expect(find.textContaining('sincronização opcional'), findsNothing);
+    expect(
+      find.textContaining('sincronização em nuvem de dados compatíveis'),
+      findsOneWidget,
+    );
+    expect(find.textContaining('registros de medicamentos'), findsOneWidget);
+    expect(
+      find.textContaining('Registro de humor, hidratação, medicamentos ativos'),
+      findsNothing,
+    );
+    expect(find.textContaining('dados relacionados ao ciclo'), findsOneWidget);
+    expect(find.textContaining('sua mensagem'), findsOneWidget);
+    expect(find.textContaining('contexto relevante'), findsOneWidget);
+    expect(
+      find.textContaining('consentimento do Companion IA'),
+      findsOneWidget,
+    );
+    expect(find.textContaining('de forma temporária'), findsNothing);
+    expect(find.textContaining('Offline-First'), findsNothing);
+    expect(
+      find.textContaining('podem continuar disponíveis sem conexão'),
+      findsOneWidget,
+    );
+    expect(find.textContaining('dependem de conexão'), findsOneWidget);
+    expect(
+      find.textContaining('podem ser recuperados em outro dispositivo'),
+      findsOneWidget,
+    );
+    expect(find.textContaining('todos os dados'), findsNothing);
+    expect(
+      find.textContaining('podem permanecer somente no dispositivo'),
+      findsOneWidget,
+    );
+    expect(find.textContaining('Firebase Authentication'), findsOneWidget);
+    expect(find.textContaining('Cloud Firestore'), findsNWidgets(2));
+    expect(find.textContaining('Firebase App Check'), findsOneWidget);
+    expect(find.textContaining('Google Sign-In'), findsNWidgets(2));
+    expect(find.textContaining('Vercel'), findsOneWidget);
+    expect(find.textContaining('Gemini'), findsNWidgets(2));
+    expect(find.textContaining('retenção zero'), findsNothing);
+    expect(find.textContaining('não treinamento'), findsNothing);
+    expect(find.textContaining('anonimizados'), findsNothing);
+    expect(find.textContaining('Firebase Analytics'), findsOneWidget);
+    expect(find.textContaining('Firebase Crashlytics'), findsOneWidget);
   });
 
   testWidgets('badge Administrador cabe em viewport realista', (tester) async {
