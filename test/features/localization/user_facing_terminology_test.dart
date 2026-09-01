@@ -260,9 +260,7 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('aparência e política exibem somente a redação autorizada', (
-    tester,
-  ) async {
+  testWidgets('aparência exibe somente a redação autorizada', (tester) async {
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
@@ -279,10 +277,44 @@ void main() {
     expect(find.textContaining('membros Pro'), findsNothing);
     expect(find.textContaining('Cyber-Minimal'), findsOneWidget);
     expect(find.textContaining('Deep Focus'), findsOneWidget);
+  });
 
+  testWidgets('política descreve segurança e telemetria sem overclaims', (
+    tester,
+  ) async {
     await tester.pumpWidget(const MaterialApp(home: PrivacyPolicyScreen()));
+
     expect(find.textContaining('(Privacy-First)'), findsNothing);
-    expect(find.textContaining('SQLCipher'), findsOneWidget);
+    expect(find.textContaining('token criptografado'), findsNothing);
+    expect(find.textContaining('SQLCipher'), findsNothing);
+    expect(find.textContaining('Hardware Secure Storage'), findsNothing);
+    expect(find.textContaining('root'), findsNothing);
+    expect(find.textContaining('banco de dados criptografado'), findsOneWidget);
+    expect(
+      find.textContaining('armazenamento seguro oferecido pelo sistema'),
+      findsOneWidget,
+    );
+    expect(
+      find.textContaining('requisições autenticadas e protegidas por HTTPS'),
+      findsOneWidget,
+    );
+    expect(find.textContaining('cópias criptografadas'), findsNothing);
+    expect(find.textContaining('E2EE'), findsNothing);
+    expect(find.textContaining('ponta a ponta'), findsNothing);
+    expect(find.textContaining('isolam estritamente'), findsNothing);
+    expect(
+      find.textContaining('garantindo que nenhum outro usuário'),
+      findsNothing,
+    );
+    expect(find.textContaining('conta autenticada'), findsOneWidget);
+    expect(find.textContaining('recursos compartilhados'), findsOneWidget);
+    expect(find.textContaining('Firebase Analytics'), findsOneWidget);
+    expect(find.textContaining('Firebase Crashlytics'), findsOneWidget);
+    expect(
+      find.textContaining('relatórios técnicos de falhas'),
+      findsOneWidget,
+    );
+    expect(find.textContaining('mensagem bruta da exceção'), findsOneWidget);
     expect(find.textContaining('Offline-First'), findsOneWidget);
     expect(find.textContaining('Batch Commit'), findsOneWidget);
   });

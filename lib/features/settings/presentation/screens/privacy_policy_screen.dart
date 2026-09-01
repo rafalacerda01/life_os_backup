@@ -44,22 +44,26 @@ class PrivacyPolicyScreen extends StatelessWidget {
                   "• **Dados de Produtividade e Hábitos:** Tarefas, metas, registros de foco e histórico de hábitos.\n"
                   "• **Dados Financeiros:** Transações (entradas e saídas) inseridas manualmente no módulo financeiro.\n"
                   "• **Dados de Saúde e Bem-Estar:** Registro de humor, hidratação, medicamentos ativos e matriz de ciclo menstrual (quando ativada pelo usuário).\n"
-                  "• **Contexto para IA (Companion):** Informações resumidas de performance enviadas de forma temporária e segura via token criptografado para processamento do assistente de inteligência artificial.",
+                  "• **Contexto para IA (Companion):** Informações resumidas de performance enviadas de forma temporária por meio de requisições autenticadas e protegidas por HTTPS para processamento do assistente de inteligência artificial.",
             ),
             _buildSection(
               "3. Armazenamento e Criptografia Local",
-              "Os dados do aplicativo são salvos localmente no dispositivo utilizando o banco de dados Drift protegido por **SQLCipher**. A chave de criptografia é gerada de forma única e isolada no Hardware Secure Storage do seu smartphone (`FlutterSecureStorage`), impedindo o acesso não autorizado por terceiros ou root.",
+              "Os dados do aplicativo são salvos localmente no dispositivo em um banco de dados criptografado. A chave de criptografia é gerada aleatoriamente e mantida no armazenamento seguro oferecido pelo sistema operacional.",
             ),
             _buildSection(
               "4. Sincronização em Nuvem (Firebase)",
-              "Para garantir a portabilidade entre dispositivos (Offline-First), o Life OS sincroniza cópias criptografadas dos registros com o ecossistema Firebase (Firestore). Todas as regras de segurança do banco de dados isolam estritamente os documentos por ID de usuário (`uid`), garantindo que nenhum outro usuário tenha acesso às suas informações.",
+              "Para garantir a portabilidade entre dispositivos (Offline-First), o Life OS sincroniza registros com o ecossistema Firebase (Firestore). As comunicações são protegidas por HTTPS, e o Firestore protege os dados armazenados com os mecanismos de segurança do provedor. Controles de acesso vinculam os dados privados à conta autenticada, enquanto recursos compartilhados, como Círculos, seguem as permissões próprias do recurso.",
             ),
             _buildSection(
-              "5. Exclusão de Conta e Dados",
+              "5. Métricas e Relatórios Técnicos",
+              "Quando o Firebase Analytics estiver habilitado na plataforma e na configuração do serviço, o Life OS pode coletar métricas de uso para compreender o funcionamento do aplicativo. Em versões de produção, o Firebase Crashlytics pode receber relatórios técnicos de falhas para diagnóstico e estabilidade. O aplicativo sanitiza o conteúdo dos erros que registra, evitando o envio da mensagem bruta da exceção.",
+            ),
+            _buildSection(
+              "6. Exclusão de Conta e Dados",
               "Você possui controle total sobre suas informações. Ao acionar a opção de deletar a conta nas configurações do aplicativo, o Life OS executa uma limpeza atômica em lote (*Batch Commit*), removendo permanentemente todas as suas subcoleções na nuvem (finanças, saúde, check-ins, círculos) e apagando integralmente o banco de dados local do dispositivo.",
             ),
             _buildSection(
-              "6. Contato",
+              "7. Contato",
               "Se tiver dúvidas sobre esta Política de Privacidade ou sobre o tratamento de seus dados, entre em contato com a equipe de engenharia e suporte do Life OS através do painel de configurações.",
             ),
             const SizedBox(height: 40),
