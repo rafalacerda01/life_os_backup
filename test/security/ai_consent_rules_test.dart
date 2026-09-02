@@ -10,7 +10,7 @@ void main() {
   late String rules;
 
   setUpAll(() async {
-    rules = await File('firestore.rules').readAsString();
+    rules = (await File('firestore.rules').readAsString()).replaceAll('\r\n', '\n');
   });
 
   test('privacy rules contêm proteção de owner e bloqueio de delete', () {
