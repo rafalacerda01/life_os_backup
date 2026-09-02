@@ -513,6 +513,46 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
   test(
+    'falha SQLite preserva barrier e impede signOut ate retry seguro',
+    () async {
+      final harness = await _Harness.create(<int>[0, 0]);
+      addTearDown(harness.dispose);
+      final db = harness.database;
+      await db
+          .into(db.taskTable)
+          .insert(
+            TaskTableCompanion.insert(
+              id: 'cleanup-test',
+              title: 'Test task',
+              priority: 'normal',
+              date: DateTime(2026, 9, 2),
+            ),
+          );
+      await db.customStatement('''
+      CREATE TEMP TRIGGER fail_cleanup BEFORE DELETE ON task_table
+      BEGIN SELECT RAISE(ABORT, 'TEST_CLEANUP_FAILURE'); END
+    ''');
+
+      await harness.notifier.logout();
+
+      expect(harness.state, isA<AuthError>());
+      expect(harness.repository.signOutCalls, 0);
+      expect(harness.auth.currentUser?.uid, _userA.uid);
+      expect(harness.authority.preparedUserId, isNull);
+      expect((await harness.readPendingCleanup())?.userId, _userA.uid);
+      expect(await db.select(db.taskTable).get(), hasLength(1));
+
+      await db.customStatement('DROP TRIGGER fail_cleanup');
+      await harness.notifier.logout();
+
+      expect(harness.state, isA<AuthUnauthenticated>());
+      expect(harness.repository.signOutCalls, 1);
+      expect(await db.select(db.taskTable).get(), isEmpty);
+      expect(await harness.readPendingCleanup(), isNull);
+    },
+  );
+
+  test(
     'logout termina Firestore após failed-precondition e repete clear',
     () async {
       final firestore = _ScriptedFirestore(

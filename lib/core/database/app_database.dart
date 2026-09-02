@@ -484,15 +484,23 @@ class AppDatabase extends _$AppDatabase {
   /// Esta operação é destrutiva e NÃO deve ser chamada durante
   /// um simples refresh de sessão.
   Future<void> clearAllData() async {
-    await transaction(() async {
-      await customStatement('PRAGMA foreign_keys = OFF');
-
+    await exclusively(() async {
       try {
-        for (final table in allTables) {
-          await delete(table).go();
+        // Keep the security cleanup commit durable without changing normal use.
+        await customStatement('PRAGMA synchronous = FULL');
+        try {
+          // SQLite only applies foreign_keys changes outside a transaction.
+          await customStatement('PRAGMA foreign_keys = OFF');
+          await transaction(() async {
+            for (final table in allTables) {
+              await delete(table).go();
+            }
+          });
+        } finally {
+          await customStatement('PRAGMA foreign_keys = ON');
         }
       } finally {
-        await customStatement('PRAGMA foreign_keys = ON');
+        await customStatement('PRAGMA synchronous = NORMAL');
       }
     });
   }
