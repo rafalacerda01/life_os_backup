@@ -24,7 +24,9 @@ class _RecordingNotificationsPlugin extends Fake
   DidReceiveBackgroundNotificationResponseCallback? backgroundCallback;
   NotificationAppLaunchDetails? launchDetails;
   final List<int> cancelledIds = <int>[];
+  int cancelAllCalls = 0;
   bool throwOnSchedule = false;
+  bool throwOnCancelAll = false;
   Future<bool?> Function(int call)? initializeHandler;
 
   @override
@@ -88,6 +90,14 @@ class _RecordingNotificationsPlugin extends Fake
   Future<void> cancel({required int id, String? tag}) async {
     cancelledIds.add(id);
   }
+
+  @override
+  Future<void> cancelAll() async {
+    cancelAllCalls += 1;
+    if (throwOnCancelAll) {
+      throw StateError('private cancel all failure');
+    }
+  }
 }
 
 class _FakeAndroidNotificationsPlugin extends Fake
@@ -130,6 +140,35 @@ void main() {
 
   setUp(() {
     SharedPreferences.setMockInitialValues(<String, Object>{});
+  });
+
+  test('cancelamento estrito chama o plugin e conclui', () async {
+    final plugin = _RecordingNotificationsPlugin();
+    final service = NotificationService(notificationsPlugin: plugin);
+
+    await service.cancelAllNotificationsOrThrow();
+
+    expect(plugin.cancelAllCalls, 1);
+  });
+
+  test('cancelamento estrito propaga falha do plugin', () async {
+    final plugin = _RecordingNotificationsPlugin()..throwOnCancelAll = true;
+    final service = NotificationService(notificationsPlugin: plugin);
+
+    await expectLater(
+      service.cancelAllNotificationsOrThrow(),
+      throwsStateError,
+    );
+    expect(plugin.cancelAllCalls, 1);
+  });
+
+  test('cancelamento best-effort preserva falha isolada da UI', () async {
+    final plugin = _RecordingNotificationsPlugin()..throwOnCancelAll = true;
+    final service = NotificationService(notificationsPlugin: plugin);
+
+    await service.cancelAllNotifications();
+
+    expect(plugin.cancelAllCalls, 1);
   });
 
   test('all_notifications false bloqueia showNotification', () async {

@@ -38,6 +38,14 @@ import 'package:life_os/core/database/database_provider.dart';
 final firebaseAuthProvider = Provider((ref) => FirebaseAuth.instance);
 final firestoreProvider = Provider((ref) => FirebaseFirestore.instance);
 
+typedef AuthNotificationCleanup = Future<void> Function();
+
+final authNotificationCleanupProvider = Provider<AuthNotificationCleanup>((
+  ref,
+) {
+  return NotificationService.instance.cancelAllNotificationsOrThrow;
+});
+
 // Provider de Armazenamento Seguro
 final secureStorageProvider = Provider<FlutterSecureStorage>((ref) {
   return const FlutterSecureStorage();
@@ -785,7 +793,7 @@ class AuthNotifier extends Notifier<AuthState> {
     }
 
     try {
-      await NotificationService.instance.cancelAllNotifications();
+      await ref.read(authNotificationCleanupProvider)();
     } on Object {
       cleanupFailed = true;
     }

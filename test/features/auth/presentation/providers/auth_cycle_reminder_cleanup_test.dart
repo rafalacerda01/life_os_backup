@@ -319,6 +319,21 @@ class _ScriptedPreferencesDeletion {
   }
 }
 
+class _ScriptedNotificationCleanup {
+  _ScriptedNotificationCleanup({this.failuresRemaining = 0});
+
+  int failuresRemaining;
+  int calls = 0;
+
+  Future<void> call() async {
+    calls += 1;
+    if (failuresRemaining > 0) {
+      failuresRemaining -= 1;
+      throw StateError('private notification cleanup failure');
+    }
+  }
+}
+
 class _Harness {
   _Harness._({
     required this.auth,
@@ -330,6 +345,7 @@ class _Harness {
     required this.lifecycle,
     required this.rotation,
     required this.preferencesDeletion,
+    required this.notificationCleanup,
     required this.coordinator,
     required this.barrierStorage,
     required this.container,
@@ -344,6 +360,7 @@ class _Harness {
   final _ScriptedLifecycle lifecycle;
   final _ScriptedTokenRotation rotation;
   final _ScriptedPreferencesDeletion preferencesDeletion;
+  final _ScriptedNotificationCleanup notificationCleanup;
   final _SessionCoordinator coordinator;
   final _MemoryBarrierStorage barrierStorage;
   final ProviderContainer container;
@@ -374,6 +391,7 @@ class _Harness {
     Iterable<int> cancellationResults, {
     int rotationFailures = 0,
     int preferenceDeletionFailures = 0,
+    int notificationCleanupFailures = 0,
     bool failSignOut = false,
     _MemoryBarrierStorage? barrierStorage,
     _ScriptedTokenRotation? tokenRotation,
@@ -416,6 +434,9 @@ class _Harness {
       failuresRemaining: preferenceDeletionFailures,
       events: lifecycleEvents,
     );
+    final notificationCleanup = _ScriptedNotificationCleanup(
+      failuresRemaining: notificationCleanupFailures,
+    );
     final durableStorage = barrierStorage ?? _MemoryBarrierStorage();
     final coordinator = _SessionCoordinator(authority, epoch);
     final cleanup = CycleReminderSessionCleanup(
@@ -440,6 +461,9 @@ class _Harness {
           _SessionRestore(),
         ),
         cycleReminderSessionCleanupProvider.overrideWithValue(cleanup),
+        authNotificationCleanupProvider.overrideWithValue(
+          notificationCleanup.call,
+        ),
         authCleanupBarrierProvider.overrideWithValue(
           AuthCleanupBarrierStore(durableStorage),
         ),
@@ -471,6 +495,7 @@ class _Harness {
       lifecycle: lifecycle,
       rotation: rotation,
       preferencesDeletion: preferencesDeletion,
+      notificationCleanup: notificationCleanup,
       coordinator: coordinator,
       barrierStorage: durableStorage,
       container: container,
@@ -652,10 +677,34 @@ void main() {
     expect(harness.lifecycle.cancellationCalls, 1);
     expect(harness.rotation.calls, 1);
     expect(harness.preferencesDeletion.userIds, <String>[_userA.uid]);
+    expect(harness.notificationCleanup.calls, 2);
     expect(harness.repository.signOutCalls, 1);
     expect(harness.authority.preparedUserId, isNull);
     expect(await harness.readPendingCleanup(), isNull);
   });
+
+  test(
+    'falha no cancelamento global bloqueia sign-out e retry faz duas passagens',
+    () async {
+      final harness = await _Harness.create(<int>[
+        0,
+        0,
+      ], notificationCleanupFailures: 1);
+      addTearDown(harness.dispose);
+
+      await harness.notifier.logout();
+
+      expect(harness.state, isA<AuthError>());
+      expect(harness.notificationCleanup.calls, 1);
+      expect(harness.repository.signOutCalls, 0);
+
+      await harness.notifier.logout();
+
+      expect(harness.state, isA<AuthUnauthenticated>());
+      expect(harness.notificationCleanup.calls, 3);
+      expect(harness.repository.signOutCalls, 1);
+    },
+  );
 
   test(
     'falha ao excluir preferências bloqueia logout e retry conclui',

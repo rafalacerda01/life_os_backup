@@ -481,12 +481,15 @@ class NotificationService {
 
   Future<void> cancelAllNotifications() async {
     try {
-      await init();
-
-      await _notificationsPlugin.cancelAll();
+      await cancelAllNotificationsOrThrow();
     } catch (_) {
       // Não propagar erro para o fluxo principal.
     }
+  }
+
+  Future<void> cancelAllNotificationsOrThrow() async {
+    await init();
+    await _notificationsPlugin.cancelAll();
   }
 
   Future<bool> _isEnabled(String? preferenceKey) async {

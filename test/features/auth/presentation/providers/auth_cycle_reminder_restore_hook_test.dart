@@ -82,7 +82,7 @@ void main() {
     final tokenCleanup = method.indexOf('await secureStorage.deleteToken();');
     final driftCleanup = method.indexOf('await db.clearAllData();');
     final notificationCleanup = method.indexOf(
-      'await NotificationService.instance.cancelAllNotifications();',
+      'await ref.read(authNotificationCleanupProvider)();',
     );
 
     expect(actionClear, greaterThanOrEqualTo(0));
