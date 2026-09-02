@@ -9,16 +9,21 @@ import 'package:life_os/features/auth/data/remote/account_remote_data_source.dar
 
 const _url = 'https://example.test/api/account/delete';
 const _token = 'sensitive-firebase-token';
+const _appCheckToken = 'mock-app-check-token';
+const _appCheckMessage =
+    'Não foi possível validar a segurança do aplicativo. Tente novamente.';
 const _uid = 'user-a';
 
 AccountRemoteDataSource _source(
   MockClient client, {
   AccountIdTokenProvider? tokenProvider,
+  AccountAppCheckTokenProvider? appCheckTokenProvider,
   Duration timeout = AccountRemoteDataSource.defaultTimeout,
 }) {
   return AccountRemoteDataSource(
     client: client,
     idTokenProvider: tokenProvider ?? (_) async => _token,
+    appCheckTokenProvider: appCheckTokenProvider ?? () async => _appCheckToken,
     url: _url,
     timeout: timeout,
   );
@@ -68,6 +73,7 @@ void main() {
   test('envia POST exato com token provider e corpo vazio', () async {
     late http.Request captured;
     var tokenCalls = 0;
+    var appCheckCalls = 0;
     final source = _source(
       MockClient((request) async {
         captured = request;
@@ -81,6 +87,11 @@ void main() {
         expect(expectedUid, _uid);
         return _token;
       },
+      appCheckTokenProvider: () async {
+        expect(tokenCalls, 1);
+        appCheckCalls += 1;
+        return _appCheckToken;
+      },
     );
 
     final result = await source.deleteAccount(expectedUid: _uid);
@@ -89,6 +100,7 @@ void main() {
     expect(captured.url, Uri.parse(_url));
     expect(captured.headers['content-type'], 'application/json');
     expect(captured.headers['authorization'], 'Bearer $_token');
+    expect(captured.headers['x-firebase-appcheck'], _appCheckToken);
     expect(captured.body, '{}');
     expect(jsonDecode(captured.body), <String, dynamic>{});
     expect(captured.body, isNot(contains('uid')));
@@ -96,6 +108,7 @@ void main() {
     expect(captured.body, isNot(contains('password')));
     expect(captured.body, isNot(contains('activeCircleId')));
     expect(tokenCalls, 1);
+    expect(appCheckCalls, 1);
     expect(result.circleDeleted, isFalse);
   });
 
@@ -175,6 +188,8 @@ void main() {
   });
 
   for (final testCase in [
+    (status: 401, code: 'APP_CHECK_REQUIRED', message: _appCheckMessage),
+    (status: 401, code: 'APP_CHECK_INVALID', message: _appCheckMessage),
     (
       status: 401,
       code: 'UNAUTHENTICATED',
@@ -207,7 +222,7 @@ void main() {
         MockClient(
           (_) async => http.Response(
             jsonEncode({
-              'error': 'raw backend details with $_token',
+              'error': 'raw backend details with $_token $_appCheckToken',
               'code': testCase.code,
             }),
             testCase.status,
@@ -224,6 +239,8 @@ void main() {
       expect(error.message, testCase.message);
       expect(error.isAmbiguous, isFalse);
       expect(error.message, isNot(contains(_token)));
+      expect(error.message, isNot(contains(_appCheckToken)));
+      expect(error.toString(), isNot(contains(_appCheckToken)));
     });
   }
 
@@ -324,19 +341,96 @@ void main() {
     expect(error.toString(), isNot(contains(_token)));
   });
 
-  test('token ausente falha antes de enviar request', () async {
+  for (final token in <String?>[null, '', '   ']) {
+    test('App Check ausente/vazio ($token) impede HTTP', () async {
+      var requests = 0;
+      final source = _source(
+        MockClient((_) async {
+          requests += 1;
+          return http.Response('{}', 200);
+        }),
+        appCheckTokenProvider: () async => token,
+      );
+
+      final error = await _capture(
+        () => source.deleteAccount(expectedUid: _uid),
+      );
+
+      expect(requests, 0);
+      expect(error.statusCode, isNull);
+      expect(error.code, 'APP_CHECK_REQUIRED');
+      expect(error.message, _appCheckMessage);
+      expect(error.isAmbiguous, isFalse);
+    });
+  }
+
+  test('falha do provider App Check impede HTTP e sanitiza o erro', () async {
     var requests = 0;
     final source = _source(
       MockClient((_) async {
         requests += 1;
         return http.Response('{}', 200);
       }),
-      tokenProvider: (_) async => ' ',
+      appCheckTokenProvider: () async {
+        throw StateError('private Firebase error $_appCheckToken $_token');
+      },
     );
 
     final error = await _capture(() => source.deleteAccount(expectedUid: _uid));
 
     expect(requests, 0);
+    expect(error.statusCode, isNull);
+    expect(error.code, 'APP_CHECK_INVALID');
+    expect(error.message, _appCheckMessage);
+    expect(error.isAmbiguous, isFalse);
+    for (final privateValue in [
+      _appCheckToken,
+      _token,
+      'private Firebase error',
+    ]) {
+      expect(error.message, isNot(contains(privateValue)));
+      expect(error.toString(), isNot(contains(privateValue)));
+    }
+  });
+
+  test('timeout do provider App Check impede HTTP sem ambiguidade', () async {
+    var requests = 0;
+    final source = _source(
+      MockClient((_) async {
+        requests += 1;
+        return http.Response('{}', 200);
+      }),
+      appCheckTokenProvider: () => Completer<String?>().future,
+      timeout: const Duration(milliseconds: 1),
+    );
+
+    final error = await _capture(() => source.deleteAccount(expectedUid: _uid));
+
+    expect(requests, 0);
+    expect(error.code, 'APP_CHECK_INVALID');
+    expect(error.message, _appCheckMessage);
+    expect(error.isAmbiguous, isFalse);
+  });
+
+  test('token ausente falha antes de App Check e request', () async {
+    var requests = 0;
+    var appCheckCalls = 0;
+    final source = _source(
+      MockClient((_) async {
+        requests += 1;
+        return http.Response('{}', 200);
+      }),
+      tokenProvider: (_) async => ' ',
+      appCheckTokenProvider: () async {
+        appCheckCalls += 1;
+        return _appCheckToken;
+      },
+    );
+
+    final error = await _capture(() => source.deleteAccount(expectedUid: _uid));
+
+    expect(requests, 0);
+    expect(appCheckCalls, 0);
     expect(error.code, 'UNAUTHENTICATED');
     expect(error.isAmbiguous, isFalse);
   });

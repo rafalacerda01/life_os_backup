@@ -1,10 +1,12 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:firebase_app_check/firebase_app_check.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:http/http.dart' as http;
 
 typedef AccountIdTokenProvider = Future<String?> Function(String expectedUid);
+typedef AccountAppCheckTokenProvider = Future<String?> Function();
 
 class AccountDeletionResponse {
   final bool circleDeleted;
@@ -40,6 +42,7 @@ class AccountRemoteDataSource {
 
   final http.Client _client;
   final AccountIdTokenProvider _idTokenProvider;
+  final AccountAppCheckTokenProvider _appCheckTokenProvider;
   final Uri _url;
   final Duration _timeout;
   final bool _ownsClient;
@@ -47,10 +50,13 @@ class AccountRemoteDataSource {
   AccountRemoteDataSource({
     http.Client? client,
     AccountIdTokenProvider? idTokenProvider,
+    AccountAppCheckTokenProvider? appCheckTokenProvider,
     String url = defaultUrl,
     Duration timeout = defaultTimeout,
   }) : _client = client ?? http.Client(),
        _idTokenProvider = idTokenProvider ?? _firebaseIdTokenProvider,
+       _appCheckTokenProvider =
+           appCheckTokenProvider ?? _firebaseAppCheckTokenProvider,
        _url = _parseUrl(url),
        _timeout = timeout,
        _ownsClient = client == null {
@@ -73,6 +79,7 @@ class AccountRemoteDataSource {
     }
 
     final token = await _loadFreshToken(normalizedExpectedUid);
+    final appCheckToken = await _loadAppCheckToken();
     http.Response response;
 
     try {
@@ -82,6 +89,7 @@ class AccountRemoteDataSource {
             headers: {
               'Content-Type': 'application/json',
               'Authorization': 'Bearer $token',
+              'X-Firebase-AppCheck': appCheckToken,
             },
             body: jsonEncode(<String, dynamic>{}),
           )
@@ -192,6 +200,32 @@ class AccountRemoteDataSource {
     return token.trim();
   }
 
+  Future<String> _loadAppCheckToken() async {
+    String? token;
+    try {
+      token = await _appCheckTokenProvider().timeout(_timeout);
+    } catch (_) {
+      throw const AccountRemoteException(
+        statusCode: null,
+        code: 'APP_CHECK_INVALID',
+        message: _appCheckFailureMessage,
+        isAmbiguous: false,
+      );
+    }
+    if (token == null || token.trim().isEmpty) {
+      throw const AccountRemoteException(
+        statusCode: null,
+        code: 'APP_CHECK_REQUIRED',
+        message: _appCheckFailureMessage,
+        isAmbiguous: false,
+      );
+    }
+    return token.trim();
+  }
+
+  static const _appCheckFailureMessage =
+      'Não foi possível validar a segurança do aplicativo. Tente novamente.';
+
   static AccountRemoteException _backendException(http.Response response) {
     if (response.statusCode >= 500) {
       return AccountRemoteException(
@@ -226,6 +260,9 @@ class AccountRemoteDataSource {
 
   static String _safeMessage(String code, int statusCode) {
     switch (code) {
+      case 'APP_CHECK_REQUIRED':
+      case 'APP_CHECK_INVALID':
+        return _appCheckFailureMessage;
       case 'CIRCLE_ADMIN_ACTION_REQUIRED':
         return 'Antes de excluir sua conta, exclua o Circle que você '
             'administra.';
@@ -246,6 +283,8 @@ class AccountRemoteDataSource {
   }
 
   static const Set<String> _knownBackendCodes = {
+    'APP_CHECK_REQUIRED',
+    'APP_CHECK_INVALID',
     'CIRCLE_ADMIN_ACTION_REQUIRED',
     'ACCOUNT_STATE_CONFLICT',
     'REAUTHENTICATION_REQUIRED',
@@ -264,6 +303,10 @@ class AccountRemoteDataSource {
     }
     return uri;
   }
+}
+
+Future<String?> _firebaseAppCheckTokenProvider() {
+  return FirebaseAppCheck.instance.getToken();
 }
 
 Future<String?> _firebaseIdTokenProvider(String expectedUid) {
