@@ -23,6 +23,11 @@ class _MemoryCycleStorage implements CycleReminderPreferencesStorage {
   final Map<String, String> values = <String, String>{};
 
   @override
+  Future<void> delete(String key) async {
+    values.remove(key);
+  }
+
+  @override
   Future<String?> read(String key) async => values[key];
 
   @override
@@ -421,6 +426,7 @@ void main() {
         mutationGate,
         lifecycle,
         rotateActionToken: (_) async {},
+        deletePreferences: (_) async {},
       );
       final reconciler = CycleReminderSessionReconciler(
         loadCyclePreferences: (_) async => _preferences('antiga'),
@@ -472,6 +478,7 @@ void main() {
         mutationGate,
         lifecycle,
         rotateActionToken: (_) async {},
+        deletePreferences: (_) async {},
       );
       final authority = CycleReminderSessionAuthority()..prepare(_userA);
       const firebaseUserId = _userA;
@@ -533,6 +540,7 @@ void main() {
         mutationGate,
         lifecycle,
         rotateActionToken: (_) async {},
+        deletePreferences: (_) async {},
       );
       final reconciler = CycleReminderSessionReconciler(
         loadCyclePreferences: (_) async => _preferences('antiga'),
@@ -572,6 +580,7 @@ void main() {
       mutationGate,
       lifecycle,
       rotateActionToken: (_) async {},
+      deletePreferences: (_) async {},
     );
     var currentUserId = _userA;
     final reconciler = CycleReminderSessionReconciler(

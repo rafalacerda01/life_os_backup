@@ -300,6 +300,25 @@ class _ScriptedTokenRotation {
   }
 }
 
+class _ScriptedPreferencesDeletion {
+  _ScriptedPreferencesDeletion({this.failuresRemaining = 0, this.events});
+
+  int failuresRemaining;
+  final List<String>? events;
+  int calls = 0;
+  final List<String> userIds = <String>[];
+
+  Future<void> call(String userId) async {
+    calls += 1;
+    userIds.add(userId);
+    events?.add('delete:$userId');
+    if (failuresRemaining > 0) {
+      failuresRemaining -= 1;
+      throw StateError('private preferences deletion failure');
+    }
+  }
+}
+
 class _Harness {
   _Harness._({
     required this.auth,
@@ -310,6 +329,7 @@ class _Harness {
     required this.epoch,
     required this.lifecycle,
     required this.rotation,
+    required this.preferencesDeletion,
     required this.coordinator,
     required this.barrierStorage,
     required this.container,
@@ -323,6 +343,7 @@ class _Harness {
   final CycleReminderOperationEpoch epoch;
   final _ScriptedLifecycle lifecycle;
   final _ScriptedTokenRotation rotation;
+  final _ScriptedPreferencesDeletion preferencesDeletion;
   final _SessionCoordinator coordinator;
   final _MemoryBarrierStorage barrierStorage;
   final ProviderContainer container;
@@ -352,6 +373,7 @@ class _Harness {
   static Future<_Harness> create(
     Iterable<int> cancellationResults, {
     int rotationFailures = 0,
+    int preferenceDeletionFailures = 0,
     bool failSignOut = false,
     _MemoryBarrierStorage? barrierStorage,
     _ScriptedTokenRotation? tokenRotation,
@@ -390,12 +412,17 @@ class _Harness {
     final rotation =
         tokenRotation ??
         _ScriptedTokenRotation(failuresRemaining: rotationFailures);
+    final preferencesDeletion = _ScriptedPreferencesDeletion(
+      failuresRemaining: preferenceDeletionFailures,
+      events: lifecycleEvents,
+    );
     final durableStorage = barrierStorage ?? _MemoryBarrierStorage();
     final coordinator = _SessionCoordinator(authority, epoch);
     final cleanup = CycleReminderSessionCleanup(
       mutationGate,
       lifecycle,
       rotateActionToken: rotation.call,
+      deletePreferences: preferencesDeletion.call,
     );
     final container = ProviderContainer(
       overrides: [
@@ -443,6 +470,7 @@ class _Harness {
       epoch: epoch,
       lifecycle: lifecycle,
       rotation: rotation,
+      preferencesDeletion: preferencesDeletion,
       coordinator: coordinator,
       barrierStorage: durableStorage,
       container: container,
@@ -623,10 +651,37 @@ void main() {
     expect(harness.state, isA<AuthUnauthenticated>());
     expect(harness.lifecycle.cancellationCalls, 1);
     expect(harness.rotation.calls, 1);
+    expect(harness.preferencesDeletion.userIds, <String>[_userA.uid]);
     expect(harness.repository.signOutCalls, 1);
     expect(harness.authority.preparedUserId, isNull);
     expect(await harness.readPendingCleanup(), isNull);
   });
+
+  test(
+    'falha ao excluir preferências bloqueia logout e retry conclui',
+    () async {
+      final harness = await _Harness.create(<int>[
+        0,
+        0,
+      ], preferenceDeletionFailures: 1);
+      addTearDown(harness.dispose);
+
+      await harness.notifier.logout();
+
+      expect(harness.state, isA<AuthError>());
+      expect(harness.preferencesDeletion.userIds, <String>[_userA.uid]);
+      expect(harness.repository.signOutCalls, 0);
+
+      await harness.notifier.logout();
+
+      expect(harness.state, isA<AuthUnauthenticated>());
+      expect(harness.preferencesDeletion.userIds, <String>[
+        _userA.uid,
+        _userA.uid,
+      ]);
+      expect(harness.repository.signOutCalls, 1);
+    },
+  );
 
   test('falha de rotação bloqueia logout e retry posterior conclui', () async {
     final harness = await _Harness.create(<int>[0], rotationFailures: 1);
@@ -818,6 +873,7 @@ void main() {
     );
 
     expect(rotation.userIds, <String>[_userA.uid]);
+    expect(harness.preferencesDeletion.userIds, <String>[_userA.uid]);
     expect(harness.coordinator.preparedUserIds, <String>['user-b']);
     expect(events, <String>['rotate:user-a', 'prepare:user-b']);
     expect(await harness.readPendingCleanup(), isNull);
@@ -842,6 +898,7 @@ void main() {
 
     expect(rotation.userIds, <String>[_userA.uid]);
     expect(harness.lifecycle.cancellationCalls, 1);
+    expect(harness.preferencesDeletion.userIds, <String>[_userA.uid]);
     expect(harness.coordinator.preparedUserIds, isEmpty);
     expect(await harness.readPendingCleanup(), isNull);
   });
@@ -951,6 +1008,7 @@ void main() {
       expect((harness.state as AuthAuthenticated).user.uid, _userB.uid);
       expect(events, <String>[
         'cleanup:${_userA.uid}',
+        'delete:${_userA.uid}',
         'prepare:${_userB.uid}',
       ]);
       expect(
@@ -971,6 +1029,7 @@ void main() {
 
     expect(harness.repository.deletedExpectedUserIds, <String>[_userA.uid]);
     expect(harness.lifecycle.cancelledUserIds, <String>[_userA.uid]);
+    expect(harness.preferencesDeletion.userIds, <String>[_userA.uid]);
     expect(harness.state, isA<AuthUnauthenticated>());
     expect(harness.auth.currentUser, isNull);
     expect(await harness.readPendingCleanup(), isNull);

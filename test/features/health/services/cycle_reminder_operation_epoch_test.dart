@@ -336,6 +336,7 @@ void main() {
         mutationGate,
         lifecycle,
         rotateActionToken: (_) async {},
+        deletePreferences: (_) async {},
       );
       final coordinator = _coordinator(
         epoch: epoch,
@@ -386,6 +387,7 @@ void main() {
         mutationGate,
         lifecycle,
         rotateActionToken: (_) async {},
+        deletePreferences: (_) async {},
       );
       final coordinator = _coordinator(
         epoch: epoch,
@@ -427,6 +429,7 @@ void main() {
       mutationGate,
       lifecycle,
       rotateActionToken: (_) async {},
+      deletePreferences: (_) async {},
     );
     final coordinator = _coordinator(
       epoch: epoch,
@@ -640,6 +643,7 @@ void main() {
       mutationGate,
       lifecycle,
       rotateActionToken: (_) async {},
+      deletePreferences: (_) async {},
     );
     final coordinator = _coordinator(
       epoch: epoch,

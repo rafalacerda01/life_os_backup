@@ -332,11 +332,13 @@ final cycleReminderActionCoordinatorProvider =
 final cycleReminderSessionCleanupProvider =
     Provider<CycleReminderSessionCleanup>((ref) {
       final tokenStore = ref.watch(cycleReminderActionTokenStoreProvider);
+      final preferencesStore = ref.watch(cycleReminderPreferencesStoreProvider);
       return CycleReminderSessionCleanup(
         ref.watch(cycleReminderMutationGateProvider),
         ref.watch(cycleReminderNotificationLifecycleProvider),
         rotateActionToken: (userId) async {
           await tokenStore.rotate(userId);
         },
+        deletePreferences: preferencesStore.delete,
       );
     });

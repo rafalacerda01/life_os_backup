@@ -60,6 +60,11 @@ class _MemoryCycleReminderStorage implements CycleReminderPreferencesStorage {
   final Map<String, String> values = <String, String>{};
 
   @override
+  Future<void> delete(String key) async {
+    values.remove(key);
+  }
+
+  @override
   Future<String?> read(String key) async => values[key];
 
   @override

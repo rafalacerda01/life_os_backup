@@ -7,6 +7,14 @@ class _MemoryStorage implements CycleReminderPreferencesStorage {
   final values = <String, String>{};
   int writeCount = 0;
   Object? readError;
+  Object? deleteError;
+
+  @override
+  Future<void> delete(String key) async {
+    final error = deleteError;
+    if (error != null) throw error;
+    values.remove(key);
+  }
 
   @override
   Future<String?> read(String key) async {
@@ -227,6 +235,39 @@ void main() {
     await store.save('user-a', preferences);
 
     expect(await store.load('user-b'), isNull);
+    expect(await store.load('user-a'), isNotNull);
+  });
+
+  test('excluir preferências de A preserva preferências de B', () async {
+    final preferences = CycleReminderPreferences(
+      enabled: true,
+      type: CycleReminderType.personal,
+      hour: 9,
+      minute: 0,
+      frequency: CycleReminderFrequency.daily,
+    );
+    await store.save('user-a', preferences);
+    await store.save('user-b', preferences);
+
+    await store.delete('user-a');
+
+    expect(await store.load('user-a'), isNull);
+    expect(await store.load('user-b'), isNotNull);
+    expect(storage.values, hasLength(1));
+  });
+
+  test('falha ao excluir preferências continua propagando', () async {
+    final preferences = CycleReminderPreferences(
+      enabled: true,
+      type: CycleReminderType.personal,
+      hour: 9,
+      minute: 0,
+      frequency: CycleReminderFrequency.daily,
+    );
+    await store.save('user-a', preferences);
+    storage.deleteError = StateError('STORAGE_DELETE_FAILED');
+
+    await expectLater(store.delete('user-a'), throwsStateError);
     expect(await store.load('user-a'), isNotNull);
   });
 

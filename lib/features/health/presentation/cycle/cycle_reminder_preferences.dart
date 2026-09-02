@@ -173,6 +173,8 @@ abstract interface class CycleReminderPreferencesStorage {
   Future<String?> read(String key);
 
   Future<void> write(String key, String value);
+
+  Future<void> delete(String key);
 }
 
 class SecureCycleReminderPreferencesStorage
@@ -187,6 +189,9 @@ class SecureCycleReminderPreferencesStorage
   @override
   Future<void> write(String key, String value) =>
       _storage.write(key: key, value: value);
+
+  @override
+  Future<void> delete(String key) => _storage.delete(key: key);
 }
 
 class CycleReminderPreferencesStore {
@@ -215,6 +220,11 @@ class CycleReminderPreferencesStore {
   Future<void> save(String userId, CycleReminderPreferences preferences) {
     final key = _keyFor(userId);
     return _storage.write(key, jsonEncode(preferences.toJson()));
+  }
+
+  Future<void> delete(String userId) {
+    final key = _keyFor(userId);
+    return _storage.delete(key);
   }
 
   String _keyFor(String userId) {
