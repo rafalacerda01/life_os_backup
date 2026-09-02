@@ -1,5 +1,7 @@
+import 'dart:async';
 import 'dart:convert';
 
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
@@ -7,6 +9,7 @@ import 'package:life_os/features/auth/data/remote/account_remote_data_source.dar
 
 const _url = 'https://example.test/api/account/delete';
 const _token = 'sensitive-firebase-token';
+const _uid = 'user-a';
 
 AccountRemoteDataSource _source(
   MockClient client, {
@@ -15,10 +18,39 @@ AccountRemoteDataSource _source(
 }) {
   return AccountRemoteDataSource(
     client: client,
-    idTokenProvider: tokenProvider ?? () async => _token,
+    idTokenProvider: tokenProvider ?? (_) async => _token,
     url: _url,
     timeout: timeout,
   );
+}
+
+class _FirebaseAuth extends Fake implements FirebaseAuth {
+  User? user;
+
+  @override
+  User? get currentUser => user;
+}
+
+class _FirebaseUser extends Fake implements User {
+  _FirebaseUser(
+    this.uid, {
+    this.token = _token,
+    this.tokenStarted,
+    this.allowToken,
+  });
+
+  @override
+  final String uid;
+  final String token;
+  final Completer<void>? tokenStarted;
+  final Completer<void>? allowToken;
+
+  @override
+  Future<String?> getIdToken([bool forceRefresh = false]) async {
+    tokenStarted?.complete();
+    await allowToken?.future;
+    return token;
+  }
 }
 
 Future<AccountRemoteException> _capture(
@@ -44,13 +76,14 @@ void main() {
           200,
         );
       }),
-      tokenProvider: () async {
+      tokenProvider: (expectedUid) async {
         tokenCalls += 1;
+        expect(expectedUid, _uid);
         return _token;
       },
     );
 
-    final result = await source.deleteAccount();
+    final result = await source.deleteAccount(expectedUid: _uid);
 
     expect(captured.method, 'POST');
     expect(captured.url, Uri.parse(_url));
@@ -77,7 +110,7 @@ void main() {
     expect(
       () => AccountRemoteDataSource(
         client: MockClient((_) async => http.Response('{}', 200)),
-        idTokenProvider: () async => _token,
+        idTokenProvider: (_) async => _token,
         url: 'http://example.test/api/account/delete',
       ),
       throwsArgumentError,
@@ -96,7 +129,7 @@ void main() {
         ),
       );
 
-      final result = await source.deleteAccount();
+      final result = await source.deleteAccount(expectedUid: _uid);
 
       expect(result.circleDeleted, isTrue);
     },
@@ -114,7 +147,9 @@ void main() {
         MockClient((_) async => http.Response(responseBody, 200)),
       );
 
-      final error = await _capture(source.deleteAccount);
+      final error = await _capture(
+        () => source.deleteAccount(expectedUid: _uid),
+      );
 
       expect(error.statusCode, 200);
       expect(error.code, 'ACCOUNT_DELETE_AMBIGUOUS_RESPONSE');
@@ -132,7 +167,7 @@ void main() {
       ),
     );
 
-    final error = await _capture(source.deleteAccount);
+    final error = await _capture(() => source.deleteAccount(expectedUid: _uid));
 
     expect(error.statusCode, 200);
     expect(error.code, 'ACCOUNT_DELETE_AMBIGUOUS_RESPONSE');
@@ -180,7 +215,9 @@ void main() {
         ),
       );
 
-      final error = await _capture(source.deleteAccount);
+      final error = await _capture(
+        () => source.deleteAccount(expectedUid: _uid),
+      );
 
       expect(error.statusCode, testCase.status);
       expect(error.code, testCase.code);
@@ -203,7 +240,7 @@ void main() {
       ),
     );
 
-    final error = await _capture(source.deleteAccount);
+    final error = await _capture(() => source.deleteAccount(expectedUid: _uid));
 
     expect(error.statusCode, 500);
     expect(error.code, 'ACCOUNT_DELETE_SERVER_ERROR');
@@ -225,7 +262,7 @@ void main() {
       ),
     );
 
-    final error = await _capture(source.deleteAccount);
+    final error = await _capture(() => source.deleteAccount(expectedUid: _uid));
 
     expect(error.statusCode, 408);
     expect(error.isAmbiguous, isTrue);
@@ -246,7 +283,7 @@ void main() {
       ),
     );
 
-    final error = await _capture(source.deleteAccount);
+    final error = await _capture(() => source.deleteAccount(expectedUid: _uid));
 
     expect(error.code, 'ACCOUNT_DELETE_FAILED');
     expect(error.message, 'Não foi possível excluir a conta. Tente novamente.');
@@ -265,7 +302,7 @@ void main() {
       timeout: const Duration(milliseconds: 1),
     );
 
-    final error = await _capture(source.deleteAccount);
+    final error = await _capture(() => source.deleteAccount(expectedUid: _uid));
 
     expect(requests, 1);
     expect(error.code, 'ACCOUNT_DELETE_TIMEOUT');
@@ -279,7 +316,7 @@ void main() {
       }),
     );
 
-    final error = await _capture(source.deleteAccount);
+    final error = await _capture(() => source.deleteAccount(expectedUid: _uid));
 
     expect(error.code, 'ACCOUNT_DELETE_TRANSPORT_ERROR');
     expect(error.isAmbiguous, isTrue);
@@ -294,10 +331,59 @@ void main() {
         requests += 1;
         return http.Response('{}', 200);
       }),
-      tokenProvider: () async => ' ',
+      tokenProvider: (_) async => ' ',
     );
 
-    final error = await _capture(source.deleteAccount);
+    final error = await _capture(() => source.deleteAccount(expectedUid: _uid));
+
+    expect(requests, 0);
+    expect(error.code, 'UNAUTHENTICATED');
+    expect(error.isAmbiguous, isFalse);
+  });
+
+  test('sessão B antes do token impede qualquer request para A', () async {
+    var requests = 0;
+    final auth = _FirebaseAuth()..user = _FirebaseUser('user-b');
+    final source = _source(
+      MockClient((_) async {
+        requests += 1;
+        return http.Response('{}', 200);
+      }),
+      tokenProvider: (expectedUid) =>
+          loadAccountIdTokenForExpectedUser(auth, expectedUid),
+    );
+
+    final error = await _capture(() => source.deleteAccount(expectedUid: _uid));
+
+    expect(requests, 0);
+    expect(error.code, 'UNAUTHENTICATED');
+    expect(error.isAmbiguous, isFalse);
+  });
+
+  test('troca A para B durante getIdToken impede o HTTP', () async {
+    var requests = 0;
+    final tokenStarted = Completer<void>();
+    final allowToken = Completer<void>();
+    final auth = _FirebaseAuth()
+      ..user = _FirebaseUser(
+        _uid,
+        tokenStarted: tokenStarted,
+        allowToken: allowToken,
+      );
+    final source = _source(
+      MockClient((_) async {
+        requests += 1;
+        return http.Response('{}', 200);
+      }),
+      tokenProvider: (expectedUid) =>
+          loadAccountIdTokenForExpectedUser(auth, expectedUid),
+    );
+
+    final pending = _capture(() => source.deleteAccount(expectedUid: _uid));
+    await tokenStarted.future;
+    auth.user = _FirebaseUser('user-b', token: 'token-b');
+    allowToken.complete();
+    final error = await pending;
 
     expect(requests, 0);
     expect(error.code, 'UNAUTHENTICATED');

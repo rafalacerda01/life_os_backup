@@ -27,5 +27,5 @@ abstract class AuthRepository {
     String? newPhotoUrl,
   });
 
-  Future<Result<void, Failure>> deleteAccount();
+  Future<Result<void, Failure>> deleteAccount({required String expectedUid});
 }

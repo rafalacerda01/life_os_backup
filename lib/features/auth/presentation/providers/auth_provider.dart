@@ -52,10 +52,10 @@ final accountRemoteDataSourceProvider = Provider<AccountRemoteDataSource>((
   ref,
 ) {
   final dataSource = AccountRemoteDataSource(
-    idTokenProvider: () async {
-      final user = ref.read(firebaseAuthProvider).currentUser;
-      return user?.getIdToken(true);
-    },
+    idTokenProvider: (expectedUid) => loadAccountIdTokenForExpectedUser(
+      ref.read(firebaseAuthProvider),
+      expectedUid,
+    ),
   );
   ref.onDispose(dataSource.close);
   return dataSource;
@@ -302,7 +302,7 @@ class AuthNotifier extends Notifier<AuthState> {
   }
 
   Future<void> login(String email, String password) async {
-    _accountDeletionInProgress = false;
+    if (_accountDeletionInProgress) return;
     state = AuthState.loading();
     final result = await _repository.signInWithEmailAndPassword(
       email,
@@ -325,7 +325,7 @@ class AuthNotifier extends Notifier<AuthState> {
   }
 
   Future<void> register(String email, String password, String name) async {
-    _accountDeletionInProgress = false;
+    if (_accountDeletionInProgress) return;
     state = AuthState.loading();
     final result = await _repository.signUpWithEmailAndPassword(
       email,
@@ -349,7 +349,7 @@ class AuthNotifier extends Notifier<AuthState> {
   }
 
   Future<void> signInWithGoogle() async {
-    _accountDeletionInProgress = false;
+    if (_accountDeletionInProgress) return;
     state = AuthState.loading();
     final result = await _repository.signInWithGoogle();
     await result.when(
@@ -481,59 +481,80 @@ class AuthNotifier extends Notifier<AuthState> {
 
   Future<void> deleteAccount({String? password}) async {
     if (_accountDeletionInProgress) return;
+    final expectedUid = _activeLocalSessionUid?.trim();
+    final user = ref.read(firebaseAuthProvider).currentUser;
+    if (expectedUid == null ||
+        expectedUid.isEmpty ||
+        user == null ||
+        user.uid != expectedUid) {
+      state = AuthState.error(
+        'Sua sessão não é válida. Entre novamente e tente de novo.',
+      );
+      return;
+    }
+
     _accountDeletionInProgress = true;
     state = AuthState.loading();
 
     try {
-      final user = ref.read(firebaseAuthProvider).currentUser;
+      final providerIds = user.providerData.map((e) => e.providerId).toList();
 
-      if (user != null) {
-        final providerIds = user.providerData.map((e) => e.providerId).toList();
-
-        if (providerIds.contains('password')) {
-          if (password != null && password.isNotEmpty && user.email != null) {
-            final credential = EmailAuthProvider.credential(
-              email: user.email!,
-              password: password,
-            );
-            await user.reauthenticateWithCredential(credential);
-          } else {
-            _accountDeletionInProgress = false;
-            state = AuthState.error(
-              'A senha atual é obrigatória para confirmar a exclusão.',
-            );
-            return;
-          }
-        } else if (providerIds.contains('google.com')) {
-          final googleSignIn = GoogleSignIn.instance;
-          await googleSignIn.initialize(
-            serverClientId:
-                '278760083864-nfp6h9r9gjaq4tvtcerif8h2d08c6afi.apps.googleusercontent.com',
+      if (providerIds.contains('password')) {
+        if (password != null && password.isNotEmpty && user.email != null) {
+          final credential = EmailAuthProvider.credential(
+            email: user.email!,
+            password: password,
           );
-
-          final googleUser = await googleSignIn.authenticate();
-          final googleAuth = googleUser.authentication;
-
-          final credential = GoogleAuthProvider.credential(
-            idToken: googleAuth.idToken,
-          );
-
           await user.reauthenticateWithCredential(credential);
+        } else {
+          _accountDeletionInProgress = false;
+          state = AuthState.error(
+            'A senha atual é obrigatória para confirmar a exclusão.',
+          );
+          return;
         }
+      } else if (providerIds.contains('google.com')) {
+        final googleSignIn = GoogleSignIn.instance;
+        await googleSignIn.initialize(
+          serverClientId:
+              '278760083864-nfp6h9r9gjaq4tvtcerif8h2d08c6afi.apps.googleusercontent.com',
+        );
+
+        final googleUser = await googleSignIn.authenticate();
+        final googleAuth = googleUser.authentication;
+
+        final credential = GoogleAuthProvider.credential(
+          idToken: googleAuth.idToken,
+        );
+
+        await user.reauthenticateWithCredential(credential);
       }
 
-      final result = await _repository.deleteAccount();
+      if (!_isExpectedFirebaseSession(expectedUid)) {
+        await _handleChangedAccountDeletionSession(expectedUid);
+        return;
+      }
+
+      final result = await _repository.deleteAccount(expectedUid: expectedUid);
 
       await result.when(
         (success) async {
-          await _finishLocalSignOut();
+          await _finishExpectedAccountDeletion(expectedUid);
         },
         (failure) async {
+          if (!_isExpectedFirebaseSession(expectedUid)) {
+            await _handleChangedAccountDeletionSession(expectedUid);
+            return;
+          }
           _accountDeletionInProgress = false;
           if (!_disposed) state = AuthState.error(failure.message);
         },
       );
     } on FirebaseAuthException catch (e) {
+      if (!_isExpectedFirebaseSession(expectedUid)) {
+        await _handleChangedAccountDeletionSession(expectedUid);
+        return;
+      }
       _accountDeletionInProgress = false;
       if (_disposed) return;
       if (e.code == 'wrong-password') {
@@ -548,11 +569,80 @@ class AuthNotifier extends Notifier<AuthState> {
         );
       }
     } catch (_) {
+      if (!_isExpectedFirebaseSession(expectedUid)) {
+        await _handleChangedAccountDeletionSession(expectedUid);
+        return;
+      }
       _accountDeletionInProgress = false;
       if (_disposed) return;
       state = AuthState.error(
         'Não foi possível excluir a conta. Tente novamente.',
       );
+    }
+  }
+
+  bool _isExpectedFirebaseSession(String expectedUid) {
+    return ref.read(firebaseAuthProvider).currentUser?.uid == expectedUid;
+  }
+
+  Future<void> _finishExpectedAccountDeletion(String expectedUid) async {
+    await _isolateExpectedAccountSession(expectedUid, deletionConfirmed: true);
+  }
+
+  Future<void> _handleChangedAccountDeletionSession(String expectedUid) async {
+    await _isolateExpectedAccountSession(expectedUid, deletionConfirmed: false);
+  }
+
+  Future<void> _isolateExpectedAccountSession(
+    String expectedUid, {
+    required bool deletionConfirmed,
+  }) async {
+    if (_disposed) return;
+
+    final activeUid = _activeLocalSessionUid;
+    if (activeUid != null && activeUid != expectedUid) {
+      _accountDeletionInProgress = false;
+      return;
+    }
+
+    try {
+      await _recoverPendingLocalCleanup();
+      if (_disposed) return;
+
+      final recoveredActiveUid = _activeLocalSessionUid;
+      if (recoveredActiveUid != null && recoveredActiveUid != expectedUid) {
+        _accountDeletionInProgress = false;
+        return;
+      }
+
+      await _clearLocalData(targetUserId: expectedUid);
+      if (_disposed) return;
+
+      _invalidateSessionProviders();
+      _accountDeletionInProgress = false;
+
+      final currentUser = ref.read(firebaseAuthProvider).currentUser;
+      if (currentUser != null && currentUser.uid != expectedUid) {
+        await checkCurrentUser();
+        return;
+      }
+
+      if (deletionConfirmed || currentUser == null) {
+        state = AuthState.unauthenticated();
+        return;
+      }
+
+      state = AuthState.error(
+        'Sua sessão não é válida. Entre novamente e tente de novo.',
+      );
+    } catch (_) {
+      _accountDeletionInProgress = false;
+      _localCleanupRequired = true;
+      if (!_disposed) {
+        state = AuthState.error(
+          'Não foi possível isolar os dados locais. Tente novamente.',
+        );
+      }
     }
   }
 

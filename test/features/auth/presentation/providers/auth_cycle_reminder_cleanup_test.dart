@@ -35,11 +35,24 @@ const _userA = UserEntity(
   streak: 0,
 );
 
+const _userB = UserEntity(
+  uid: 'user-b',
+  email: 'b@example.invalid',
+  displayName: 'B',
+  isPremium: false,
+  xp: 0,
+  level: 1,
+  streak: 0,
+);
+
 class _FirebaseUser extends Fake implements User {
   _FirebaseUser(this.uid);
 
   @override
   final String uid;
+
+  @override
+  List<UserInfo> get providerData => const <UserInfo>[];
 
   @override
   Future<String?> getIdToken([bool forceRefresh = false]) async => 'test-token';
@@ -73,15 +86,44 @@ class _FirebaseAuth extends Fake implements FirebaseAuth {
 }
 
 class _AuthRepository extends Fake implements AuthRepository {
-  _AuthRepository(this.auth, {this.failSignOut = false});
+  _AuthRepository(
+    this.auth, {
+    this.failSignOut = false,
+    this.deleteStarted,
+    this.allowDelete,
+    this.completeDeletionBySigningOut = false,
+    this.onGetCurrentUser,
+  });
 
   final _FirebaseAuth auth;
   final bool failSignOut;
+  final Completer<void>? deleteStarted;
+  final Completer<void>? allowDelete;
+  final bool completeDeletionBySigningOut;
+  final Future<void> Function(String userId)? onGetCurrentUser;
   int signOutCalls = 0;
+  final List<String> deletedExpectedUserIds = <String>[];
 
   @override
-  Future<Result<UserEntity, Failure>> getCurrentUser() async =>
-      const Success(_userA);
+  Future<Result<UserEntity, Failure>> getCurrentUser() async {
+    final userId = auth.currentUser?.uid;
+    if (userId == null) {
+      return const Error(AuthFailure('not authenticated'));
+    }
+    await onGetCurrentUser?.call(userId);
+    return Success(userId == _userB.uid ? _userB : _userA);
+  }
+
+  @override
+  Future<Result<void, Failure>> deleteAccount({
+    required String expectedUid,
+  }) async {
+    deletedExpectedUserIds.add(expectedUid);
+    deleteStarted?.complete();
+    await allowDelete?.future;
+    if (completeDeletionBySigningOut) auth.emit(null);
+    return const Success(null);
+  }
 
   @override
   Future<Result<void, Failure>> signOut() async {
@@ -180,15 +222,19 @@ class _SessionRestore extends Fake implements CycleReminderSessionRestore {
 
 class _ScriptedLifecycle extends Fake
     implements CycleReminderNotificationLifecycle {
-  _ScriptedLifecycle(Iterable<int> cancellationResults)
+  _ScriptedLifecycle(Iterable<int> cancellationResults, {this.events})
     : _cancellationResults = cancellationResults.toList();
 
   final List<int> _cancellationResults;
+  final List<String>? events;
   int cancellationCalls = 0;
+  final List<String> cancelledUserIds = <String>[];
 
   @override
   Future<int> cancelAllCycleReminders(String userId) async {
     cancellationCalls += 1;
+    cancelledUserIds.add(userId);
+    events?.add('cleanup:$userId');
     return _cancellationResults.removeAt(0);
   }
 }
@@ -279,16 +325,34 @@ class _Harness {
     _ScriptedTokenRotation? tokenRotation,
     String? firebaseUserId = 'user-a',
     bool waitForAuthentication = true,
+    Completer<void>? deleteStarted,
+    Completer<void>? allowDelete,
+    bool completeDeletionBySigningOut = false,
+    Future<void> Function(String userId, AppDatabase database)?
+    onGetCurrentUser,
+    List<String>? lifecycleEvents,
   }) async {
     final auth = _FirebaseAuth(
       firebaseUserId == null ? null : _FirebaseUser(firebaseUserId),
     );
-    final repository = _AuthRepository(auth, failSignOut: failSignOut);
     final database = AppDatabase(executor: NativeDatabase.memory());
+    final repository = _AuthRepository(
+      auth,
+      failSignOut: failSignOut,
+      deleteStarted: deleteStarted,
+      allowDelete: allowDelete,
+      completeDeletionBySigningOut: completeDeletionBySigningOut,
+      onGetCurrentUser: onGetCurrentUser == null
+          ? null
+          : (userId) => onGetCurrentUser(userId, database),
+    );
     final authority = CycleReminderSessionAuthority();
     final epoch = CycleReminderOperationEpoch();
     final mutationGate = CycleReminderMutationGate();
-    final lifecycle = _ScriptedLifecycle(cancellationResults);
+    final lifecycle = _ScriptedLifecycle(
+      cancellationResults,
+      events: lifecycleEvents,
+    );
     final rotation =
         tokenRotation ??
         _ScriptedTokenRotation(failuresRemaining: rotationFailures);
@@ -699,5 +763,71 @@ void main() {
     expect(harness.coordinator.preparedUserIds, <String>[_userA.uid]);
     expect(harness.authority.preparedUserId, isNull);
     expect((await harness.readPendingCleanup())?.requiresSignOut, isTrue);
+  });
+
+  test(
+    'delete A com troca para B limpa A antes de preparar e preserva B',
+    () async {
+      final deleteStarted = Completer<void>();
+      final allowDelete = Completer<void>();
+      final events = <String>[];
+      final harness = await _Harness.create(
+        <int>[0],
+        deleteStarted: deleteStarted,
+        allowDelete: allowDelete,
+        lifecycleEvents: events,
+        onGetCurrentUser: (userId, database) async {
+          if (userId != _userB.uid) return;
+          events.add('prepare:$userId');
+          await database
+              .into(database.taskTable)
+              .insert(
+                TaskTableCompanion.insert(
+                  id: 'user-b-local-data',
+                  title: 'B local data',
+                  priority: 'normal',
+                  date: DateTime(2026, 9, 1),
+                ),
+              );
+        },
+      );
+      addTearDown(harness.dispose);
+
+      final deletion = harness.notifier.deleteAccount();
+      await deleteStarted.future;
+      harness.auth.emit(_FirebaseUser(_userB.uid));
+      allowDelete.complete();
+      await deletion;
+
+      expect(harness.repository.deletedExpectedUserIds, <String>[_userA.uid]);
+      expect(harness.auth.signOutCalls, 0);
+      expect(harness.auth.currentUser?.uid, _userB.uid);
+      expect(harness.state, isA<AuthAuthenticated>());
+      expect((harness.state as AuthAuthenticated).user.uid, _userB.uid);
+      expect(events, <String>[
+        'cleanup:${_userA.uid}',
+        'prepare:${_userB.uid}',
+      ]);
+      expect(
+        await harness.database.select(harness.database.taskTable).get(),
+        hasLength(1),
+      );
+      expect(await harness.readPendingCleanup(), isNull);
+    },
+  );
+
+  test('delete A no happy path limpa A e termina sem sessão', () async {
+    final harness = await _Harness.create(<int>[
+      0,
+    ], completeDeletionBySigningOut: true);
+    addTearDown(harness.dispose);
+
+    await harness.notifier.deleteAccount();
+
+    expect(harness.repository.deletedExpectedUserIds, <String>[_userA.uid]);
+    expect(harness.lifecycle.cancelledUserIds, <String>[_userA.uid]);
+    expect(harness.state, isA<AuthUnauthenticated>());
+    expect(harness.auth.currentUser, isNull);
+    expect(await harness.readPendingCleanup(), isNull);
   });
 }

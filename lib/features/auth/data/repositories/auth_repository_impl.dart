@@ -21,21 +21,28 @@ class AuthRepositoryImpl implements AuthRepository {
   );
 
   @override
-  Future<Result<void, Failure>> deleteAccount() async {
+  Future<Result<void, Failure>> deleteAccount({
+    required String expectedUid,
+  }) async {
+    final normalizedExpectedUid = expectedUid.trim();
     final user = _firebaseAuth.currentUser;
-    if (user == null) {
+    if (normalizedExpectedUid.isEmpty ||
+        user == null ||
+        user.uid != normalizedExpectedUid) {
       return const Error(
         AuthFailure('Usuário não está autenticado.', code: 'UNAUTHENTICATED'),
       );
     }
 
     try {
-      await _accountRemoteDataSource.deleteAccount();
-      await _signOutBestEffort();
+      await _accountRemoteDataSource.deleteAccount(
+        expectedUid: normalizedExpectedUid,
+      );
+      await _signOutBestEffort(normalizedExpectedUid);
       return const Success(null);
     } on AccountRemoteException catch (error) {
       if (error.isAmbiguous && await _isAuthUserDeleted(user)) {
-        await _signOutBestEffort();
+        await _signOutBestEffort(normalizedExpectedUid);
         return const Success(null);
       }
       return Error(AuthFailure(error.message, code: error.code));
@@ -60,7 +67,9 @@ class AuthRepositoryImpl implements AuthRepository {
     }
   }
 
-  Future<void> _signOutBestEffort() async {
+  Future<void> _signOutBestEffort(String expectedUid) async {
+    if (_firebaseAuth.currentUser?.uid != expectedUid) return;
+
     try {
       await _firebaseAuth.signOut();
     } catch (_) {

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -22,6 +24,10 @@ class FakeFirebaseAuth extends Fake implements FirebaseAuth {
 }
 
 class FakeFirebaseUser extends Fake implements User {
+  FakeFirebaseUser(this.uid);
+
+  @override
+  final String uid;
   Object? reloadError;
   int reloadCalls = 0;
   int deleteCalls = 0;
@@ -42,17 +48,23 @@ class FakeFirebaseFirestore extends Fake implements FirebaseFirestore {}
 
 class FakeAccountRemoteDataSource extends AccountRemoteDataSource {
   Object? error;
+  Future<void> Function(String expectedUid)? onDelete;
   int calls = 0;
+  final List<String> expectedUids = <String>[];
 
   FakeAccountRemoteDataSource()
     : super(
         client: MockClient((_) async => throw UnimplementedError()),
-        idTokenProvider: () async => 'token',
+        idTokenProvider: (_) async => 'token',
       );
 
   @override
-  Future<AccountDeletionResponse> deleteAccount() async {
+  Future<AccountDeletionResponse> deleteAccount({
+    required String expectedUid,
+  }) async {
     calls += 1;
+    expectedUids.add(expectedUid);
+    await onDelete?.call(expectedUid);
     if (error != null) throw error!;
     return const AccountDeletionResponse(circleDeleted: false);
   }
@@ -73,19 +85,20 @@ void main() {
 
   setUp(() {
     auth = FakeFirebaseAuth();
-    user = FakeFirebaseUser();
+    user = FakeFirebaseUser('user-a');
     remote = FakeAccountRemoteDataSource();
     auth.user = user;
     repository = AuthRepositoryImpl(auth, FakeFirebaseFirestore(), remote);
   });
 
   test('sucesso HTTP faz signOut local best-effort', () async {
-    final result = await repository.deleteAccount();
+    final result = await repository.deleteAccount(expectedUid: 'user-a');
 
     var succeeded = false;
     result.when((_) => succeeded = true, (_) {});
     expect(succeeded, isTrue);
     expect(remote.calls, 1);
+    expect(remote.expectedUids, <String>['user-a']);
     expect(auth.signOutCalls, 1);
     expect(user.deleteCalls, 0);
   });
@@ -94,7 +107,7 @@ void main() {
     remote.error = _ambiguousError;
     user.reloadError = FirebaseAuthException(code: 'user-not-found');
 
-    final result = await repository.deleteAccount();
+    final result = await repository.deleteAccount(expectedUid: 'user-a');
 
     var succeeded = false;
     result.when((_) => succeeded = true, (_) {});
@@ -105,7 +118,7 @@ void main() {
 
   test('ambiguidade com usuário existente preserva a falha', () async {
     remote.error = _ambiguousError;
-    final result = await repository.deleteAccount();
+    final result = await repository.deleteAccount(expectedUid: 'user-a');
 
     Failure? capturedFailure;
     result.when((_) {}, (failure) => capturedFailure = failure);
@@ -126,7 +139,7 @@ void main() {
       remote.error = _ambiguousError;
       user.reloadError = FirebaseAuthException(code: code);
 
-      final result = await repository.deleteAccount();
+      final result = await repository.deleteAccount(expectedUid: 'user-a');
 
       var failed = false;
       result.when((_) {}, (_) => failed = true);
@@ -138,7 +151,7 @@ void main() {
   test('falha de signOut não reverte sucesso confirmado', () async {
     auth.signOutError = StateError('local sign-out failed');
 
-    final result = await repository.deleteAccount();
+    final result = await repository.deleteAccount(expectedUid: 'user-a');
 
     var succeeded = false;
     result.when((_) => succeeded = true, (_) {});
@@ -153,12 +166,72 @@ void main() {
       isAmbiguous: false,
     );
 
-    final result = await repository.deleteAccount();
+    final result = await repository.deleteAccount(expectedUid: 'user-a');
 
     var failed = false;
     result.when((_) {}, (_) => failed = true);
     expect(failed, isTrue);
     expect(user.reloadCalls, 0);
     expect(auth.signOutCalls, 0);
+  });
+
+  test('sessão B antes do remote falha sem request ou signOut', () async {
+    auth.user = FakeFirebaseUser('user-b');
+
+    final result = await repository.deleteAccount(expectedUid: 'user-a');
+
+    Failure? capturedFailure;
+    result.when((_) {}, (failure) => capturedFailure = failure);
+    expect(capturedFailure, isA<AuthFailure>());
+    expect(capturedFailure?.code, 'UNAUTHENTICATED');
+    expect(remote.calls, 0);
+    expect(auth.signOutCalls, 0);
+    expect(auth.currentUser?.uid, 'user-b');
+  });
+
+  test('troca para B após remote não faz signOut de B', () async {
+    final remoteStarted = Completer<void>();
+    final allowRemote = Completer<void>();
+    remote.onDelete = (_) async {
+      remoteStarted.complete();
+      await allowRemote.future;
+    };
+
+    final pending = repository.deleteAccount(expectedUid: 'user-a');
+    await remoteStarted.future;
+    auth.user = FakeFirebaseUser('user-b');
+    allowRemote.complete();
+    final result = await pending;
+
+    var succeeded = false;
+    result.when((_) => succeeded = true, (_) {});
+    expect(succeeded, isTrue);
+    expect(remote.expectedUids, <String>['user-a']);
+    expect(auth.signOutCalls, 0);
+    expect(auth.currentUser?.uid, 'user-b');
+  });
+
+  test('ambiguidade reconcilia somente User A e preserva sessão B', () async {
+    final remoteStarted = Completer<void>();
+    final allowRemote = Completer<void>();
+    remote.error = _ambiguousError;
+    remote.onDelete = (_) async {
+      remoteStarted.complete();
+      await allowRemote.future;
+    };
+    user.reloadError = FirebaseAuthException(code: 'user-not-found');
+
+    final pending = repository.deleteAccount(expectedUid: 'user-a');
+    await remoteStarted.future;
+    auth.user = FakeFirebaseUser('user-b');
+    allowRemote.complete();
+    final result = await pending;
+
+    var succeeded = false;
+    result.when((_) => succeeded = true, (_) {});
+    expect(succeeded, isTrue);
+    expect(user.reloadCalls, 1);
+    expect(auth.signOutCalls, 0);
+    expect(auth.currentUser?.uid, 'user-b');
   });
 }

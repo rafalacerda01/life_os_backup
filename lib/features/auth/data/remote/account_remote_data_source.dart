@@ -4,7 +4,7 @@ import 'dart:convert';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:http/http.dart' as http;
 
-typedef AccountIdTokenProvider = Future<String?> Function();
+typedef AccountIdTokenProvider = Future<String?> Function(String expectedUid);
 
 class AccountDeletionResponse {
   final bool circleDeleted;
@@ -59,8 +59,20 @@ class AccountRemoteDataSource {
     }
   }
 
-  Future<AccountDeletionResponse> deleteAccount() async {
-    final token = await _loadFreshToken();
+  Future<AccountDeletionResponse> deleteAccount({
+    required String expectedUid,
+  }) async {
+    final normalizedExpectedUid = expectedUid.trim();
+    if (normalizedExpectedUid.isEmpty) {
+      throw const AccountRemoteException(
+        statusCode: null,
+        code: 'UNAUTHENTICATED',
+        message: 'Sua sessão não é válida. Entre novamente e tente de novo.',
+        isAmbiguous: false,
+      );
+    }
+
+    final token = await _loadFreshToken(normalizedExpectedUid);
     http.Response response;
 
     try {
@@ -131,10 +143,10 @@ class AccountRemoteDataSource {
     if (_ownsClient) _client.close();
   }
 
-  Future<String> _loadFreshToken() async {
+  Future<String> _loadFreshToken(String expectedUid) async {
     String? token;
     try {
-      token = await _idTokenProvider().timeout(_timeout);
+      token = await _idTokenProvider(expectedUid).timeout(_timeout);
     } on TimeoutException {
       throw const AccountRemoteException(
         statusCode: null,
@@ -254,8 +266,37 @@ class AccountRemoteDataSource {
   }
 }
 
-Future<String?> _firebaseIdTokenProvider() async {
-  return FirebaseAuth.instance.currentUser?.getIdToken(true);
+Future<String?> _firebaseIdTokenProvider(String expectedUid) {
+  return loadAccountIdTokenForExpectedUser(FirebaseAuth.instance, expectedUid);
+}
+
+Future<String?> loadAccountIdTokenForExpectedUser(
+  FirebaseAuth auth,
+  String expectedUid,
+) async {
+  final normalizedExpectedUid = expectedUid.trim();
+  final user = auth.currentUser;
+  if (normalizedExpectedUid.isEmpty ||
+      user == null ||
+      user.uid != normalizedExpectedUid) {
+    throw const AccountRemoteException(
+      statusCode: null,
+      code: 'UNAUTHENTICATED',
+      message: 'Sua sessão não é válida. Entre novamente e tente de novo.',
+      isAmbiguous: false,
+    );
+  }
+
+  final token = await user.getIdToken(true);
+  if (auth.currentUser?.uid != normalizedExpectedUid) {
+    throw const AccountRemoteException(
+      statusCode: null,
+      code: 'UNAUTHENTICATED',
+      message: 'Sua sessão não é válida. Entre novamente e tente de novo.',
+      isAmbiguous: false,
+    );
+  }
+  return token;
 }
 
 Map<String, dynamic> _decodeJsonMap(String body) {
