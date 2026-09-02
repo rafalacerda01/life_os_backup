@@ -1,5 +1,7 @@
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:life_os/features/ai_companion/data/repositories/ai_companion_repository.dart';
 import 'package:life_os/features/premium/presentation/premium_screen.dart';
 import 'package:life_os/features/ai_companion/presentation/providers/ai_companion_provider.dart';
 import 'package:life_os/features/premium/presentation/premium_provider.dart';
@@ -18,6 +20,20 @@ class AICompanionScreen extends ConsumerStatefulWidget {
 class _AICompanionScreenState extends ConsumerState<AICompanionScreen> {
   final TextEditingController _controller = TextEditingController();
   final ScrollController _scrollController = ScrollController();
+
+  String _requireAuthenticatedUserId() {
+    final userId = FirebaseAuth.instance.currentUser?.uid;
+    if (userId == null || userId.isEmpty) {
+      throw const AIAuthenticationException();
+    }
+    return userId;
+  }
+
+  void _ensureExpectedSession(String expectedUserId) {
+    if (FirebaseAuth.instance.currentUser?.uid != expectedUserId) {
+      throw const AIAuthenticationException();
+    }
+  }
 
   void _scrollToBottom() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -321,30 +337,33 @@ class _AICompanionScreenState extends ConsumerState<AICompanionScreen> {
 
     if (text.isEmpty) return;
 
-    final hasConsented = ref.read(aiConsentProvider).value ?? false;
-
-    if (!hasConsented) {
-      if (!mounted) return;
-
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text(
-            'Aceite o consentimento para permitir o uso dos seus dados pelo Companion.',
-          ),
-        ),
-      );
-
-      return;
-    }
-
-    _controller.clear();
-
     try {
+      final expectedUserId = _requireAuthenticatedUserId();
+      final hasConsented = ref.read(aiConsentProvider).value ?? false;
+      _ensureExpectedSession(expectedUserId);
+
+      if (!hasConsented) {
+        if (!mounted) return;
+
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Aceite o consentimento para permitir o uso dos seus dados pelo Companion.',
+            ),
+          ),
+        );
+
+        return;
+      }
+
+      _controller.clear();
+
       // ----------------------------------------------------------------------
       // 1. SINCRONIZAÇÃO
       // ----------------------------------------------------------------------
 
       await ref.read(healthRepositoryProvider).syncHealthFromFirebase();
+      _ensureExpectedSession(expectedUserId);
 
       // ----------------------------------------------------------------------
       // 2. LEITURA DOS ESTADOS ATUAIS
@@ -356,6 +375,7 @@ class _AICompanionScreenState extends ConsumerState<AICompanionScreen> {
       final healthAsyncValue = ref.read(healthStreamProvider);
       final medicationsAsyncValue = ref.read(medicationsStreamProvider);
       final financeAsyncValue = ref.read(financeStreamProvider);
+      _ensureExpectedSession(expectedUserId);
 
       final health = healthAsyncValue.asData?.value;
       final medications = medicationsAsyncValue.asData?.value ?? [];
@@ -410,6 +430,7 @@ class _AICompanionScreenState extends ConsumerState<AICompanionScreen> {
         medications: activeMedications,
         finance: financeSummary,
       );
+      _ensureExpectedSession(expectedUserId);
 
       // ----------------------------------------------------------------------
       // 5. ENVIO
@@ -417,7 +438,7 @@ class _AICompanionScreenState extends ConsumerState<AICompanionScreen> {
 
       await ref
           .read(aiCompanionProvider.notifier)
-          .sendMessage(text, contextData);
+          .sendMessage(text, contextData, expectedUserId: expectedUserId);
     } catch (e) {
       if (!mounted) return;
 

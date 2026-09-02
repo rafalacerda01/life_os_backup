@@ -8,6 +8,8 @@ import 'package:life_os/features/health/data/models/health_model.dart';
 
 const _idToken = 'firebase-id-token';
 const _appCheckToken = 'firebase-app-check-token';
+const _userA = 'user-a';
+const _userB = 'user-b';
 
 class _Medication {
   const _Medication(this.name);
@@ -19,11 +21,13 @@ AICompanionRepository _repository({
   required http.Client client,
   Future<String?> Function()? idTokenProvider,
   Future<String?> Function()? appCheckTokenProvider,
+  String? Function()? currentUserIdProvider,
 }) {
   return AICompanionRepository(
     client: client,
     idTokenProvider: idTokenProvider ?? () async => _idToken,
     appCheckTokenProvider: appCheckTokenProvider ?? () async => _appCheckToken,
+    currentUserIdProvider: currentUserIdProvider ?? () => _userA,
   );
 }
 
@@ -266,7 +270,7 @@ void main() {
     );
   });
 
-  test('token App Check válido é enviado apenas no header', () async {
+  test('sessão estável envia tokens e contexto corretamente', () async {
     var requests = 0;
     final client = MockClient((request) async {
       requests++;
@@ -285,10 +289,143 @@ void main() {
 
     final reply = await _repository(
       client: client,
-    ).sendMessageToApi('Olá', {'humor': 'bem'});
+    ).sendMessageToApi('Olá', {'humor': 'bem'}, expectedUserId: _userA);
 
     expect(reply, 'Resposta');
     expect(requests, 1);
+  });
+
+  test('troca após ID token falha autenticada sem request HTTP', () async {
+    String? currentUserId = _userA;
+    var requests = 0;
+    var appCheckCalls = 0;
+    final client = MockClient((_) async {
+      requests++;
+      return http.Response('{}', 200);
+    });
+    addTearDown(client.close);
+
+    await expectLater(
+      _repository(
+        client: client,
+        currentUserIdProvider: () => currentUserId,
+        idTokenProvider: () async {
+          currentUserId = _userB;
+          return _idToken;
+        },
+        appCheckTokenProvider: () async {
+          appCheckCalls++;
+          return _appCheckToken;
+        },
+      ).sendMessageToApi('Olá', const {}, expectedUserId: _userA),
+      throwsA(isA<AIAuthenticationException>()),
+    );
+
+    expect(requests, 0);
+    expect(appCheckCalls, 0);
+  });
+
+  test('troca durante App Check falha autenticada sem request HTTP', () async {
+    String? currentUserId = _userA;
+    var requests = 0;
+    final client = MockClient((_) async {
+      requests++;
+      return http.Response('{}', 200);
+    });
+    addTearDown(client.close);
+
+    await expectLater(
+      _repository(
+        client: client,
+        currentUserIdProvider: () => currentUserId,
+        appCheckTokenProvider: () async {
+          currentUserId = _userB;
+          return _appCheckToken;
+        },
+      ).sendMessageToApi('Olá', const {}, expectedUserId: _userA),
+      throwsA(isA<AIAuthenticationException>()),
+    );
+
+    expect(requests, 0);
+  });
+
+  test('troca imediatamente antes do POST não envia request HTTP', () async {
+    var sessionChecks = 0;
+    var requests = 0;
+    final client = MockClient((_) async {
+      requests++;
+      return http.Response('{}', 200);
+    });
+    addTearDown(client.close);
+
+    await expectLater(
+      _repository(
+        client: client,
+        currentUserIdProvider: () {
+          sessionChecks++;
+          return sessionChecks < 4 ? _userA : _userB;
+        },
+      ).sendMessageToApi('Olá', const {}, expectedUserId: _userA),
+      throwsA(isA<AIAuthenticationException>()),
+    );
+
+    expect(sessionChecks, 4);
+    expect(requests, 0);
+  });
+
+  test('mismatch inicial não obtém tokens nem faz request HTTP', () async {
+    var requests = 0;
+    var idTokenCalls = 0;
+    var appCheckCalls = 0;
+    final client = MockClient((_) async {
+      requests++;
+      return http.Response('{}', 200);
+    });
+    addTearDown(client.close);
+
+    await expectLater(
+      _repository(
+        client: client,
+        currentUserIdProvider: () => _userB,
+        idTokenProvider: () async {
+          idTokenCalls++;
+          return _idToken;
+        },
+        appCheckTokenProvider: () async {
+          appCheckCalls++;
+          return _appCheckToken;
+        },
+      ).sendMessageToApi('Olá', const {}, expectedUserId: _userA),
+      throwsA(isA<AIAuthenticationException>()),
+    );
+
+    expect(requests, 0);
+    expect(idTokenCalls, 0);
+    expect(appCheckCalls, 0);
+  });
+
+  test('logout após ID token falha autenticado sem request HTTP', () async {
+    String? currentUserId = _userA;
+    var requests = 0;
+    final client = MockClient((_) async {
+      requests++;
+      return http.Response('{}', 200);
+    });
+    addTearDown(client.close);
+
+    await expectLater(
+      _repository(
+        client: client,
+        currentUserIdProvider: () => currentUserId,
+        idTokenProvider: () async {
+          currentUserId = null;
+          return _idToken;
+        },
+      ).sendMessageToApi('Olá', const {}, expectedUserId: _userA),
+      throwsA(isA<AIAuthenticationException>()),
+    );
+
+    expect(requests, 0);
   });
 
   test('token App Check null falha fechado sem chamada HTTP', () async {
@@ -303,7 +440,7 @@ void main() {
       _repository(
         client: client,
         appCheckTokenProvider: () async => null,
-      ).sendMessageToApi('Olá', const {}),
+      ).sendMessageToApi('Olá', const {}, expectedUserId: _userA),
       throwsA(isA<AIAppCheckException>()),
     );
     expect(requests, 0);
@@ -321,7 +458,7 @@ void main() {
       _repository(
         client: client,
         appCheckTokenProvider: () async => '   ',
-      ).sendMessageToApi('Olá', const {}),
+      ).sendMessageToApi('Olá', const {}, expectedUserId: _userA),
       throwsA(isA<AIAppCheckException>()),
     );
     expect(requests, 0);
@@ -342,7 +479,7 @@ void main() {
         appCheckTokenProvider: () async {
           throw StateError('firebase-app-check-token segredo');
         },
-      ).sendMessageToApi('Olá', const {});
+      ).sendMessageToApi('Olá', const {}, expectedUserId: _userA);
     } catch (error) {
       capturedError = error;
     }
@@ -364,7 +501,9 @@ void main() {
       addTearDown(client.close);
 
       await expectLater(
-        _repository(client: client).sendMessageToApi('Olá', const {}),
+        _repository(
+          client: client,
+        ).sendMessageToApi('Olá', const {}, expectedUserId: _userA),
         throwsA(
           isA<AIAppCheckException>().having(
             (error) => error.message,
@@ -389,7 +528,9 @@ void main() {
       addTearDown(client.close);
 
       await expectLater(
-        _repository(client: client).sendMessageToApi('Olá', const {}),
+        _repository(
+          client: client,
+        ).sendMessageToApi('Olá', const {}, expectedUserId: _userA),
         throwsA(
           isA<AIPremiumRequiredException>()
               .having(
@@ -415,7 +556,7 @@ void main() {
 
     final reply = await _repository(
       client: client,
-    ).sendMessageToApi('Olá', const {});
+    ).sendMessageToApi('Olá', const {}, expectedUserId: _userA);
 
     expect(reply, 'Tudo certo');
   });

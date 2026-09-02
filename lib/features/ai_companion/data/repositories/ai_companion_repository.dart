@@ -91,6 +91,7 @@ class AIConsentRequiredException extends AICompanionException {
 
 typedef AIIdTokenProvider = Future<String?> Function();
 typedef AIAppCheckTokenProvider = Future<String?> Function();
+typedef AICurrentUserIdProvider = String? Function();
 
 enum AIRelevantDomain {
   finance,
@@ -275,6 +276,7 @@ class AICompanionRepository {
   final http.Client client;
   final AIIdTokenProvider _idTokenProvider;
   final AIAppCheckTokenProvider _appCheckTokenProvider;
+  final AICurrentUserIdProvider _currentUserIdProvider;
 
   static const Duration _networkTimeout = Duration(seconds: 15);
 
@@ -282,10 +284,13 @@ class AICompanionRepository {
     http.Client? client,
     AIIdTokenProvider? idTokenProvider,
     AIAppCheckTokenProvider? appCheckTokenProvider,
+    AICurrentUserIdProvider? currentUserIdProvider,
   }) : client = client ?? http.Client(),
        _idTokenProvider = idTokenProvider ?? _getFirebaseIdToken,
        _appCheckTokenProvider =
-           appCheckTokenProvider ?? _getFirebaseAppCheckToken;
+           appCheckTokenProvider ?? _getFirebaseAppCheckToken,
+       _currentUserIdProvider =
+           currentUserIdProvider ?? _getFirebaseCurrentUserId;
 
   // ==========================================================================
   // CONTEXTO DO SISTEMA
@@ -401,12 +406,15 @@ class AICompanionRepository {
 
   Future<String> sendMessageToApi(
     String text,
-    Map<String, dynamic> contextData,
-  ) async {
+    Map<String, dynamic> contextData, {
+    required String expectedUserId,
+  }) async {
     try {
       // ----------------------------------------------------------------------
       // AUTENTICAÇÃO
       // ----------------------------------------------------------------------
+
+      _ensureExpectedSession(expectedUserId);
 
       final token = await _idTokenProvider();
 
@@ -414,11 +422,15 @@ class AICompanionRepository {
         throw const AIAuthenticationException();
       }
 
+      _ensureExpectedSession(expectedUserId);
+
       // ----------------------------------------------------------------------
       // APP CHECK
       // ----------------------------------------------------------------------
 
       final appCheckToken = await _getRequiredAppCheckToken();
+
+      _ensureExpectedSession(expectedUserId);
 
       // ----------------------------------------------------------------------
       // ENDPOINT
@@ -429,6 +441,8 @@ class AICompanionRepository {
       // ----------------------------------------------------------------------
       // REQUEST
       // ----------------------------------------------------------------------
+
+      _ensureExpectedSession(expectedUserId);
 
       final response = await client
           .post(
@@ -524,6 +538,12 @@ class AICompanionRepository {
     }
   }
 
+  void _ensureExpectedSession(String expectedUserId) {
+    if (expectedUserId.isEmpty || _currentUserIdProvider() != expectedUserId) {
+      throw const AIAuthenticationException();
+    }
+  }
+
   Future<String> _getRequiredAppCheckToken() async {
     try {
       final token = await _appCheckTokenProvider();
@@ -557,6 +577,10 @@ class AICompanionRepository {
 
 Future<String?> _getFirebaseIdToken() async {
   return FirebaseAuth.instance.currentUser?.getIdToken();
+}
+
+String? _getFirebaseCurrentUserId() {
+  return FirebaseAuth.instance.currentUser?.uid;
 }
 
 Future<String?> _getFirebaseAppCheckToken() {

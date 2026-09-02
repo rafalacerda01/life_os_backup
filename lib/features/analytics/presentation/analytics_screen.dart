@@ -1,3 +1,4 @@
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
@@ -184,12 +185,21 @@ class AnalyticsScreen extends ConsumerWidget {
                 width: double.infinity,
                 child: ElevatedButton.icon(
                   onPressed: () async {
+                    final expectedUserId =
+                        FirebaseAuth.instance.currentUser?.uid;
+                    if (expectedUserId == null || expectedUserId.isEmpty) {
+                      return;
+                    }
+
+                    final admittedAnalyticsData = ref.read(analyticsProvider);
                     final analyticsContext = {
-                      "productivityIndex": analyticsData.productivityIndex,
-                      "healthIndex": analyticsData.healthIndex,
-                      "financeIndex": analyticsData.financeIndex,
-                      "habitConsistency": analyticsData.habitConsistency,
-                      "weeklyEvolution": analyticsData.weeklyEvolution
+                      "productivityIndex":
+                          admittedAnalyticsData.productivityIndex,
+                      "healthIndex": admittedAnalyticsData.healthIndex,
+                      "financeIndex": admittedAnalyticsData.financeIndex,
+                      "habitConsistency":
+                          admittedAnalyticsData.habitConsistency,
+                      "weeklyEvolution": admittedAnalyticsData.weeklyEvolution
                           .map(
                             (e) => {
                               "dayName": e.dayName,
@@ -204,6 +214,7 @@ class AnalyticsScreen extends ConsumerWidget {
                         .sendMessage(
                           "Faça uma análise detalhada da minha performance semanal com base nestes dados atuais do sistema.",
                           analyticsContext,
+                          expectedUserId: expectedUserId,
                         );
 
                     if (context.mounted) {

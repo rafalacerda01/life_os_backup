@@ -49,8 +49,9 @@ class AICompanionNotifier extends Notifier<AICompanionState> {
 
   Future<void> sendMessage(
     String text,
-    Map<String, dynamic> contextData,
-  ) async {
+    Map<String, dynamic> contextData, {
+    required String expectedUserId,
+  }) async {
     if (text.trim().isEmpty) return;
 
     final premiumStatus = ref.read(premiumProvider);
@@ -78,7 +79,11 @@ class AICompanionNotifier extends Notifier<AICompanionState> {
 
     try {
       final repository = ref.read(aiCompanionRepositoryProvider);
-      final replyText = await repository.sendMessageToApi(text, contextData);
+      final replyText = await repository.sendMessageToApi(
+        text,
+        contextData,
+        expectedUserId: expectedUserId,
+      );
 
       final assistantMessage = ChatMessage(
         text: replyText,
