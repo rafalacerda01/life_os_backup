@@ -80,6 +80,7 @@ class AuthNotifier extends Notifier<AuthState> {
   bool _explicitSignOutInProgress = false;
   bool _localCleanupRequired = false;
   String? _activeLocalSessionUid;
+  bool _firestoreLocalStateCleared = false;
   Future<void>? _localCleanupInFlight;
   String? _localCleanupInFlightUid;
   Future<void>? _durableCleanupRecoveryInFlight;
@@ -242,6 +243,7 @@ class AuthNotifier extends Notifier<AuthState> {
 
     if (isPrepared) {
       _activeLocalSessionUid = uid;
+      _firestoreLocalStateCleared = false;
       _notifyCycleReminderActionSessionPrepared(uid);
       _restoreCycleReminderForPreparedSession(uid);
     }
@@ -751,6 +753,12 @@ class AuthNotifier extends Notifier<AuthState> {
     final db = ref.read(databaseProvider);
     var cleanupFailed = false;
 
+    try {
+      await _clearFirestoreLocalState();
+    } on Object {
+      cleanupFailed = true;
+    }
+
     if (cleanupUserId != null) {
       try {
         final failedCancellations = await ref
@@ -786,6 +794,21 @@ class AuthNotifier extends Notifier<AuthState> {
       _localCleanupRequired = true;
       throw StateError('LOCAL_DATA_ISOLATION_FAILED');
     }
+  }
+
+  Future<void> _clearFirestoreLocalState() async {
+    if (_firestoreLocalStateCleared) return;
+
+    final firestore = ref.read(firestoreProvider);
+    try {
+      await firestore.clearPersistence();
+    } on FirebaseException catch (error) {
+      if (error.code != 'failed-precondition') rethrow;
+      await firestore.terminate();
+      await firestore.clearPersistence();
+    }
+
+    _firestoreLocalStateCleared = true;
   }
 
   Future<void> _recoverPendingLocalCleanup() {

@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:drift/native.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -83,6 +84,35 @@ class _FirebaseAuth extends Fake implements FirebaseAuth {
   }
 
   Future<void> close() => _changes.close();
+}
+
+class _ScriptedFirestore extends Fake implements FirebaseFirestore {
+  _ScriptedFirestore({
+    Iterable<Object?> clearResults = const <Object?>[null],
+    Iterable<Object?> terminateResults = const <Object?>[null],
+  }) : _clearResults = clearResults.toList(),
+       _terminateResults = terminateResults.toList();
+
+  final List<Object?> _clearResults;
+  final List<Object?> _terminateResults;
+  int clearPersistenceCalls = 0;
+  int terminateCalls = 0;
+
+  @override
+  Future<void> clearPersistence() async {
+    clearPersistenceCalls += 1;
+    final result = _clearResults.isEmpty ? null : _clearResults.removeAt(0);
+    if (result != null) throw result;
+  }
+
+  @override
+  Future<void> terminate() async {
+    terminateCalls += 1;
+    final result = _terminateResults.isEmpty
+        ? null
+        : _terminateResults.removeAt(0);
+    if (result != null) throw result;
+  }
 }
 
 class _AuthRepository extends Fake implements AuthRepository {
@@ -274,6 +304,7 @@ class _Harness {
   _Harness._({
     required this.auth,
     required this.repository,
+    required this.firestore,
     required this.database,
     required this.authority,
     required this.epoch,
@@ -286,6 +317,7 @@ class _Harness {
 
   final _FirebaseAuth auth;
   final _AuthRepository repository;
+  final _ScriptedFirestore firestore;
   final AppDatabase database;
   final CycleReminderSessionAuthority authority;
   final CycleReminderOperationEpoch epoch;
@@ -328,6 +360,7 @@ class _Harness {
     Completer<void>? deleteStarted,
     Completer<void>? allowDelete,
     bool completeDeletionBySigningOut = false,
+    _ScriptedFirestore? firestore,
     Future<void> Function(String userId, AppDatabase database)?
     onGetCurrentUser,
     List<String>? lifecycleEvents,
@@ -336,6 +369,7 @@ class _Harness {
       firebaseUserId == null ? null : _FirebaseUser(firebaseUserId),
     );
     final database = AppDatabase(executor: NativeDatabase.memory());
+    final localFirestore = firestore ?? _ScriptedFirestore();
     final repository = _AuthRepository(
       auth,
       failSignOut: failSignOut,
@@ -366,6 +400,7 @@ class _Harness {
     final container = ProviderContainer(
       overrides: [
         firebaseAuthProvider.overrideWithValue(auth),
+        firestoreProvider.overrideWithValue(localFirestore),
         authRepositoryProvider.overrideWithValue(repository),
         secureStorageProvider.overrideWithValue(_SecureStorage()),
         databaseProvider.overrideWithValue(database),
@@ -402,6 +437,7 @@ class _Harness {
     return _Harness._(
       auth: auth,
       repository: repository,
+      firestore: localFirestore,
       database: database,
       authority: authority,
       epoch: epoch,
@@ -422,6 +458,115 @@ class _Harness {
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+
+  test(
+    'logout termina Firestore após failed-precondition e repete clear',
+    () async {
+      final firestore = _ScriptedFirestore(
+        clearResults: <Object?>[
+          FirebaseException(
+            plugin: 'cloud_firestore',
+            code: 'failed-precondition',
+          ),
+          null,
+        ],
+      );
+      final harness = await _Harness.create(<int>[0], firestore: firestore);
+      addTearDown(harness.dispose);
+
+      await harness.notifier.logout();
+
+      expect(harness.state, isA<AuthUnauthenticated>());
+      expect(harness.repository.signOutCalls, 1);
+      expect(firestore.clearPersistenceCalls, 2);
+      expect(firestore.terminateCalls, 1);
+    },
+  );
+
+  test('segunda passagem do logout não repete limpeza Firestore', () async {
+    final firestore = _ScriptedFirestore();
+    final harness = await _Harness.create(<int>[0], firestore: firestore);
+    addTearDown(harness.dispose);
+
+    await harness.notifier.logout();
+
+    expect(harness.state, isA<AuthUnauthenticated>());
+    expect(firestore.clearPersistenceCalls, 1);
+    expect(firestore.terminateCalls, 0);
+  });
+
+  test('falha ao terminar Firestore bloqueia sign-out', () async {
+    final firestore = _ScriptedFirestore(
+      clearResults: <Object?>[
+        FirebaseException(
+          plugin: 'cloud_firestore',
+          code: 'failed-precondition',
+        ),
+      ],
+      terminateResults: <Object?>[
+        StateError('private Firestore terminate failure'),
+      ],
+    );
+    final harness = await _Harness.create(<int>[0], firestore: firestore);
+    addTearDown(harness.dispose);
+
+    await harness.notifier.logout();
+
+    expect(harness.state, isA<AuthError>());
+    expect(harness.repository.signOutCalls, 0);
+    expect(firestore.clearPersistenceCalls, 1);
+    expect(firestore.terminateCalls, 1);
+  });
+
+  test('falha no segundo clear não conclui guard e retry limpa', () async {
+    final firestore = _ScriptedFirestore(
+      clearResults: <Object?>[
+        FirebaseException(
+          plugin: 'cloud_firestore',
+          code: 'failed-precondition',
+        ),
+        StateError('private second clear failure'),
+        null,
+      ],
+    );
+    final harness = await _Harness.create(<int>[0, 0], firestore: firestore);
+    addTearDown(harness.dispose);
+
+    await harness.notifier.logout();
+
+    expect(harness.state, isA<AuthError>());
+    expect(harness.repository.signOutCalls, 0);
+    expect(firestore.clearPersistenceCalls, 2);
+    expect(firestore.terminateCalls, 1);
+
+    await harness.notifier.logout();
+
+    expect(harness.state, isA<AuthUnauthenticated>());
+    expect(harness.repository.signOutCalls, 1);
+    expect(firestore.clearPersistenceCalls, 3);
+    expect(firestore.terminateCalls, 1);
+  });
+
+  test('nova sessão rearma limpeza Firestore para logout posterior', () async {
+    final firestore = _ScriptedFirestore();
+    final harness = await _Harness.create(<int>[0, 0], firestore: firestore);
+    addTearDown(harness.dispose);
+
+    await harness.notifier.logout();
+    expect(harness.state, isA<AuthUnauthenticated>());
+    expect(firestore.clearPersistenceCalls, 1);
+
+    harness.auth.user = _FirebaseUser(_userB.uid);
+    await harness.notifier.checkCurrentUser();
+    expect(harness.state, isA<AuthAuthenticated>());
+
+    await harness.notifier.logout();
+
+    expect(harness.state, isA<AuthUnauthenticated>());
+    expect(harness.repository.signOutCalls, 2);
+    expect(firestore.clearPersistenceCalls, 2);
+    expect(firestore.terminateCalls, 0);
+  });
 
   test(
     'cancelamento final parcial falha fechado e retry posterior pode concluir',

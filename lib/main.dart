@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:ui';
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_app_check/firebase_app_check.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_crashlytics/firebase_crashlytics.dart';
@@ -23,6 +24,14 @@ void main() {
       await Firebase.initializeApp(
         options: DefaultFirebaseOptions.currentPlatform,
       );
+
+      if (!kIsWeb &&
+          (defaultTargetPlatform == TargetPlatform.android ||
+              defaultTargetPlatform == TargetPlatform.iOS)) {
+        FirebaseFirestore.instance.settings = const Settings(
+          persistenceEnabled: false,
+        );
+      }
 
       // 🚀 CÓDIGO ALTERADO: App Check agora é aguardado ANTES de construir a UI.
       // Isso garante que nenhuma requisição do Riverpod bata no Firebase sem o token de segurança.
