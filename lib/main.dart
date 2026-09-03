@@ -11,6 +11,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/date_symbol_data_local.dart';
 import 'package:life_os/core/router/router.dart';
 import 'package:life_os/core/security/biometric_app_gate.dart';
+import 'package:life_os/core/services/analytics_service.dart';
 import 'package:life_os/core/utils/app_logger.dart';
 import 'package:life_os/features/health/services/cycle_reminder_action_bootstrap.dart';
 import 'package:life_os/firebase_options.dart';
@@ -25,6 +26,7 @@ void main() {
       await Firebase.initializeApp(
         options: DefaultFirebaseOptions.currentPlatform,
       );
+      await initializeAnalyticsCollection();
 
       if (!kIsWeb &&
           (defaultTargetPlatform == TargetPlatform.android ||

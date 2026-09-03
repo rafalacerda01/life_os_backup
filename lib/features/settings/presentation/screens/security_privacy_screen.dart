@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:life_os/features/auth/presentation/providers/auth_provider.dart';
+import 'package:life_os/features/settings/presentation/providers/analytics_provider.dart';
 import 'package:life_os/features/settings/presentation/providers/biometric_provider.dart';
 
 class SecurityPrivacyScreen extends ConsumerWidget {
@@ -10,6 +11,7 @@ class SecurityPrivacyScreen extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     // Escuta apenas o estado reativo da biometria
     final biometricState = ref.watch(biometricProvider);
+    final analyticsState = ref.watch(analyticsPreferenceProvider);
 
     return Scaffold(
       backgroundColor: const Color(0xFF070B14),
@@ -88,6 +90,46 @@ class SecurityPrivacyScreen extends ConsumerWidget {
             value: false,
             activeColor: Colors.purpleAccent,
             onChanged: (val) {},
+            tileColor: const Color(0xFF11182E),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(12),
+            ),
+          ),
+
+          const SizedBox(height: 12),
+          SwitchListTile(
+            title: const Text(
+              "Métricas de uso",
+              style: TextStyle(color: Colors.white),
+            ),
+            subtitle: const Text(
+              "Compartilhar métricas de uso para ajudar a melhorar o Life OS",
+              style: TextStyle(color: Colors.white54),
+            ),
+            value: analyticsState.isEnabled,
+            activeColor: Colors.purpleAccent,
+            onChanged:
+                analyticsState.status == AnalyticsPreferenceStatus.loading ||
+                    analyticsState.operationInProgress
+                ? null
+                : (enabled) async {
+                    final success = await ref
+                        .read(analyticsPreferenceProvider.notifier)
+                        .setEnabled(enabled);
+                    if (!context.mounted) return;
+
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(
+                        content: Text(
+                          success
+                              ? enabled
+                                    ? "Métricas de uso ativadas."
+                                    : "Métricas de uso desativadas."
+                              : "Não foi possível concluir a alteração das métricas de uso.",
+                        ),
+                      ),
+                    );
+                  },
             tileColor: const Color(0xFF11182E),
             shape: RoundedRectangleBorder(
               borderRadius: BorderRadius.circular(12),
