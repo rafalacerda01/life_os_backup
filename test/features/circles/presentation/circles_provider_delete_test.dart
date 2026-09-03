@@ -168,6 +168,7 @@ void main() {
               http.Response(jsonEncode({'code': 'CIRCLE_NOT_FOUND'}), 404),
         ),
         idTokenProvider: () async => 'firebase-token',
+        appCheckTokenProvider: () async => 'firebase-app-check-token',
         url: 'https://example.test/api/circles/delete',
       );
       final repository = FakeCirclesRepository(fixtureCircle())

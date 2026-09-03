@@ -1,10 +1,12 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:firebase_app_check/firebase_app_check.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:http/http.dart' as http;
 
 typedef CircleIdTokenProvider = Future<String?> Function();
+typedef CircleAppCheckTokenProvider = Future<String?> Function();
 
 abstract interface class CircleDeleteGateway {
   Future<void> deleteCircle(String circleId);
@@ -36,6 +38,7 @@ class CircleDeleteRemoteDataSource implements CircleDeleteGateway {
 
   final http.Client _client;
   final CircleIdTokenProvider _idTokenProvider;
+  final CircleAppCheckTokenProvider _appCheckTokenProvider;
   final Uri _url;
   final Duration _timeout;
   final bool _ownsClient;
@@ -43,10 +46,13 @@ class CircleDeleteRemoteDataSource implements CircleDeleteGateway {
   CircleDeleteRemoteDataSource({
     http.Client? client,
     CircleIdTokenProvider? idTokenProvider,
+    CircleAppCheckTokenProvider? appCheckTokenProvider,
     String url = defaultUrl,
     Duration timeout = defaultTimeout,
   }) : _client = client ?? http.Client(),
        _idTokenProvider = idTokenProvider ?? _firebaseIdTokenProvider,
+       _appCheckTokenProvider =
+           appCheckTokenProvider ?? _firebaseAppCheckTokenProvider,
        _url = _parseUrl(url),
        _timeout = timeout,
        _ownsClient = client == null {
@@ -71,6 +77,7 @@ class CircleDeleteRemoteDataSource implements CircleDeleteGateway {
     }
 
     final token = await _loadToken();
+    final appCheckToken = await _loadAppCheckToken();
     http.Response response;
     try {
       response = await _client
@@ -79,6 +86,7 @@ class CircleDeleteRemoteDataSource implements CircleDeleteGateway {
             headers: {
               'Content-Type': 'application/json',
               'Authorization': 'Bearer $token',
+              'X-Firebase-AppCheck': appCheckToken,
             },
             body: jsonEncode({'circleId': normalizedCircleId}),
           )
@@ -159,6 +167,32 @@ class CircleDeleteRemoteDataSource implements CircleDeleteGateway {
     }
   }
 
+  Future<String> _loadAppCheckToken() async {
+    String? token;
+    try {
+      token = await _appCheckTokenProvider().timeout(_timeout);
+    } catch (_) {
+      throw const CircleDeleteRemoteException(
+        statusCode: null,
+        code: 'APP_CHECK_INVALID',
+        message: _appCheckFailureMessage,
+        isAmbiguous: false,
+      );
+    }
+    if (token == null || token.trim().isEmpty) {
+      throw const CircleDeleteRemoteException(
+        statusCode: null,
+        code: 'APP_CHECK_REQUIRED',
+        message: _appCheckFailureMessage,
+        isAmbiguous: false,
+      );
+    }
+    return token.trim();
+  }
+
+  static const _appCheckFailureMessage =
+      'Não foi possível validar a segurança do aplicativo. Tente novamente.';
+
   static CircleDeleteRemoteException _backendException(http.Response response) {
     if (response.statusCode >= 500) {
       return CircleDeleteRemoteException(
@@ -197,6 +231,7 @@ class CircleDeleteRemoteDataSource implements CircleDeleteGateway {
 
   static String _safeMessage(String code) {
     return switch (code) {
+      'APP_CHECK_REQUIRED' || 'APP_CHECK_INVALID' => _appCheckFailureMessage,
       'CIRCLE_ADMIN_REQUIRED' =>
         'Somente o administrador pode excluir o Circle.',
       'CIRCLE_NOT_FOUND' => 'Circle não encontrado.',
@@ -209,6 +244,8 @@ class CircleDeleteRemoteDataSource implements CircleDeleteGateway {
   }
 
   static const Set<String> _knownCodes = {
+    'APP_CHECK_REQUIRED',
+    'APP_CHECK_INVALID',
     'CIRCLE_ADMIN_REQUIRED',
     'CIRCLE_NOT_FOUND',
     'CIRCLE_STATE_CONFLICT',
@@ -226,6 +263,10 @@ class CircleDeleteRemoteDataSource implements CircleDeleteGateway {
     }
     return uri;
   }
+}
+
+Future<String?> _firebaseAppCheckTokenProvider() {
+  return FirebaseAppCheck.instance.getToken();
 }
 
 Future<String?> _firebaseIdTokenProvider() async {

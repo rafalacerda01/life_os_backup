@@ -1,10 +1,12 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:firebase_app_check/firebase_app_check.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:http/http.dart' as http;
 
 typedef FocusIdTokenProvider = Future<String?> Function();
+typedef FocusAppCheckTokenProvider = Future<String?> Function();
 
 enum FocusRemoteTargetType {
   task('TASK'),
@@ -138,6 +140,7 @@ class FocusRemoteDataSource {
 
   final http.Client _client;
   final FocusIdTokenProvider _idTokenProvider;
+  final FocusAppCheckTokenProvider _appCheckTokenProvider;
   final String _baseUrl;
   final Duration _timeout;
   final bool _ownsClient;
@@ -145,10 +148,13 @@ class FocusRemoteDataSource {
   FocusRemoteDataSource({
     http.Client? client,
     FocusIdTokenProvider? idTokenProvider,
+    FocusAppCheckTokenProvider? appCheckTokenProvider,
     String baseUrl = defaultBaseUrl,
     Duration timeout = defaultTimeout,
   }) : _client = client ?? http.Client(),
        _idTokenProvider = idTokenProvider ?? _firebaseIdTokenProvider,
+       _appCheckTokenProvider =
+           appCheckTokenProvider ?? _firebaseAppCheckTokenProvider,
        _baseUrl = _normalizeBaseUrl(baseUrl),
        _timeout = timeout,
        _ownsClient = client == null {
@@ -230,6 +236,7 @@ class FocusRemoteDataSource {
     required Map<String, dynamic> payload,
   }) async {
     final token = await _loadToken(fallbackCode);
+    final appCheckToken = await _loadAppCheckToken();
     http.Response response;
 
     try {
@@ -239,6 +246,7 @@ class FocusRemoteDataSource {
             headers: {
               'Content-Type': 'application/json',
               'Authorization': 'Bearer $token',
+              'X-Firebase-AppCheck': appCheckToken,
             },
             body: jsonEncode(payload),
           )
@@ -318,6 +326,32 @@ class FocusRemoteDataSource {
     }
   }
 
+  Future<String> _loadAppCheckToken() async {
+    String? token;
+    try {
+      token = await _appCheckTokenProvider().timeout(_timeout);
+    } catch (_) {
+      throw const FocusRemoteException(
+        statusCode: null,
+        code: 'APP_CHECK_INVALID',
+        message: _appCheckFailureMessage,
+        isRetryable: true,
+      );
+    }
+    if (token == null || token.trim().isEmpty) {
+      throw const FocusRemoteException(
+        statusCode: null,
+        code: 'APP_CHECK_REQUIRED',
+        message: _appCheckFailureMessage,
+        isRetryable: false,
+      );
+    }
+    return token.trim();
+  }
+
+  static const _appCheckFailureMessage =
+      'Não foi possível validar a segurança do aplicativo. Tente novamente.';
+
   static FocusRemoteException _backendException(
     http.Response response,
     String fallbackCode,
@@ -330,6 +364,15 @@ class FocusRemoteDataSource {
     }
 
     final backendCode = body?['code'];
+    if (backendCode == 'APP_CHECK_REQUIRED' ||
+        backendCode == 'APP_CHECK_INVALID') {
+      return FocusRemoteException(
+        statusCode: response.statusCode,
+        code: backendCode as String,
+        message: _appCheckFailureMessage,
+        isRetryable: _isRetryableStatus(response.statusCode),
+      );
+    }
     final backendMessage = body?['error'];
     return FocusRemoteException(
       statusCode: response.statusCode,
@@ -393,6 +436,10 @@ class _FocusHttpResponse {
   final Map<String, dynamic> json;
 
   const _FocusHttpResponse({required this.statusCode, required this.json});
+}
+
+Future<String?> _firebaseAppCheckTokenProvider() {
+  return FirebaseAppCheck.instance.getToken();
 }
 
 Future<String?> _firebaseIdTokenProvider() async {

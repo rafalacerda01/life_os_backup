@@ -1,11 +1,13 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:firebase_app_check/firebase_app_check.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:http/http.dart' as http;
 
 typedef ActivityIdTokenProvider = Future<String?> Function();
+typedef ActivityAppCheckTokenProvider = Future<String?> Function();
 
 class ActivityTaskCompletionResponse {
   final String resourceId;
@@ -105,6 +107,7 @@ class ActivityRemoteDataSource {
 
   final http.Client _client;
   final ActivityIdTokenProvider _idTokenProvider;
+  final ActivityAppCheckTokenProvider _appCheckTokenProvider;
   final String _baseUrl;
   final Duration _timeout;
   final bool _ownsClient;
@@ -112,10 +115,13 @@ class ActivityRemoteDataSource {
   ActivityRemoteDataSource({
     http.Client? client,
     ActivityIdTokenProvider? idTokenProvider,
+    ActivityAppCheckTokenProvider? appCheckTokenProvider,
     String baseUrl = defaultBaseUrl,
     Duration timeout = defaultTimeout,
   }) : _client = client ?? http.Client(),
        _idTokenProvider = idTokenProvider ?? _firebaseIdTokenProvider,
+       _appCheckTokenProvider =
+           appCheckTokenProvider ?? _firebaseAppCheckTokenProvider,
        _baseUrl = _normalizeBaseUrl(baseUrl),
        _timeout = timeout,
        _ownsClient = client == null {
@@ -180,6 +186,7 @@ class ActivityRemoteDataSource {
     required Map<String, dynamic> payload,
   }) async {
     final token = await _loadToken(fallbackCode);
+    final appCheckToken = await _loadAppCheckToken();
     http.Response response;
     try {
       response = await _client
@@ -188,6 +195,7 @@ class ActivityRemoteDataSource {
             headers: {
               'Content-Type': 'application/json',
               'Authorization': 'Bearer $token',
+              'X-Firebase-AppCheck': appCheckToken,
             },
             body: jsonEncode(payload),
           )
@@ -265,6 +273,32 @@ class ActivityRemoteDataSource {
     }
   }
 
+  Future<String> _loadAppCheckToken() async {
+    String? token;
+    try {
+      token = await _appCheckTokenProvider().timeout(_timeout);
+    } catch (_) {
+      throw const ActivityRemoteException(
+        statusCode: null,
+        code: 'APP_CHECK_INVALID',
+        message: _appCheckFailureMessage,
+        isRetryable: true,
+      );
+    }
+    if (token == null || token.trim().isEmpty) {
+      throw const ActivityRemoteException(
+        statusCode: null,
+        code: 'APP_CHECK_REQUIRED',
+        message: _appCheckFailureMessage,
+        isRetryable: false,
+      );
+    }
+    return token.trim();
+  }
+
+  static const _appCheckFailureMessage =
+      'Não foi possível validar a segurança do aplicativo. Tente novamente.';
+
   static ActivityRemoteException _backendException(
     http.Response response,
     String fallbackCode,
@@ -277,6 +311,15 @@ class ActivityRemoteDataSource {
     }
 
     final backendCode = body?['code'];
+    if (backendCode == 'APP_CHECK_REQUIRED' ||
+        backendCode == 'APP_CHECK_INVALID') {
+      return ActivityRemoteException(
+        statusCode: response.statusCode,
+        code: backendCode as String,
+        message: _appCheckFailureMessage,
+        isRetryable: response.statusCode == 429 || response.statusCode >= 500,
+      );
+    }
     final backendMessage = body?['error'];
     return ActivityRemoteException(
       statusCode: response.statusCode,
@@ -336,6 +379,10 @@ class _ActivityHttpResponse {
   final Map<String, dynamic> json;
 
   const _ActivityHttpResponse({required this.statusCode, required this.json});
+}
+
+Future<String?> _firebaseAppCheckTokenProvider() {
+  return FirebaseAppCheck.instance.getToken();
 }
 
 Future<String?> _firebaseIdTokenProvider() async {

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -7,6 +8,9 @@ import 'package:life_os/core/network/activity_remote_data_source.dart';
 
 const _baseUrl = 'https://example.test/api/activity';
 const _token = 'firebase-id-token';
+const _appCheckToken = 'firebase-app-check-token';
+const _appCheckMessage =
+    'Não foi possível validar a segurança do aplicativo. Tente novamente.';
 
 Map<String, dynamic> get _taskResponse => {
   'type': 'TASK_COMPLETION',
@@ -26,12 +30,14 @@ Map<String, dynamic> get _habitResponse => {
 ActivityRemoteDataSource _source(
   MockClient client, {
   ActivityIdTokenProvider? tokenProvider,
+  ActivityAppCheckTokenProvider? appCheckTokenProvider,
   String baseUrl = _baseUrl,
   Duration timeout = ActivityRemoteDataSource.defaultTimeout,
 }) {
   return ActivityRemoteDataSource(
     client: client,
     idTokenProvider: tokenProvider ?? () async => _token,
+    appCheckTokenProvider: appCheckTokenProvider ?? () async => _appCheckToken,
     baseUrl: baseUrl,
     timeout: timeout,
   );
@@ -49,6 +55,158 @@ Future<ActivityRemoteException> _capture(
 }
 
 void main() {
+  group('App Check', () {
+    test(
+      'task-complete envia tokens e payload exatos com App Check trimado',
+      () async {
+        late http.Request request;
+        var idTokenLoaded = false;
+        final remote = _source(
+          MockClient((received) async {
+            request = received;
+            return http.Response(jsonEncode(_taskResponse), 200);
+          }),
+          tokenProvider: () async {
+            idTokenLoaded = true;
+            return _token;
+          },
+          appCheckTokenProvider: () async {
+            expect(idTokenLoaded, isTrue);
+            return '  $_appCheckToken  ';
+          },
+        );
+        await remote.completeTask(taskId: 'task-1');
+        expect(request.method, 'POST');
+        expect(request.url, Uri.parse('$_baseUrl/task-complete'));
+        expect(request.headers['authorization'], 'Bearer $_token');
+        expect(request.headers['x-firebase-appcheck'], _appCheckToken);
+        expect(request.headers['content-type'], 'application/json');
+        expect(request.body, jsonEncode({'taskId': 'task-1'}));
+      },
+    );
+
+    test(
+      'habit-complete envia tokens e payload exatos com App Check trimado',
+      () async {
+        late http.Request request;
+        var idTokenLoaded = false;
+        final remote = _source(
+          MockClient((received) async {
+            request = received;
+            return http.Response(jsonEncode(_habitResponse), 200);
+          }),
+          tokenProvider: () async {
+            idTokenLoaded = true;
+            return _token;
+          },
+          appCheckTokenProvider: () async {
+            expect(idTokenLoaded, isTrue);
+            return '  $_appCheckToken  ';
+          },
+        );
+        await remote.completeHabit(habitId: 'habit-1');
+        expect(request.method, 'POST');
+        expect(request.url, Uri.parse('$_baseUrl/habit-complete'));
+        expect(request.headers['authorization'], 'Bearer $_token');
+        expect(request.headers['x-firebase-appcheck'], _appCheckToken);
+        expect(request.headers['content-type'], 'application/json');
+        expect(request.body, jsonEncode({'habitId': 'habit-1'}));
+      },
+    );
+
+    for (final token in <String?>[null, '', '   ']) {
+      test('token ausente/vazio ($token) impede HTTP', () async {
+        var requests = 0;
+        final remote = _source(
+          MockClient((_) async {
+            requests += 1;
+            return http.Response(jsonEncode(_taskResponse), 200);
+          }),
+          appCheckTokenProvider: () async => token,
+        );
+        final error = await _capture(
+          () => remote.completeTask(taskId: 'task-1'),
+        );
+        expect(requests, 0);
+        expect(error.statusCode, isNull);
+        expect(error.code, 'APP_CHECK_REQUIRED');
+        expect(error.message, _appCheckMessage);
+        expect(error.isRetryable, isFalse);
+      });
+    }
+
+    test('falha do provider impede HTTP e nao expoe detalhes', () async {
+      var requests = 0;
+      final remote = _source(
+        MockClient((_) async {
+          requests += 1;
+          return http.Response(jsonEncode(_taskResponse), 200);
+        }),
+        appCheckTokenProvider: () async {
+          throw StateError('private-provider-error $_appCheckToken $_token');
+        },
+      );
+      final error = await _capture(() => remote.completeTask(taskId: 'task-1'));
+      expect(requests, 0);
+      expect(error.statusCode, isNull);
+      expect(error.code, 'APP_CHECK_INVALID');
+      expect(error.message, _appCheckMessage);
+      expect(error.isRetryable, isTrue);
+      for (final secret in [_appCheckToken, _token, 'private-provider-error']) {
+        expect(error.message, isNot(contains(secret)));
+        expect(error.toString(), isNot(contains(secret)));
+      }
+    });
+
+    test('timeout do provider impede HTTP', () async {
+      var requests = 0;
+      final remote = _source(
+        MockClient((_) async {
+          requests += 1;
+          return http.Response(jsonEncode(_taskResponse), 200);
+        }),
+        appCheckTokenProvider: () => Completer<String?>().future,
+        timeout: const Duration(milliseconds: 1),
+      );
+      final error = await _capture(() => remote.completeTask(taskId: 'task-1'));
+      expect(requests, 0);
+      expect(error.code, 'APP_CHECK_INVALID');
+      expect(error.message, _appCheckMessage);
+      expect(error.isRetryable, isTrue);
+    });
+
+    for (final code in ['APP_CHECK_REQUIRED', 'APP_CHECK_INVALID']) {
+      test('401 $code usa mensagem local sanitizada', () async {
+        final remote = _source(
+          MockClient(
+            (_) async => http.Response(
+              jsonEncode({
+                'code': code,
+                'error': 'private-backend-error $_appCheckToken $_token',
+              }),
+              401,
+            ),
+          ),
+        );
+        final error = await _capture(
+          () => remote.completeTask(taskId: 'task-1'),
+        );
+        expect(error.statusCode, 401);
+        expect(error.code, code);
+        expect(error.message, _appCheckMessage);
+        expect(error.isRetryable, isFalse);
+        for (final secret in [
+          _appCheckToken,
+          _token,
+          'private-backend-error',
+        ]) {
+          expect(error.message, isNot(contains(secret)));
+          expect(error.toString(), isNot(contains(secret)));
+        }
+      });
+    }
+  });
+
   group('requests', () {
     test('Task uses POST, exact URL, Bearer auth, and exact body', () async {
       late http.Request captured;

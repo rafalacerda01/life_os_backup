@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -7,6 +8,9 @@ import 'package:life_os/features/focus/data/remote/focus_remote_data_source.dart
 
 const _baseUrl = 'https://example.test/api/focus';
 const _token = 'firebase-id-token';
+const _appCheckToken = 'firebase-app-check-token';
+const _appCheckMessage =
+    'Não foi possível validar a segurança do aplicativo. Tente novamente.';
 
 Map<String, dynamic> get _startResponse => {
   'sessionId': 'session-start',
@@ -35,11 +39,13 @@ Map<String, dynamic> get _cancelResponse => {
 FocusRemoteDataSource _dataSource(
   MockClient client, {
   FocusIdTokenProvider? tokenProvider,
+  FocusAppCheckTokenProvider? appCheckTokenProvider,
   Duration timeout = FocusRemoteDataSource.defaultTimeout,
 }) {
   return FocusRemoteDataSource(
     client: client,
     idTokenProvider: tokenProvider ?? () async => _token,
+    appCheckTokenProvider: appCheckTokenProvider ?? () async => _appCheckToken,
     baseUrl: _baseUrl,
     timeout: timeout,
   );
@@ -57,6 +63,199 @@ Future<FocusRemoteException> _captureRemoteException(
 }
 
 void main() {
+  group('App Check', () {
+    test('start envia tokens e payload exatos com App Check trimado', () async {
+      late http.Request request;
+      var idTokenLoaded = false;
+      final remote = _dataSource(
+        MockClient((received) async {
+          request = received;
+          return http.Response(jsonEncode(_startResponse), 200);
+        }),
+        tokenProvider: () async {
+          idTokenLoaded = true;
+          return _token;
+        },
+        appCheckTokenProvider: () async {
+          expect(idTokenLoaded, isTrue);
+          return '  $_appCheckToken  ';
+        },
+      );
+      await remote.startFocus(
+        targetId: 'task-1',
+        targetType: FocusRemoteTargetType.task,
+        plannedDurationSeconds: 1500,
+      );
+      expect(request.method, 'POST');
+      expect(request.url, Uri.parse('$_baseUrl/start'));
+      expect(request.headers['authorization'], 'Bearer $_token');
+      expect(request.headers['x-firebase-appcheck'], _appCheckToken);
+      expect(request.headers['content-type'], 'application/json');
+      expect(
+        request.body,
+        jsonEncode({
+          'targetId': 'task-1',
+          'targetType': 'TASK',
+          'plannedDurationSeconds': 1500,
+        }),
+      );
+    });
+
+    test(
+      'finish envia tokens e payload exatos com App Check trimado',
+      () async {
+        late http.Request request;
+        var idTokenLoaded = false;
+        final remote = _dataSource(
+          MockClient((received) async {
+            request = received;
+            return http.Response(jsonEncode(_finishResponse), 200);
+          }),
+          tokenProvider: () async {
+            idTokenLoaded = true;
+            return _token;
+          },
+          appCheckTokenProvider: () async {
+            expect(idTokenLoaded, isTrue);
+            return '  $_appCheckToken  ';
+          },
+        );
+        await remote.finishFocus(sessionId: 'session-finish');
+        expect(request.method, 'POST');
+        expect(request.url, Uri.parse('$_baseUrl/finish'));
+        expect(request.headers['authorization'], 'Bearer $_token');
+        expect(request.headers['x-firebase-appcheck'], _appCheckToken);
+        expect(request.headers['content-type'], 'application/json');
+        expect(request.body, jsonEncode({'sessionId': 'session-finish'}));
+      },
+    );
+
+    test(
+      'cancel envia tokens e payload exatos com App Check trimado',
+      () async {
+        late http.Request request;
+        var idTokenLoaded = false;
+        final remote = _dataSource(
+          MockClient((received) async {
+            request = received;
+            return http.Response(jsonEncode(_cancelResponse), 200);
+          }),
+          tokenProvider: () async {
+            idTokenLoaded = true;
+            return _token;
+          },
+          appCheckTokenProvider: () async {
+            expect(idTokenLoaded, isTrue);
+            return '  $_appCheckToken  ';
+          },
+        );
+        await remote.cancelFocus(sessionId: 'session-cancel');
+        expect(request.method, 'POST');
+        expect(request.url, Uri.parse('$_baseUrl/cancel'));
+        expect(request.headers['authorization'], 'Bearer $_token');
+        expect(request.headers['x-firebase-appcheck'], _appCheckToken);
+        expect(request.headers['content-type'], 'application/json');
+        expect(request.body, jsonEncode({'sessionId': 'session-cancel'}));
+      },
+    );
+
+    for (final token in <String?>[null, '', '   ']) {
+      test('token ausente/vazio ($token) impede HTTP', () async {
+        var requests = 0;
+        final remote = _dataSource(
+          MockClient((_) async {
+            requests += 1;
+            return http.Response(jsonEncode(_finishResponse), 200);
+          }),
+          appCheckTokenProvider: () async => token,
+        );
+        final error = await _captureRemoteException(
+          () => remote.finishFocus(sessionId: 'session-finish'),
+        );
+        expect(requests, 0);
+        expect(error.statusCode, isNull);
+        expect(error.code, 'APP_CHECK_REQUIRED');
+        expect(error.message, _appCheckMessage);
+        expect(error.isRetryable, isFalse);
+      });
+    }
+
+    test('falha do provider impede HTTP e nao expoe detalhes', () async {
+      var requests = 0;
+      final remote = _dataSource(
+        MockClient((_) async {
+          requests += 1;
+          return http.Response(jsonEncode(_finishResponse), 200);
+        }),
+        appCheckTokenProvider: () async {
+          throw StateError('private-provider-error $_appCheckToken $_token');
+        },
+      );
+      final error = await _captureRemoteException(
+        () => remote.finishFocus(sessionId: 'session-finish'),
+      );
+      expect(requests, 0);
+      expect(error.statusCode, isNull);
+      expect(error.code, 'APP_CHECK_INVALID');
+      expect(error.message, _appCheckMessage);
+      expect(error.isRetryable, isTrue);
+      for (final secret in [_appCheckToken, _token, 'private-provider-error']) {
+        expect(error.message, isNot(contains(secret)));
+        expect(error.toString(), isNot(contains(secret)));
+      }
+    });
+
+    test('timeout do provider impede HTTP', () async {
+      var requests = 0;
+      final remote = _dataSource(
+        MockClient((_) async {
+          requests += 1;
+          return http.Response(jsonEncode(_finishResponse), 200);
+        }),
+        appCheckTokenProvider: () => Completer<String?>().future,
+        timeout: const Duration(milliseconds: 1),
+      );
+      final error = await _captureRemoteException(
+        () => remote.finishFocus(sessionId: 'session-finish'),
+      );
+      expect(requests, 0);
+      expect(error.code, 'APP_CHECK_INVALID');
+      expect(error.message, _appCheckMessage);
+      expect(error.isRetryable, isTrue);
+    });
+
+    for (final code in ['APP_CHECK_REQUIRED', 'APP_CHECK_INVALID']) {
+      test('401 $code usa mensagem local sanitizada', () async {
+        final remote = _dataSource(
+          MockClient(
+            (_) async => http.Response(
+              jsonEncode({
+                'code': code,
+                'error': 'private-backend-error $_appCheckToken $_token',
+              }),
+              401,
+            ),
+          ),
+        );
+        final error = await _captureRemoteException(
+          () => remote.finishFocus(sessionId: 'session-finish'),
+        );
+        expect(error.statusCode, 401);
+        expect(error.code, code);
+        expect(error.message, _appCheckMessage);
+        expect(error.isRetryable, isFalse);
+        for (final secret in [
+          _appCheckToken,
+          _token,
+          'private-backend-error',
+        ]) {
+          expect(error.message, isNot(contains(secret)));
+          expect(error.toString(), isNot(contains(secret)));
+        }
+      });
+    }
+  });
+
   group('startFocus', () {
     test('uses the configured start URL', () async {
       late Uri capturedUrl;
