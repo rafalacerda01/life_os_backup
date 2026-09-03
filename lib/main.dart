@@ -10,6 +10,7 @@ import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/date_symbol_data_local.dart';
 import 'package:life_os/core/router/router.dart';
+import 'package:life_os/core/security/biometric_app_gate.dart';
 import 'package:life_os/core/utils/app_logger.dart';
 import 'package:life_os/features/health/services/cycle_reminder_action_bootstrap.dart';
 import 'package:life_os/firebase_options.dart';
@@ -123,6 +124,8 @@ class LifeOSApp extends ConsumerWidget {
         scaffoldBackgroundColor: const Color(0xFF070B14),
         useMaterial3: true,
       ),
+      builder: (context, child) =>
+          BiometricAppGate(child: child ?? const SizedBox.shrink()),
       routerConfig: router,
     );
   }

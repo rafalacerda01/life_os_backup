@@ -5,6 +5,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:go_router/go_router.dart';
 import 'package:life_os/core/router/router.dart';
+import 'package:life_os/features/auth/presentation/providers/auth_provider.dart';
+import 'package:life_os/features/auth/presentation/providers/auth_state.dart';
 import 'package:life_os/features/health/services/cycle_reminder_action_bootstrap.dart';
 import 'package:life_os/main.dart';
 
@@ -12,6 +14,11 @@ import 'package:life_os/main.dart';
 class _UnusedNotificationBootstrap implements CycleReminderActionBootstrap {
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+class _UnauthenticatedNotifier extends AuthNotifier {
+  @override
+  AuthState build() => AuthState.unauthenticated();
 }
 
 const _openDatePickerKey = Key('open-date-picker');
@@ -56,6 +63,7 @@ Future<BuildContext> _pumpApp(
     ProviderScope(
       overrides: [
         routerProvider.overrideWithValue(router),
+        authNotifierProvider.overrideWith(_UnauthenticatedNotifier.new),
         cycleReminderActionBootstrapProvider.overrideWithValue(
           _UnusedNotificationBootstrap(),
         ),

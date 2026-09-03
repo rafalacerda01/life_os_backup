@@ -9,7 +9,7 @@ class SecurityPrivacyScreen extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     // Escuta apenas o estado reativo da biometria
-    final isBiometricsEnabled = ref.watch(biometricProvider);
+    final biometricState = ref.watch(biometricProvider);
 
     return Scaffold(
       backgroundColor: const Color(0xFF070B14),
@@ -34,33 +34,39 @@ class SecurityPrivacyScreen extends ConsumerWidget {
               "Exigir FaceID/Impressão Digital",
               style: TextStyle(color: Colors.white54),
             ),
-            value: isBiometricsEnabled,
+            value: biometricState.isEnabled,
             activeColor: Colors.purpleAccent,
-            onChanged: (val) async {
-              final success = await ref
-                  .read(biometricProvider.notifier)
-                  .toggleBiometrics(val);
+            onChanged:
+                biometricState.status == BiometricLockStatus.loading ||
+                    biometricState.authenticationInProgress
+                ? null
+                : (val) async {
+                    final success = await ref
+                        .read(biometricProvider.notifier)
+                        .toggleBiometrics(val);
 
-              if (!context.mounted) return;
+                    if (!context.mounted) return;
 
-              if (!success && val) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(
-                    content: Text(
-                      "Não foi possível autenticar ou o dispositivo não suporta biometria.",
-                    ),
-                  ),
-                );
-              } else {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(
-                    content: Text(
-                      val ? "Biometria ativada!" : "Biometria desativada.",
-                    ),
-                  ),
-                );
-              }
-            },
+                    if (!success) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(
+                          content: Text(
+                            "Não foi possível confirmar a biometria. A configuração foi mantida.",
+                          ),
+                        ),
+                      );
+                    } else {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(
+                          content: Text(
+                            val
+                                ? "Biometria ativada!"
+                                : "Biometria desativada.",
+                          ),
+                        ),
+                      );
+                    }
+                  },
             tileColor: const Color(0xFF11182E),
             shape: RoundedRectangleBorder(
               borderRadius: BorderRadius.circular(12),

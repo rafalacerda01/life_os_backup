@@ -3,6 +3,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:go_router/go_router.dart';
 import 'package:life_os/core/router/router.dart';
+import 'package:life_os/features/auth/presentation/providers/auth_provider.dart';
+import 'package:life_os/features/auth/presentation/providers/auth_state.dart';
 import 'package:life_os/features/health/data/models/health_model.dart';
 import 'package:life_os/features/health/presentation/health_screen.dart';
 import 'package:life_os/features/health/presentation/providers/health_provider.dart';
@@ -15,6 +17,11 @@ import 'package:life_os/main.dart';
 class _UnusedNotificationBootstrap implements CycleReminderActionBootstrap {
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+class _UnauthenticatedNotifier extends AuthNotifier {
+  @override
+  AuthState build() => AuthState.unauthenticated();
 }
 
 void main() {
@@ -60,6 +67,7 @@ void main() {
       ProviderScope(
         overrides: [
           routerProvider.overrideWithValue(router),
+          authNotifierProvider.overrideWith(_UnauthenticatedNotifier.new),
           cycleReminderActionBootstrapProvider.overrideWithValue(
             _UnusedNotificationBootstrap(),
           ),
