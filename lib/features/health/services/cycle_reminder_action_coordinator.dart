@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:life_os/core/services/notification_preferences.dart';
@@ -5,6 +7,7 @@ import 'package:life_os/core/services/notification_service.dart';
 import 'package:life_os/core/utils/app_logger.dart';
 import 'package:life_os/features/health/presentation/cycle/cycle_reminder_preferences.dart';
 import 'package:life_os/features/health/presentation/providers/health_provider.dart';
+import 'package:life_os/features/settings/presentation/providers/biometric_provider.dart';
 import 'package:life_os/features/settings/presentation/providers/notification_provider.dart';
 
 import 'cycle_reminder_action_security.dart';
@@ -71,7 +74,16 @@ abstract interface class CycleReminderActionSessionCoordinator {
 
   Future<void> onSessionPrepared(String userId);
 
+  Future<void> onLocalAccessChanged(bool allowed);
+
   void onSessionCleared();
+}
+
+bool isCycleReminderLocalAccessAllowed(BiometricLockState state) {
+  return switch (state.status) {
+    BiometricLockStatus.disabled || BiometricLockStatus.unlocked => true,
+    BiometricLockStatus.loading || BiometricLockStatus.locked => false,
+  };
 }
 
 class CycleReminderActionCoordinator
@@ -92,6 +104,7 @@ class CycleReminderActionCoordinator
         const CycleReminderActionPayloadCodec(),
     DateTime Function()? clock,
     void Function(String message)? warningLogger,
+    bool initialLocalAccessAllowed = false,
   }) {
     return CycleReminderActionCoordinator._(
       currentUserId,
@@ -108,6 +121,7 @@ class CycleReminderActionCoordinator
       codec,
       clock ?? DateTime.now,
       warningLogger ?? AppLogger.w,
+      initialLocalAccessAllowed,
     );
   }
 
@@ -126,6 +140,7 @@ class CycleReminderActionCoordinator
     this._codec,
     this._clock,
     this._warningLogger,
+    this._localAccessAllowed,
   );
 
   final CycleReminderUserIdReader _currentUserId;
@@ -146,6 +161,8 @@ class CycleReminderActionCoordinator
   Future<void> _tail = Future<void>.value();
   NotificationResponse? _pending;
   bool _canBufferPendingAction = true;
+  bool _localAccessAllowed;
+  int _localAccessRevision = 0;
 
   @override
   Future<void> handle(NotificationResponse response) {
@@ -155,7 +172,7 @@ class CycleReminderActionCoordinator
     }
 
     final preparedUserId = _sessionAuthority.preparedUserId;
-    if (preparedUserId == null) {
+    if (preparedUserId == null || !_localAccessAllowed) {
       if (_canBufferPendingAction) {
         _pending = response;
       }
@@ -171,10 +188,28 @@ class CycleReminderActionCoordinator
 
     _sessionAuthority.prepare(normalizedUserId);
     _canBufferPendingAction = true;
+    return _drainPendingIfReady();
+  }
+
+  @override
+  Future<void> onLocalAccessChanged(bool allowed) {
+    if (_localAccessAllowed != allowed) {
+      _localAccessAllowed = allowed;
+      _localAccessRevision += 1;
+    }
+    return _drainPendingIfReady();
+  }
+
+  Future<void> _drainPendingIfReady() {
+    final preparedUserId = _sessionAuthority.preparedUserId;
+    if (preparedUserId == null || !_localAccessAllowed) {
+      return Future<void>.value();
+    }
+
     final pending = _pending;
     _pending = null;
     if (pending == null) return Future<void>.value();
-    return _enqueue(() => _process(normalizedUserId, pending));
+    return _enqueue(() => _process(preparedUserId, pending));
   }
 
   @override
@@ -201,15 +236,16 @@ class CycleReminderActionCoordinator
   }
 
   Future<void> _process(String userId, NotificationResponse response) async {
-    if (!_isCurrentSession(userId)) return;
+    if (!_isCurrentSession(userId) || !_localAccessAllowed) return;
     final generation = _operationEpoch.snapshot(userId);
+    final localAccessRevision = _localAccessRevision;
 
     final payload = _codec.decode(response.payload);
     final notificationId = response.id;
     if (payload == null || notificationId == null) return;
 
     final storedToken = await _tokenStore.load(userId);
-    if (!_isCurrentOperation(userId, generation) ||
+    if (!_isCurrentOperation(userId, generation, localAccessRevision) ||
         storedToken == null ||
         !constantTimeTokenEquals(storedToken, payload.token)) {
       return;
@@ -219,15 +255,21 @@ class CycleReminderActionCoordinator
       return;
     }
 
-    if (!_isCurrentOperation(userId, generation)) return;
+    if (!_isCurrentOperation(userId, generation, localAccessRevision)) return;
     await _mutationGate.run(userId, () async {
-      if (!_isCurrentOperation(userId, generation)) return;
+      if (!_isCurrentOperation(userId, generation, localAccessRevision)) {
+        return;
+      }
 
       final preferences = await _loadPreferences(userId);
-      if (!_isCurrentOperation(userId, generation)) return;
+      if (!_isCurrentOperation(userId, generation, localAccessRevision)) {
+        return;
+      }
 
       final globalEnabled = await _loadGlobalNotifications();
-      if (!_isCurrentOperation(userId, generation)) return;
+      if (!_isCurrentOperation(userId, generation, localAccessRevision)) {
+        return;
+      }
 
       if (preferences == null || !preferences.enabled || !globalEnabled) {
         await _lifecycle.cancelAllCycleReminders(userId);
@@ -241,12 +283,15 @@ class CycleReminderActionCoordinator
 
       if (response.actionId == cycleReminderDoneActionId) {
         if (preferences.type != CycleReminderType.pill ||
-            !_isCurrentOperation(userId, generation)) {
+            !_isCurrentOperation(userId, generation, localAccessRevision)) {
           return;
         }
 
         final completed = await _markPillTaken(userId);
-        if (!completed || !_isCurrentOperation(userId, generation)) return;
+        if (!completed ||
+            !_isCurrentOperation(userId, generation, localAccessRevision)) {
+          return;
+        }
 
         await _notificationGateway.cancel(snoozeId);
         return;
@@ -254,7 +299,8 @@ class CycleReminderActionCoordinator
 
       if (preferences.type == CycleReminderType.pill) {
         final alreadyTaken = await _readPillTaken(userId);
-        if (alreadyTaken == null || !_isCurrentOperation(userId, generation)) {
+        if (alreadyTaken == null ||
+            !_isCurrentOperation(userId, generation, localAccessRevision)) {
           return;
         }
         if (alreadyTaken) {
@@ -269,7 +315,9 @@ class CycleReminderActionCoordinator
       );
 
       await _notificationGateway.cancel(snoozeId);
-      if (!_isCurrentOperation(userId, generation)) return;
+      if (!_isCurrentOperation(userId, generation, localAccessRevision)) {
+        return;
+      }
 
       await _notificationGateway.scheduleSnooze(
         id: snoozeId,
@@ -280,7 +328,8 @@ class CycleReminderActionCoordinator
         includeDoneAction: preferences.type == CycleReminderType.pill,
       );
 
-      if (!_operationEpoch.isCurrent(userId, generation)) {
+      if (!_operationEpoch.isCurrent(userId, generation) ||
+          !_isCurrentLocalAccess(localAccessRevision)) {
         await _notificationGateway.cancel(snoozeId);
         return;
       }
@@ -290,9 +339,18 @@ class CycleReminderActionCoordinator
     });
   }
 
-  bool _isCurrentOperation(String userId, int generation) {
+  bool _isCurrentOperation(
+    String userId,
+    int generation,
+    int localAccessRevision,
+  ) {
     return _operationEpoch.isCurrent(userId, generation) &&
-        _isCurrentSession(userId);
+        _isCurrentSession(userId) &&
+        _isCurrentLocalAccess(localAccessRevision);
+  }
+
+  bool _isCurrentLocalAccess(int revision) {
+    return _localAccessAllowed && _localAccessRevision == revision;
   }
 
   bool _isCurrentSession(String userId) {
@@ -305,7 +363,8 @@ final cycleReminderActionCoordinatorProvider =
     Provider<CycleReminderActionSessionCoordinator>((ref) {
       final notificationStore = ref.watch(notificationPreferencesStoreProvider);
       final notificationService = ref.watch(notificationServiceProvider);
-      return CycleReminderActionCoordinator(
+      final initialBiometricState = ref.read(biometricProvider);
+      final coordinator = CycleReminderActionCoordinator(
         currentUserId: ref.watch(cycleReminderUserIdReaderProvider),
         tokenStore: ref.watch(cycleReminderActionTokenStoreProvider),
         loadPreferences: ref.watch(cycleReminderPreferencesStoreProvider).load,
@@ -326,7 +385,18 @@ final cycleReminderActionCoordinatorProvider =
         notificationGateway: NotificationServiceCycleReminderActionGateway(
           notificationService,
         ),
+        initialLocalAccessAllowed: isCycleReminderLocalAccessAllowed(
+          initialBiometricState,
+        ),
       );
+      ref.listen(biometricProvider, (_, next) {
+        unawaited(
+          coordinator.onLocalAccessChanged(
+            isCycleReminderLocalAccessAllowed(next),
+          ),
+        );
+      });
+      return coordinator;
     });
 
 final cycleReminderSessionCleanupProvider =

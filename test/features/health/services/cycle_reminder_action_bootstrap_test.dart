@@ -85,6 +85,9 @@ class _RecordingCoordinator implements CycleReminderActionSessionCoordinator {
   }
 
   @override
+  Future<void> onLocalAccessChanged(bool allowed) async {}
+
+  @override
   void onSessionCleared() {
     clearedSessions += 1;
   }
@@ -114,6 +117,9 @@ class _PendingCoordinator implements CycleReminderActionSessionCoordinator {
       processed += 1;
     }
   }
+
+  @override
+  Future<void> onLocalAccessChanged(bool allowed) async {}
 
   @override
   void onSessionCleared() {

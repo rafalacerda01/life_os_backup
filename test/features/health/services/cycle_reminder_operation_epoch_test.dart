@@ -246,6 +246,7 @@ CycleReminderActionCoordinator _coordinator({
     lifecycle: lifecycle,
     notificationGateway: gateway,
     clock: () => DateTime(2026, 8, 26, 10),
+    initialLocalAccessAllowed: true,
   );
 }
 

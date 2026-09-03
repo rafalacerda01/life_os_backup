@@ -11,6 +11,7 @@ import 'package:life_os/features/health/services/cycle_reminder_notification_lif
 import 'package:life_os/features/health/services/cycle_reminder_mutation_gate.dart';
 import 'package:life_os/features/health/services/cycle_reminder_operation_epoch.dart';
 import 'package:life_os/features/health/services/cycle_reminder_session_authority.dart';
+import 'package:life_os/features/settings/presentation/providers/biometric_provider.dart';
 
 class _TokenStore implements CycleReminderActionTokenReader {
   _TokenStore(this.token);
@@ -175,7 +176,9 @@ void main() {
     );
   }
 
-  CycleReminderActionCoordinator coordinator() {
+  CycleReminderActionCoordinator coordinator({
+    bool initialLocalAccessAllowed = true,
+  }) {
     return CycleReminderActionCoordinator(
       currentUserId: () => currentUserId,
       tokenStore: tokenStore,
@@ -214,6 +217,7 @@ void main() {
       notificationGateway: gateway,
       clock: () => now,
       warningLogger: warnings.add,
+      initialLocalAccessAllowed: initialLocalAccessAllowed,
     );
   }
 
@@ -239,6 +243,167 @@ void main() {
     pillWriteStarted = null;
     pillWriteGate = null;
     throwOnPillWrite = false;
+  });
+
+  test('biometric states map to local action authorization', () {
+    expect(
+      isCycleReminderLocalAccessAllowed(const BiometricLockState.loading()),
+      isFalse,
+    );
+    expect(
+      isCycleReminderLocalAccessAllowed(
+        const BiometricLockState(BiometricLockStatus.locked),
+      ),
+      isFalse,
+    );
+    expect(
+      isCycleReminderLocalAccessAllowed(
+        const BiometricLockState(BiometricLockStatus.disabled),
+      ),
+      isTrue,
+    );
+    expect(
+      isCycleReminderLocalAccessAllowed(
+        const BiometricLockState(BiometricLockStatus.unlocked),
+      ),
+      isTrue,
+    );
+  });
+
+  test('DONE bloqueado fica pending sem mutações', () async {
+    preferences = _preferences(type: CycleReminderType.pill);
+    final actionCoordinator = coordinator(initialLocalAccessAllowed: false);
+    await actionCoordinator.onSessionPrepared(userA);
+
+    await actionCoordinator.handle(
+      responseFor(actionId: cycleReminderDoneActionId),
+    );
+
+    expect(pillWriterCalls, 0);
+    expect(gateway.cancelledIds, isEmpty);
+    expect(gateway.schedules, isEmpty);
+
+    await actionCoordinator.onLocalAccessChanged(true);
+    expect(pillWriterCalls, 1);
+  });
+
+  test('snooze bloqueado fica pending sem efeitos', () async {
+    final actionCoordinator = coordinator(initialLocalAccessAllowed: false);
+    await actionCoordinator.onSessionPrepared(userA);
+
+    await actionCoordinator.handle(responseFor());
+
+    expect(gateway.cancelledIds, isEmpty);
+    expect(gateway.schedules, isEmpty);
+  });
+
+  test('unlock drena pending exatamente uma vez', () async {
+    final actionCoordinator = coordinator(initialLocalAccessAllowed: false);
+    await actionCoordinator.onSessionPrepared(userA);
+    await actionCoordinator.handle(responseFor());
+
+    await actionCoordinator.onLocalAccessChanged(true);
+    await actionCoordinator.onLocalAccessChanged(true);
+    await actionCoordinator.onLocalAccessChanged(true);
+
+    expect(gateway.cancelledIds, hasLength(1));
+    expect(gateway.schedules, hasLength(1));
+  });
+
+  test('session prepared não drena sem acesso local', () async {
+    final actionCoordinator = coordinator(initialLocalAccessAllowed: false);
+    await actionCoordinator.handle(responseFor());
+
+    await actionCoordinator.onSessionPrepared(userA);
+    expect(gateway.schedules, isEmpty);
+
+    await actionCoordinator.onLocalAccessChanged(true);
+    expect(gateway.schedules, hasLength(1));
+  });
+
+  test('acesso local não drena sem session prepared', () async {
+    final actionCoordinator = coordinator(initialLocalAccessAllowed: false);
+    await actionCoordinator.handle(responseFor());
+
+    await actionCoordinator.onLocalAccessChanged(true);
+    expect(gateway.schedules, isEmpty);
+
+    await actionCoordinator.onSessionPrepared(userA);
+    expect(gateway.schedules, hasLength(1));
+  });
+
+  test('session clear descarta pending bloqueada', () async {
+    final actionCoordinator = coordinator(initialLocalAccessAllowed: false);
+    await actionCoordinator.onSessionPrepared(userA);
+    await actionCoordinator.handle(responseFor());
+
+    actionCoordinator.onSessionCleared();
+    await actionCoordinator.onLocalAccessChanged(true);
+
+    expect(gateway.cancelledIds, isEmpty);
+    expect(gateway.schedules, isEmpty);
+  });
+
+  test('lock durante await impede DONE posterior', () async {
+    preferences = _preferences(type: CycleReminderType.pill);
+    final loadStarted = Completer<void>();
+    final releaseLoad = Completer<void>();
+    preferencesLoadStarted = loadStarted;
+    preferencesLoadGate = releaseLoad.future;
+    final actionCoordinator = coordinator();
+    await actionCoordinator.onSessionPrepared(userA);
+
+    final action = actionCoordinator.handle(
+      responseFor(actionId: cycleReminderDoneActionId),
+    );
+    await loadStarted.future;
+    await actionCoordinator.onLocalAccessChanged(false);
+    releaseLoad.complete();
+    await action;
+
+    expect(pillWriterCalls, 0);
+    expect(gateway.cancelledIds, isEmpty);
+  });
+
+  test('lock durante schedule compensa snooze recém-criado', () async {
+    final scheduleStarted = Completer<void>();
+    final releaseSchedule = Completer<void>();
+    gateway.scheduleStarted = scheduleStarted;
+    gateway.scheduleGate = releaseSchedule.future;
+    final actionCoordinator = coordinator();
+    await actionCoordinator.onSessionPrepared(userA);
+    final snoozeId = cycleReminderNotificationId(
+      userA,
+      cycleReminderSnoozeSlot,
+    );
+
+    final action = actionCoordinator.handle(responseFor());
+    await scheduleStarted.future;
+    await actionCoordinator.onLocalAccessChanged(false);
+    releaseSchedule.complete();
+    await action;
+
+    expect(gateway.schedules, hasLength(1));
+    expect(gateway.cancelledIds, <int>[snoozeId, snoozeId]);
+  });
+
+  test('lock transitório invalida operação antiga após novo unlock', () async {
+    final loadStarted = Completer<void>();
+    final releaseLoad = Completer<void>();
+    preferencesLoadStarted = loadStarted;
+    preferencesLoadGate = releaseLoad.future;
+    final actionCoordinator = coordinator();
+    await actionCoordinator.onSessionPrepared(userA);
+
+    final action = actionCoordinator.handle(responseFor());
+    await loadStarted.future;
+    await actionCoordinator.onLocalAccessChanged(false);
+    await actionCoordinator.onLocalAccessChanged(true);
+    releaseLoad.complete();
+    await action;
+
+    expect(gateway.cancelledIds, isEmpty);
+    expect(gateway.schedules, isEmpty);
   });
 
   test('snooze válido substitui slot 8 e agenda para 15 minutos', () async {
