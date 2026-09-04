@@ -512,12 +512,9 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
                                     color: Colors.transparent,
                                     child: InkWell(
                                       onTap: () async {
-                                        await ref
-                                            .read(tasksRepositoryProvider)
-                                            .toggleTaskStatus(
-                                              task.id,
-                                              task.isCompleted,
-                                            );
+                                        await ref.read(
+                                          manualTaskStatusToggleProvider,
+                                        )(task.id, task.isCompleted);
                                       },
                                       child: Container(
                                         decoration: BoxDecoration(

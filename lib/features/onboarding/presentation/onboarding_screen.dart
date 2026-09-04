@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:life_os/features/onboarding/presentation/onboarding_provider.dart';
+import 'package:life_os/features/settings/presentation/providers/analytics_provider.dart';
 
 // Modelo para organizar as cores e ícones de cada área
 class AreaConfig {
@@ -18,6 +19,10 @@ class OnboardingScreen extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final onboardingState = ref.watch(onboardingProvider);
+    final analyticsState = ref.watch(analyticsPreferenceProvider);
+    final canContinue =
+        onboardingState.selectedFocusAreas.isNotEmpty &&
+        !analyticsState.operationInProgress;
 
     final List<AreaConfig> areas = [
       AreaConfig("Produtividade", Icons.track_changes, Colors.blueAccent),
@@ -97,34 +102,70 @@ class OnboardingScreen extends ConsumerWidget {
                 padding: const EdgeInsets.only(bottom: 20),
                 child: Column(
                   children: [
+                    SwitchListTile(
+                      contentPadding: const EdgeInsets.symmetric(
+                        horizontal: 16,
+                        vertical: 4,
+                      ),
+                      tileColor: const Color(0xFF11182E),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(14),
+                      ),
+                      title: const Text(
+                        "Ajude a melhorar o Life OS",
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      subtitle: const Text(
+                        "Compartilhar métricas de uso para nos ajudar a entender quais recursos são mais úteis. Nenhum conteúdo de saúde, finanças ou IA é enviado pelo Analytics.",
+                        style: TextStyle(color: Colors.white54),
+                      ),
+                      value: analyticsState.isEnabled,
+                      activeColor: const Color(0xFFB026FF),
+                      onChanged:
+                          analyticsState.status ==
+                                  AnalyticsPreferenceStatus.loading ||
+                              analyticsState.operationInProgress
+                          ? null
+                          : (enabled) async {
+                              await ref
+                                  .read(analyticsPreferenceProvider.notifier)
+                                  .setEnabled(enabled);
+                            },
+                    ),
+                    const SizedBox(height: 12),
                     SizedBox(
                       width: double.infinity,
                       height: 56,
                       child: ElevatedButton(
                         style: ElevatedButton.styleFrom(
-                          backgroundColor: onboardingState.selectedFocusAreas.isEmpty 
-                              ? const Color(0xFF11182E) 
-                              : const Color(0xFF5D0EFF),
+                          backgroundColor: canContinue
+                              ? const Color(0xFF5D0EFF)
+                              : const Color(0xFF11182E),
                           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
                         ),
-                        onPressed: onboardingState.selectedFocusAreas.isEmpty
-                            ? null
-                            : () async {
+                        onPressed: canContinue
+                            ? () async {
                                 await ref.read(onboardingProvider.notifier).completeOnboarding();
                                 if (context.mounted) {
                                   context.go('/login');
                                 }
-                              },
+                              }
+                            : null,
                         child: Text("Continuar", 
                           style: TextStyle(
-                            color: onboardingState.selectedFocusAreas.isEmpty ? Colors.white24 : Colors.white, 
+                            color: canContinue ? Colors.white : Colors.white24,
                             fontSize: 16, 
                             fontWeight: FontWeight.bold
                           )),
                       ),
                     ),
                     TextButton(
-                      onPressed: () => context.go('/login'),
+                      onPressed: analyticsState.operationInProgress
+                          ? null
+                          : () => context.go('/login'),
                       child: const Text("Pular", style: TextStyle(color: Colors.white54)),
                     ),
                   ],

@@ -9,6 +9,7 @@ import 'package:life_os/features/focus/data/remote/focus_remote_data_source.dart
 import 'package:life_os/features/focus/data/repositories/focus_repository.dart';
 import 'package:life_os/features/tasks/presentation/providers/tasks_provider.dart';
 import 'package:life_os/features/study/presentation/providers/study_provider.dart';
+import 'package:life_os/features/settings/presentation/providers/analytics_provider.dart';
 
 enum FocusTargetType {
   task('TASK'),
@@ -290,6 +291,7 @@ class FocusNotifier extends Notifier<FocusState> {
     if (_isCompletingSession) return;
 
     _isCompletingSession = true;
+    final analytics = ref.read(analyticsServiceProvider);
 
     final cycle = _activeCycle;
     final verifiedSessionId = _takeVerifiedSession();
@@ -324,6 +326,13 @@ class FocusNotifier extends Notifier<FocusState> {
     } catch (e, stack) {
       AppLogger.e("Erro ao finalizar sessão de foco", e, stack);
     } finally {
+      if (!state.isBreak) {
+        final durationSeconds =
+            cycle?.plannedDurationSeconds ?? _timerDurationInSeconds;
+        unawaited(
+          analytics.logFocusCompleted(durationMinutes: durationSeconds ~/ 60),
+        );
+      }
       toggleSessionType();
       _isCompletingSession = false;
     }

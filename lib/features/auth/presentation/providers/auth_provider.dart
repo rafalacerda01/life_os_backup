@@ -6,6 +6,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:life_os/core/services/notification_service.dart';
+import 'package:life_os/core/services/analytics_service.dart';
 import 'package:life_os/core/services/sync_manager_provider.dart';
 import 'package:life_os/core/utils/app_logger.dart';
 // Imports dos providers de todos os módulos
@@ -24,6 +25,7 @@ import 'package:life_os/features/ai_companion/presentation/providers/ai_companio
 import 'package:life_os/features/ai_companion/presentation/providers/ai_consent_provider.dart';
 import 'package:life_os/features/circles/presentation/circles_provider.dart';
 import 'package:life_os/features/premium/presentation/premium_provider.dart';
+import 'package:life_os/features/settings/presentation/providers/analytics_provider.dart';
 
 import 'package:life_os/features/dashboard/presentation/providers/dashboard_provider.dart';
 import 'package:life_os/features/auth/data/repositories/auth_repository_impl.dart';
@@ -313,6 +315,7 @@ class AuthNotifier extends Notifier<AuthState> {
 
   Future<void> login(String email, String password) async {
     if (_accountDeletionInProgress) return;
+    final analytics = ref.read(analyticsServiceProvider);
     state = AuthState.loading();
     final result = await _repository.signInWithEmailAndPassword(
       email,
@@ -327,6 +330,7 @@ class AuthNotifier extends Notifier<AuthState> {
         }
         state = AuthState.authenticated(user);
         _scheduleHydration(firebaseUser.uid);
+        unawaited(analytics.logLogin(method: AnalyticsAuthMethod.email));
       },
       (failure) async {
         state = AuthState.error(failure.message);
@@ -336,6 +340,7 @@ class AuthNotifier extends Notifier<AuthState> {
 
   Future<void> register(String email, String password, String name) async {
     if (_accountDeletionInProgress) return;
+    final analytics = ref.read(analyticsServiceProvider);
     state = AuthState.loading();
     final result = await _repository.signUpWithEmailAndPassword(
       email,
@@ -351,6 +356,7 @@ class AuthNotifier extends Notifier<AuthState> {
         }
         state = AuthState.authenticated(user);
         _scheduleHydration(firebaseUser.uid);
+        unawaited(analytics.logSignUp(method: AnalyticsAuthMethod.email));
       },
       (failure) async {
         state = AuthState.error(failure.message);
@@ -360,6 +366,7 @@ class AuthNotifier extends Notifier<AuthState> {
 
   Future<void> signInWithGoogle() async {
     if (_accountDeletionInProgress) return;
+    final analytics = ref.read(analyticsServiceProvider);
     state = AuthState.loading();
     final result = await _repository.signInWithGoogle();
     await result.when(
@@ -371,6 +378,7 @@ class AuthNotifier extends Notifier<AuthState> {
         }
         state = AuthState.authenticated(user);
         _scheduleHydration(firebaseUser.uid);
+        unawaited(analytics.logLogin(method: AnalyticsAuthMethod.google));
       },
       (failure) async {
         state = AuthState.error(failure.message);

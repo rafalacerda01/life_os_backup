@@ -5,10 +5,28 @@ const String analyticsEnabledPreferenceKey = 'analytics_enabled';
 
 typedef AnalyticsPreferencesLoader = Future<SharedPreferences> Function();
 
+enum AnalyticsAuthMethod { email, google }
+
 abstract interface class AnalyticsPlatform {
   Future<void> setCollectionEnabled(bool enabled);
 
   Future<void> resetAnalyticsData();
+
+  Future<void> logAnalyticsOptIn();
+
+  Future<void> logOnboardingCompleted();
+
+  Future<void> logLogin(AnalyticsAuthMethod method);
+
+  Future<void> logSignUp(AnalyticsAuthMethod method);
+
+  Future<void> logTaskCompleted();
+
+  Future<void> logHabitCompleted();
+
+  Future<void> logFocusCompleted(int durationMinutes);
+
+  Future<void> logSupportOpened();
 }
 
 class FirebaseAnalyticsPlatform implements AnalyticsPlatform {
@@ -24,6 +42,49 @@ class FirebaseAnalyticsPlatform implements AnalyticsPlatform {
 
   @override
   Future<void> resetAnalyticsData() => _analytics.resetAnalyticsData();
+
+  @override
+  Future<void> logAnalyticsOptIn() {
+    return _analytics.logEvent(name: 'analytics_opt_in');
+  }
+
+  @override
+  Future<void> logOnboardingCompleted() {
+    return _analytics.logEvent(name: 'onboarding_completed');
+  }
+
+  @override
+  Future<void> logLogin(AnalyticsAuthMethod method) {
+    return _analytics.logLogin(loginMethod: method.name);
+  }
+
+  @override
+  Future<void> logSignUp(AnalyticsAuthMethod method) {
+    return _analytics.logSignUp(signUpMethod: method.name);
+  }
+
+  @override
+  Future<void> logTaskCompleted() {
+    return _analytics.logEvent(name: 'task_completed');
+  }
+
+  @override
+  Future<void> logHabitCompleted() {
+    return _analytics.logEvent(name: 'habit_completed');
+  }
+
+  @override
+  Future<void> logFocusCompleted(int durationMinutes) {
+    return _analytics.logEvent(
+      name: 'focus_completed',
+      parameters: <String, Object>{'duration_minutes': durationMinutes},
+    );
+  }
+
+  @override
+  Future<void> logSupportOpened() {
+    return _analytics.logEvent(name: 'support_opened');
+  }
 }
 
 class AnalyticsService {
@@ -37,6 +98,47 @@ class AnalyticsService {
   }
 
   Future<void> resetAnalyticsData() => _platform.resetAnalyticsData();
+
+  Future<void> logAnalyticsOptIn() {
+    return _runBestEffort(_platform.logAnalyticsOptIn);
+  }
+
+  Future<void> logOnboardingCompleted() {
+    return _runBestEffort(_platform.logOnboardingCompleted);
+  }
+
+  Future<void> logLogin({required AnalyticsAuthMethod method}) {
+    return _runBestEffort(() => _platform.logLogin(method));
+  }
+
+  Future<void> logSignUp({required AnalyticsAuthMethod method}) {
+    return _runBestEffort(() => _platform.logSignUp(method));
+  }
+
+  Future<void> logTaskCompleted() {
+    return _runBestEffort(_platform.logTaskCompleted);
+  }
+
+  Future<void> logHabitCompleted() {
+    return _runBestEffort(_platform.logHabitCompleted);
+  }
+
+  Future<void> logFocusCompleted({required int durationMinutes}) {
+    if (durationMinutes <= 0) return Future<void>.value();
+    return _runBestEffort(() => _platform.logFocusCompleted(durationMinutes));
+  }
+
+  Future<void> logSupportOpened() {
+    return _runBestEffort(_platform.logSupportOpened);
+  }
+
+  Future<void> _runBestEffort(Future<void> Function() operation) async {
+    try {
+      await operation();
+    } catch (_) {
+      // Product Analytics is never allowed to affect a user action.
+    }
+  }
 }
 
 class AnalyticsPreferenceStore {

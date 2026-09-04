@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:life_os/core/services/analytics_service.dart';
 
@@ -30,6 +31,12 @@ class AnalyticsPreferenceState {
 
 final analyticsServiceProvider = Provider<AnalyticsService>((ref) {
   return AnalyticsService();
+});
+
+typedef AnalyticsSessionActive = bool Function();
+
+final analyticsSessionActiveProvider = Provider<AnalyticsSessionActive>((ref) {
+  return () => FirebaseAuth.instance.currentUser != null;
 });
 
 final analyticsPreferenceStoreProvider = Provider<AnalyticsPreferenceStore>((
@@ -97,8 +104,8 @@ class AnalyticsPreferenceNotifier extends Notifier<AnalyticsPreferenceState> {
       if (!await store.saveEnabled(true)) return false;
       await service.setCollectionEnabled(true);
       if (!ref.mounted) return false;
-      _operationInProgress = false;
       state = const AnalyticsPreferenceState(AnalyticsPreferenceStatus.enabled);
+      unawaited(service.logAnalyticsOptIn());
       return true;
     } catch (_) {
       await _disableCollectionBestEffort(service);

@@ -8,6 +8,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:life_os/core/database/app_database.dart';
 import 'package:life_os/core/database/database_provider.dart';
 import 'package:life_os/core/utils/app_logger.dart';
+import 'package:life_os/features/settings/presentation/providers/analytics_provider.dart';
 import 'package:life_os/features/tasks/data/models/task_model.dart';
 
 // ============================================================================
@@ -18,6 +19,22 @@ final tasksRepositoryProvider = Provider((ref) {
   final db = ref.watch(databaseProvider);
 
   return TasksRepository(db, FirebaseFirestore.instance, FirebaseAuth.instance);
+});
+
+typedef ManualTaskStatusToggle =
+    Future<void> Function(String taskId, bool currentStatus);
+
+final manualTaskStatusToggleProvider = Provider<ManualTaskStatusToggle>((ref) {
+  final repository = ref.watch(tasksRepositoryProvider);
+  final analytics = ref.watch(analyticsServiceProvider);
+  final isSessionActive = ref.watch(analyticsSessionActiveProvider);
+  return (taskId, currentStatus) async {
+    final sessionActive = isSessionActive();
+    await repository.toggleTaskStatus(taskId, currentStatus);
+    if (sessionActive && !currentStatus) {
+      unawaited(analytics.logTaskCompleted());
+    }
+  };
 });
 
 // ============================================================================

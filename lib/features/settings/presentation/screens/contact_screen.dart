@@ -1,11 +1,26 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter/services.dart';
 import 'package:life_os/core/theme/app_colors.dart';
+import 'package:life_os/features/settings/presentation/providers/analytics_provider.dart';
 
-class ContactScreen extends StatelessWidget {
+class ContactScreen extends ConsumerStatefulWidget {
   const ContactScreen({super.key});
 
-  final String _supportEmail = "suporte@lifeos.app";
+  @override
+  ConsumerState<ContactScreen> createState() => _ContactScreenState();
+}
+
+class _ContactScreenState extends ConsumerState<ContactScreen> {
+  static const String _supportEmail = "suporte@lifeos.app";
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(ref.read(analyticsServiceProvider).logSupportOpened());
+  }
 
   void _copyEmailToClipboard(BuildContext context) {
     Clipboard.setData(ClipboardData(text: _supportEmail));

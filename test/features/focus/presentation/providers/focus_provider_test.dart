@@ -5,9 +5,13 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:life_os/features/focus/data/remote/focus_remote_data_source.dart';
 import 'package:life_os/features/focus/data/repositories/focus_repository.dart';
 import 'package:life_os/features/focus/presentation/providers/providers/focus_provider.dart';
+import 'package:life_os/core/services/analytics_service.dart';
+import 'package:life_os/features/settings/presentation/providers/analytics_provider.dart';
 import 'package:life_os/features/study/data/study_repository.dart';
 import 'package:life_os/features/study/presentation/providers/study_provider.dart';
 import 'package:life_os/features/tasks/presentation/providers/tasks_provider.dart';
+
+import '../../../../helpers/recording_analytics_platform.dart';
 
 typedef _StartOperation =
     Future<FocusStartResponse> Function({
@@ -194,6 +198,7 @@ void main() {
   late _FakeTasksRepository tasksRepository;
   late _FakeStudyRepository studyRepository;
   late _FakeFocusRemoteDataSource remoteDataSource;
+  late RecordingAnalyticsPlatform analytics;
   late ProviderContainer container;
   late _ControlledPeriodicTimer timer;
 
@@ -202,6 +207,7 @@ void main() {
     tasksRepository = _FakeTasksRepository();
     studyRepository = _FakeStudyRepository();
     remoteDataSource = _FakeFocusRemoteDataSource();
+    analytics = RecordingAnalyticsPlatform();
 
     container = ProviderContainer(
       overrides: [
@@ -216,6 +222,9 @@ void main() {
           timer = _ControlledPeriodicTimer(callback);
           return timer;
         }),
+        analyticsServiceProvider.overrideWithValue(
+          AnalyticsService(platform: analytics),
+        ),
       ],
     );
 
@@ -331,6 +340,9 @@ void main() {
     expect(tasksRepository.toggleCalls, 1);
     expect(studyRepository.addStudyTimeCalls, 0);
     expect(container.read(focusProvider).isBreak, isTrue);
+    expect(analytics.events, <RecordedAnalyticsEvent>[
+      const RecordedAnalyticsEvent('focus_completed', {'duration_minutes': 1}),
+    ]);
   });
 
   test('SUBJECT full session finishes verified and adds study time', () async {
@@ -352,6 +364,9 @@ void main() {
     expect(studyRepository.lastElapsedSeconds, 60);
     expect(tasksRepository.toggleCalls, 0);
     expect(container.read(focusProvider).isBreak, isTrue);
+    expect(analytics.events, <RecordedAnalyticsEvent>[
+      const RecordedAnalyticsEvent('focus_completed', {'duration_minutes': 1}),
+    ]);
   });
 
   test('start failure keeps the personal session local-only', () async {
@@ -373,6 +388,9 @@ void main() {
 
     expect(remoteDataSource.startCalls, 1);
     expect(remoteDataSource.finishCalls, 0);
+    expect(analytics.events, <RecordedAnalyticsEvent>[
+      const RecordedAnalyticsEvent('focus_completed', {'duration_minutes': 1}),
+    ]);
     expect(focusRepository.saveCalls, 1);
     expect(tasksRepository.toggleCalls, 1);
     expect(container.read(focusProvider).isBreak, isTrue);
@@ -390,6 +408,7 @@ void main() {
     expect(remoteDataSource.cancelCalls, 1);
     expect(remoteDataSource.cancelledSessionIds, ['verified-1']);
     expect(remoteDataSource.finishCalls, 0);
+    expect(analytics.events, isEmpty);
   });
 
   test('resume after pause does not create another verified start', () async {
@@ -426,6 +445,7 @@ void main() {
       expect(remoteDataSource.cancelCalls, 1);
       expect(container.read(focusProvider).durationRemaining, 60);
       expect(container.read(focusProvider).isRunning, isFalse);
+      expect(analytics.events, isEmpty);
 
       await startAndFlush(notifier);
 
@@ -494,6 +514,9 @@ void main() {
     expect(focusRepository.saveCalls, 1);
     expect(tasksRepository.toggleCalls, 1);
     expect(container.read(focusProvider).isBreak, isTrue);
+    expect(analytics.events, <RecordedAnalyticsEvent>[
+      const RecordedAnalyticsEvent('focus_completed', {'duration_minutes': 1}),
+    ]);
   });
 
   test(
@@ -591,6 +614,7 @@ void main() {
     expect(remoteDataSource.startCalls, 0);
     expect(remoteDataSource.finishCalls, 0);
     expect(remoteDataSource.cancelCalls, 0);
+    expect(analytics.events, isEmpty);
     expect(focusRepository.saveCalls, 0);
     expect(container.read(focusProvider).isBreak, isFalse);
   });
@@ -631,6 +655,23 @@ void main() {
     expect(remoteDataSource.finishCalls, 1);
     expect(tasksRepository.toggleCalls, 1);
     expect(studyRepository.addStudyTimeCalls, 0);
+    expect(analytics.events, <RecordedAnalyticsEvent>[
+      const RecordedAnalyticsEvent('focus_completed', {'duration_minutes': 1}),
+    ]);
+  });
+
+  test('Analytics failure does not break natural Focus completion', () async {
+    analytics.throwOnEvent = true;
+    final notifier = container.read(focusProvider.notifier);
+    configureTarget(notifier, FocusTargetType.task);
+    await startAndFlush(notifier);
+
+    finishCurrentTimer(60);
+    await pumpEventQueue();
+
+    expect(focusRepository.saveCalls, 1);
+    expect(tasksRepository.toggleCalls, 1);
+    expect(container.read(focusProvider).isBreak, isTrue);
   });
 
   test(

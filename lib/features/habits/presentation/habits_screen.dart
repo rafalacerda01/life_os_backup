@@ -377,14 +377,13 @@ class HabitsScreen extends ConsumerWidget {
                                                 size: 28,
                                               ),
                                               onPressed: () async {
-                                                await ref
-                                                    .read(
-                                                      habitsRepositoryProvider,
-                                                    )
-                                                    .toggleHabitToday(
-                                                      habit.id,
-                                                      habit.completedDates,
-                                                    );
+                                                await ref.read(
+                                                  manualHabitTodayToggleProvider,
+                                                )(
+                                                  habit.id,
+                                                  habit.completedDates,
+                                                  isDoneToday,
+                                                );
                                               },
                                             ),
                                             IconButton(

@@ -10,6 +10,7 @@ class _FakeAnalyticsPlatform implements AnalyticsPlatform {
   final List<String> events = <String>[];
   bool throwOnEnable = false;
   bool throwOnReset = false;
+  bool throwOnOptIn = false;
 
   @override
   Future<void> setCollectionEnabled(bool enabled) async {
@@ -24,6 +25,15 @@ class _FakeAnalyticsPlatform implements AnalyticsPlatform {
     events.add('reset');
     if (throwOnReset) throw StateError('private reset error');
   }
+
+  @override
+  Future<void> logAnalyticsOptIn() async {
+    events.add('analytics_opt_in');
+    if (throwOnOptIn) throw StateError('private analytics error');
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
 Future<void> _settle() async {
@@ -122,7 +132,7 @@ void main() {
         .setEnabled(true);
 
     expect(succeeded, isTrue);
-    expect(platform.events, <String>['collection:true']);
+    expect(platform.events, <String>['collection:true', 'analytics_opt_in']);
     expect(
       (await SharedPreferences.getInstance()).getBool(
         analyticsEnabledPreferenceKey,
@@ -215,6 +225,25 @@ void main() {
       );
     },
   );
+
+  test('opt-in event failure does not roll back successful enable', () async {
+    final platform = _FakeAnalyticsPlatform()..throwOnOptIn = true;
+    final container = _container(platform);
+    container.read(analyticsPreferenceProvider);
+    await _settle();
+    platform.events.clear();
+
+    final succeeded = await container
+        .read(analyticsPreferenceProvider.notifier)
+        .setEnabled(true);
+
+    expect(succeeded, isTrue);
+    expect(platform.events, <String>['collection:true', 'analytics_opt_in']);
+    expect(
+      container.read(analyticsPreferenceProvider).status,
+      AnalyticsPreferenceStatus.enabled,
+    );
+  });
 
   test('Firebase load synchronization failure does not escape', () async {
     SharedPreferences.setMockInitialValues(<String, Object>{
