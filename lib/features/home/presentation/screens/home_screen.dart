@@ -9,7 +9,6 @@ import 'package:life_os/features/auth/presentation/providers/auth_provider.dart'
 import 'package:life_os/features/dashboard/data/models/dashboard_model.dart';
 import 'package:life_os/features/dashboard/domain/entities/models/insight_model.dart';
 import 'package:life_os/features/home/presentation/providers/insight_provider.dart';
-import 'package:life_os/features/finance/presentation/providers/finance_provider.dart';
 import 'package:life_os/features/notifications/domain/providers/notification_engine.dart';
 
 class HomeScreen extends ConsumerWidget {
@@ -19,31 +18,6 @@ class HomeScreen extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final homeState = ref.watch(homeStateProvider);
     final authState = ref.watch(authNotifierProvider);
-
-    // 🔴 NOVO: Lendo as transações locais para calcular o score financeiro dinâmico (Opção 1)
-    final financeAsync = ref.watch(financeStreamProvider);
-    final transactions = financeAsync.asData?.value ?? [];
-
-    double totalIncome = 0.0;
-    double totalExpense = 0.0;
-
-    for (var t in transactions) {
-      if (t.type == 'income') {
-        totalIncome += t.amount;
-      } else if (t.type == 'expense') {
-        totalExpense += t.amount;
-      }
-    }
-
-    // Cálculo da Opção 1: (Saldo / Entradas) * 100
-    // Proteção contra divisão por zero se não houver entradas cadastradas
-    double calculatedFinancialScore = 0.0;
-    if (totalIncome > 0) {
-      final balance = totalIncome - totalExpense;
-      calculatedFinancialScore = (balance / totalIncome) * 100;
-      // Garante que o score fique entre 0% e 100% para não quebrar o layout visual
-      calculatedFinancialScore = calculatedFinancialScore.clamp(0.0, 100.0);
-    }
 
     final now = DateTime.now();
     final formattedDate = DateFormat("dd/MM/yyyy - EEEE", "pt_BR").format(now);
@@ -154,11 +128,7 @@ class HomeScreen extends ConsumerWidget {
                 ),
 
                 const SizedBox(height: 25),
-                // 🔴 Passando o score financeiro dinâmico para o card de score geral
-                _MainScoreCard(
-                  dashboard: dashboard,
-                  financialScoreOverride: calculatedFinancialScore,
-                ),
+                _MainScoreCard(dashboard: dashboard),
                 const SizedBox(height: 20),
 
                 const PremiumInsightCard(),
@@ -170,7 +140,9 @@ class HomeScreen extends ConsumerWidget {
                     Expanded(
                       child: MiniCard(
                         title: "Produtividade",
-                        value: "${dashboard.productivityScore.toInt()}%",
+                        value: dashboard.hasProductivityData
+                            ? "${dashboard.productivityScore.toInt()}%"
+                            : "—",
                         color: Colors.purpleAccent,
                         onTap: () => context.push('/tasks'),
                       ),
@@ -179,7 +151,9 @@ class HomeScreen extends ConsumerWidget {
                     Expanded(
                       child: MiniCard(
                         title: "Saúde",
-                        value: "${dashboard.healthScore.toInt()}%",
+                        value: dashboard.hasHealthData
+                            ? "${dashboard.healthScore.toInt()}%"
+                            : "—",
                         color: Colors.greenAccent,
                         onTap: () => context.push('/health'),
                       ),
@@ -188,8 +162,9 @@ class HomeScreen extends ConsumerWidget {
                     Expanded(
                       child: MiniCard(
                         title: "Financeiro",
-                        // 🔴 Utilizando o score dinâmico calculado na Opção 1
-                        value: "${calculatedFinancialScore.toInt()}%",
+                        value: dashboard.hasFinancialData
+                            ? "${dashboard.financialScore.toInt()}%"
+                            : "—",
                         color: Colors.blueAccent,
                         onTap: () => context.push('/finance'),
                       ),
@@ -217,7 +192,9 @@ class HomeScreen extends ConsumerWidget {
                   title: "Estado geral",
                   subtitle:
                       "Medicamentos ativos: ${homeState.medicationCount} • Humor: ${dashboard.mood}",
-                  value: "${dashboard.healthScore.toInt()}%",
+                  value: dashboard.hasHealthData
+                      ? "${dashboard.healthScore.toInt()}%"
+                      : "—",
                   color: AppColors.health,
                   icon: Icons.favorite_rounded,
                   onTap: () => context.push('/health'),
@@ -267,21 +244,12 @@ class HomeScreen extends ConsumerWidget {
 
 class _MainScoreCard extends StatelessWidget {
   final DashboardModel dashboard;
-  final double
-  financialScoreOverride; // 🔴 Parâmetro para receber o score financeiro em tempo real
 
-  const _MainScoreCard({
-    required this.dashboard,
-    required this.financialScoreOverride,
-  });
+  const _MainScoreCard({required this.dashboard});
 
   @override
   Widget build(BuildContext context) {
-    final score =
-        (dashboard.productivityScore +
-            dashboard.healthScore +
-            financialScoreOverride) /
-        3;
+    final score = dashboard.overallScore;
     return Container(
       padding: const EdgeInsets.all(20),
       decoration: BoxDecoration(
@@ -294,7 +262,7 @@ class _MainScoreCard extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           const Text(
-            "Pontuação geral do dia",
+            "Pontuação geral",
             style: TextStyle(
               color: AppColors.textMain,
               fontWeight: FontWeight.bold,
@@ -302,7 +270,7 @@ class _MainScoreCard extends StatelessWidget {
           ),
           const SizedBox(height: 15),
           Text(
-            "${score.toInt()}%",
+            score == null ? "—" : "${score.toInt()}%",
             style: const TextStyle(
               fontSize: 42,
               color: AppColors.textMain,
@@ -311,7 +279,7 @@ class _MainScoreCard extends StatelessWidget {
           ),
           const SizedBox(height: 6),
           const Text(
-            "Seu desempenho geral hoje",
+            "Visão atual de produtividade, saúde e finanças",
             style: TextStyle(color: AppColors.textSecondary),
           ),
         ],

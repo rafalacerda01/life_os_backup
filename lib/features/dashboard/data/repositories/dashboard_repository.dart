@@ -33,6 +33,7 @@ class DashboardRepository {
       bool hasStudyGoals =
           studyProgress > 0.0 ||
           (studyData != null && studyData.reviewQueue > 0);
+      final hasProductivityData = hasTasks || hasStudyGoals;
 
       if (!hasTasks && !hasStudyGoals) {
         productivityScore = 0.0;
@@ -53,13 +54,32 @@ class DashboardRepository {
       // 3. Cálculos de Saúde e Finanças (Scores)
       final double waterScore = _calculateWaterScore(healthData);
       final double moodScore = _calculateMoodScore(healthData);
-      double healthScore = (waterScore + moodScore).clamp(0.0, 100.0);
-      double financialScore = financeBalance >= 0 ? 95.0 : 40.0;
+      final hasWaterData = _hasWaterData(healthData);
+      final hasMoodData = _hasMoodData(healthData);
+      final hasHealthData = hasWaterData || hasMoodData;
+      final double healthScore;
+      if (hasWaterData && hasMoodData) {
+        healthScore = waterScore + moodScore;
+      } else if (hasWaterData) {
+        healthScore = waterScore / 50 * 100;
+      } else if (hasMoodData) {
+        healthScore = moodScore / 50 * 100;
+      } else {
+        healthScore = 0.0;
+      }
+
+      final hasFinancialData = transactions.isNotEmpty;
+      final double financialScore = incomeSum > 0
+          ? ((financeBalance / incomeSum) * 100).clamp(0.0, 100.0)
+          : 0.0;
 
       return DashboardModel(
         productivityScore: productivityScore,
-        healthScore: healthScore,
+        hasProductivityData: hasProductivityData,
+        healthScore: healthScore.clamp(0.0, 100.0),
+        hasHealthData: hasHealthData,
         financialScore: financialScore,
+        hasFinancialData: hasFinancialData,
         studyStreak: studyData?.streak ?? 0,
         studyReviewQueue: studyData?.reviewQueue ?? 0,
         studyProgress: studyProgress,
@@ -73,8 +93,11 @@ class DashboardRepository {
       // Retorno de fallback seguro em caso de erro nos cálculos
       return const DashboardModel(
         productivityScore: 0.0,
+        hasProductivityData: false,
         healthScore: 0.0,
-        financialScore: 50.0,
+        hasHealthData: false,
+        financialScore: 0.0,
+        hasFinancialData: false,
         studyStreak: 0,
         studyReviewQueue: 0,
         studyProgress: 0.0,
@@ -115,6 +138,15 @@ class DashboardRepository {
       default:
         return 0.0;
     }
+  }
+
+  bool _hasWaterData(dynamic healthData) {
+    return _readPositiveInt(healthData?.waterIntakeMl, fallback: 0) > 0;
+  }
+
+  bool _hasMoodData(dynamic healthData) {
+    final mood = healthData?.mood?.toString().trim() ?? '';
+    return mood.isNotEmpty && mood != '—' && mood != 'Sem registro';
   }
 
   int _readPositiveInt(dynamic value, {required int fallback}) {

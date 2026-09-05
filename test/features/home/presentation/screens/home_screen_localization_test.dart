@@ -90,7 +90,7 @@ void main() {
         await tester.pumpAndSettle();
 
         expect(find.text('Sequência: 0 dias • Revisões: 0'), findsOneWidget);
-        expect(find.text('Pontuação geral do dia'), findsOneWidget);
+        expect(find.text('Pontuação geral'), findsOneWidget);
         expect(find.text('PREMIUM'), findsOneWidget);
         expect(find.text('PRO'), findsNothing);
         expect(find.textContaining('Streak:'), findsNothing);
