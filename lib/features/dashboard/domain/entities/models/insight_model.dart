@@ -48,10 +48,13 @@ class InsightModel {
   });
 }
 
+enum HealthInsightDataState { noData, realData, loading, unavailable }
+
 /// Agrupa os dados necessários para o motor tomar decisões.
 class InsightContext {
   final double productivityScore;
   final double healthScore;
+  final HealthInsightDataState healthDataState;
   final double financialScore;
   final int studyStreak;
   final DateTime currentTime;
@@ -61,6 +64,7 @@ class InsightContext {
   const InsightContext({
     required this.productivityScore,
     required this.healthScore,
+    required this.healthDataState,
     required this.financialScore,
     required this.studyStreak,
     required this.currentTime,

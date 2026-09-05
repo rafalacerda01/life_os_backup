@@ -24,6 +24,7 @@ class CriticalHealthRule implements InsightRule {
 
   @override
   double evaluate(InsightContext context) {
+    if (context.healthDataState != HealthInsightDataState.realData) return 0.0;
     if (context.healthScore < 30) return 1.0; // Urgência máxima
     if (context.healthScore < 50) return 0.7;
     return 0.0;
@@ -41,6 +42,28 @@ class CriticalHealthRule implements InsightRule {
       message: messages[Random().nextInt(messages.length)],
       category: InsightCategory.warning,
       priority: InsightPriority.critical,
+    );
+  }
+}
+
+class HealthNoDataRule implements InsightRule {
+  @override
+  String get id => 'health_no_data';
+
+  @override
+  double evaluate(InsightContext context) {
+    return context.healthDataState == HealthInsightDataState.noData ? 0.2 : 0.0;
+  }
+
+  @override
+  InsightModel generate(InsightContext context) {
+    return InsightModel(
+      id: id,
+      title: 'Comece pelo básico',
+      message:
+          'Comece registrando seu bem-estar para acompanhar sua rotina ao longo dos dias.',
+      category: InsightCategory.health,
+      priority: InsightPriority.low,
     );
   }
 }
@@ -139,6 +162,7 @@ class BalanceRule implements InsightRule {
 class InsightEngine {
   final List<InsightRule> _rules = [
     CriticalHealthRule(),
+    HealthNoDataRule(),
     MorningMomentumRule(),
     StudyStreakRule(),
     BalanceRule(),
