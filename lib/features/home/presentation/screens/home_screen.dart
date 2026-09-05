@@ -3,7 +3,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
 import 'package:go_router/go_router.dart';
 import 'package:life_os/core/theme/app_colors.dart';
-import 'package:life_os/core/widgets/dashboard_components.dart';
 import 'package:life_os/features/home/presentation/providers/home_provider.dart';
 import 'package:life_os/features/auth/presentation/providers/auth_provider.dart';
 import 'package:life_os/features/dashboard/data/models/dashboard_model.dart';
@@ -27,6 +26,22 @@ void _retryHomeData(WidgetRef ref) {
   ref.invalidate(subjectsStreamProvider);
 }
 
+String _formatBrl(double value) => NumberFormat.currency(
+  locale: 'pt_BR',
+  symbol: 'R\$',
+  decimalDigits: 2,
+).format(value);
+
+String _firstName(String? displayName) {
+  final normalizedName = displayName?.trim();
+  if (normalizedName == null || normalizedName.isEmpty) return 'Usuário';
+  return normalizedName.split(RegExp(r'\s+')).first;
+}
+
+String _pendingLabel(int count) => count == 1 ? 'pendente' : 'pendentes';
+
+String _activeLabel(int count) => count == 1 ? 'ativo' : 'ativos';
+
 class HomeScreen extends ConsumerWidget {
   const HomeScreen({super.key});
 
@@ -44,7 +59,7 @@ class HomeScreen extends ConsumerWidget {
     );
 
     final userName = authState.maybeWhen(
-      authenticated: (user) => user.displayName ?? "Usuário",
+      authenticated: (user) => _firstName(user.displayName),
       orElse: () => "Usuário",
     );
 
@@ -52,210 +67,191 @@ class HomeScreen extends ConsumerWidget {
         ? "Bom dia"
         : (now.hour < 18 ? "Boa tarde" : "Boa noite");
 
-    final dashboard = homeState.dashboard;
-
-    Widget content = homeState.isLoading
+    final content = homeState.isLoading
         ? const _HomeScreenSkeleton()
         : homeState.isUnavailable
         ? _HomeUnavailableState(onRetry: () => _retryHomeData(ref))
-        : SingleChildScrollView(
-            padding: const EdgeInsets.all(20),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Row(
-                            children: [
-                              Flexible(
-                                child: Text(
-                                  "$greeting, $userName",
-                                  style: const TextStyle(
-                                    color: AppColors.textMain,
-                                    fontSize: 22,
-                                    fontWeight: FontWeight.bold,
-                                  ),
-                                  overflow: TextOverflow.ellipsis,
-                                ),
-                              ),
-                              if (isPremium) ...[
-                                const SizedBox(width: 8),
-                                Container(
-                                  padding: const EdgeInsets.symmetric(
-                                    horizontal: 6,
-                                    vertical: 2,
-                                  ),
-                                  decoration: BoxDecoration(
-                                    color: AppColors.primary.withOpacity(0.15),
-                                    borderRadius: BorderRadius.circular(8),
-                                    border: Border.all(
-                                      color: AppColors.primary,
-                                    ),
-                                  ),
-                                  child: const Text(
-                                    "PREMIUM",
-                                    style: TextStyle(
-                                      color: AppColors.primary,
-                                      fontSize: 10,
-                                      fontWeight: FontWeight.bold,
-                                    ),
-                                  ),
-                                ),
-                              ],
-                            ],
-                          ),
-                          const SizedBox(height: 4),
-                          Text(
-                            formattedDate,
-                            style: const TextStyle(
-                              color: AppColors.textHint,
-                              fontSize: 13,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-
-                    // 🚀 O SINO DE NOTIFICAÇÕES AQUI
-                    Consumer(
-                      builder: (context, ref, child) {
-                        final unreadCount = ref.watch(
-                          unreadNotificationsCountProvider,
-                        );
-
-                        return IconButton(
-                          icon: Badge(
-                            isLabelVisible: unreadCount > 0,
-                            label: Text('$unreadCount'),
-                            backgroundColor: AppColors.primary,
-                            child: const Icon(
-                              Icons.notifications_none,
-                              color: AppColors.textSecondary,
-                            ),
-                          ),
-                          onPressed: () => context.push('/notifications'),
-                        );
-                      },
-                    ),
-                  ],
-                ),
-
-                const SizedBox(height: 25),
-                _MainScoreCard(dashboard: dashboard),
-                const SizedBox(height: 20),
-
-                const PremiumInsightCard(),
-
-                const SizedBox(height: 20),
-
-                Row(
-                  children: [
-                    Expanded(
-                      child: MiniCard(
-                        title: "Produtividade",
-                        value: dashboard.hasProductivityData
-                            ? "${dashboard.productivityScore.toInt()}%"
-                            : "—",
-                        color: Colors.purpleAccent,
-                        onTap: () => context.push('/tasks'),
-                      ),
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: MiniCard(
-                        title: "Saúde",
-                        value: dashboard.hasHealthData
-                            ? "${dashboard.healthScore.toInt()}%"
-                            : "—",
-                        color: Colors.greenAccent,
-                        onTap: () => context.push('/health'),
-                      ),
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: MiniCard(
-                        title: "Financeiro",
-                        value: dashboard.hasFinancialData
-                            ? "${dashboard.financialScore.toInt()}%"
-                            : "—",
-                        color: Colors.blueAccent,
-                        onTap: () => context.push('/finance'),
-                      ),
-                    ),
-                  ],
-                ),
-
-                const SizedBox(height: 25),
-                const SectionTitle("Estudos"),
-                const SizedBox(height: 12),
-                InfoCard(
-                  title: "Progresso de estudo",
-                  subtitle:
-                      "Sequência: ${dashboard.studyStreak} dias • Revisões: ${dashboard.studyReviewQueue}",
-                  value: "${(dashboard.studyProgress * 100).toInt()}%",
-                  color: AppColors.study,
-                  icon: Icons.school_rounded,
-                  onTap: () => context.push('/study'),
-                ),
-
-                const SizedBox(height: 20),
-                const SectionTitle("Saúde"),
-                const SizedBox(height: 12),
-                InfoCard(
-                  title: "Estado geral",
-                  subtitle:
-                      "Medicamentos ativos: ${homeState.medicationCount} • Humor: ${dashboard.mood}",
-                  value: dashboard.hasHealthData
-                      ? "${dashboard.healthScore.toInt()}%"
-                      : "—",
-                  color: AppColors.health,
-                  icon: Icons.favorite_rounded,
-                  onTap: () => context.push('/health'),
-                ),
-
-                const SizedBox(height: 20),
-                const SectionTitle("Finanças"),
-                const SizedBox(height: 12),
-                InfoCard(
-                  title: "Saldo atual",
-                  subtitle: "Transações: ${dashboard.transactionsCount}",
-                  value: NumberFormat.currency(
-                    locale: 'pt_BR',
-                    symbol: 'R\$',
-                    decimalDigits: 2,
-                  ).format(dashboard.financeBalance),
-                  color: AppColors.finance,
-                  icon: Icons.account_balance_wallet_rounded,
-                  onTap: () => context.push('/finance'),
-                ),
-
-                const SizedBox(height: 20),
-                const SectionTitle("Hábitos"),
-                const SizedBox(height: 12),
-                InfoCard(
-                  title: "Rotina Diária",
-                  subtitle:
-                      "Concluídos: ${homeState.completedHabitsToday} de ${homeState.totalHabits}",
-                  value: homeState.totalHabits > 0
-                      ? "${((homeState.completedHabitsToday / homeState.totalHabits) * 100).toInt()}%"
-                      : "0%",
-                  color: AppColors.habits,
-                  icon: Icons.local_fire_department_rounded,
-                  onTap: () => context.push('/habits'),
-                ),
-                const SizedBox(height: 30),
-              ],
-            ),
+        : _HomeReadyContent(
+            homeState: homeState,
+            greeting: greeting,
+            userName: userName,
+            formattedDate: formattedDate,
+            isPremium: isPremium,
           );
 
     return Container(
       color: AppColors.scaffoldBackground,
       child: SafeArea(child: content),
+    );
+  }
+}
+
+class _HomeReadyContent extends StatelessWidget {
+  final HomeStateData homeState;
+  final String greeting;
+  final String userName;
+  final String formattedDate;
+  final bool isPremium;
+
+  const _HomeReadyContent({
+    required this.homeState,
+    required this.greeting,
+    required this.userName,
+    required this.formattedDate,
+    required this.isPremium,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final dashboard = homeState.dashboard;
+
+    return TweenAnimationBuilder<double>(
+      tween: Tween(begin: 0, end: 1),
+      duration: const Duration(milliseconds: 380),
+      curve: Curves.easeOutCubic,
+      builder: (context, animation, child) => Opacity(
+        opacity: animation,
+        child: Transform.translate(
+          offset: Offset(0, 10 * (1 - animation)),
+          child: child,
+        ),
+      ),
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.fromLTRB(20, 12, 20, 32),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _HomeHeader(
+              greeting: greeting,
+              userName: userName,
+              formattedDate: formattedDate,
+              isPremium: isPremium,
+            ),
+            const SizedBox(height: 22),
+            _MainScoreCard(dashboard: dashboard),
+            const SizedBox(height: 16),
+            _MetricsRow(dashboard: dashboard),
+            const SizedBox(height: 18),
+            _PlanDayButton(onTap: () => _showDayPlanner(context, homeState)),
+            const SizedBox(height: 26),
+            const _HomeSectionHeader(
+              eyebrow: 'VISÃO DO DIA',
+              title: 'Resumo rápido',
+            ),
+            const SizedBox(height: 12),
+            _QuickSummaryGrid(homeState: homeState),
+            const SizedBox(height: 26),
+            const _HomeSectionHeader(
+              eyebrow: 'LIFE OS INSIGHT',
+              title: 'Sugestão para você',
+            ),
+            const SizedBox(height: 12),
+            const PremiumInsightCard(),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _HomeHeader extends ConsumerWidget {
+  final String greeting;
+  final String userName;
+  final String formattedDate;
+  final bool isPremium;
+
+  const _HomeHeader({
+    required this.greeting,
+    required this.userName,
+    required this.formattedDate,
+    required this.isPremium,
+  });
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final unreadCount = ref.watch(unreadNotificationsCountProvider);
+
+    return Row(
+      children: [
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                formattedDate.toUpperCase(),
+                style: const TextStyle(
+                  color: AppColors.textHint,
+                  fontSize: 11,
+                  fontWeight: FontWeight.w600,
+                  letterSpacing: 1.1,
+                ),
+              ),
+              const SizedBox(height: 6),
+              Row(
+                children: [
+                  Flexible(
+                    child: Text(
+                      '$greeting, $userName',
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: AppColors.textMain,
+                        fontSize: 23,
+                        height: 1.1,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ),
+                  if (isPremium) ...[
+                    const SizedBox(width: 9),
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 8,
+                        vertical: 4,
+                      ),
+                      decoration: BoxDecoration(
+                        color: AppColors.primary.withOpacity(0.12),
+                        borderRadius: BorderRadius.circular(9),
+                        border: Border.all(
+                          color: AppColors.primary.withOpacity(0.45),
+                        ),
+                      ),
+                      child: const Text(
+                        'PREMIUM',
+                        style: TextStyle(
+                          color: AppColors.primary,
+                          fontSize: 9,
+                          fontWeight: FontWeight.w800,
+                          letterSpacing: 0.8,
+                        ),
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(width: 12),
+        Material(
+          color: AppColors.cardBackground,
+          shape: CircleBorder(
+            side: BorderSide(color: Colors.white.withOpacity(0.07)),
+          ),
+          child: IconButton(
+            tooltip: 'Notificações',
+            onPressed: () => context.push('/notifications'),
+            icon: Badge(
+              isLabelVisible: unreadCount > 0,
+              label: Text('$unreadCount'),
+              backgroundColor: AppColors.primary,
+              child: const Icon(
+                Icons.notifications_none_rounded,
+                color: AppColors.textSecondary,
+              ),
+            ),
+          ),
+        ),
+      ],
     );
   }
 }
@@ -313,39 +309,686 @@ class _MainScoreCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final score = dashboard.overallScore;
+    final progress = score == null
+        ? 0.0
+        : (score / 100).clamp(0.0, 1.0).toDouble();
+
     return Container(
       padding: const EdgeInsets.all(20),
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(24),
-        gradient: const LinearGradient(
-          colors: [AppColors.secondary, AppColors.primary],
+        border: Border.all(color: AppColors.primary.withOpacity(0.22)),
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [
+            AppColors.cardBackground,
+            AppColors.secondary.withOpacity(0.13),
+            AppColors.primary.withOpacity(0.08),
+          ],
         ),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Text(
-            "Pontuação geral",
-            style: TextStyle(
-              color: AppColors.textMain,
-              fontWeight: FontWeight.bold,
-            ),
-          ),
-          const SizedBox(height: 15),
-          Text(
-            score == null ? "—" : "${score.toInt()}%",
-            style: const TextStyle(
-              fontSize: 42,
-              color: AppColors.textMain,
-              fontWeight: FontWeight.bold,
-            ),
-          ),
-          const SizedBox(height: 6),
-          const Text(
-            "Visão atual de produtividade, saúde e finanças",
-            style: TextStyle(color: AppColors.textSecondary),
+        boxShadow: [
+          BoxShadow(
+            color: AppColors.primary.withOpacity(0.08),
+            blurRadius: 24,
+            offset: const Offset(0, 10),
           ),
         ],
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          SizedBox.square(
+            dimension: 102,
+            child: Stack(
+              alignment: Alignment.center,
+              children: [
+                SizedBox.square(
+                  dimension: 102,
+                  child: CircularProgressIndicator(
+                    value: 1,
+                    strokeWidth: 8,
+                    color: Colors.white.withOpacity(0.06),
+                  ),
+                ),
+                TweenAnimationBuilder<double>(
+                  tween: Tween(begin: 0, end: progress),
+                  duration: const Duration(milliseconds: 750),
+                  curve: Curves.easeOutCubic,
+                  builder: (context, value, _) => SizedBox.square(
+                    dimension: 102,
+                    child: CircularProgressIndicator(
+                      value: value,
+                      strokeWidth: 8,
+                      strokeCap: StrokeCap.round,
+                      color: score == null
+                          ? Colors.transparent
+                          : AppColors.primary,
+                    ),
+                  ),
+                ),
+                Text(
+                  score == null ? '—' : '${score.toInt()}%',
+                  key: const Key('home-overall-score-value'),
+                  style: const TextStyle(
+                    color: AppColors.textMain,
+                    fontSize: 25,
+                    fontWeight: FontWeight.w800,
+                    letterSpacing: -0.8,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 18),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Pontuação geral',
+                  style: TextStyle(
+                    color: AppColors.textMain,
+                    fontSize: 18,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 7),
+                const Text(
+                  'Visão atual de produtividade, saúde e finanças',
+                  style: TextStyle(
+                    color: AppColors.textSecondary,
+                    fontSize: 12,
+                    height: 1.35,
+                  ),
+                ),
+                const SizedBox(height: 13),
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 6,
+                  ),
+                  decoration: BoxDecoration(
+                    color: Colors.white.withOpacity(0.04),
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: const Text(
+                    'Pequenas ações, grandes resultados.',
+                    style: TextStyle(
+                      color: AppColors.textHint,
+                      fontSize: 10.5,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _MetricsRow extends StatelessWidget {
+  final DashboardModel dashboard;
+
+  const _MetricsRow({required this.dashboard});
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Expanded(
+          child: _MetricCard(
+            label: 'Produtividade',
+            icon: Icons.bolt_rounded,
+            score: dashboard.productivityScore,
+            hasData: dashboard.hasProductivityData,
+            color: AppColors.primary,
+            onTap: () => context.push('/tasks'),
+          ),
+        ),
+        const SizedBox(width: 8),
+        Expanded(
+          child: _MetricCard(
+            label: 'Saúde',
+            icon: Icons.favorite_rounded,
+            score: dashboard.healthScore,
+            hasData: dashboard.hasHealthData,
+            color: AppColors.health,
+            onTap: () => context.push('/health'),
+          ),
+        ),
+        const SizedBox(width: 8),
+        Expanded(
+          child: _MetricCard(
+            label: 'Financeiro',
+            icon: Icons.account_balance_wallet_rounded,
+            score: dashboard.financialScore,
+            hasData: dashboard.hasFinancialData,
+            color: AppColors.finance,
+            onTap: () => context.push('/finance'),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _MetricCard extends StatelessWidget {
+  final String label;
+  final IconData icon;
+  final double score;
+  final bool hasData;
+  final Color color;
+  final VoidCallback onTap;
+
+  const _MetricCard({
+    required this.label,
+    required this.icon,
+    required this.score,
+    required this.hasData,
+    required this.color,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final progress = hasData ? (score / 100).clamp(0.0, 1.0).toDouble() : 0.0;
+
+    return Material(
+      color: AppColors.cardBackground,
+      borderRadius: BorderRadius.circular(18),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(18),
+        child: Container(
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(18),
+            border: Border.all(color: color.withOpacity(0.16)),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Container(
+                width: 30,
+                height: 30,
+                decoration: BoxDecoration(
+                  color: color.withOpacity(0.12),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Icon(icon, color: color, size: 17),
+              ),
+              const SizedBox(height: 11),
+              FittedBox(
+                fit: BoxFit.scaleDown,
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  label,
+                  maxLines: 1,
+                  style: const TextStyle(
+                    color: AppColors.textSecondary,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 4),
+              Text(
+                hasData ? '${score.toInt()}%' : '—',
+                style: TextStyle(
+                  color: hasData ? AppColors.textMain : AppColors.textHint,
+                  fontSize: 20,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+              const SizedBox(height: 9),
+              ClipRRect(
+                borderRadius: BorderRadius.circular(4),
+                child: TweenAnimationBuilder<double>(
+                  tween: Tween(begin: 0, end: progress),
+                  duration: const Duration(milliseconds: 700),
+                  curve: Curves.easeOutCubic,
+                  builder: (context, value, _) => LinearProgressIndicator(
+                    value: value,
+                    minHeight: 4,
+                    backgroundColor: Colors.white.withOpacity(0.06),
+                    color: color,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _PlanDayButton extends StatelessWidget {
+  final VoidCallback onTap;
+
+  const _PlanDayButton({required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Colors.transparent,
+      borderRadius: BorderRadius.circular(20),
+      child: Ink(
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(20),
+          gradient: const LinearGradient(
+            colors: [AppColors.secondary, AppColors.primary],
+          ),
+          boxShadow: [
+            BoxShadow(
+              color: AppColors.primary.withOpacity(0.18),
+              blurRadius: 18,
+              offset: const Offset(0, 8),
+            ),
+          ],
+        ),
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(20),
+          child: const Padding(
+            padding: EdgeInsets.symmetric(horizontal: 18, vertical: 17),
+            child: Row(
+              children: [
+                Icon(Icons.auto_awesome_rounded, color: Colors.white, size: 21),
+                SizedBox(width: 12),
+                Expanded(
+                  child: Text(
+                    'Planejar meu dia',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 15,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ),
+                Icon(
+                  Icons.arrow_forward_rounded,
+                  color: Colors.white70,
+                  size: 20,
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+void _showDayPlanner(BuildContext context, HomeStateData homeState) {
+  final dashboard = homeState.dashboard;
+
+  showModalBottomSheet<void>(
+    context: context,
+    isScrollControlled: true,
+    useSafeArea: true,
+    backgroundColor: const Color(0xFF0A0F1E),
+    shape: const RoundedRectangleBorder(
+      borderRadius: BorderRadius.vertical(top: Radius.circular(30)),
+    ),
+    builder: (sheetContext) => SingleChildScrollView(
+      padding: EdgeInsets.fromLTRB(
+        20,
+        12,
+        20,
+        20 + MediaQuery.viewInsetsOf(sheetContext).bottom,
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Center(
+            child: Container(
+              width: 42,
+              height: 4,
+              decoration: BoxDecoration(
+                color: Colors.white24,
+                borderRadius: BorderRadius.circular(4),
+              ),
+            ),
+          ),
+          const SizedBox(height: 22),
+          const Text(
+            'Planejar meu dia',
+            style: TextStyle(
+              color: AppColors.textMain,
+              fontSize: 24,
+              fontWeight: FontWeight.w800,
+            ),
+          ),
+          const SizedBox(height: 7),
+          const Text(
+            'Organize seu próximo passo com o que já está no Life OS.',
+            style: TextStyle(color: AppColors.textSecondary, height: 1.4),
+          ),
+          const SizedBox(height: 22),
+          _PlannerStat(
+            icon: Icons.local_fire_department_rounded,
+            color: AppColors.habits,
+            label: 'Hábitos',
+            value:
+                '${homeState.completedHabitsToday}/${homeState.totalHabits} concluídos',
+          ),
+          _PlannerStat(
+            icon: Icons.school_rounded,
+            color: AppColors.study,
+            label: 'Revisões',
+            value:
+                '${dashboard.studyReviewQueue} '
+                '${_pendingLabel(dashboard.studyReviewQueue)}',
+          ),
+          _PlannerStat(
+            icon: Icons.medication_rounded,
+            color: AppColors.health,
+            label: 'Medicamentos',
+            value:
+                '${homeState.medicationCount} '
+                '${_activeLabel(homeState.medicationCount)}',
+          ),
+          _PlannerStat(
+            icon: Icons.account_balance_wallet_rounded,
+            color: AppColors.finance,
+            label: 'Saldo',
+            value: _formatBrl(dashboard.financeBalance),
+          ),
+          const SizedBox(height: 18),
+          SizedBox(
+            width: double.infinity,
+            child: ElevatedButton.icon(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: AppColors.primary,
+                foregroundColor: Colors.white,
+                padding: const EdgeInsets.symmetric(vertical: 15),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(16),
+                ),
+              ),
+              onPressed: () {
+                Navigator.of(sheetContext).pop();
+                context.push('/focus');
+              },
+              icon: const Icon(Icons.timer_rounded),
+              label: const Text(
+                'Iniciar foco',
+                style: TextStyle(fontWeight: FontWeight.w700),
+              ),
+            ),
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              Expanded(
+                child: OutlinedButton(
+                  onPressed: () {
+                    Navigator.of(sheetContext).pop();
+                    context.push('/tasks');
+                  },
+                  child: const Text('Ver tarefas'),
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: OutlinedButton(
+                  onPressed: () {
+                    Navigator.of(sheetContext).pop();
+                    context.push('/study');
+                  },
+                  child: const Text('Ver estudos'),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    ),
+  );
+}
+
+class _PlannerStat extends StatelessWidget {
+  final IconData icon;
+  final Color color;
+  final String label;
+  final String value;
+
+  const _PlannerStat({
+    required this.icon,
+    required this.color,
+    required this.label,
+    required this.value,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+        decoration: BoxDecoration(
+          color: AppColors.cardBackground,
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: Colors.white.withOpacity(0.05)),
+        ),
+        child: Row(
+          children: [
+            Icon(icon, color: color, size: 20),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Text(
+                label,
+                style: const TextStyle(color: AppColors.textSecondary),
+              ),
+            ),
+            Flexible(
+              child: Text(
+                value,
+                textAlign: TextAlign.end,
+                style: const TextStyle(
+                  color: AppColors.textMain,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _HomeSectionHeader extends StatelessWidget {
+  final String eyebrow;
+  final String title;
+
+  const _HomeSectionHeader({required this.eyebrow, required this.title});
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          eyebrow,
+          style: const TextStyle(
+            color: AppColors.primary,
+            fontSize: 10,
+            fontWeight: FontWeight.w700,
+            letterSpacing: 1.3,
+          ),
+        ),
+        const SizedBox(height: 4),
+        Text(
+          title,
+          style: const TextStyle(
+            color: AppColors.textMain,
+            fontSize: 19,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _QuickSummaryGrid extends StatelessWidget {
+  final HomeStateData homeState;
+
+  const _QuickSummaryGrid({required this.homeState});
+
+  @override
+  Widget build(BuildContext context) {
+    final dashboard = homeState.dashboard;
+
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final itemWidth = (constraints.maxWidth - 12) / 2;
+        return Wrap(
+          spacing: 12,
+          runSpacing: 12,
+          children: [
+            _QuickSummaryCard(
+              width: itemWidth,
+              icon: Icons.local_fire_department_rounded,
+              color: AppColors.habits,
+              label: 'Hábitos',
+              value:
+                  '${homeState.completedHabitsToday}/${homeState.totalHabits}',
+              detail: 'concluídos',
+              onTap: () => context.push('/habits'),
+            ),
+            _QuickSummaryCard(
+              width: itemWidth,
+              icon: Icons.school_rounded,
+              color: AppColors.study,
+              label: 'Revisões',
+              value: '${dashboard.studyReviewQueue}',
+              detail: _pendingLabel(dashboard.studyReviewQueue),
+              onTap: () => context.push('/study'),
+            ),
+            _QuickSummaryCard(
+              width: itemWidth,
+              icon: Icons.medication_rounded,
+              color: AppColors.health,
+              label: 'Medicamentos',
+              value: '${homeState.medicationCount}',
+              detail: _activeLabel(homeState.medicationCount),
+              onTap: () => context.push('/health'),
+            ),
+            _QuickSummaryCard(
+              key: const Key('home-summary-balance'),
+              width: itemWidth,
+              icon: Icons.account_balance_wallet_rounded,
+              color: AppColors.finance,
+              label: 'Saldo',
+              value: _formatBrl(dashboard.financeBalance),
+              detail: 'saldo atual',
+              onTap: () => context.push('/finance'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+}
+
+class _QuickSummaryCard extends StatelessWidget {
+  final double width;
+  final IconData icon;
+  final Color color;
+  final String label;
+  final String value;
+  final String detail;
+  final VoidCallback onTap;
+
+  const _QuickSummaryCard({
+    super.key,
+    required this.width,
+    required this.icon,
+    required this.color,
+    required this.label,
+    required this.value,
+    required this.detail,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      width: width,
+      child: Material(
+        color: AppColors.cardBackground,
+        borderRadius: BorderRadius.circular(18),
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(18),
+          child: Container(
+            padding: const EdgeInsets.all(14),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(18),
+              border: Border.all(color: Colors.white.withOpacity(0.05)),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.all(7),
+                      decoration: BoxDecoration(
+                        color: color.withOpacity(0.12),
+                        borderRadius: BorderRadius.circular(9),
+                      ),
+                      child: Icon(icon, color: color, size: 17),
+                    ),
+                    const SizedBox(width: 9),
+                    Expanded(
+                      child: Text(
+                        label,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: AppColors.textSecondary,
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 13),
+                FittedBox(
+                  fit: BoxFit.scaleDown,
+                  alignment: Alignment.centerLeft,
+                  child: Text(
+                    value,
+                    maxLines: 1,
+                    style: const TextStyle(
+                      color: AppColors.textMain,
+                      fontSize: 19,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  detail,
+                  style: const TextStyle(
+                    color: AppColors.textHint,
+                    fontSize: 10.5,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
       ),
     );
   }

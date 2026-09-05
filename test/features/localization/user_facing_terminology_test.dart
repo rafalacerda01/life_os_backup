@@ -141,7 +141,8 @@ void main() {
     expect(navigation.items.map((item) => item.label), isNot(contains('Home')));
     expect(navigation.items.map((item) => item.label), isNot(contains('AI')));
 
-    await tester.tap(find.byIcon(Icons.menu));
+    expect(find.byTooltip('Abrir menu'), findsOneWidget);
+    await tester.tap(find.byTooltip('Abrir menu'));
     await tester.pumpAndSettle();
     expect(find.text('Análises'), findsOneWidget);
     expect(find.text('Analytics'), findsNothing);

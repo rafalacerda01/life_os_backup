@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:life_os/core/theme/app_colors.dart';
 import 'package:life_os/features/auth/presentation/providers/auth_provider.dart';
 
 class MainNavigationScreen extends ConsumerWidget {
@@ -98,16 +99,39 @@ class MainNavigationScreen extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     return Scaffold(
       appBar: AppBar(
-        backgroundColor: const Color(0xFF070B14),
+        backgroundColor: AppColors.scaffoldBackground,
         elevation: 0,
+        surfaceTintColor: Colors.transparent,
         title: const Text(
           "Life OS",
-          style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+          style: TextStyle(
+            color: AppColors.textMain,
+            fontWeight: FontWeight.w800,
+            letterSpacing: -0.4,
+          ),
         ),
         actions: [
           PopupMenuButton<String>(
-            icon: const Icon(Icons.menu, color: Colors.white),
-            color: const Color(0xFF11182E),
+            tooltip: 'Abrir menu',
+            icon: Container(
+              padding: const EdgeInsets.all(9),
+              decoration: BoxDecoration(
+                color: AppColors.cardBackground,
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(color: Colors.white.withOpacity(0.07)),
+              ),
+              child: const Icon(
+                Icons.menu_rounded,
+                color: AppColors.textMain,
+                size: 20,
+              ),
+            ),
+            color: AppColors.cardBackground,
+            elevation: 12,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(20),
+              side: BorderSide(color: Colors.white.withOpacity(0.07)),
+            ),
             onSelected: (value) {
               if (value == 'logout') {
                 _showLogoutConfirmation(context, ref);
@@ -185,44 +209,63 @@ class MainNavigationScreen extends ConsumerWidget {
         ],
       ),
       body: child,
-      bottomNavigationBar: Theme(
-        data: Theme.of(context).copyWith(canvasColor: const Color(0xFF11182E)),
-        child: BottomNavigationBar(
-          currentIndex: _calculateSelectedIndex(context),
-          onTap: (index) => _onItemTapped(index, context),
-          type: BottomNavigationBarType.fixed,
-          backgroundColor: const Color(0xFF11182E),
-          selectedItemColor: Colors.purpleAccent,
-          unselectedItemColor: Colors.white54,
-          showSelectedLabels: true,
-          showUnselectedLabels: false,
-          items: const [
-            BottomNavigationBarItem(
-              icon: Icon(Icons.dashboard_outlined),
-              activeIcon: Icon(Icons.dashboard),
-              label: 'Início',
-            ),
-            BottomNavigationBarItem(
-              icon: Icon(Icons.local_library_outlined),
-              activeIcon: Icon(Icons.local_library),
-              label: 'Estudos',
-            ),
-            BottomNavigationBarItem(
-              icon: Icon(Icons.favorite_border),
-              activeIcon: Icon(Icons.favorite),
-              label: 'Saúde',
-            ),
-            BottomNavigationBarItem(
-              icon: Icon(Icons.account_balance_wallet_outlined),
-              activeIcon: Icon(Icons.account_balance_wallet),
-              label: 'Finanças',
-            ),
-            BottomNavigationBarItem(
-              icon: Icon(Icons.psychology_outlined),
-              activeIcon: Icon(Icons.psychology),
-              label: 'IA',
+      bottomNavigationBar: DecoratedBox(
+        decoration: BoxDecoration(
+          color: const Color(0xFF0A0F1E),
+          border: Border(
+            top: BorderSide(color: AppColors.primary.withOpacity(0.16)),
+          ),
+          boxShadow: [
+            BoxShadow(
+              color: AppColors.primary.withOpacity(0.07),
+              blurRadius: 20,
+              offset: const Offset(0, -4),
             ),
           ],
+        ),
+        child: SafeArea(
+          top: false,
+          child: BottomNavigationBar(
+            currentIndex: _calculateSelectedIndex(context),
+            onTap: (index) => _onItemTapped(index, context),
+            type: BottomNavigationBarType.fixed,
+            backgroundColor: Colors.transparent,
+            elevation: 0,
+            selectedItemColor: AppColors.primary,
+            unselectedItemColor: Colors.white54,
+            selectedFontSize: 11,
+            unselectedFontSize: 10,
+            iconSize: 23,
+            showSelectedLabels: true,
+            showUnselectedLabels: true,
+            items: const [
+              BottomNavigationBarItem(
+                icon: Icon(Icons.dashboard_outlined),
+                activeIcon: Icon(Icons.dashboard_rounded),
+                label: 'Início',
+              ),
+              BottomNavigationBarItem(
+                icon: Icon(Icons.local_library_outlined),
+                activeIcon: Icon(Icons.local_library_rounded),
+                label: 'Estudos',
+              ),
+              BottomNavigationBarItem(
+                icon: Icon(Icons.favorite_border_rounded),
+                activeIcon: Icon(Icons.favorite_rounded),
+                label: 'Saúde',
+              ),
+              BottomNavigationBarItem(
+                icon: Icon(Icons.account_balance_wallet_outlined),
+                activeIcon: Icon(Icons.account_balance_wallet_rounded),
+                label: 'Finanças',
+              ),
+              BottomNavigationBarItem(
+                icon: Icon(Icons.psychology_outlined),
+                activeIcon: Icon(Icons.psychology_rounded),
+                label: 'IA',
+              ),
+            ],
+          ),
         ),
       ),
     );

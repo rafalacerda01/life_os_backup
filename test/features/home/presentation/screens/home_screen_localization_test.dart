@@ -3,7 +3,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:intl/date_symbol_data_local.dart';
 import 'package:intl/intl.dart';
-import 'package:life_os/core/widgets/dashboard_components.dart';
 import 'package:life_os/features/auth/domain/entities/user_entity.dart';
 import 'package:life_os/features/auth/presentation/providers/auth_provider.dart';
 import 'package:life_os/features/auth/presentation/providers/auth_state.dart';
@@ -89,7 +88,7 @@ void main() {
         );
         await tester.pumpAndSettle();
 
-        expect(find.text('Sequência: 0 dias • Revisões: 0'), findsOneWidget);
+        expect(find.text('Revisões'), findsOneWidget);
         expect(find.text('Pontuação geral'), findsOneWidget);
         expect(find.text('PREMIUM'), findsOneWidget);
         expect(find.text('PRO'), findsNothing);
@@ -109,9 +108,7 @@ void main() {
         expect(Intl.getCurrentLocale(), 'en_US');
         expect(NumberFormat('0.00').format(1234.56), '1234.56');
 
-        final balanceCard = find.byWidgetPredicate(
-          (widget) => widget is InfoCard && widget.title == 'Saldo atual',
-        );
+        final balanceCard = find.byKey(const Key('home-summary-balance'));
         await tester.ensureVisible(balanceCard);
         await tester.pumpAndSettle();
 
