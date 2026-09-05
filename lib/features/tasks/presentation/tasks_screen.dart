@@ -390,8 +390,8 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
                         const SizedBox(height: 8),
                         Text(
                           tasks.isEmpty
-                              ? "Nenhuma tarefa para hoje."
-                              : "Você concluiu $completedCount de ${tasks.length} metas hoje",
+                              ? "Nenhuma tarefa cadastrada."
+                              : "Você concluiu $completedCount de ${tasks.length} tarefas",
                           style: const TextStyle(
                             color: Colors.white54,
                             fontSize: 16,
@@ -458,7 +458,7 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
                               ),
                               const SizedBox(height: 8),
                               const Text(
-                                "Adicione uma nova tarefa focada\npara começar o dia.",
+                                "Adicione uma nova tarefa focada\npara começar.",
                                 textAlign: TextAlign.center,
                                 style: TextStyle(
                                   color: Colors.white38,
