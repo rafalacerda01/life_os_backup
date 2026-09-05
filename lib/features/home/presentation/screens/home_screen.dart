@@ -8,8 +8,24 @@ import 'package:life_os/features/home/presentation/providers/home_provider.dart'
 import 'package:life_os/features/auth/presentation/providers/auth_provider.dart';
 import 'package:life_os/features/dashboard/data/models/dashboard_model.dart';
 import 'package:life_os/features/dashboard/domain/entities/models/insight_model.dart';
+import 'package:life_os/features/dashboard/presentation/providers/dashboard_provider.dart';
+import 'package:life_os/features/finance/presentation/providers/finance_provider.dart';
+import 'package:life_os/features/habits/presentation/providers/habits_provider.dart';
+import 'package:life_os/features/health/presentation/providers/health_provider.dart';
 import 'package:life_os/features/home/presentation/providers/insight_provider.dart';
 import 'package:life_os/features/notifications/domain/providers/notification_engine.dart';
+import 'package:life_os/features/study/presentation/providers/study_provider.dart';
+import 'package:life_os/features/tasks/presentation/providers/tasks_provider.dart';
+
+void _retryHomeData(WidgetRef ref) {
+  ref.invalidate(financeStreamProvider);
+  ref.invalidate(studyStreamProvider);
+  ref.invalidate(healthStreamProvider);
+  ref.invalidate(tasksStreamProvider);
+  ref.invalidate(medicationsStreamProvider);
+  ref.invalidate(habitsStreamProvider);
+  ref.invalidate(subjectsStreamProvider);
+}
 
 class HomeScreen extends ConsumerWidget {
   const HomeScreen({super.key});
@@ -40,6 +56,8 @@ class HomeScreen extends ConsumerWidget {
 
     Widget content = homeState.isLoading
         ? const _HomeScreenSkeleton()
+        : homeState.isUnavailable
+        ? _HomeUnavailableState(onRetry: () => _retryHomeData(ref))
         : SingleChildScrollView(
             padding: const EdgeInsets.all(20),
             child: Column(
@@ -238,6 +256,51 @@ class HomeScreen extends ConsumerWidget {
     return Container(
       color: AppColors.scaffoldBackground,
       child: SafeArea(child: content),
+    );
+  }
+}
+
+class _HomeUnavailableState extends StatelessWidget {
+  final VoidCallback onRetry;
+
+  const _HomeUnavailableState({required this.onRetry});
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(
+              Icons.cloud_off_outlined,
+              color: AppColors.textSecondary,
+              size: 36,
+            ),
+            const SizedBox(height: 16),
+            const Text(
+              'Não foi possível carregar seus dados.',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                color: AppColors.textMain,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const SizedBox(height: 8),
+            const Text(
+              'Verifique sua conexão e tente novamente.',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: AppColors.textSecondary),
+            ),
+            const SizedBox(height: 20),
+            ElevatedButton(
+              onPressed: onRetry,
+              child: const Text('Tentar novamente'),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
