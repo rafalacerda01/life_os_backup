@@ -543,7 +543,7 @@ class _GoalsScreenState extends ConsumerState<GoalsScreen> {
                     deSegunda.year != hojeSegunda.year;
               }
 
-              if (precisaResetar && goal.currentValue != 0) {
+              if (precisaResetar) {
                 Future.microtask(() => _resetGoalCycle(goal.id));
               }
             }

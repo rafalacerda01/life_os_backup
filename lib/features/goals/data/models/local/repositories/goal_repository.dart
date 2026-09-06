@@ -101,16 +101,46 @@ class GoalRepository {
     }
 
     try {
+      final currentRow = await (_db.select(
+        _db.goals,
+      )..where((table) => table.id.equals(id))).getSingleOrNull();
+      final now = DateTime.now();
+      final cycleExpired =
+          currentRow != null &&
+          _isGoalCycleExpired(
+            currentRow.period,
+            DateTime.fromMillisecondsSinceEpoch(currentRow.lastReset),
+            now,
+          );
+      final effectiveValue = cycleExpired
+          ? _progressForNewCycle(
+              requestedValue: newValue,
+              currentValue: currentRow.currentValue,
+              targetValue: currentRow.targetValue,
+            )
+          : newValue;
+
       await _db.transactionWithSync(
         ownerUid: user.uid,
         localOperation: () async {
-          await (_db.update(_db.goals)..where((table) => table.id.equals(id)))
-              .write(GoalsCompanion(currentValue: Value(newValue)));
+          await (_db.update(
+            _db.goals,
+          )..where((table) => table.id.equals(id))).write(
+            GoalsCompanion(
+              currentValue: Value(effectiveValue),
+              lastReset: cycleExpired
+                  ? Value(now.millisecondsSinceEpoch)
+                  : const Value.absent(),
+            ),
+          );
         },
         collection: 'goals',
         docId: id,
         operationType: 'update',
-        payloadJson: jsonEncode({'currentValue': newValue}),
+        payloadJson: jsonEncode({
+          'currentValue': effectiveValue,
+          if (cycleExpired) 'lastReset': now.toIso8601String(),
+        }),
       );
     } catch (e, stack) {
       AppLogger.e('Erro ao atualizar progresso da Meta local', e, stack);
@@ -261,5 +291,43 @@ class GoalRepository {
     if (value is Timestamp) return value.toDate();
     if (value is String) return DateTime.tryParse(value);
     return null;
+  }
+
+  bool _isGoalCycleExpired(String period, DateTime lastReset, DateTime now) {
+    if (period == 'DIÁRIA') {
+      return lastReset.day != now.day ||
+          lastReset.month != now.month ||
+          lastReset.year != now.year;
+    }
+
+    if (period == 'MENSAL') {
+      return lastReset.month != now.month || lastReset.year != now.year;
+    }
+
+    if (period == 'SEMANAL') {
+      final lastResetMonday = lastReset.subtract(
+        Duration(days: lastReset.weekday - 1),
+      );
+      final currentMonday = now.subtract(Duration(days: now.weekday - 1));
+
+      return lastResetMonday.day != currentMonday.day ||
+          lastResetMonday.month != currentMonday.month ||
+          lastResetMonday.year != currentMonday.year;
+    }
+
+    return false;
+  }
+
+  int _progressForNewCycle({
+    required int requestedValue,
+    required int currentValue,
+    required int targetValue,
+  }) {
+    final delta = requestedValue - currentValue;
+    final nonNegativeDelta = delta < 0 ? 0 : delta;
+    if (targetValue >= 0 && nonNegativeDelta > targetValue) {
+      return targetValue;
+    }
+    return nonNegativeDelta;
   }
 }

@@ -110,18 +110,24 @@ void main() {
 
   tearDown(() => db.close());
 
-  Future<void> seed({int currentValue = 1}) async {
+  Future<void> seed({
+    String period = 'DIÁRIA',
+    int currentValue = 1,
+    int targetValue = 10,
+    DateTime? lastReset,
+  }) async {
+    final resetAt = lastReset ?? DateTime.now();
     await db
         .into(db.goals)
         .insert(
           GoalsCompanion.insert(
             id: 'goal-1',
             title: 'Local',
-            period: 'DIÁRIA',
+            period: period,
             currentValue: currentValue,
-            targetValue: 10,
+            targetValue: targetValue,
             createdAt: DateTime.utc(2026, 8, 1).millisecondsSinceEpoch,
-            lastReset: DateTime.utc(2026, 8, 2).millisecondsSinceEpoch,
+            lastReset: resetAt.millisecondsSinceEpoch,
           ),
         );
   }
@@ -154,6 +160,189 @@ void main() {
     expect(item.docId, 'goal-1');
     expect(item.operationType, 'update');
     expect(jsonDecode(item.payloadJson), {'currentValue': 2});
+  });
+
+  test('same cycle preserves lastReset and sends only currentValue', () async {
+    final lastReset = DateTime.now();
+    await seed(lastReset: lastReset);
+
+    await repository.updateGoalProgress('goal-1', 2);
+
+    final goal = await db.select(db.goals).getSingle();
+    expect(goal.currentValue, 2);
+    expect(goal.lastReset, lastReset.millisecondsSinceEpoch);
+    final item =
+        (await db.getPendingSyncItems('user-a')).single as SyncQueueTableData;
+    expect(jsonDecode(item.payloadJson), {'currentValue': 2});
+  });
+
+  test('expired daily cycle with zero keeps first progress', () async {
+    final now = DateTime.now();
+    final previousDay = DateTime(
+      now.year,
+      now.month,
+      now.day,
+    ).subtract(const Duration(days: 1));
+    await seed(currentValue: 0, lastReset: previousDay);
+    final beforeUpdate = DateTime.now();
+
+    await repository.updateGoalProgress('goal-1', 1);
+
+    final afterUpdate = DateTime.now();
+    final goal = await db.select(db.goals).getSingle();
+    expect(goal.currentValue, 1);
+    expect(
+      goal.lastReset,
+      inInclusiveRange(
+        beforeUpdate.millisecondsSinceEpoch,
+        afterUpdate.millisecondsSinceEpoch,
+      ),
+    );
+    final items = await db.getPendingSyncItems('user-a');
+    expect(items, hasLength(1));
+    final payload =
+        jsonDecode((items.single as SyncQueueTableData).payloadJson)
+            as Map<String, dynamic>;
+    expect(payload['currentValue'], 1);
+    expect(
+      DateTime.parse(payload['lastReset'] as String).millisecondsSinceEpoch,
+      goal.lastReset,
+    );
+  });
+
+  test('expired daily cycle applies increment as delta from zero', () async {
+    final now = DateTime.now();
+    await seed(
+      currentValue: 5,
+      lastReset: DateTime(
+        now.year,
+        now.month,
+        now.day,
+      ).subtract(const Duration(days: 1)),
+    );
+
+    await repository.updateGoalProgress('goal-1', 6);
+
+    expect((await db.select(db.goals).getSingle()).currentValue, 1);
+    final items = await db.getPendingSyncItems('user-a');
+    expect(items, hasLength(1));
+    expect(
+      jsonDecode(
+        (items.single as SyncQueueTableData).payloadJson,
+      )['currentValue'],
+      1,
+    );
+  });
+
+  test('expired daily cycle clamps decrement delta to zero', () async {
+    final now = DateTime.now();
+    await seed(
+      currentValue: 5,
+      lastReset: DateTime(
+        now.year,
+        now.month,
+        now.day,
+      ).subtract(const Duration(days: 1)),
+    );
+
+    await repository.updateGoalProgress('goal-1', 4);
+
+    final goal = await db.select(db.goals).getSingle();
+    expect(goal.currentValue, 0);
+    final item =
+        (await db.getPendingSyncItems('user-a')).single as SyncQueueTableData;
+    expect(jsonDecode(item.payloadJson)['currentValue'], 0);
+    expect(jsonDecode(item.payloadJson), contains('lastReset'));
+  });
+
+  test('reset cycle with zero updates lastReset and queues update', () async {
+    final now = DateTime.now();
+    final previousDay = DateTime(
+      now.year,
+      now.month,
+      now.day,
+    ).subtract(const Duration(days: 1));
+    await seed(currentValue: 0, lastReset: previousDay);
+    final beforeReset = DateTime.now();
+
+    await repository.resetGoalCycle('goal-1');
+
+    final afterReset = DateTime.now();
+    final goal = await db.select(db.goals).getSingle();
+    expect(goal.currentValue, 0);
+    expect(
+      goal.lastReset,
+      inInclusiveRange(
+        beforeReset.millisecondsSinceEpoch,
+        afterReset.millisecondsSinceEpoch,
+      ),
+    );
+    final item =
+        (await db.getPendingSyncItems('user-a')).single as SyncQueueTableData;
+    final payload = jsonDecode(item.payloadJson) as Map<String, dynamic>;
+    expect(payload['currentValue'], 0);
+    expect(
+      DateTime.parse(payload['lastReset'] as String).millisecondsSinceEpoch,
+      goal.lastReset,
+    );
+  });
+
+  test('weekly cycle recognizes a previous week', () async {
+    final now = DateTime.now();
+    final currentMonday = DateTime(
+      now.year,
+      now.month,
+      now.day,
+    ).subtract(Duration(days: now.weekday - 1));
+    await seed(
+      period: 'SEMANAL',
+      currentValue: 5,
+      lastReset: currentMonday.subtract(const Duration(days: 7)),
+    );
+
+    await repository.updateGoalProgress('goal-1', 6);
+
+    final goal = await db.select(db.goals).getSingle();
+    expect(goal.currentValue, 1);
+    final item =
+        (await db.getPendingSyncItems('user-a')).single as SyncQueueTableData;
+    expect(jsonDecode(item.payloadJson), contains('lastReset'));
+  });
+
+  test('weekly cycle preserves dates within the same week', () async {
+    final now = DateTime.now();
+    final currentMonday = DateTime(
+      now.year,
+      now.month,
+      now.day,
+    ).subtract(Duration(days: now.weekday - 1));
+    await seed(period: 'SEMANAL', currentValue: 1, lastReset: currentMonday);
+
+    await repository.updateGoalProgress('goal-1', 2);
+
+    final goal = await db.select(db.goals).getSingle();
+    expect(goal.currentValue, 2);
+    expect(goal.lastReset, currentMonday.millisecondsSinceEpoch);
+    final item =
+        (await db.getPendingSyncItems('user-a')).single as SyncQueueTableData;
+    expect(jsonDecode(item.payloadJson), {'currentValue': 2});
+  });
+
+  test('monthly cycle recognizes a previous month', () async {
+    final now = DateTime.now();
+    await seed(
+      period: 'MENSAL',
+      currentValue: 5,
+      lastReset: DateTime(now.year, now.month - 1, 1),
+    );
+
+    await repository.updateGoalProgress('goal-1', 6);
+
+    final goal = await db.select(db.goals).getSingle();
+    expect(goal.currentValue, 1);
+    final item =
+        (await db.getPendingSyncItems('user-a')).single as SyncQueueTableData;
+    expect(jsonDecode(item.payloadJson), contains('lastReset'));
   });
 
   test('pending update protects local progress from stale remote', () async {
