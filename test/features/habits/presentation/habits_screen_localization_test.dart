@@ -56,6 +56,53 @@ void main() {
     });
   });
 
+  testWidgets('daily status stays factual without task or streak semantics', (
+    tester,
+  ) async {
+    final today = DateFormat('yyyy-MM-dd').format(DateTime.now());
+    final previousDay = DateFormat(
+      'yyyy-MM-dd',
+    ).format(DateTime.now().subtract(const Duration(days: 1)));
+    final earlierDay = DateFormat(
+      'yyyy-MM-dd',
+    ).format(DateTime.now().subtract(const Duration(days: 2)));
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          habitsStreamProvider.overrideWith(
+            (ref) => Stream.value([
+              HabitModel(
+                id: 'habit-done',
+                title: 'Meditar',
+                completedDates: [today],
+              ),
+              HabitModel(
+                id: 'habit-pending',
+                title: 'Ler',
+                completedDates: [previousDay, earlierDay],
+              ),
+            ]),
+          ),
+        ],
+        child: const MaterialApp(home: HabitsScreen()),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Feito hoje'), findsOneWidget);
+    expect(find.text('Pendente hoje'), findsOneWidget);
+    expect(find.text('1 dia registrado'), findsOneWidget);
+    expect(find.text('2 dias registrados'), findsOneWidget);
+    expect(find.byIcon(Icons.local_fire_department_rounded), findsNothing);
+
+    for (final title in ['Meditar', 'Ler']) {
+      final titleWidget = tester.widget<Text>(find.text(title));
+      expect(titleWidget.style?.decoration, isNot(TextDecoration.lineThrough));
+    }
+    expect(tester.takeException(), isNull);
+  });
+
   test('Portuguese weekday abbreviations preserve the Saturday accent', () {
     Intl.withLocale('en_US', () {
       final monday = DateTime(2026, 8, 24);
