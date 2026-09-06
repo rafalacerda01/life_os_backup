@@ -53,8 +53,18 @@ class GoalRepository {
       return;
     }
 
-    final id = _uuid.v4();
     final cleanTitle = InputSanitizer.sanitize(title);
+    if (cleanTitle.isEmpty || cleanTitle.length > 200) {
+      throw ArgumentError('Título da meta inválido.');
+    }
+    if (targetValue <= 0) {
+      throw ArgumentError('Objetivo numérico da meta inválido.');
+    }
+    if (!const {'DIÁRIA', 'SEMANAL', 'MENSAL'}.contains(period)) {
+      throw ArgumentError('Período da meta inválido.');
+    }
+
+    final id = _uuid.v4();
     final now = DateTime.now();
 
     try {

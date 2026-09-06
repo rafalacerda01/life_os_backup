@@ -328,11 +328,46 @@ class _GoalsScreenState extends ConsumerState<GoalsScreen> {
                               final title = InputSanitizer.sanitize(
                                 titleController.text,
                               );
-
-                              final target =
-                                  int.tryParse(targetController.text) ?? 1;
+                              final target = int.tryParse(
+                                targetController.text.trim(),
+                              );
 
                               if (title.isEmpty) {
+                                if (context.mounted) {
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    const SnackBar(
+                                      content: Text(
+                                        'Informe um nome para a meta.',
+                                      ),
+                                    ),
+                                  );
+                                }
+                                return;
+                              }
+
+                              if (title.length > 200) {
+                                if (context.mounted) {
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    const SnackBar(
+                                      content: Text(
+                                        'O nome da meta deve ter no máximo 200 caracteres.',
+                                      ),
+                                    ),
+                                  );
+                                }
+                                return;
+                              }
+
+                              if (target == null || target <= 0) {
+                                if (context.mounted) {
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    const SnackBar(
+                                      content: Text(
+                                        'Informe um objetivo numérico maior que zero.',
+                                      ),
+                                    ),
+                                  );
+                                }
                                 return;
                               }
 

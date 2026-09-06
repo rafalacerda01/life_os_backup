@@ -147,6 +147,100 @@ void main() {
     );
   }
 
+  Future<void> expectNoGoalOrSyncItems() async {
+    expect(await db.select(db.goals).get(), isEmpty);
+    expect(await db.getPendingSyncItems('user-a'), isEmpty);
+  }
+
+  test('valid create writes one goal and one pending operation', () async {
+    await repository.createGoal('  <b>Meta válida</b>  ', 'DIÁRIA', 1);
+
+    final goals = await db.select(db.goals).get();
+    expect(goals, hasLength(1));
+    expect(goals.single.title, 'Meta válida');
+    expect(goals.single.period, 'DIÁRIA');
+    expect(goals.single.targetValue, 1);
+
+    final items = await db.getPendingSyncItems('user-a');
+    expect(items, hasLength(1));
+    final item = items.single as SyncQueueTableData;
+    expect(item.operationType, 'create');
+    final payload = jsonDecode(item.payloadJson) as Map<String, dynamic>;
+    expect(payload['title'], 'Meta válida');
+    expect(payload['period'], 'DIÁRIA');
+    expect(payload['targetValue'], 1);
+  });
+
+  test('empty title is rejected before local writes', () async {
+    await expectLater(
+      repository.createGoal('   ', 'DIÁRIA', 1),
+      throwsA(isA<ArgumentError>()),
+    );
+
+    await expectNoGoalOrSyncItems();
+  });
+
+  test(
+    'title emptied by sanitization is rejected before local writes',
+    () async {
+      await expectLater(
+        repository.createGoal('<b></b>', 'DIÁRIA', 1),
+        throwsA(isA<ArgumentError>()),
+      );
+
+      await expectNoGoalOrSyncItems();
+    },
+  );
+
+  test('title with exactly 200 characters is accepted', () async {
+    final title = List.filled(200, 'a').join();
+
+    await repository.createGoal(title, 'SEMANAL', 1);
+
+    final goals = await db.select(db.goals).get();
+    expect(goals, hasLength(1));
+    expect(goals.single.title, title);
+    expect(await db.getPendingSyncItems('user-a'), hasLength(1));
+  });
+
+  test('title with 201 characters is rejected before local writes', () async {
+    final title = List.filled(201, 'a').join();
+
+    await expectLater(
+      repository.createGoal(title, 'DIÁRIA', 1),
+      throwsA(isA<ArgumentError>()),
+    );
+
+    await expectNoGoalOrSyncItems();
+  });
+
+  test('zero target is rejected before local writes', () async {
+    await expectLater(
+      repository.createGoal('Meta', 'DIÁRIA', 0),
+      throwsA(isA<ArgumentError>()),
+    );
+
+    await expectNoGoalOrSyncItems();
+  });
+
+  test('negative target is rejected before local writes', () async {
+    await expectLater(
+      repository.createGoal('Meta', 'DIÁRIA', -1),
+      throwsA(isA<ArgumentError>()),
+    );
+
+    await expectNoGoalOrSyncItems();
+  });
+
+  test('unsupported period is rejected before local writes', () async {
+    await expectLater(
+      repository.createGoal('Meta', 'ANUAL', 1),
+      throwsA(isA<ArgumentError>()),
+    );
+
+    await expectNoGoalOrSyncItems();
+  });
+
   test('update progress writes Drift and pending queue with owner', () async {
     await seed();
 
