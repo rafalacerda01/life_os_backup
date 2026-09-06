@@ -216,7 +216,7 @@ class _GoalsScreenState extends ConsumerState<GoalsScreen> {
                                   ),
                                   SizedBox(height: 3),
                                   Text(
-                                    'Defina um objetivo para acompanhar.',
+                                    'Defina um resultado mensurável para acompanhar por ciclo.',
                                     style: TextStyle(
                                       color: _white45,
                                       fontSize: 12,
@@ -241,13 +241,13 @@ class _GoalsScreenState extends ConsumerState<GoalsScreen> {
                           ),
                           textInputAction: TextInputAction.next,
                           decoration: _modalInputDecoration(
-                            hintText: 'Ex.: Ler 20 páginas',
+                            hintText: 'Ex.: Páginas lidas',
                           ),
                         ),
                         const SizedBox(height: 18),
                         _ModalLabel(
                           icon: Icons.calendar_today_outlined,
-                          label: 'Período',
+                          label: 'Ciclo',
                         ),
                         const SizedBox(height: 8),
                         Container(
@@ -297,7 +297,7 @@ class _GoalsScreenState extends ConsumerState<GoalsScreen> {
                         const SizedBox(height: 18),
                         _ModalLabel(
                           icon: Icons.track_changes_rounded,
-                          label: 'Objetivo numérico',
+                          label: 'Alvo do ciclo',
                         ),
                         const SizedBox(height: 8),
                         TextField(
@@ -310,6 +310,11 @@ class _GoalsScreenState extends ConsumerState<GoalsScreen> {
                           decoration: _modalInputDecoration(
                             hintText: 'Ex.: 10',
                           ),
+                        ),
+                        const SizedBox(height: 7),
+                        const Text(
+                          'O progresso é ajustado em passos de 1.',
+                          style: TextStyle(color: _white45, fontSize: 11),
                         ),
                         const SizedBox(height: 24),
                         SizedBox(
@@ -437,7 +442,7 @@ class _GoalsScreenState extends ConsumerState<GoalsScreen> {
                                 Icon(Icons.check_rounded, size: 20),
                                 SizedBox(width: 8),
                                 Text(
-                                  'Ativar meta',
+                                  'Criar meta',
                                   style: TextStyle(
                                     fontSize: 15,
                                     fontWeight: FontWeight.w700,
@@ -491,7 +496,7 @@ class _GoalsScreenState extends ConsumerState<GoalsScreen> {
               ),
               SizedBox(height: 3),
               Text(
-                'Transforme objetivos em progresso.',
+                'Acompanhe alvos recorrentes por ciclo.',
                 style: TextStyle(
                   color: _white45,
                   fontSize: 12,
@@ -596,12 +601,24 @@ class _GoalsScreenState extends ConsumerState<GoalsScreen> {
                   );
                 }
 
+                final reachedGoals = filteredGoals
+                    .where((goal) => goal.currentValue >= goal.targetValue)
+                    .length;
+
                 return ListView.builder(
                   physics: const BouncingScrollPhysics(),
                   padding: const EdgeInsets.fromLTRB(20, 22, 20, 110),
-                  itemCount: filteredGoals.length,
+                  itemCount: filteredGoals.length + 1,
                   itemBuilder: (context, index) {
-                    final goal = filteredGoals[index];
+                    if (index == 0) {
+                      return _CycleSummary(
+                        period: timeframe,
+                        total: filteredGoals.length,
+                        reached: reachedGoals,
+                      );
+                    }
+
+                    final goal = filteredGoals[index - 1];
 
                     final double progress = goal.targetValue > 0
                         ? (goal.currentValue / goal.targetValue).clamp(0.0, 1.0)
@@ -750,7 +767,7 @@ class _GoalCard extends StatelessWidget {
                     borderRadius: BorderRadius.circular(13),
                   ),
                   child: Icon(
-                    isCompleted ? Icons.check_rounded : Icons.flag_outlined,
+                    Icons.flag_outlined,
                     color: isCompleted
                         ? _GoalsScreenState._successColor
                         : _GoalsScreenState._primaryColor,
@@ -766,24 +783,18 @@ class _GoalCard extends StatelessWidget {
                         goal.title,
                         maxLines: 2,
                         overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                          color: isCompleted
-                              ? _GoalsScreenState._white38
-                              : Colors.white,
+                        style: const TextStyle(
+                          color: Colors.white,
                           fontSize: 15,
                           fontWeight: FontWeight.w700,
                           height: 1.25,
-                          decoration: isCompleted
-                              ? TextDecoration.lineThrough
-                              : null,
-                          decorationColor: _GoalsScreenState._white38,
                         ),
                       ),
                       const SizedBox(height: 5),
                       Text(
                         isCompleted
-                            ? 'Meta concluída'
-                            : '$percentage% concluído',
+                            ? 'Alvo do ciclo atingido'
+                            : '$percentage% do alvo',
                         style: TextStyle(
                           color: isCompleted
                               ? _GoalsScreenState._successColor
@@ -806,7 +817,7 @@ class _GoalCard extends StatelessWidget {
                     borderRadius: BorderRadius.circular(10),
                   ),
                   child: Text(
-                    '${goal.currentValue}/${goal.targetValue}',
+                    '${goal.currentValue} / ${goal.targetValue}',
                     style: TextStyle(
                       color: isCompleted
                           ? _GoalsScreenState._successColor
@@ -821,14 +832,19 @@ class _GoalCard extends StatelessWidget {
             const SizedBox(height: 17),
             ClipRRect(
               borderRadius: BorderRadius.circular(20),
-              child: LinearProgressIndicator(
-                value: progress,
-                minHeight: 8,
-                backgroundColor: Colors.white.withValues(alpha: 0.06),
-                valueColor: AlwaysStoppedAnimation<Color>(
-                  isCompleted
-                      ? _GoalsScreenState._successColor
-                      : _GoalsScreenState._primaryColor,
+              child: TweenAnimationBuilder<double>(
+                tween: Tween(begin: 0, end: progress),
+                duration: const Duration(milliseconds: 600),
+                curve: Curves.easeOutCubic,
+                builder: (context, value, _) => LinearProgressIndicator(
+                  value: value,
+                  minHeight: 8,
+                  backgroundColor: Colors.white.withValues(alpha: 0.06),
+                  valueColor: AlwaysStoppedAnimation<Color>(
+                    isCompleted
+                        ? _GoalsScreenState._successColor
+                        : _GoalsScreenState._primaryColor,
+                  ),
                 ),
               ),
             ),
@@ -843,7 +859,7 @@ class _GoalCard extends StatelessWidget {
                 const SizedBox(width: 8),
                 Expanded(
                   child: Text(
-                    isCompleted ? 'Objetivo alcançado' : 'Atualizar progresso',
+                    'Ajustar progresso',
                     textAlign: TextAlign.center,
                     style: const TextStyle(
                       color: _GoalsScreenState._white45,
@@ -874,6 +890,88 @@ class _GoalCard extends StatelessWidget {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+// =============================================================================
+// RESUMO DO CICLO
+// =============================================================================
+
+class _CycleSummary extends StatelessWidget {
+  final String period;
+  final int total;
+  final int reached;
+
+  const _CycleSummary({
+    required this.period,
+    required this.total,
+    required this.reached,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final cycleLabel = switch (period) {
+      'DIÁRIA' => 'CICLO DIÁRIO',
+      'SEMANAL' => 'CICLO SEMANAL',
+      'MENSAL' => 'CICLO MENSAL',
+      _ => 'CICLO',
+    };
+    final targetLabel = total == 1 ? 'alvo atingido' : 'alvos atingidos';
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 18),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+      decoration: BoxDecoration(
+        color: _GoalsScreenState._cardColor,
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(
+          color: _GoalsScreenState._primaryColor.withValues(alpha: 0.16),
+        ),
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 38,
+            height: 38,
+            decoration: BoxDecoration(
+              color: _GoalsScreenState._primaryColor.withValues(alpha: 0.10),
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: const Icon(
+              Icons.track_changes_rounded,
+              color: _GoalsScreenState._primaryColor,
+              size: 20,
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  cycleLabel,
+                  style: const TextStyle(
+                    color: _GoalsScreenState._white45,
+                    fontSize: 10,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: 0.8,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  '$reached de $total $targetLabel',
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 14,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -965,7 +1063,7 @@ class _EmptyGoalsState extends StatelessWidget {
             ),
             const SizedBox(height: 20),
             const Text(
-              'Nenhuma meta definida',
+              'Nenhuma meta neste ciclo',
               textAlign: TextAlign.center,
               style: TextStyle(
                 color: Colors.white,
@@ -975,7 +1073,7 @@ class _EmptyGoalsState extends StatelessWidget {
             ),
             const SizedBox(height: 8),
             Text(
-              'Você ainda não possui metas ${_GoalsScreenState._formatPeriod(timeframe).toLowerCase()}.',
+              'Crie uma meta ${_GoalsScreenState._formatPeriod(timeframe).toLowerCase()} com um alvo mensurável para acompanhar.',
               textAlign: TextAlign.center,
               style: const TextStyle(
                 color: _GoalsScreenState._white45,
