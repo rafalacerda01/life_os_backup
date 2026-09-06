@@ -193,32 +193,66 @@ class HabitsRepository {
   // ===========================================================================
 
   Future<void> syncHabitsFromFirebaseToLocal() async {
-    final userId = _auth.currentUser?.uid;
-    if (userId == null) return;
+    final user = _auth.currentUser;
+    if (user == null) return;
+
+    final expectedUid = user.uid;
 
     try {
       AppLogger.i('SYNC Hábitos: Iniciando...');
+      final pullStartedAt = DateTime.now().millisecondsSinceEpoch;
       final snapshot = await _firestore
           .collection('users')
-          .doc(userId)
+          .doc(expectedUid)
           .collection('habits')
           .get();
 
-      for (var doc in snapshot.docs) {
+      for (final doc in snapshot.docs) {
+        if (_auth.currentUser?.uid != expectedUid) return;
         final data = doc.data();
 
         final rawDates = data['completedDates'] as List<dynamic>? ?? [];
         final dates = rawDates.map((e) => e.toString()).toList();
 
-        await _db
-            .into(_db.habits)
-            .insertOnConflictUpdate(
-              HabitsCompanion.insert(
-                id: doc.id,
-                title: data['title'] ?? 'Sem título',
-                completedDates: jsonEncode(dates),
-              ),
-            );
+        final sessionValid = await _db.transaction(() async {
+          if (_auth.currentUser?.uid != expectedUid) return false;
+
+          final locallyAuthoritative =
+              await (_db.select(_db.syncQueueTable)..where(
+                    (item) =>
+                        item.ownerUid.equals(expectedUid) &
+                        item.docId.equals(doc.id) &
+                        (item.collection.equals('habits') |
+                            (item.collection.equals('batch') &
+                                item.operationType.equals('batch_delete'))) &
+                        (item.status.equals(
+                              SyncQueuePersistenceStatus.pending,
+                            ) |
+                            (item.status.equals(
+                                  SyncQueuePersistenceStatus.succeeded,
+                                ) &
+                                item.createdAt.isBiggerOrEqualValue(
+                                  pullStartedAt,
+                                ))),
+                  ))
+                  .get();
+
+          if (_auth.currentUser?.uid != expectedUid) return false;
+          if (locallyAuthoritative.isNotEmpty) return true;
+
+          await _db
+              .into(_db.habits)
+              .insertOnConflictUpdate(
+                HabitsCompanion.insert(
+                  id: doc.id,
+                  title: data['title'] ?? 'Sem título',
+                  completedDates: jsonEncode(dates),
+                ),
+              );
+          return _auth.currentUser?.uid == expectedUid;
+        });
+
+        if (!sessionValid) return;
       }
       AppLogger.i('SYNC Hábitos: Concluído com sucesso.');
     } catch (error, stackTrace) {

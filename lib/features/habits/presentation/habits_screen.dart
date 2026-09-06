@@ -1,13 +1,55 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
+import 'package:life_os/core/services/sync_manager_provider.dart';
+import 'package:life_os/core/utils/app_logger.dart';
 import 'package:life_os/features/habits/presentation/providers/habits_provider.dart';
 import 'package:life_os/features/premium/domain/services/plan_limits.dart';
 import 'package:life_os/features/premium/domain/services/quota_service.dart';
 import 'package:life_os/features/premium/presentation/plan_limits_provider.dart';
 
-class HabitsScreen extends ConsumerWidget {
+class HabitsScreen extends ConsumerStatefulWidget {
   const HabitsScreen({super.key});
+
+  @override
+  ConsumerState<HabitsScreen> createState() => _HabitsScreenState();
+}
+
+class _HabitsScreenState extends ConsumerState<HabitsScreen> {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      unawaited(_syncPendingThenHydrateHabits());
+    });
+  }
+
+  Future<void> _syncPendingThenHydrateHabits() async {
+    try {
+      final queueDrained = await ref
+          .read(syncManagerProvider)
+          .processPendingItems();
+      if (!mounted || !queueDrained) return;
+      await ref.read(habitsRepositoryProvider).syncHabitsFromFirebaseToLocal();
+    } catch (_) {
+      AppLogger.w('Não foi possível sincronizar hábitos neste momento.');
+    }
+  }
+
+  void _schedulePendingHabitSync() {
+    if (!mounted) return;
+    unawaited(
+      ref.read(syncManagerProvider).processPendingItems().catchError((
+        Object _,
+      ) {
+        AppLogger.w('Não foi possível sincronizar hábitos neste momento.');
+        return false;
+      }),
+    );
+  }
 
   void _showAddHabitDialog(BuildContext context, WidgetRef ref) {
     final controller = TextEditingController();
@@ -96,6 +138,7 @@ class HabitsScreen extends ConsumerWidget {
               }
 
               await ref.read(habitsRepositoryProvider).addHabit(title);
+              _schedulePendingHabitSync();
 
               if (context.mounted) {
                 Navigator.pop(context);
@@ -148,6 +191,7 @@ class HabitsScreen extends ConsumerWidget {
               await ref
                   .read(habitsRepositoryProvider)
                   .deleteHabit(habitId, habitTitle);
+              _schedulePendingHabitSync();
               if (context.mounted) Navigator.pop(context);
             },
             child: const Text(
@@ -164,7 +208,7 @@ class HabitsScreen extends ConsumerWidget {
   }
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  Widget build(BuildContext context) {
     final habitsAsync = ref.watch(habitsStreamProvider);
     final todayStr = DateFormat('yyyy-MM-dd').format(DateTime.now());
 
@@ -384,6 +428,7 @@ class HabitsScreen extends ConsumerWidget {
                                                   habit.completedDates,
                                                   isDoneToday,
                                                 );
+                                                _schedulePendingHabitSync();
                                               },
                                             ),
                                             IconButton(
@@ -443,6 +488,7 @@ class HabitsScreen extends ConsumerWidget {
                                                   habit.id,
                                                   updatedDates,
                                                 );
+                                            _schedulePendingHabitSync();
                                           },
                                           child: Column(
                                             children: [
