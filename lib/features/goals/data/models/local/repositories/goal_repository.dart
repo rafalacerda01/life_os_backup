@@ -185,40 +185,81 @@ class GoalRepository {
   // ===========================================================================
 
   Future<void> syncGoalsFromFirebaseToLocal() async {
-    final uid = _auth.currentUser?.uid;
-    if (uid == null) return;
+    final user = _auth.currentUser;
+    if (user == null) return;
+
+    final expectedUid = user.uid;
 
     try {
       AppLogger.i("SYNC Metas: Iniciando...");
+      final pullStartedAt = DateTime.now().millisecondsSinceEpoch;
       final snapshot = await _firestore
           .collection('users')
-          .doc(uid)
+          .doc(expectedUid)
           .collection('goals')
           .get();
 
-      for (var doc in snapshot.docs) {
+      for (final doc in snapshot.docs) {
+        if (_auth.currentUser?.uid != expectedUid) return;
         final data = doc.data();
-        await _db
-            .into(_db.goals)
-            .insertOnConflictUpdate(
-              GoalsCompanion(
-                id: Value(doc.id),
-                title: Value(data['title']),
-                period: Value(data['period']),
-                currentValue: Value(data['currentValue']),
-                targetValue: Value(data['targetValue']),
-                createdAt: Value(
-                  (data['createdAt'] as Timestamp).millisecondsSinceEpoch,
+        final createdAt = _parseFirestoreDate(data['createdAt']);
+        if (createdAt == null) {
+          AppLogger.w('SYNC Metas: data de criação inválida ignorada.');
+          continue;
+        }
+        final lastReset = _parseFirestoreDate(data['lastReset']) ?? createdAt;
+
+        final sessionValid = await _db.transaction(() async {
+          if (_auth.currentUser?.uid != expectedUid) return false;
+
+          final locallyAuthoritative =
+              await (_db.select(_db.syncQueueTable)..where(
+                    (item) =>
+                        item.ownerUid.equals(expectedUid) &
+                        item.collection.equals('goals') &
+                        item.docId.equals(doc.id) &
+                        (item.status.equals(
+                              SyncQueuePersistenceStatus.pending,
+                            ) |
+                            (item.status.equals(
+                                  SyncQueuePersistenceStatus.succeeded,
+                                ) &
+                                item.createdAt.isBiggerOrEqualValue(
+                                  pullStartedAt,
+                                ))),
+                  ))
+                  .get();
+
+          if (_auth.currentUser?.uid != expectedUid) return false;
+          if (locallyAuthoritative.isNotEmpty) return true;
+
+          await _db
+              .into(_db.goals)
+              .insertOnConflictUpdate(
+                GoalsCompanion(
+                  id: Value(doc.id),
+                  title: Value(data['title']),
+                  period: Value(data['period']),
+                  currentValue: Value(data['currentValue']),
+                  targetValue: Value(data['targetValue']),
+                  createdAt: Value(createdAt.millisecondsSinceEpoch),
+                  lastReset: Value(lastReset.millisecondsSinceEpoch),
                 ),
-                lastReset: Value(
-                  (data['lastReset'] as Timestamp).millisecondsSinceEpoch,
-                ),
-              ),
-            );
+              );
+          return _auth.currentUser?.uid == expectedUid;
+        });
+
+        if (!sessionValid) return;
       }
       AppLogger.i("SYNC Metas: Concluído.");
     } catch (e, stack) {
       AppLogger.e("SYNC Metas: ERRO CRÍTICO", e, stack);
     }
+  }
+
+  DateTime? _parseFirestoreDate(Object? value) {
+    if (value is Timestamp) return value.toDate();
+    if (value is String) return DateTime.tryParse(value);
+    return null;
   }
 }

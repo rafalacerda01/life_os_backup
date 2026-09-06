@@ -844,7 +844,7 @@ service cloud.firestore {
               .diff(resource.data)
               .affectedKeys()
               .hasAny(['lastReset']) ||
-            request.resource.data.lastReset is string
+            request.resource.data.lastReset is timestamp
           );
       }
 

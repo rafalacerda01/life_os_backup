@@ -187,7 +187,9 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
           if (operationType == 'create') {
             await documentRef.set(data);
           } else {
-            await documentRef.update(data);
+            await documentRef.update(
+              collection == 'goals' ? _prepareGoalUpdatePayload(data) : data,
+            );
           }
 
           return const SyncOperationResult.success();
@@ -230,6 +232,32 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
         code: 'UNEXPECTED_SYNC_ERROR',
       );
     }
+  }
+
+  Map<String, dynamic> _prepareGoalUpdatePayload(Map<String, dynamic> data) {
+    if (data.isEmpty ||
+        data.keys.any((key) => key != 'currentValue' && key != 'lastReset')) {
+      throw const FormatException('Payload de atualização de meta inválido.');
+    }
+
+    final currentValue = data['currentValue'];
+    if (data.containsKey('currentValue') && currentValue is! int) {
+      throw const FormatException('Progresso da meta inválido.');
+    }
+
+    final prepared = Map<String, dynamic>.from(data);
+    if (data.containsKey('lastReset')) {
+      final rawLastReset = data['lastReset'];
+      final parsedLastReset = rawLastReset is String
+          ? DateTime.tryParse(rawLastReset)
+          : null;
+      if (parsedLastReset == null) {
+        throw const FormatException('Data de reset da meta inválida.');
+      }
+      prepared['lastReset'] = Timestamp.fromDate(parsedLastReset);
+    }
+
+    return prepared;
   }
 
   Future<SyncOperationResult> _createTransactionServerSide({

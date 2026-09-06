@@ -1,7 +1,11 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:life_os/core/services/sync_manager_provider.dart';
 import 'package:life_os/features/goals/presentation/goals_provider.dart';
 import 'package:life_os/core/security/input_sanitizer.dart';
+import 'package:life_os/core/utils/app_logger.dart';
 import 'package:life_os/features/premium/domain/services/plan_limits.dart';
 import 'package:life_os/features/premium/domain/services/quota_service.dart';
 import 'package:life_os/features/premium/presentation/plan_limits_provider.dart';
@@ -29,8 +33,43 @@ class _GoalsScreenState extends ConsumerState<GoalsScreen> {
     super.initState();
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      ref.read(goalRepositoryProvider).syncGoalsFromFirebaseToLocal();
+      if (!mounted) return;
+      unawaited(_syncPendingThenHydrateGoals());
     });
+  }
+
+  Future<void> _syncPendingThenHydrateGoals() async {
+    try {
+      final queueDrained = await ref
+          .read(syncManagerProvider)
+          .processPendingItems();
+      if (!mounted || !queueDrained) return;
+      await ref.read(goalRepositoryProvider).syncGoalsFromFirebaseToLocal();
+    } catch (_) {
+      AppLogger.w('Não foi possível sincronizar metas neste momento.');
+    }
+  }
+
+  void _schedulePendingGoalSync() {
+    if (!mounted) return;
+    unawaited(
+      ref.read(syncManagerProvider).processPendingItems().catchError((
+        Object _,
+      ) {
+        AppLogger.w('Não foi possível sincronizar metas neste momento.');
+        return false;
+      }),
+    );
+  }
+
+  Future<void> _updateGoalProgress(String goalId, int value) async {
+    await ref.read(goalRepositoryProvider).updateGoalProgress(goalId, value);
+    _schedulePendingGoalSync();
+  }
+
+  Future<void> _resetGoalCycle(String goalId) async {
+    await ref.read(goalRepositoryProvider).resetGoalCycle(goalId);
+    _schedulePendingGoalSync();
   }
 
   // ===========================================================================
@@ -95,9 +134,12 @@ class _GoalsScreenState extends ConsumerState<GoalsScreen> {
                   borderRadius: BorderRadius.circular(12),
                 ),
               ),
-              onPressed: () {
-                ref.read(goalRepositoryProvider).removeGoal(goalId);
-                Navigator.pop(context);
+              onPressed: () async {
+                await ref.read(goalRepositoryProvider).removeGoal(goalId);
+                _schedulePendingGoalSync();
+                if (context.mounted) {
+                  Navigator.pop(context);
+                }
               },
               child: const Text(
                 'Excluir',
@@ -348,6 +390,8 @@ class _GoalsScreenState extends ConsumerState<GoalsScreen> {
                                   .read(goalRepositoryProvider)
                                   .createGoal(title, selectedTimeframe, target);
 
+                              _schedulePendingGoalSync();
+
                               if (context.mounted) {
                                 Navigator.pop(context);
                               }
@@ -500,10 +544,7 @@ class _GoalsScreenState extends ConsumerState<GoalsScreen> {
               }
 
               if (precisaResetar && goal.currentValue != 0) {
-                Future.microtask(
-                  () =>
-                      ref.read(goalRepositoryProvider).resetGoalCycle(goal.id),
-                );
+                Future.microtask(() => _resetGoalCycle(goal.id));
               }
             }
 
@@ -539,20 +580,16 @@ class _GoalsScreenState extends ConsumerState<GoalsScreen> {
                       progress: progress,
                       isCompleted: isCompleted,
                       onDecrease: goal.currentValue > 0
-                          ? () => ref
-                                .read(goalRepositoryProvider)
-                                .updateGoalProgress(
-                                  goal.id,
-                                  goal.currentValue - 1,
-                                )
+                          ? () => _updateGoalProgress(
+                              goal.id,
+                              goal.currentValue - 1,
+                            )
                           : null,
                       onIncrease: goal.currentValue < goal.targetValue
-                          ? () => ref
-                                .read(goalRepositoryProvider)
-                                .updateGoalProgress(
-                                  goal.id,
-                                  goal.currentValue + 1,
-                                )
+                          ? () => _updateGoalProgress(
+                              goal.id,
+                              goal.currentValue + 1,
+                            )
                           : null,
                       onDelete: () => _showDeleteConfirmationDialog(
                         context,

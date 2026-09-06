@@ -14,8 +14,10 @@ class _RecordingHealthDocumentReference extends Fake
     implements DocumentReference<Map<String, dynamic>> {
   final Map<String, dynamic> storedData = <String, dynamic>{};
   Map<String, dynamic>? lastData;
+  Map<Object, Object?>? lastUpdateData;
   SetOptions? lastOptions;
   FirebaseException? setError;
+  int updateCalls = 0;
 
   @override
   Future<void> set(Map<String, dynamic> data, [SetOptions? options]) async {
@@ -35,6 +37,12 @@ class _RecordingHealthDocumentReference extends Fake
         ..clear()
         ..addAll(data);
     }
+  }
+
+  @override
+  Future<void> update(Map<Object, Object?> data) async {
+    updateCalls += 1;
+    lastUpdateData = Map<Object, Object?>.from(data);
   }
 }
 
@@ -58,7 +66,7 @@ class _RecordingUserDocumentReference extends Fake
 
   @override
   CollectionReference<Map<String, dynamic>> collection(String path) {
-    if (path != 'health_info') {
+    if (path != 'health_info' && path != 'goals') {
       throw UnsupportedError('Unexpected collection: $path');
     }
 
@@ -225,6 +233,21 @@ SyncQueueTableData createHabitCompletionItem() {
   );
 }
 
+SyncQueueTableData createGoalUpdateItem(Map<String, dynamic> payload) {
+  return SyncQueueTableData(
+    id: 6,
+    ownerUid: 'user-123',
+    collection: 'goals',
+    docId: 'goal-1',
+    operationType: 'update',
+    payloadJson: jsonEncode(payload),
+    createdAt: DateTime.now().millisecondsSinceEpoch,
+    isSynced: false,
+    status: SyncQueuePersistenceStatus.pending,
+    attemptCount: 0,
+  );
+}
+
 void main() {
   late _RecordingHealthDocumentReference healthDoc;
   late FirestoreSyncRemoteDataSource remote;
@@ -273,6 +296,58 @@ void main() {
     expect(healthDoc.lastData?['mood'], 'Radiante');
     expect(healthDoc.lastData?['date'], isA<Timestamp>());
     expect(healthDoc.lastOptions?.merge, isTrue);
+  });
+
+  test('goals update preserva currentValue inteiro', () async {
+    final result = await remote.process(
+      'user-123',
+      createGoalUpdateItem({'currentValue': 3}),
+    );
+
+    expect(result.isSuccess, isTrue);
+    expect(healthDoc.lastUpdateData, {'currentValue': 3});
+    expect(healthDoc.lastUpdateData!['currentValue'], isA<int>());
+  });
+
+  test('goals update converte lastReset ISO para Timestamp', () async {
+    final result = await remote.process(
+      'user-123',
+      createGoalUpdateItem({
+        'currentValue': 0,
+        'lastReset': '2026-09-06T10:00:00.000Z',
+      }),
+    );
+
+    expect(result.isSuccess, isTrue);
+    expect(healthDoc.lastUpdateData!['currentValue'], 0);
+    expect(healthDoc.lastUpdateData!['lastReset'], isA<Timestamp>());
+    expect(
+      (healthDoc.lastUpdateData!['lastReset']! as Timestamp)
+          .millisecondsSinceEpoch,
+      DateTime.parse('2026-09-06T10:00:00.000Z').millisecondsSinceEpoch,
+    );
+  });
+
+  test('goals update rejeita lastReset inválido sem escrever', () async {
+    final result = await remote.process(
+      'user-123',
+      createGoalUpdateItem({'currentValue': 0, 'lastReset': 'inválido'}),
+    );
+
+    expect(result.isPermanentFailure, isTrue);
+    expect(result.code, 'INVALID_PAYLOAD');
+    expect(healthDoc.updateCalls, 0);
+  });
+
+  test('goals update rejeita campo extra sem escrever', () async {
+    final result = await remote.process(
+      'user-123',
+      createGoalUpdateItem({'currentValue': 3, 'unexpectedField': true}),
+    );
+
+    expect(result.isPermanentFailure, isTrue);
+    expect(result.code, 'INVALID_PAYLOAD');
+    expect(healthDoc.updateCalls, 0);
   });
 
   test('health_info create também usa set com merge:true', () async {
