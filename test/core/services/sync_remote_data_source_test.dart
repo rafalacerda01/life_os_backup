@@ -775,6 +775,37 @@ void main() {
     });
   });
 
+  test('Task update preserva false no payload HTTP', () async {
+    late Map<String, dynamic> payload;
+    final client = _RecordingHttpClient((request) async {
+      payload = jsonDecode(await request.finalize().bytesToString());
+      return _jsonResponse(200);
+    });
+    final dataSource = FirestoreSyncRemoteDataSource(
+      _RecordingFirestore(
+        _RecordingUsersCollectionReference(
+          _RecordingUserDocumentReference(
+            _RecordingHealthCollectionReference(healthDoc),
+          ),
+        ),
+      ),
+      _FakeFirebaseAuth(_FakeFirebaseUser('user-123')),
+      clientFactory: () => client,
+      appCheckTokenProvider: _validAppCheckToken,
+      idTokenProvider: (_, _) async => 'token',
+    );
+    final result = await dataSource.process(
+      'user-123',
+      createTaskUpdateItem(isCompleted: false),
+    );
+    expect(result.isSuccess, isTrue);
+    expect(payload, {
+      'operation': 'update_task',
+      'taskId': 'task-1',
+      'isCompleted': false,
+    });
+  });
+
   test('Habit update normal não solicita atividade competitiva', () async {
     late Map<String, dynamic> payload;
     final client = _RecordingHttpClient((request) async {

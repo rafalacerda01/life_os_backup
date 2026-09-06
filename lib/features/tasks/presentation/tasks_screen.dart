@@ -1,7 +1,11 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:life_os/core/theme/app_colors.dart';
+import 'package:life_os/core/services/sync_manager_provider.dart';
+import 'package:life_os/core/utils/app_logger.dart';
 import 'package:life_os/features/tasks/presentation/providers/tasks_provider.dart';
 import 'package:life_os/features/tasks/data/models/task_model.dart';
 import 'package:life_os/features/premium/domain/services/plan_limits.dart';
@@ -22,8 +26,32 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
     // 🛡️ CORREÇÃO: O sync agora roda APENAS UMA VEZ ao abrir a tela, evitando o loop infinito no terminal.
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
-      ref.read(tasksRepositoryProvider).syncTasksFromFirebaseToLocal();
+      unawaited(_syncPendingThenHydrateTasks());
     });
+  }
+
+  Future<void> _syncPendingThenHydrateTasks() async {
+    try {
+      final queueDrained = await ref
+          .read(syncManagerProvider)
+          .processPendingItems();
+      if (!mounted || !queueDrained) return;
+      await ref.read(tasksRepositoryProvider).syncTasksFromFirebaseToLocal();
+    } catch (_) {
+      AppLogger.w('Não foi possível sincronizar tarefas neste momento.');
+    }
+  }
+
+  void _schedulePendingTaskSync() {
+    if (!mounted) return;
+    unawaited(
+      ref.read(syncManagerProvider).processPendingItems().catchError((
+        Object _,
+      ) {
+        AppLogger.w('Não foi possível sincronizar tarefas neste momento.');
+        return false;
+      }),
+    );
   }
 
   // Modal para cadastrar tarefa com seletor de prioridade e design premium
@@ -213,6 +241,8 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
                             .read(tasksRepositoryProvider)
                             .addTask(title, selectedPriority);
 
+                        _schedulePendingTaskSync();
+
                         if (context.mounted) {
                           Navigator.pop(context);
                         }
@@ -325,6 +355,7 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
 
     if (confirmed == true && mounted) {
       await ref.read(tasksRepositoryProvider).deleteTask(taskId);
+      _schedulePendingTaskSync();
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -387,6 +418,7 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
                       task.id,
                       task.isCompleted,
                     );
+                    _schedulePendingTaskSync();
                   },
                   child: Padding(
                     padding: const EdgeInsets.fromLTRB(14, 12, 6, 12),

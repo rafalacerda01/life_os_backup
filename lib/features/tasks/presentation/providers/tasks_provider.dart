@@ -89,29 +89,61 @@ class TasksRepository {
       return;
     }
 
+    final expectedUid = user.uid;
+
     try {
+      final pullStartedAt = DateTime.now().millisecondsSinceEpoch;
       final snapshot = await _firestore
           .collection('users')
-          .doc(user.uid)
+          .doc(expectedUid)
           .collection('tasks')
           .get();
 
       for (final doc in snapshot.docs) {
+        if (_auth.currentUser?.uid != expectedUid) return;
         final data = doc.data();
 
-        await _db
-            .into(_db.taskTable)
-            .insertOnConflictUpdate(
-              TaskTableCompanion.insert(
-                id: doc.id,
-                title: data['title'] ?? '',
-                priority: data['priority'] ?? 'medium',
-                isCompleted: Value(data['isCompleted'] ?? false),
-                date: data['date'] != null
-                    ? (data['date'] as Timestamp).toDate()
-                    : DateTime.now(),
-              ),
-            );
+        final sessionValid = await _db.transaction(() async {
+          if (_auth.currentUser?.uid != expectedUid) return false;
+          // Serialize the local-authority check and remote write with mutations.
+          final locallyAuthoritative =
+              await (_db.select(_db.syncQueueTable)..where(
+                    (item) =>
+                        item.ownerUid.equals(expectedUid) &
+                        item.collection.equals('tasks') &
+                        item.docId.equals(doc.id) &
+                        (item.status.equals(
+                              SyncQueuePersistenceStatus.pending,
+                            ) |
+                            (item.status.equals(
+                                  SyncQueuePersistenceStatus.succeeded,
+                                ) &
+                                item.createdAt.isBiggerOrEqualValue(
+                                  pullStartedAt,
+                                ))),
+                  ))
+                  .get();
+          if (_auth.currentUser?.uid != expectedUid) return false;
+          if (locallyAuthoritative.isNotEmpty) {
+            return true;
+          }
+
+          await _db
+              .into(_db.taskTable)
+              .insertOnConflictUpdate(
+                TaskTableCompanion.insert(
+                  id: doc.id,
+                  title: data['title'] ?? '',
+                  priority: data['priority'] ?? 'medium',
+                  isCompleted: Value(data['isCompleted'] ?? false),
+                  date: data['date'] != null
+                      ? (data['date'] as Timestamp).toDate()
+                      : DateTime.now(),
+                ),
+              );
+          return true;
+        });
+        if (!sessionValid) return;
       }
     } catch (e, stack) {
       AppLogger.e('Erro ao sincronizar tarefas', e, stack);
