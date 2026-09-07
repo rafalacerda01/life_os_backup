@@ -1139,6 +1139,21 @@ void main() {
     },
   );
 
+  test('addMedication dispara processamento da SyncQueue', () async {
+    await repository.addMedication(
+      'Medicamento de teste',
+      DateTime(2026, 8, 25, 21),
+      7,
+    );
+
+    final pending = await db.getPendingSyncItems('user-123');
+
+    expect(pending, hasLength(1));
+    expect(pending.single.collection, 'medications');
+    expect(pending.single.operationType, 'create');
+    expect(syncManager.calls, 1);
+  });
+
   test('permissão normal negada preserva medicamento salvo', () async {
     notificationService.notificationPermissionGranted = false;
 
@@ -1149,6 +1164,8 @@ void main() {
     );
 
     expect(await db.select(db.medications).get(), hasLength(1));
+    expect(await db.getPendingSyncItems('user-123'), hasLength(1));
+    expect(syncManager.calls, 1);
     expect(notificationService.notificationPermissionRequests, 1);
     expect(notificationService.platformPermissionRequests, 1);
     expect(
@@ -1174,6 +1191,7 @@ void main() {
       );
 
       expect(await db.select(db.medications).get(), hasLength(1));
+      expect(syncManager.calls, 1);
       expect(notificationService.platformPermissionRequests, 0);
       expect(notificationService.exactPermissionRequests, 0);
       expect(notificationService.scheduleCalls, 0);
@@ -1193,6 +1211,7 @@ void main() {
     );
 
     expect(await db.select(db.medications).get(), hasLength(1));
+    expect(syncManager.calls, 1);
     expect(notificationService.platformPermissionRequests, 0);
     expect(notificationService.exactPermissionRequests, 0);
     expect(notificationService.scheduleCalls, 0);
@@ -1254,7 +1273,13 @@ void main() {
 
       await repository.deleteMedication(firestoreId, localId);
 
+      final pending = await db.getPendingSyncItems('user-123');
+
       expect(await db.select(db.medications).get(), isEmpty);
+      expect(pending, hasLength(1));
+      expect(pending.single.collection, 'medications');
+      expect(pending.single.operationType, 'delete');
+      expect(syncManager.calls, 1);
       expect(notificationService.cancelledIds, <int>[
         notificationIdForMedication(firestoreId),
       ]);

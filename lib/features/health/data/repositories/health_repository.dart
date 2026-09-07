@@ -497,6 +497,8 @@ class HealthRepository {
         }),
       );
 
+      _schedulePendingHealthSync();
+
       AppLogger.i('Medicamento salvo localmente com sucesso.');
 
       // =====================================================================
@@ -577,6 +579,8 @@ class HealthRepository {
           operationType: 'delete',
           payloadJson: jsonEncode({'medicationId': cleanDocId}),
         );
+
+        _schedulePendingHealthSync();
       } else {
         // Preserva o comportamento para registros
         // puramente locais / pendentes.

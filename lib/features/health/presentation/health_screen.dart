@@ -37,9 +37,12 @@ class HealthScreen extends ConsumerWidget {
 
   static const Color _background = Color(0xFF070B14);
   static const Color _surface = Color(0xFF11182E);
-  static const Color _green = Colors.greenAccent;
-  static const Color _blue = Colors.blueAccent;
-  static const Color _purple = Colors.purpleAccent;
+  static const Color _surfaceSecondary = Color(0xFF0D1326);
+  static const Color _primary = Color(0xFFB026FF);
+  static const Color _moodColor = Color(0xFFC58CFF);
+  static const Color _hydrationColor = Color(0xFF5EA8FF);
+  static const Color _medicationColor = Color(0xFF63D6B0);
+  static const Color _danger = Color(0xFFFF5C70);
 
   void _showSnackBar(
     BuildContext context,
@@ -53,7 +56,7 @@ class HealthScreen extends ConsumerWidget {
       ..showSnackBar(
         SnackBar(
           content: Text(message),
-          backgroundColor: error ? Colors.redAccent : _surface,
+          backgroundColor: error ? _danger : _surface,
           behavior: SnackBarBehavior.floating,
           margin: const EdgeInsets.all(16),
           shape: RoundedRectangleBorder(
@@ -118,7 +121,7 @@ class HealthScreen extends ConsumerWidget {
               ),
               title: const Row(
                 children: [
-                  Icon(Icons.medication_rounded, color: _green),
+                  Icon(Icons.medication_rounded, color: _medicationColor),
                   SizedBox(width: 10),
                   Expanded(
                     child: Text(
@@ -141,6 +144,7 @@ class HealthScreen extends ConsumerWidget {
                       controller: nameController,
                       label: 'Nome',
                       hint: 'Ex.: Vitamina D',
+                      focusedBorderColor: _primary,
                     ),
                     const SizedBox(height: 14),
                     _DialogField(
@@ -148,6 +152,7 @@ class HealthScreen extends ConsumerWidget {
                       label: 'Duração',
                       hint: 'Opcional',
                       keyboardType: TextInputType.number,
+                      focusedBorderColor: _primary,
                     ),
                     const SizedBox(height: 18),
                     const Text(
@@ -188,7 +193,7 @@ class HealthScreen extends ConsumerWidget {
                           children: [
                             const Icon(
                               Icons.calendar_today_rounded,
-                              color: _green,
+                              color: _primary,
                               size: 18,
                             ),
                             const SizedBox(width: 10),
@@ -260,7 +265,7 @@ class HealthScreen extends ConsumerWidget {
                           children: [
                             const Icon(
                               Icons.schedule_rounded,
-                              color: _green,
+                              color: _primary,
                               size: 18,
                             ),
                             const SizedBox(width: 10),
@@ -300,8 +305,8 @@ class HealthScreen extends ConsumerWidget {
                 ),
                 ElevatedButton(
                   style: ElevatedButton.styleFrom(
-                    backgroundColor: _green,
-                    foregroundColor: Colors.black,
+                    backgroundColor: _primary,
+                    foregroundColor: Colors.white,
                     elevation: 0,
                     padding: const EdgeInsets.symmetric(
                       horizontal: 20,
@@ -471,7 +476,7 @@ class HealthScreen extends ConsumerWidget {
           ),
           title: const Row(
             children: [
-              Icon(Icons.warning_amber_rounded, color: Colors.redAccent),
+              Icon(Icons.warning_amber_rounded, color: _danger),
               SizedBox(width: 10),
               Expanded(
                 child: Text(
@@ -501,7 +506,7 @@ class HealthScreen extends ConsumerWidget {
             ),
             ElevatedButton(
               style: ElevatedButton.styleFrom(
-                backgroundColor: Colors.redAccent,
+                backgroundColor: _danger,
                 foregroundColor: Colors.white,
                 elevation: 0,
                 shape: RoundedRectangleBorder(
@@ -576,7 +581,7 @@ class HealthScreen extends ConsumerWidget {
                 .toDouble();
 
             return RefreshIndicator(
-              color: _green,
+              color: _primary,
               backgroundColor: _surface,
               onRefresh: () async {
                 ref.invalidate(healthStreamProvider);
@@ -626,12 +631,12 @@ class HealthScreen extends ConsumerWidget {
 
                         _buildSectionLabel(
                           'MEDICAMENTOS',
-                          'Tratamentos ativos',
+                          'Sua rotina de medicamentos',
                           trailing: IconButton(
                             onPressed: () =>
                                 _showAddMedicationModal(context, ref),
                             icon: const Icon(Icons.add_rounded),
-                            color: _green,
+                            color: _primary,
                             tooltip: 'Adicionar medicamento',
                           ),
                         ),
@@ -667,17 +672,17 @@ class HealthScreen extends ConsumerWidget {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text(
-                'SAÚDE',
+                'Saúde',
                 style: TextStyle(
                   color: Colors.white,
-                  fontSize: 26,
+                  fontSize: 29,
                   fontWeight: FontWeight.w800,
-                  letterSpacing: 0.5,
+                  letterSpacing: -0.5,
                 ),
               ),
               SizedBox(height: 4),
               Text(
-                'Seu bem-estar hoje',
+                'Acompanhe seu bem-estar de hoje.',
                 style: TextStyle(color: Colors.white54, fontSize: 14),
               ),
             ],
@@ -696,7 +701,7 @@ class HealthScreen extends ConsumerWidget {
                 MaterialPageRoute(builder: (_) => const CheckInScreen()),
               );
             },
-            icon: const Icon(Icons.insights_rounded, color: _green),
+            icon: const Icon(Icons.insights_rounded, color: _primary),
             tooltip: 'Check-in de estado',
           ),
         ),
@@ -706,10 +711,10 @@ class HealthScreen extends ConsumerWidget {
 
   Widget _buildDailySnapshot(HealthModel health) {
     return Container(
-      padding: const EdgeInsets.all(20),
+      padding: const EdgeInsets.all(18),
       decoration: BoxDecoration(
         gradient: LinearGradient(
-          colors: [_surface, _surface.withOpacity(0.78)],
+          colors: [_surface, _surfaceSecondary],
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
         ),
@@ -721,10 +726,10 @@ class HealthScreen extends ConsumerWidget {
         children: [
           const Row(
             children: [
-              Icon(Icons.today_rounded, color: _green, size: 18),
+              Icon(Icons.today_rounded, color: _primary, size: 18),
               SizedBox(width: 8),
               Text(
-                'RESUMO DO DIA',
+                'HOJE',
                 style: TextStyle(
                   color: Colors.white54,
                   fontSize: 11,
@@ -740,7 +745,7 @@ class HealthScreen extends ConsumerWidget {
               Expanded(
                 child: _SnapshotItem(
                   icon: Icons.psychology_rounded,
-                  color: _purple,
+                  color: _moodColor,
                   label: 'Humor',
                   value: health.mood == '—' ? 'Não registrado' : health.mood,
                 ),
@@ -749,31 +754,9 @@ class HealthScreen extends ConsumerWidget {
               Expanded(
                 child: _SnapshotItem(
                   icon: Icons.water_drop_rounded,
-                  color: _blue,
+                  color: _hydrationColor,
                   label: 'Hidratação',
                   value: '${health.waterIntakeMl} ml',
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 12),
-          Row(
-            children: [
-              const Expanded(
-                child: _SnapshotItem(
-                  icon: Icons.medication_rounded,
-                  color: _green,
-                  label: 'Cuidados',
-                  value: 'Monitorados',
-                ),
-              ),
-              const SizedBox(width: 12),
-              const Expanded(
-                child: _SnapshotItem(
-                  icon: Icons.auto_awesome_rounded,
-                  color: _purple,
-                  label: 'Sugestão',
-                  value: 'Disponível',
                 ),
               ),
             ],
@@ -843,18 +826,20 @@ class HealthScreen extends ConsumerWidget {
                     padding: const EdgeInsets.symmetric(vertical: 8),
                     decoration: BoxDecoration(
                       color: isSelected
-                          ? _green.withOpacity(0.10)
+                          ? _moodColor.withValues(alpha: 0.12)
                           : Colors.transparent,
                       borderRadius: BorderRadius.circular(16),
                       border: Border.all(
-                        color: isSelected ? _green : Colors.transparent,
+                        color: isSelected
+                            ? _moodColor.withValues(alpha: 0.78)
+                            : Colors.transparent,
                         width: 1.4,
                       ),
                     ),
                     child: Column(
                       children: [
                         AnimatedScale(
-                          scale: isSelected ? 1.08 : 1.0,
+                          scale: isSelected ? 1.03 : 1.0,
                           duration: const Duration(milliseconds: 220),
                           child: Text(
                             mood.emoji,
@@ -868,8 +853,8 @@ class HealthScreen extends ConsumerWidget {
                           overflow: TextOverflow.ellipsis,
                           textAlign: TextAlign.center,
                           style: TextStyle(
-                            color: isSelected ? _green : Colors.white38,
-                            fontSize: 9.5,
+                            color: isSelected ? _moodColor : Colors.white38,
+                            fontSize: 10,
                             fontWeight: isSelected
                                 ? FontWeight.w700
                                 : FontWeight.w500,
@@ -887,7 +872,7 @@ class HealthScreen extends ConsumerWidget {
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
               decoration: BoxDecoration(
-                color: _green.withOpacity(0.06),
+                color: _moodColor.withValues(alpha: 0.08),
                 borderRadius: BorderRadius.circular(10),
               ),
               child: Row(
@@ -895,14 +880,14 @@ class HealthScreen extends ConsumerWidget {
                 children: [
                   const Icon(
                     Icons.check_circle_rounded,
-                    color: _green,
+                    color: _moodColor,
                     size: 15,
                   ),
                   const SizedBox(width: 6),
                   Text(
                     'Estado registrado: ${health.mood}',
                     style: const TextStyle(
-                      color: _green,
+                      color: _moodColor,
                       fontSize: 11,
                       fontWeight: FontWeight.w600,
                     ),
@@ -931,7 +916,7 @@ class HealthScreen extends ConsumerWidget {
       decoration: BoxDecoration(
         color: _surface,
         borderRadius: BorderRadius.circular(24),
-        border: Border.all(color: _blue.withOpacity(0.14)),
+        border: Border.all(color: _hydrationColor.withValues(alpha: 0.16)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -942,12 +927,12 @@ class HealthScreen extends ConsumerWidget {
                 width: 42,
                 height: 42,
                 decoration: BoxDecoration(
-                  color: _blue.withOpacity(0.10),
+                  color: _hydrationColor.withValues(alpha: 0.10),
                   shape: BoxShape.circle,
                 ),
                 child: const Icon(
                   Icons.water_drop_rounded,
-                  color: _blue,
+                  color: _hydrationColor,
                   size: 21,
                 ),
               ),
@@ -974,7 +959,7 @@ class HealthScreen extends ConsumerWidget {
               Text(
                 '$percentage%',
                 style: const TextStyle(
-                  color: _blue,
+                  color: _hydrationColor,
                   fontSize: 18,
                   fontWeight: FontWeight.w800,
                 ),
@@ -982,33 +967,47 @@ class HealthScreen extends ConsumerWidget {
             ],
           ),
           const SizedBox(height: 20),
-          ClipRRect(
-            borderRadius: BorderRadius.circular(10),
-            child: LinearProgressIndicator(
-              value: progress,
-              minHeight: 11,
-              backgroundColor: _background,
-              valueColor: const AlwaysStoppedAnimation<Color>(_blue),
-            ),
+          TweenAnimationBuilder<double>(
+            tween: Tween<double>(begin: 0, end: progress),
+            duration: const Duration(milliseconds: 550),
+            curve: Curves.easeOutCubic,
+            builder: (context, animatedProgress, child) {
+              return ClipRRect(
+                borderRadius: BorderRadius.circular(10),
+                child: LinearProgressIndicator(
+                  value: animatedProgress,
+                  minHeight: 11,
+                  backgroundColor: _background,
+                  valueColor: const AlwaysStoppedAnimation<Color>(
+                    _hydrationColor,
+                  ),
+                ),
+              );
+            },
           ),
           const SizedBox(height: 12),
           Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              Text(
-                '${health.waterIntakeMl} ml consumidos',
-                style: const TextStyle(
-                  color: Colors.white70,
-                  fontSize: 12,
-                  fontWeight: FontWeight.w600,
+              Expanded(
+                child: Text(
+                  '${health.waterIntakeMl} ml registrados',
+                  style: const TextStyle(
+                    color: Colors.white70,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                  ),
                 ),
               ),
-              Text(
-                remaining > 0 ? '$remaining ml restantes' : 'Meta atingida',
-                style: TextStyle(
-                  color: remaining > 0 ? Colors.white38 : _blue,
-                  fontSize: 11,
-                  fontWeight: FontWeight.w600,
+              const SizedBox(width: 12),
+              Expanded(
+                child: Text(
+                  remaining > 0 ? '$remaining ml restantes' : 'Meta atingida',
+                  textAlign: TextAlign.end,
+                  style: TextStyle(
+                    color: remaining > 0 ? Colors.white38 : _hydrationColor,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w600,
+                  ),
                 ),
               ),
             ],
@@ -1020,8 +1019,10 @@ class HealthScreen extends ConsumerWidget {
             child: OutlinedButton.icon(
               onPressed: () => _addWater(context, ref, health.waterIntakeMl),
               style: OutlinedButton.styleFrom(
-                side: BorderSide(color: _blue.withOpacity(0.45)),
-                foregroundColor: _blue,
+                side: BorderSide(
+                  color: _hydrationColor.withValues(alpha: 0.42),
+                ),
+                foregroundColor: _hydrationColor,
                 shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(14),
                 ),
@@ -1044,7 +1045,7 @@ class HealthScreen extends ConsumerWidget {
       decoration: BoxDecoration(
         color: _surface,
         borderRadius: BorderRadius.circular(24),
-        border: Border.all(color: Colors.white10),
+        border: Border.all(color: _medicationColor.withValues(alpha: 0.14)),
       ),
       child: ref
           .watch(medicationsStreamProvider)
@@ -1052,7 +1053,10 @@ class HealthScreen extends ConsumerWidget {
             loading: () => const Padding(
               padding: EdgeInsets.all(20),
               child: Center(
-                child: CircularProgressIndicator(color: _green, strokeWidth: 2),
+                child: CircularProgressIndicator(
+                  color: _medicationColor,
+                  strokeWidth: 2,
+                ),
               ),
             ),
             error: (error, stack) {
@@ -1062,7 +1066,7 @@ class HealthScreen extends ConsumerWidget {
                 padding: EdgeInsets.all(16),
                 child: Text(
                   'Não foi possível carregar os medicamentos.',
-                  style: TextStyle(color: Colors.redAccent, fontSize: 12),
+                  style: TextStyle(color: _danger, fontSize: 12),
                 ),
               );
             },
@@ -1110,7 +1114,8 @@ class CycleHealthSummaryCard extends StatelessWidget {
   final VoidCallback onTap;
 
   static const Color _surface = Color(0xFF11182E);
-  static const Color _primary = Color(0xFFB026FF);
+  static const Color _surfaceSecondary = Color(0xFF17121F);
+  static const Color _rose = Color(0xFFE58AAE);
 
   @override
   Widget build(BuildContext context) {
@@ -1145,9 +1150,20 @@ class CycleHealthSummaryCard extends StatelessWidget {
           child: Ink(
             padding: const EdgeInsets.all(18),
             decoration: BoxDecoration(
-              color: _surface,
+              gradient: const LinearGradient(
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+                colors: [_surface, _surfaceSecondary],
+              ),
               borderRadius: BorderRadius.circular(22),
-              border: Border.all(color: _primary.withOpacity(0.18)),
+              border: Border.all(color: _rose.withValues(alpha: 0.17)),
+              boxShadow: [
+                BoxShadow(
+                  color: _rose.withValues(alpha: 0.05),
+                  blurRadius: 18,
+                  offset: const Offset(0, 8),
+                ),
+              ],
             ),
             child: Row(
               children: [
@@ -1155,16 +1171,12 @@ class CycleHealthSummaryCard extends StatelessWidget {
                   width: 46,
                   height: 46,
                   decoration: BoxDecoration(
-                    gradient: const LinearGradient(
-                      begin: Alignment.topLeft,
-                      end: Alignment.bottomRight,
-                      colors: [Color(0xFF5D0EFF), _primary],
-                    ),
+                    color: _rose.withValues(alpha: 0.11),
                     borderRadius: BorderRadius.circular(15),
                   ),
                   child: const Icon(
                     Icons.calendar_month_rounded,
-                    color: Colors.white,
+                    color: _rose,
                     size: 22,
                   ),
                 ),
@@ -2412,7 +2424,8 @@ class _MedicationCard extends StatelessWidget {
   });
 
   static const Color _background = Color(0xFF070B14);
-  static const Color _green = Colors.greenAccent;
+  static const Color _medicationColor = Color(0xFF63D6B0);
+  static const Color _danger = Color(0xFFFF5C70);
 
   String _getStatus() {
     final endDate = medication.endDate;
@@ -2467,13 +2480,13 @@ class _MedicationCard extends StatelessWidget {
             height: 42,
             decoration: BoxDecoration(
               color: isExpired
-                  ? Colors.redAccent.withOpacity(0.08)
-                  : _green.withOpacity(0.08),
+                  ? _danger.withValues(alpha: 0.08)
+                  : _medicationColor.withValues(alpha: 0.08),
               shape: BoxShape.circle,
             ),
             child: Icon(
               Icons.medication_rounded,
-              color: isExpired ? Colors.redAccent : _green,
+              color: isExpired ? _danger : _medicationColor,
               size: 20,
             ),
           ),
@@ -2496,19 +2509,40 @@ class _MedicationCard extends StatelessWidget {
                 Text(
                   status,
                   style: TextStyle(
-                    color: isExpired ? Colors.redAccent : Colors.white54,
+                    color: isExpired ? _danger : Colors.white54,
                     fontSize: 11,
                     fontWeight: FontWeight.w500,
                   ),
+                ),
+                const SizedBox(height: 4),
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Icon(
+                      Icons.schedule_rounded,
+                      color: _medicationColor,
+                      size: 13,
+                    ),
+                    const SizedBox(width: 5),
+                    Flexible(
+                      child: Text(
+                        DateFormat('HH:mm').format(medication.startDate),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: Colors.white54,
+                          fontSize: 11,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
                 if (endDate != null) ...[
                   const SizedBox(height: 2),
                   Text(
                     'Até ${DateFormat('dd/MM/yyyy').format(endDate)}',
-                    style: const TextStyle(
-                      color: Colors.white30,
-                      fontSize: 9.5,
-                    ),
+                    style: const TextStyle(color: Colors.white30, fontSize: 10),
                   ),
                 ],
               ],
@@ -2517,7 +2551,7 @@ class _MedicationCard extends StatelessWidget {
           IconButton(
             icon: const Icon(
               Icons.delete_outline_rounded,
-              color: Colors.redAccent,
+              color: _danger,
               size: 20,
             ),
             onPressed: onDelete,
@@ -2560,7 +2594,7 @@ class _SnapshotItem extends StatelessWidget {
               children: [
                 Text(
                   label,
-                  style: const TextStyle(color: Colors.white38, fontSize: 9),
+                  style: const TextStyle(color: Colors.white38, fontSize: 10),
                 ),
                 const SizedBox(height: 3),
                 Text(
@@ -2587,12 +2621,14 @@ class _DialogField extends StatelessWidget {
   final String label;
   final String hint;
   final TextInputType? keyboardType;
+  final Color focusedBorderColor;
 
   const _DialogField({
     required this.controller,
     required this.label,
     required this.hint,
     this.keyboardType,
+    this.focusedBorderColor = Colors.greenAccent,
   });
 
   @override
@@ -2628,7 +2664,7 @@ class _DialogField extends StatelessWidget {
             ),
             focusedBorder: OutlineInputBorder(
               borderRadius: BorderRadius.circular(13),
-              borderSide: const BorderSide(color: Colors.greenAccent),
+              borderSide: BorderSide(color: focusedBorderColor),
             ),
           ),
         ),
@@ -2646,7 +2682,7 @@ class _EmptyMedicationState extends StatelessWidget {
       padding: EdgeInsets.symmetric(horizontal: 12, vertical: 22),
       child: Column(
         children: [
-          Icon(Icons.medication_outlined, color: Colors.white24, size: 34),
+          Icon(Icons.medication_outlined, color: Color(0xFF63D6B0), size: 34),
           SizedBox(height: 10),
           Text(
             'Nenhum medicamento cadastrado',
@@ -2675,7 +2711,7 @@ class _HealthLoading extends StatelessWidget {
   Widget build(BuildContext context) {
     return const Center(
       child: CircularProgressIndicator(
-        color: Colors.greenAccent,
+        color: Color(0xFFB026FF),
         strokeWidth: 2.5,
       ),
     );
@@ -2699,12 +2735,12 @@ class _HealthError extends StatelessWidget {
               width: 64,
               height: 64,
               decoration: BoxDecoration(
-                color: Colors.redAccent.withOpacity(0.08),
+                color: const Color(0xFFFF5C70).withValues(alpha: 0.08),
                 shape: BoxShape.circle,
               ),
               child: const Icon(
                 Icons.cloud_off_rounded,
-                color: Colors.redAccent,
+                color: Color(0xFFFF5C70),
                 size: 30,
               ),
             ),
@@ -2728,8 +2764,8 @@ class _HealthError extends StatelessWidget {
             OutlinedButton.icon(
               onPressed: onRetry,
               style: OutlinedButton.styleFrom(
-                foregroundColor: Colors.greenAccent,
-                side: const BorderSide(color: Colors.greenAccent),
+                foregroundColor: const Color(0xFFB026FF),
+                side: const BorderSide(color: Color(0xFFB026FF)),
                 shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(13),
                 ),
