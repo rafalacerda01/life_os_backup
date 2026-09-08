@@ -11,10 +11,11 @@ import 'package:life_os/features/premium/domain/services/plan_limits.dart';
 import 'package:life_os/features/premium/presentation/plan_limits_provider.dart';
 
 class _RecordingFinanceRepository extends Fake implements FinanceRepository {
-  final Completer<void> completer;
+  final Completer<void>? completer;
   int addCalls = 0;
+  int syncCalls = 0;
 
-  _RecordingFinanceRepository(this.completer);
+  _RecordingFinanceRepository([this.completer]);
 
   @override
   Future<void> addTransaction({
@@ -24,7 +25,12 @@ class _RecordingFinanceRepository extends Fake implements FinanceRepository {
     required String category,
   }) {
     addCalls += 1;
-    return completer.future;
+    return completer?.future ?? Future.value();
+  }
+
+  @override
+  Future<void> syncTransactionsFromFirestore() async {
+    syncCalls += 1;
   }
 }
 
@@ -80,6 +86,7 @@ void main() {
   testWidgets('erro do stream usa mensagem genérica sem detalhe interno', (
     tester,
   ) async {
+    final repository = _RecordingFinanceRepository();
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
@@ -88,6 +95,7 @@ void main() {
               StateError('detalhe privado do banco'),
             ),
           ),
+          financeRepositoryProvider.overrideWithValue(repository),
         ],
         child: const MaterialApp(home: FinanceScreen()),
       ),
@@ -103,6 +111,7 @@ void main() {
   });
 
   testWidgets('card mostra a categoria real da transação', (tester) async {
+    final repository = _RecordingFinanceRepository();
     final transaction = Transaction(
       id: 1,
       firestoreId: 'remote-1',
@@ -120,6 +129,7 @@ void main() {
           financeStreamProvider.overrideWith(
             (ref) => Stream.value([transaction]),
           ),
+          financeRepositoryProvider.overrideWithValue(repository),
         ],
         child: const MaterialApp(home: FinanceScreen()),
       ),
@@ -133,11 +143,13 @@ void main() {
   testWidgets('mudar filtros de tipo e categoria reseta paginação', (
     tester,
   ) async {
+    final repository = _RecordingFinanceRepository();
     final container = ProviderContainer(
       overrides: [
         financeStreamProvider.overrideWith(
           (ref) => Stream.value(const <Transaction>[]),
         ),
+        financeRepositoryProvider.overrideWithValue(repository),
       ],
     );
     addTearDown(container.dispose);
@@ -179,12 +191,14 @@ void main() {
   testWidgets('filtros aparecem e criação inicia sem categoria selecionada', (
     tester,
   ) async {
+    final repository = _RecordingFinanceRepository();
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
           financeStreamProvider.overrideWith(
             (ref) => Stream.value(const <Transaction>[]),
           ),
+          financeRepositoryProvider.overrideWithValue(repository),
         ],
         child: const MaterialApp(home: FinanceScreen()),
       ),
@@ -223,5 +237,39 @@ void main() {
     expect(find.text('Categoria personalizada'), findsOneWidget);
     expect(find.byKey(const ValueKey('custom-category-field')), findsOneWidget);
     expect(find.text('Ex.: Pet'), findsOneWidget);
+  });
+
+  testWidgets('montagem hidrata uma vez e rebuild normal não repete', (
+    tester,
+  ) async {
+    final repository = _RecordingFinanceRepository();
+    late StateSetter rebuildHost;
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          financeStreamProvider.overrideWith(
+            (ref) => Stream.value(const <Transaction>[]),
+          ),
+          financeRepositoryProvider.overrideWithValue(repository),
+        ],
+        child: MaterialApp(
+          home: StatefulBuilder(
+            builder: (context, setState) {
+              rebuildHost = setState;
+              return const FinanceScreen();
+            },
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(repository.syncCalls, 1);
+
+    rebuildHost(() {});
+    await tester.pump();
+
+    expect(repository.syncCalls, 1);
   });
 }

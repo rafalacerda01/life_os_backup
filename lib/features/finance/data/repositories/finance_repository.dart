@@ -11,6 +11,26 @@ import 'package:life_os/core/utils/app_logger.dart'; // 🚀 Nosso Logger injeta
 import 'package:life_os/features/finance/data/models/transaction_model.dart';
 import 'package:uuid/uuid.dart';
 
+class _FinanceSessionChanged implements Exception {
+  const _FinanceSessionChanged();
+}
+
+class _RemoteFinanceTransaction {
+  final String title;
+  final double amount;
+  final String type;
+  final String category;
+  final DateTime date;
+
+  const _RemoteFinanceTransaction({
+    required this.title,
+    required this.amount,
+    required this.type,
+    required this.category,
+    required this.date,
+  });
+}
+
 class FinanceRepository {
   static const double _maximumAmount = 1000000000;
 
@@ -133,62 +153,190 @@ class FinanceRepository {
     }
   }
 
-  // 🚀 NOVO: Puxa os dados da nuvem (Firebase) e reconstrói o banco local (SQLite)
   Future<void> syncTransactionsFromFirestore() async {
-    final userId = _auth.currentUser?.uid;
+    final expectedUid = _auth.currentUser?.uid.trim();
 
-    if (userId == null) {
-      AppLogger.i('Sincronização abortada: usuário não autenticado.');
+    if (expectedUid == null || expectedUid.isEmpty) return;
+
+    try {
+      final pullStartedAt = DateTime.now().millisecondsSinceEpoch;
+      final queueDrained = await _syncManager.processPendingItems();
+      if (!queueDrained || !_isCurrentUser(expectedUid)) return;
+
+      final snapshot = await _firestore
+          .collection('users')
+          .doc(expectedUid)
+          .collection('transactions')
+          .get(const GetOptions(source: Source.server));
+      _requireCurrentUser(expectedUid);
+
+      final remoteDocIds = snapshot.docs.map((doc) => doc.id).toSet();
+
+      await _db.transaction(() async {
+        _requireCurrentUser(expectedUid);
+
+        final authoritativeItems =
+            await (_db.select(_db.syncQueueTable)..where(
+                  (item) =>
+                      item.ownerUid.equals(expectedUid) &
+                      item.collection.equals('transactions') &
+                      (item.status.equals(
+                            local_db.SyncQueuePersistenceStatus.pending,
+                          ) |
+                          (item.status.equals(
+                                local_db.SyncQueuePersistenceStatus.succeeded,
+                              ) &
+                              item.createdAt.isBiggerOrEqualValue(
+                                pullStartedAt,
+                              ))),
+                ))
+                .get();
+        final protectedDocIds = authoritativeItems
+            .map((item) => item.docId)
+            .toSet();
+
+        _requireCurrentUser(expectedUid);
+
+        for (final doc in snapshot.docs) {
+          _requireCurrentUser(expectedUid);
+          if (protectedDocIds.contains(doc.id)) continue;
+
+          final remote = _parseRemoteTransaction(doc.data());
+          if (remote == null) {
+            AppLogger.w('SYNC Finanças: documento remoto inválido ignorado.');
+            continue;
+          }
+
+          final existing =
+              await (_db.select(_db.transactions)
+                    ..where((table) => table.firestoreId.equals(doc.id)))
+                  .getSingleOrNull();
+
+          _requireCurrentUser(expectedUid);
+
+          if (existing == null) {
+            await _db
+                .into(_db.transactions)
+                .insert(
+                  local_db.TransactionsCompanion.insert(
+                    firestoreId: Value(doc.id),
+                    title: remote.title,
+                    amount: remote.amount,
+                    type: remote.type,
+                    category: remote.category,
+                    date: remote.date,
+                  ),
+                );
+          } else {
+            await (_db.update(
+              _db.transactions,
+            )..where((table) => table.id.equals(existing.id))).write(
+              local_db.TransactionsCompanion(
+                firestoreId: Value(doc.id),
+                title: Value(remote.title),
+                amount: Value(remote.amount),
+                type: Value(remote.type),
+                category: Value(remote.category),
+                date: Value(remote.date),
+                isDeleted: const Value(false),
+              ),
+            );
+          }
+        }
+
+        _requireCurrentUser(expectedUid);
+        final localTransactions = await _db.select(_db.transactions).get();
+
+        for (final transaction in localTransactions) {
+          _requireCurrentUser(expectedUid);
+          final firestoreId = transaction.firestoreId;
+          if (!_isRemoteFirestoreId(firestoreId) ||
+              remoteDocIds.contains(firestoreId) ||
+              protectedDocIds.contains(firestoreId)) {
+            continue;
+          }
+
+          await (_db.delete(
+            _db.transactions,
+          )..where((table) => table.id.equals(transaction.id))).go();
+        }
+
+        _requireCurrentUser(expectedUid);
+      });
+    } on _FinanceSessionChanged {
       return;
+    } catch (_) {
+      AppLogger.w('Não foi possível sincronizar as transações neste momento.');
+    }
+  }
+
+  bool _isCurrentUser(String expectedUid) =>
+      _auth.currentUser?.uid == expectedUid;
+
+  void _requireCurrentUser(String expectedUid) {
+    if (!_isCurrentUser(expectedUid)) {
+      throw const _FinanceSessionChanged();
+    }
+  }
+
+  bool _isRemoteFirestoreId(String? firestoreId) {
+    final value = firestoreId?.trim();
+    return value != null &&
+        value.isNotEmpty &&
+        value != 'pending' &&
+        value != 'synced';
+  }
+
+  _RemoteFinanceTransaction? _parseRemoteTransaction(
+    Map<String, dynamic> data,
+  ) {
+    final rawTitle = data['title'];
+    final rawAmount = data['amount'];
+    final rawType = data['type'];
+    final rawCategory = data['category'];
+    final rawDate = data['date'];
+
+    if (rawTitle is! String ||
+        rawAmount is! num ||
+        rawType is! String ||
+        rawCategory is! String) {
+      return null;
+    }
+
+    final title = InputSanitizer.sanitize(rawTitle);
+    final category = InputSanitizer.sanitize(rawCategory);
+    final amount = rawAmount.toDouble();
+    final date = switch (rawDate) {
+      Timestamp value => value.toDate(),
+      DateTime value => value,
+      String value => DateTime.tryParse(value),
+      _ => null,
+    };
+
+    if (date == null ||
+        rawType != TransactionType.income.name &&
+            rawType != TransactionType.expense.name) {
+      return null;
     }
 
     try {
-      AppLogger.i('Iniciando Sync-Down das transações do Firebase...');
-
-      // 1. Busca todos os documentos do usuário na nuvem
-      final snapshot = await _firestore
-          .collection('users')
-          .doc(userId)
-          .collection('transactions')
-          .get();
-
-      // 2. Percorre cada transação da nuvem
-      for (var doc in snapshot.docs) {
-        final data = doc.data();
-        final firestoreId = doc.id;
-
-        // 3. Verifica se a transação já existe no SQLite local
-        final existingTransaction =
-            await (_db.select(_db.transactions)
-                  ..where((table) => table.firestoreId.equals(firestoreId)))
-                .getSingleOrNull();
-
-        // 4. Se não existir localmente, nós a inserimos no Drift!
-        if (existingTransaction == null) {
-          await _db
-              .into(_db.transactions)
-              .insert(
-                local_db.TransactionsCompanion.insert(
-                  firestoreId: Value(firestoreId),
-                  title: data['title'] as String? ?? 'Sem título',
-                  amount: (data['amount'] as num?)?.toDouble() ?? 0.0,
-                  type: data['type'] as String? ?? TransactionType.expense.name,
-                  category: data['category'] as String? ?? 'Outros',
-                  date:
-                      (data['date'] as Timestamp?)?.toDate() ?? DateTime.now(),
-                ),
-              );
-        }
-      }
-
-      AppLogger.i('Sync-Down concluído! SQLite reconstruído com sucesso.');
-    } catch (error, stackTrace) {
-      AppLogger.e(
-        'Erro ao sincronizar transações do Firebase',
-        error,
-        stackTrace,
+      _validateTransaction(
+        title: title,
+        amount: amount,
+        type: rawType,
+        category: category,
       );
+    } on ArgumentError {
+      return null;
     }
+
+    return _RemoteFinanceTransaction(
+      title: title,
+      amount: amount,
+      type: rawType,
+      category: category,
+      date: date,
+    );
   }
 
   Future<void> _deleteLocalTransaction(int localId) async {
