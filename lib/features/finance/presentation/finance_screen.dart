@@ -4,6 +4,7 @@ import 'package:intl/intl.dart';
 import 'package:life_os/features/finance/presentation/providers/finance_provider.dart';
 import 'package:life_os/core/security/input_sanitizer.dart';
 import 'package:life_os/core/database/app_database.dart';
+import 'package:life_os/core/utils/app_logger.dart';
 import 'package:life_os/features/premium/domain/services/plan_limits.dart';
 import 'package:life_os/features/premium/domain/services/quota_service.dart';
 import 'package:life_os/features/premium/presentation/plan_limits_provider.dart';
@@ -15,15 +16,59 @@ class FinanceScreen extends ConsumerStatefulWidget {
   ConsumerState<FinanceScreen> createState() => _FinanceScreenState();
 }
 
+class _FinanceTransactionInputControllers extends StatefulWidget {
+  final Widget Function(
+    TextEditingController titleController,
+    TextEditingController amountController,
+    TextEditingController customCategoryController,
+  )
+  builder;
+
+  const _FinanceTransactionInputControllers({required this.builder});
+
+  @override
+  State<_FinanceTransactionInputControllers> createState() =>
+      _FinanceTransactionInputControllersState();
+}
+
+class _FinanceTransactionInputControllersState
+    extends State<_FinanceTransactionInputControllers> {
+  final _titleController = TextEditingController();
+  final _amountController = TextEditingController();
+  final _customCategoryController = TextEditingController();
+
+  @override
+  void dispose() {
+    _titleController.dispose();
+    _amountController.dispose();
+    _customCategoryController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return widget.builder(
+      _titleController,
+      _amountController,
+      _customCategoryController,
+    );
+  }
+}
+
 class _FinanceScreenState extends ConsumerState<FinanceScreen> {
   final ScrollController _scrollController = ScrollController();
 
   bool _isLoadingMore = false;
+  FinanceTypeFilter _typeFilter = FinanceTypeFilter.all;
+  String? _categoryFilter;
 
   static const Color _backgroundColor = Color(0xFF070B14);
   static const Color _cardColor = Color(0xFF11182E);
   static const Color _inputColor = Color(0xFF0B1020);
   static const Color _primaryColor = Color(0xFFB45CFF);
+
+  FinanceFilters get _filters =>
+      FinanceFilters(type: _typeFilter, category: _categoryFilter);
 
   @override
   void initState() {
@@ -56,6 +101,26 @@ class _FinanceScreenState extends ConsumerState<FinanceScreen> {
         });
       }
     }
+  }
+
+  void _setTypeFilter(FinanceTypeFilter filter) {
+    if (_typeFilter == filter) return;
+
+    ref.read(transactionLimitProvider.notifier).reset();
+    setState(() => _typeFilter = filter);
+  }
+
+  void _setCategoryFilter(String? category) {
+    if (_categoryFilter == category) return;
+
+    ref.read(transactionLimitProvider.notifier).reset();
+    setState(() => _categoryFilter = category);
+  }
+
+  void _showMessage(BuildContext context, String message) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(message), behavior: SnackBarBehavior.floating),
+    );
   }
 
   Future<void> _showDeleteConfirmation(
@@ -99,7 +164,19 @@ class _FinanceScreenState extends ConsumerState<FinanceScreen> {
     );
 
     if (confirmed == true) {
-      await ref.read(financeRepositoryProvider).deleteTransaction(tx.id);
+      try {
+        await ref.read(financeRepositoryProvider).deleteTransaction(tx.id);
+      } catch (error, stackTrace) {
+        AppLogger.e('Falha ao excluir transação.', error, stackTrace);
+
+        if (context.mounted) {
+          _showMessage(
+            context,
+            'Não foi possível excluir a transação. Tente novamente.',
+          );
+        }
+        return;
+      }
 
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -117,245 +194,387 @@ class _FinanceScreenState extends ConsumerState<FinanceScreen> {
   }
 
   void _showAddTransactionDialog(BuildContext context, WidgetRef ref) {
-    final titleController = TextEditingController();
-    final amountController = TextEditingController();
-
     String selectedType = 'expense';
-    String selectedCategory = 'Lazer';
+    String? selectedCategory;
+    bool isSubmitting = false;
 
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (context) => StatefulBuilder(
-        builder: (context, setModalState) {
-          return Container(
-            decoration: const BoxDecoration(
-              color: _cardColor,
-              borderRadius: BorderRadius.vertical(top: Radius.circular(30)),
-            ),
-            child: Padding(
-              padding: EdgeInsets.only(
-                bottom: MediaQuery.of(context).viewInsets.bottom,
-                left: 20,
-                right: 20,
-                top: 12,
+      builder: (context) => _FinanceTransactionInputControllers(
+        builder: (titleController, amountController, customCategoryController) => StatefulBuilder(
+          builder: (context, setModalState) {
+            return Container(
+              decoration: const BoxDecoration(
+                color: _cardColor,
+                borderRadius: BorderRadius.vertical(top: Radius.circular(30)),
               ),
-              child: SingleChildScrollView(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Center(
-                      child: Container(
-                        width: 42,
-                        height: 4,
-                        decoration: BoxDecoration(
-                          color: Colors.white24,
-                          borderRadius: BorderRadius.circular(10),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(height: 24),
-                    const Text(
-                      'Nova transação',
-                      style: TextStyle(
-                        color: Colors.white,
-                        fontSize: 23,
-                        fontWeight: FontWeight.w800,
-                      ),
-                    ),
-                    const SizedBox(height: 5),
-                    const Text(
-                      'Registre uma nova movimentação financeira.',
-                      style: TextStyle(color: Colors.white54, fontSize: 13),
-                    ),
-                    const SizedBox(height: 24),
-                    const Text(
-                      'Título',
-                      style: TextStyle(
-                        color: Colors.white70,
-                        fontSize: 13,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-                    TextField(
-                      controller: titleController,
-                      style: const TextStyle(color: Colors.white, fontSize: 15),
-                      decoration: _inputDec('Ex: Mercado', Icons.edit_outlined),
-                    ),
-                    const SizedBox(height: 18),
-                    const Text(
-                      'Valor',
-                      style: TextStyle(
-                        color: Colors.white70,
-                        fontSize: 13,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-                    TextField(
-                      controller: amountController,
-                      keyboardType: const TextInputType.numberWithOptions(
-                        decimal: true,
-                      ),
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 17,
-                        fontWeight: FontWeight.w600,
-                      ),
-                      decoration: _inputDec(
-                        'R\$ 0,00',
-                        Icons.attach_money_rounded,
-                      ),
-                    ),
-                    const SizedBox(height: 20),
-                    const Text(
-                      'Tipo de transação',
-                      style: TextStyle(
-                        color: Colors.white70,
-                        fontSize: 13,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                    const SizedBox(height: 10),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: _TransactionTypeButton(
-                            label: 'Entrada',
-                            icon: Icons.arrow_upward_rounded,
-                            color: Colors.greenAccent,
-                            selected: selectedType == 'income',
-                            onTap: () {
-                              setModalState(() => selectedType = 'income');
-                            },
+              child: Padding(
+                padding: EdgeInsets.only(
+                  bottom: MediaQuery.of(context).viewInsets.bottom,
+                  left: 20,
+                  right: 20,
+                  top: 12,
+                ),
+                child: SingleChildScrollView(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Center(
+                        child: Container(
+                          width: 42,
+                          height: 4,
+                          decoration: BoxDecoration(
+                            color: Colors.white24,
+                            borderRadius: BorderRadius.circular(10),
                           ),
                         ),
-                        const SizedBox(width: 12),
-                        Expanded(
-                          child: _TransactionTypeButton(
-                            label: 'Saída',
-                            icon: Icons.arrow_downward_rounded,
-                            color: Colors.redAccent,
-                            selected: selectedType == 'expense',
-                            onTap: () {
-                              setModalState(() => selectedType = 'expense');
+                      ),
+                      const SizedBox(height: 24),
+                      const Text(
+                        'Nova transação',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 23,
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                      const SizedBox(height: 5),
+                      const Text(
+                        'Registre uma nova movimentação financeira.',
+                        style: TextStyle(color: Colors.white54, fontSize: 13),
+                      ),
+                      const SizedBox(height: 24),
+                      const Text(
+                        'Título',
+                        style: TextStyle(
+                          color: Colors.white70,
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      TextField(
+                        controller: titleController,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 15,
+                        ),
+                        decoration: _inputDec(
+                          'Ex: Mercado',
+                          Icons.edit_outlined,
+                        ),
+                      ),
+                      const SizedBox(height: 18),
+                      const Text(
+                        'Valor',
+                        style: TextStyle(
+                          color: Colors.white70,
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      TextField(
+                        controller: amountController,
+                        keyboardType: const TextInputType.numberWithOptions(
+                          decimal: true,
+                        ),
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 17,
+                          fontWeight: FontWeight.w600,
+                        ),
+                        decoration: _inputDec(
+                          'R\$ 0,00',
+                          Icons.attach_money_rounded,
+                        ),
+                      ),
+                      const SizedBox(height: 20),
+                      const Text(
+                        'Tipo de transação',
+                        style: TextStyle(
+                          color: Colors.white70,
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      const SizedBox(height: 10),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: _TransactionTypeButton(
+                              label: 'Entrada',
+                              icon: Icons.arrow_upward_rounded,
+                              color: Colors.greenAccent,
+                              selected: selectedType == 'income',
+                              onTap: () {
+                                setModalState(() => selectedType = 'income');
+                              },
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: _TransactionTypeButton(
+                              label: 'Saída',
+                              icon: Icons.arrow_downward_rounded,
+                              color: Colors.redAccent,
+                              selected: selectedType == 'expense',
+                              onTap: () {
+                                setModalState(() => selectedType = 'expense');
+                              },
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 20),
+                      const Text(
+                        'Categoria',
+                        style: TextStyle(
+                          color: Colors.white70,
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      const SizedBox(height: 10),
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        children: financeOfficialCategories.map((category) {
+                          return ChoiceChip(
+                            key: ValueKey('create-category-$category'),
+                            label: Text(category),
+                            selected: selectedCategory == category,
+                            onSelected: (_) {
+                              setModalState(() => selectedCategory = category);
                             },
+                            selectedColor: _primaryColor.withValues(
+                              alpha: 0.20,
+                            ),
+                            backgroundColor: _inputColor,
+                            side: BorderSide(
+                              color: selectedCategory == category
+                                  ? _primaryColor.withValues(alpha: 0.65)
+                                  : Colors.white10,
+                            ),
+                            labelStyle: TextStyle(
+                              color: selectedCategory == category
+                                  ? Colors.white
+                                  : Colors.white60,
+                              fontSize: 12,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          );
+                        }).toList(),
+                      ),
+                      if (selectedCategory == 'Outros') ...[
+                        const SizedBox(height: 18),
+                        const Text(
+                          'Categoria personalizada',
+                          style: TextStyle(
+                            color: Colors.white70,
+                            fontSize: 13,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        TextField(
+                          key: const ValueKey('custom-category-field'),
+                          controller: customCategoryController,
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 15,
+                          ),
+                          decoration: _inputDec(
+                            'Ex.: Pet',
+                            Icons.category_outlined,
                           ),
                         ),
                       ],
-                    ),
-                    const SizedBox(height: 26),
-                    SizedBox(
-                      width: double.infinity,
-                      height: 54,
-                      child: ElevatedButton(
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: _primaryColor,
-                          foregroundColor: Colors.white,
-                          elevation: 0,
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(16),
+                      const SizedBox(height: 26),
+                      SizedBox(
+                        width: double.infinity,
+                        height: 54,
+                        child: ElevatedButton(
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: _primaryColor,
+                            foregroundColor: Colors.white,
+                            elevation: 0,
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(16),
+                            ),
                           ),
-                        ),
-                        onPressed: () async {
-                          final title = InputSanitizer.sanitize(
-                            titleController.text,
-                          );
+                          onPressed: isSubmitting
+                              ? null
+                              : () async {
+                                  if (isSubmitting) return;
 
-                          if (title.isEmpty || amountController.text.isEmpty) {
-                            return;
-                          }
+                                  final title = InputSanitizer.sanitize(
+                                    titleController.text,
+                                  );
 
-                          final amount =
-                              double.tryParse(
-                                amountController.text.replaceAll(',', '.'),
-                              ) ??
-                              0.0;
+                                  if (title.isEmpty) {
+                                    _showMessage(context, 'Informe o título.');
+                                    return;
+                                  }
 
-                          final transactionsAsync = ref.read(
-                            financeStreamProvider,
-                          );
+                                  if (title.length > 200) {
+                                    _showMessage(
+                                      context,
+                                      'O título deve ter no máximo 200 caracteres.',
+                                    );
+                                    return;
+                                  }
 
-                          if (!transactionsAsync.hasValue) {
-                            if (context.mounted) {
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                const SnackBar(
-                                  content: Text(
-                                    'Não foi possível verificar suas transações agora. Tente novamente.',
-                                  ),
-                                ),
-                              );
-                            }
-                            return;
-                          }
+                                  final selected = selectedCategory;
+                                  if (selected == null) {
+                                    _showMessage(
+                                      context,
+                                      'Selecione uma categoria.',
+                                    );
+                                    return;
+                                  }
 
-                          final transactions = transactionsAsync.requireValue;
+                                  final category = selected == 'Outros'
+                                      ? InputSanitizer.sanitize(
+                                          customCategoryController.text,
+                                        )
+                                      : selected;
 
-                          final limits = ref.read(planLimitsProvider);
-                          const quotaService = QuotaService();
+                                  if (category.isEmpty) {
+                                    _showMessage(
+                                      context,
+                                      'Informe a categoria personalizada.',
+                                    );
+                                    return;
+                                  }
 
-                          final transactionLimit = limits.limitFor(
-                            QuotaResource.transactions,
-                          );
+                                  if (category.length > 100) {
+                                    _showMessage(
+                                      context,
+                                      'A categoria deve ter no máximo 100 caracteres.',
+                                    );
+                                    return;
+                                  }
 
-                          final canCreate = quotaService.canCreate(
-                            limit: transactionLimit,
-                            currentCount: transactions.length,
-                          );
+                                  final normalizedAmount = amountController.text
+                                      .trim()
+                                      .replaceAll(',', '.');
+                                  final amount = double.tryParse(
+                                    normalizedAmount,
+                                  );
 
-                          if (!canCreate) {
-                            final message = switch (transactionLimit.mode) {
-                              QuotaMode.disabled =>
-                                'Este recurso não está disponível no seu plano.',
-                              QuotaMode.limited =>
-                                'Você atingiu o limite de ${transactionLimit.maximum} transações do seu plano.',
-                              QuotaMode.unlimited =>
-                                'Você não possui limite de transações.',
-                              QuotaMode.notConfigured =>
-                                'O limite deste recurso ainda não está configurado.',
-                            };
+                                  if (amount == null ||
+                                      !amount.isFinite ||
+                                      amount <= 0 ||
+                                      amount > 1000000000) {
+                                    _showMessage(
+                                      context,
+                                      'Informe um valor válido.',
+                                    );
+                                    return;
+                                  }
 
-                            if (context.mounted) {
-                              ScaffoldMessenger.of(
-                                context,
-                              ).showSnackBar(SnackBar(content: Text(message)));
-                            }
+                                  final transactionsAsync = ref.read(
+                                    financeStreamProvider,
+                                  );
 
-                            return;
-                          }
+                                  if (!transactionsAsync.hasValue) {
+                                    if (context.mounted) {
+                                      _showMessage(
+                                        context,
+                                        'Não foi possível verificar suas transações agora. Tente novamente.',
+                                      );
+                                    }
+                                    return;
+                                  }
 
-                          await ref
-                              .read(financeRepositoryProvider)
-                              .addTransaction(
-                                title: title,
-                                amount: amount,
-                                type: selectedType,
-                                category: selectedCategory,
-                              );
+                                  final transactions =
+                                      transactionsAsync.requireValue;
 
-                          if (context.mounted) {
-                            Navigator.pop(context);
-                          }
-                        },
-                        child: const Text(
-                          'Confirmar lançamento',
-                          style: TextStyle(
-                            fontSize: 15,
-                            fontWeight: FontWeight.w700,
+                                  final limits = ref.read(planLimitsProvider);
+                                  const quotaService = QuotaService();
+
+                                  final transactionLimit = limits.limitFor(
+                                    QuotaResource.transactions,
+                                  );
+
+                                  final canCreate = quotaService.canCreate(
+                                    limit: transactionLimit,
+                                    currentCount: transactions.length,
+                                  );
+
+                                  if (!canCreate) {
+                                    final message = switch (transactionLimit
+                                        .mode) {
+                                      QuotaMode.disabled =>
+                                        'Este recurso não está disponível no seu plano.',
+                                      QuotaMode.limited =>
+                                        'Você atingiu o limite de ${transactionLimit.maximum} transações do seu plano.',
+                                      QuotaMode.unlimited =>
+                                        'Você não possui limite de transações.',
+                                      QuotaMode.notConfigured =>
+                                        'O limite deste recurso ainda não está configurado.',
+                                    };
+
+                                    if (context.mounted) {
+                                      _showMessage(context, message);
+                                    }
+
+                                    return;
+                                  }
+
+                                  setModalState(() => isSubmitting = true);
+
+                                  try {
+                                    await ref
+                                        .read(financeRepositoryProvider)
+                                        .addTransaction(
+                                          title: title,
+                                          amount: amount,
+                                          type: selectedType,
+                                          category: category,
+                                        );
+                                  } catch (error, stackTrace) {
+                                    AppLogger.e(
+                                      'Falha ao criar transação.',
+                                      error,
+                                      stackTrace,
+                                    );
+
+                                    if (context.mounted) {
+                                      setModalState(() => isSubmitting = false);
+                                      _showMessage(
+                                        context,
+                                        'Não foi possível salvar a transação. Tente novamente.',
+                                      );
+                                    }
+                                    return;
+                                  }
+
+                                  if (context.mounted) {
+                                    Navigator.pop(context);
+                                  }
+                                },
+                          child: const Text(
+                            'Confirmar lançamento',
+                            style: TextStyle(
+                              fontSize: 15,
+                              fontWeight: FontWeight.w700,
+                            ),
                           ),
                         ),
                       ),
-                    ),
-                    const SizedBox(height: 24),
-                  ],
+                      const SizedBox(height: 24),
+                    ],
+                  ),
                 ),
               ),
-            ),
-          );
-        },
+            );
+          },
+        ),
       ),
     );
   }
@@ -381,7 +600,10 @@ class _FinanceScreenState extends ConsumerState<FinanceScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final transactionsAsync = ref.watch(financeVisibleTransactionsProvider);
+    final allTransactionsAsync = ref.watch(financeStreamProvider);
+    final visibleTransactionsAsync = ref.watch(
+      financeVisibleTransactionsProvider(_filters),
+    );
 
     return Scaffold(
       backgroundColor: _backgroundColor,
@@ -392,55 +614,219 @@ class _FinanceScreenState extends ConsumerState<FinanceScreen> {
         child: const Icon(Icons.add_rounded, color: Colors.white, size: 28),
       ),
       body: SafeArea(
-        child: transactionsAsync.when(
+        child: allTransactionsAsync.when(
           loading: () => const Center(
             child: CircularProgressIndicator(color: _primaryColor),
           ),
-          error: (err, _) => Center(
-            child: Padding(
-              padding: const EdgeInsets.all(24),
-              child: Text(
-                'Erro: $err',
-                style: const TextStyle(color: Colors.white70),
-                textAlign: TextAlign.center,
+          error: (error, stackTrace) {
+            AppLogger.e('Falha ao carregar transações.', error, stackTrace);
+            return const _FinanceLoadError();
+          },
+          data: (allTransactions) {
+            final summary = calculateFinanceSummary(allTransactions);
+
+            return visibleTransactionsAsync.when(
+              loading: () => const Center(
+                child: CircularProgressIndicator(color: _primaryColor),
               ),
-            ),
-          ),
-          data: (transactions) {
-            double income = 0;
-            double expense = 0;
-
-            for (final t in transactions) {
-              if (t.type == 'income') {
-                income += t.amount;
-              } else {
-                expense += t.amount;
-              }
-            }
-
-            final balance = income - expense;
-
-            return CustomScrollView(
-              key: const PageStorageKey<String>('finance_scroll_position'),
-              controller: _scrollController,
-              cacheExtent: 500,
-              physics: const BouncingScrollPhysics(),
-              slivers: [
-                _FinanceSummary(
-                  income: income,
-                  expense: expense,
-                  balance: balance,
-                ),
-                _TransactionList(
-                  transactions: transactions,
-                  onDelete: (tx) => _showDeleteConfirmation(context, ref, tx),
-                ),
-                if (_isLoadingMore)
-                  const SliverToBoxAdapter(child: SizedBox(height: 8)),
-                const SliverToBoxAdapter(child: SizedBox(height: 90)),
-              ],
+              error: (error, stackTrace) {
+                AppLogger.e('Falha ao filtrar transações.', error, stackTrace);
+                return const _FinanceLoadError();
+              },
+              data: (visibleTransactions) {
+                return CustomScrollView(
+                  key: const PageStorageKey<String>('finance_scroll_position'),
+                  controller: _scrollController,
+                  cacheExtent: 500,
+                  physics: const BouncingScrollPhysics(),
+                  slivers: [
+                    _FinanceSummary(
+                      income: summary.income,
+                      expense: summary.expense,
+                      balance: summary.balance,
+                    ),
+                    _TransactionFilters(
+                      type: _typeFilter,
+                      category: _categoryFilter,
+                      onTypeChanged: _setTypeFilter,
+                      onCategoryChanged: _setCategoryFilter,
+                    ),
+                    _TransactionList(
+                      transactions: visibleTransactions,
+                      hasAnyTransactions: allTransactions.isNotEmpty,
+                      onDelete: (tx) =>
+                          _showDeleteConfirmation(context, ref, tx),
+                    ),
+                    if (_isLoadingMore)
+                      const SliverToBoxAdapter(child: SizedBox(height: 8)),
+                    const SliverToBoxAdapter(child: SizedBox(height: 90)),
+                  ],
+                );
+              },
             );
           },
+        ),
+      ),
+    );
+  }
+}
+
+// ============================================================================
+// FILTROS
+// ============================================================================
+
+class _TransactionFilters extends StatelessWidget {
+  static const _allCategoriesValue = '__all_categories__';
+
+  final FinanceTypeFilter type;
+  final String? category;
+  final ValueChanged<FinanceTypeFilter> onTypeChanged;
+  final ValueChanged<String?> onCategoryChanged;
+
+  const _TransactionFilters({
+    required this.type,
+    required this.category,
+    required this.onTypeChanged,
+    required this.onCategoryChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return SliverPadding(
+      padding: const EdgeInsets.fromLTRB(20, 0, 20, 16),
+      sliver: SliverToBoxAdapter(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Wrap(
+              spacing: 8,
+              children: [
+                _FinanceFilterChip(
+                  key: const ValueKey('finance-type-filter-all'),
+                  label: 'Todas',
+                  selected: type == FinanceTypeFilter.all,
+                  onSelected: () => onTypeChanged(FinanceTypeFilter.all),
+                ),
+                _FinanceFilterChip(
+                  key: const ValueKey('finance-type-filter-income'),
+                  label: 'Entradas',
+                  selected: type == FinanceTypeFilter.income,
+                  onSelected: () => onTypeChanged(FinanceTypeFilter.income),
+                ),
+                _FinanceFilterChip(
+                  key: const ValueKey('finance-type-filter-expense'),
+                  label: 'Saídas',
+                  selected: type == FinanceTypeFilter.expense,
+                  onSelected: () => onTypeChanged(FinanceTypeFilter.expense),
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 14),
+              decoration: BoxDecoration(
+                color: const Color(0xFF0B1020),
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(color: Colors.white10),
+              ),
+              child: DropdownButtonHideUnderline(
+                child: DropdownButton<String>(
+                  key: const ValueKey('finance-category-filter'),
+                  value: category ?? _allCategoriesValue,
+                  isExpanded: true,
+                  dropdownColor: const Color(0xFF11182E),
+                  iconEnabledColor: Colors.white54,
+                  style: const TextStyle(color: Colors.white70, fontSize: 13),
+                  items: [
+                    const DropdownMenuItem(
+                      value: _allCategoriesValue,
+                      child: Text('Todas as categorias'),
+                    ),
+                    ...financeOfficialCategories.map(
+                      (item) => DropdownMenuItem(
+                        value: item,
+                        child: Text(
+                          item,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                    ),
+                  ],
+                  onChanged: (value) {
+                    if (value == null) return;
+                    onCategoryChanged(
+                      value == _allCategoriesValue ? null : value,
+                    );
+                  },
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _FinanceFilterChip extends StatelessWidget {
+  final String label;
+  final bool selected;
+  final VoidCallback onSelected;
+
+  const _FinanceFilterChip({
+    super.key,
+    required this.label,
+    required this.selected,
+    required this.onSelected,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return ChoiceChip(
+      label: Text(label),
+      selected: selected,
+      onSelected: (_) => onSelected(),
+      showCheckmark: false,
+      selectedColor: const Color(0xFFB45CFF).withValues(alpha: 0.20),
+      backgroundColor: const Color(0xFF0B1020),
+      side: BorderSide(
+        color: selected
+            ? const Color(0xFFB45CFF).withValues(alpha: 0.65)
+            : Colors.white10,
+      ),
+      labelStyle: TextStyle(
+        color: selected ? Colors.white : Colors.white60,
+        fontSize: 12,
+        fontWeight: FontWeight.w600,
+      ),
+    );
+  }
+}
+
+class _FinanceLoadError extends StatelessWidget {
+  const _FinanceLoadError();
+
+  @override
+  Widget build(BuildContext context) {
+    return const Center(
+      child: Padding(
+        padding: EdgeInsets.all(24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              'Não foi possível carregar suas transações.',
+              style: TextStyle(color: Colors.white70),
+              textAlign: TextAlign.center,
+            ),
+            SizedBox(height: 6),
+            Text(
+              'Tente novamente em instantes.',
+              style: TextStyle(color: Colors.white38, fontSize: 12),
+              textAlign: TextAlign.center,
+            ),
+          ],
         ),
       ),
     );
@@ -655,9 +1041,14 @@ class _SummaryMetric extends StatelessWidget {
 
 class _TransactionList extends StatelessWidget {
   final List transactions;
+  final bool hasAnyTransactions;
   final Function(Transaction) onDelete;
 
-  const _TransactionList({required this.transactions, required this.onDelete});
+  const _TransactionList({
+    required this.transactions,
+    required this.hasAnyTransactions,
+    required this.onDelete,
+  });
 
   String _formatCurrency(double value) {
     return NumberFormat.currency(locale: 'pt_BR', symbol: 'R\$').format(value);
@@ -686,9 +1077,11 @@ class _TransactionList extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     if (transactions.isEmpty) {
-      return const SliverPadding(
+      return SliverPadding(
         padding: EdgeInsets.symmetric(horizontal: 20),
-        sliver: SliverToBoxAdapter(child: _EmptyTransactions()),
+        sliver: SliverToBoxAdapter(
+          child: _EmptyTransactions(filtered: hasAnyTransactions),
+        ),
       );
     }
 
@@ -744,7 +1137,9 @@ class _TransactionList extends StatelessWidget {
                 subtitle: Padding(
                   padding: const EdgeInsets.only(top: 4),
                   child: Text(
-                    _formatDate(tx.date),
+                    '${tx.category} · ${_formatDate(tx.date)}',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
                     style: const TextStyle(color: Colors.white38, fontSize: 11),
                   ),
                 ),
@@ -786,7 +1181,9 @@ class _TransactionList extends StatelessWidget {
 // ============================================================================
 
 class _EmptyTransactions extends StatelessWidget {
-  const _EmptyTransactions();
+  final bool filtered;
+
+  const _EmptyTransactions({this.filtered = false});
 
   @override
   Widget build(BuildContext context) {
@@ -815,19 +1212,27 @@ class _EmptyTransactions extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 14),
-          const Text(
-            'Nenhuma transação ainda',
-            style: TextStyle(
+          Text(
+            filtered
+                ? 'Nenhuma movimentação encontrada.'
+                : 'Nenhuma transação ainda',
+            style: const TextStyle(
               color: Colors.white,
               fontSize: 15,
               fontWeight: FontWeight.w700,
             ),
           ),
           const SizedBox(height: 5),
-          const Text(
-            'Suas movimentações financeiras aparecerão aqui.',
+          Text(
+            filtered
+                ? 'Ajuste os filtros para ver outras transações.'
+                : 'Suas movimentações financeiras aparecerão aqui.',
             textAlign: TextAlign.center,
-            style: TextStyle(color: Colors.white38, fontSize: 12, height: 1.4),
+            style: const TextStyle(
+              color: Colors.white38,
+              fontSize: 12,
+              height: 1.4,
+            ),
           ),
         ],
       ),

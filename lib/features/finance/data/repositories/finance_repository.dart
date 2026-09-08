@@ -1,20 +1,25 @@
 import 'dart:async';
-import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:firebase_auth/firebase_auth.dart';
-import 'package:life_os/core/database/app_database.dart' as local_db;
-import 'package:life_os/core/utils/app_logger.dart'; // 🚀 Nosso Logger injetado
-import 'package:life_os/core/security/input_sanitizer.dart';
-import 'package:life_os/features/finance/data/models/transaction_model.dart';
-import 'package:uuid/uuid.dart';
-import 'package:drift/drift.dart';
 import 'dart:convert';
 
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:drift/drift.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:life_os/core/database/app_database.dart' as local_db;
+import 'package:life_os/core/security/input_sanitizer.dart';
+import 'package:life_os/core/services/sync_manager.dart';
+import 'package:life_os/core/utils/app_logger.dart'; // 🚀 Nosso Logger injetado
+import 'package:life_os/features/finance/data/models/transaction_model.dart';
+import 'package:uuid/uuid.dart';
+
 class FinanceRepository {
+  static const double _maximumAmount = 1000000000;
+
   final local_db.AppDatabase _db;
   final FirebaseFirestore _firestore;
   final FirebaseAuth _auth;
+  final SyncManager _syncManager;
 
-  FinanceRepository(this._db, this._firestore, this._auth);
+  FinanceRepository(this._db, this._firestore, this._auth, this._syncManager);
 
   Future<void> addTransaction({
     required String title,
@@ -22,6 +27,17 @@ class FinanceRepository {
     required String type,
     required String category,
   }) async {
+    final cleanTitle = InputSanitizer.sanitize(title);
+    final cleanCategory = InputSanitizer.sanitize(category);
+    final cleanType = InputSanitizer.sanitize(type);
+
+    _validateTransaction(
+      title: cleanTitle,
+      amount: amount,
+      type: cleanType,
+      category: cleanCategory,
+    );
+
     final user = _auth.currentUser;
 
     if (user == null) {
@@ -29,14 +45,7 @@ class FinanceRepository {
     }
 
     try {
-      final cleanTitle = InputSanitizer.sanitize(title);
-      final cleanCategory = InputSanitizer.sanitize(category);
-      final cleanType = InputSanitizer.sanitize(type);
-
-      final transactionType = TransactionType.values.firstWhere(
-        (item) => item.name.toLowerCase() == cleanType.toLowerCase().trim(),
-        orElse: () => TransactionType.expense,
-      );
+      final transactionType = TransactionType.values.byName(cleanType);
 
       final firestoreId = const Uuid().v4();
 
@@ -69,6 +78,8 @@ class FinanceRepository {
           'date': createdAt.toIso8601String(),
         }),
       );
+
+      _schedulePendingFinanceSync();
     } catch (error, stackTrace) {
       AppLogger.e('Erro ao inserir transação localmente', error, stackTrace);
       rethrow;
@@ -114,6 +125,8 @@ class FinanceRepository {
         operationType: 'delete',
         payloadJson: jsonEncode({'transactionId': firestoreId}),
       );
+
+      _schedulePendingFinanceSync();
     } catch (error, stackTrace) {
       AppLogger.e('Erro ao excluir transação', error, stackTrace);
       rethrow;
@@ -182,5 +195,42 @@ class FinanceRepository {
     await (_db.delete(
       _db.transactions,
     )..where((table) => table.id.equals(localId))).go();
+  }
+
+  void _validateTransaction({
+    required String title,
+    required double amount,
+    required String type,
+    required String category,
+  }) {
+    if (title.isEmpty || title.length > 200) {
+      throw ArgumentError.value(title, 'title', 'Título inválido.');
+    }
+
+    if (category.isEmpty || category.length > 100) {
+      throw ArgumentError.value(category, 'category', 'Categoria inválida.');
+    }
+
+    if (!amount.isFinite || amount <= 0 || amount > _maximumAmount) {
+      throw ArgumentError.value(amount, 'amount', 'Valor inválido.');
+    }
+
+    if (type != TransactionType.income.name &&
+        type != TransactionType.expense.name) {
+      throw ArgumentError.value(type, 'type', 'Tipo inválido.');
+    }
+  }
+
+  void _schedulePendingFinanceSync() {
+    unawaited(
+      _syncManager.processPendingItems().catchError((error, stackTrace) {
+        AppLogger.e(
+          'Erro ao processar fila de sincronização financeira.',
+          error,
+          stackTrace,
+        );
+        return false;
+      }),
+    );
   }
 }
