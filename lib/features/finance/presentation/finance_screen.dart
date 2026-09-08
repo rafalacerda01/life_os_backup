@@ -66,8 +66,11 @@ class _FinanceScreenState extends ConsumerState<FinanceScreen> {
 
   static const Color _backgroundColor = Color(0xFF070B14);
   static const Color _cardColor = Color(0xFF11182E);
-  static const Color _inputColor = Color(0xFF0B1020);
-  static const Color _primaryColor = Color(0xFFB45CFF);
+  static const Color _inputColor = Color(0xFF11182E);
+  static const Color _primaryColor = Color(0xFFB026FF);
+  static const Color _gradientStart = Color(0xFF5D0EFF);
+  static const Color _incomeColor = Color(0xFF69E6B6);
+  static const Color _expenseColor = Color(0xFFFF6B8A);
 
   FinanceFilters get _filters =>
       FinanceFilters(type: _typeFilter, category: _categoryFilter);
@@ -215,7 +218,7 @@ class _FinanceScreenState extends ConsumerState<FinanceScreen> {
           builder: (context, setModalState) {
             return Container(
               decoration: const BoxDecoration(
-                color: _cardColor,
+                color: Color(0xFF0A0F1E),
                 borderRadius: BorderRadius.vertical(top: Radius.circular(30)),
               ),
               child: Padding(
@@ -241,20 +244,37 @@ class _FinanceScreenState extends ConsumerState<FinanceScreen> {
                         ),
                       ),
                       const SizedBox(height: 24),
-                      const Text(
-                        'Nova transação',
-                        style: TextStyle(
-                          color: Colors.white,
-                          fontSize: 23,
-                          fontWeight: FontWeight.w800,
-                        ),
+                      const Row(
+                        children: [
+                          _SheetHeaderIcon(),
+                          SizedBox(width: 13),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  'Nova transação',
+                                  style: TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 23,
+                                    fontWeight: FontWeight.w800,
+                                    letterSpacing: -0.4,
+                                  ),
+                                ),
+                                SizedBox(height: 3),
+                                Text(
+                                  'Registre uma nova movimentação.',
+                                  style: TextStyle(
+                                    color: Colors.white54,
+                                    fontSize: 13,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
                       ),
-                      const SizedBox(height: 5),
-                      const Text(
-                        'Registre uma nova movimentação financeira.',
-                        style: TextStyle(color: Colors.white54, fontSize: 13),
-                      ),
-                      const SizedBox(height: 24),
+                      const SizedBox(height: 28),
                       const Text(
                         'Título',
                         style: TextStyle(
@@ -316,7 +336,7 @@ class _FinanceScreenState extends ConsumerState<FinanceScreen> {
                             child: _TransactionTypeButton(
                               label: 'Entrada',
                               icon: Icons.arrow_upward_rounded,
-                              color: Colors.greenAccent,
+                              color: _incomeColor,
                               selected: selectedType == 'income',
                               onTap: () {
                                 setModalState(() => selectedType = 'income');
@@ -328,7 +348,7 @@ class _FinanceScreenState extends ConsumerState<FinanceScreen> {
                             child: _TransactionTypeButton(
                               label: 'Saída',
                               icon: Icons.arrow_downward_rounded,
-                              color: Colors.redAccent,
+                              color: _expenseColor,
                               selected: selectedType == 'expense',
                               onTap: () {
                                 setModalState(() => selectedType = 'expense');
@@ -359,7 +379,7 @@ class _FinanceScreenState extends ConsumerState<FinanceScreen> {
                               setModalState(() => selectedCategory = category);
                             },
                             selectedColor: _primaryColor.withValues(
-                              alpha: 0.20,
+                              alpha: 0.18,
                             ),
                             backgroundColor: _inputColor,
                             side: BorderSide(
@@ -404,173 +424,222 @@ class _FinanceScreenState extends ConsumerState<FinanceScreen> {
                       const SizedBox(height: 26),
                       SizedBox(
                         width: double.infinity,
-                        height: 54,
-                        child: ElevatedButton(
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: _primaryColor,
-                            foregroundColor: Colors.white,
-                            elevation: 0,
-                            shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(16),
+                        height: 56,
+                        child: DecoratedBox(
+                          decoration: BoxDecoration(
+                            gradient: LinearGradient(
+                              colors: isSubmitting
+                                  ? [
+                                      _gradientStart.withValues(alpha: 0.45),
+                                      _primaryColor.withValues(alpha: 0.45),
+                                    ]
+                                  : const [_gradientStart, _primaryColor],
                             ),
+                            borderRadius: BorderRadius.circular(18),
+                            boxShadow: isSubmitting
+                                ? null
+                                : [
+                                    BoxShadow(
+                                      color: _primaryColor.withValues(
+                                        alpha: 0.24,
+                                      ),
+                                      blurRadius: 20,
+                                      offset: const Offset(0, 8),
+                                    ),
+                                  ],
                           ),
-                          onPressed: isSubmitting
-                              ? null
-                              : () async {
-                                  if (isSubmitting) return;
+                          child: ElevatedButton(
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: Colors.transparent,
+                              disabledBackgroundColor: Colors.transparent,
+                              shadowColor: Colors.transparent,
+                              foregroundColor: Colors.white,
+                              disabledForegroundColor: Colors.white70,
+                              elevation: 0,
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(18),
+                              ),
+                            ),
+                            onPressed: isSubmitting
+                                ? null
+                                : () async {
+                                    if (isSubmitting) return;
 
-                                  final title = InputSanitizer.sanitize(
-                                    titleController.text,
-                                  );
-
-                                  if (title.isEmpty) {
-                                    _showMessage(context, 'Informe o título.');
-                                    return;
-                                  }
-
-                                  if (title.length > 200) {
-                                    _showMessage(
-                                      context,
-                                      'O título deve ter no máximo 200 caracteres.',
+                                    final title = InputSanitizer.sanitize(
+                                      titleController.text,
                                     );
-                                    return;
-                                  }
 
-                                  final selected = selectedCategory;
-                                  if (selected == null) {
-                                    _showMessage(
-                                      context,
-                                      'Selecione uma categoria.',
-                                    );
-                                    return;
-                                  }
-
-                                  final category = selected == 'Outros'
-                                      ? InputSanitizer.sanitize(
-                                          customCategoryController.text,
-                                        )
-                                      : selected;
-
-                                  if (category.isEmpty) {
-                                    _showMessage(
-                                      context,
-                                      'Informe a categoria personalizada.',
-                                    );
-                                    return;
-                                  }
-
-                                  if (category.length > 100) {
-                                    _showMessage(
-                                      context,
-                                      'A categoria deve ter no máximo 100 caracteres.',
-                                    );
-                                    return;
-                                  }
-
-                                  final normalizedAmount = amountController.text
-                                      .trim()
-                                      .replaceAll(',', '.');
-                                  final amount = double.tryParse(
-                                    normalizedAmount,
-                                  );
-
-                                  if (amount == null ||
-                                      !amount.isFinite ||
-                                      amount <= 0 ||
-                                      amount > 1000000000) {
-                                    _showMessage(
-                                      context,
-                                      'Informe um valor válido.',
-                                    );
-                                    return;
-                                  }
-
-                                  final transactionsAsync = ref.read(
-                                    financeStreamProvider,
-                                  );
-
-                                  if (!transactionsAsync.hasValue) {
-                                    if (context.mounted) {
+                                    if (title.isEmpty) {
                                       _showMessage(
                                         context,
-                                        'Não foi possível verificar suas transações agora. Tente novamente.',
+                                        'Informe o título.',
                                       );
-                                    }
-                                    return;
-                                  }
-
-                                  final transactions =
-                                      transactionsAsync.requireValue;
-
-                                  final limits = ref.read(planLimitsProvider);
-                                  const quotaService = QuotaService();
-
-                                  final transactionLimit = limits.limitFor(
-                                    QuotaResource.transactions,
-                                  );
-
-                                  final canCreate = quotaService.canCreate(
-                                    limit: transactionLimit,
-                                    currentCount: transactions.length,
-                                  );
-
-                                  if (!canCreate) {
-                                    final message = switch (transactionLimit
-                                        .mode) {
-                                      QuotaMode.disabled =>
-                                        'Este recurso não está disponível no seu plano.',
-                                      QuotaMode.limited =>
-                                        'Você atingiu o limite de ${transactionLimit.maximum} transações do seu plano.',
-                                      QuotaMode.unlimited =>
-                                        'Você não possui limite de transações.',
-                                      QuotaMode.notConfigured =>
-                                        'O limite deste recurso ainda não está configurado.',
-                                    };
-
-                                    if (context.mounted) {
-                                      _showMessage(context, message);
+                                      return;
                                     }
 
-                                    return;
-                                  }
+                                    if (title.length > 200) {
+                                      _showMessage(
+                                        context,
+                                        'O título deve ter no máximo 200 caracteres.',
+                                      );
+                                      return;
+                                    }
 
-                                  setModalState(() => isSubmitting = true);
+                                    final selected = selectedCategory;
+                                    if (selected == null) {
+                                      _showMessage(
+                                        context,
+                                        'Selecione uma categoria.',
+                                      );
+                                      return;
+                                    }
 
-                                  try {
-                                    await ref
-                                        .read(financeRepositoryProvider)
-                                        .addTransaction(
-                                          title: title,
-                                          amount: amount,
-                                          type: selectedType,
-                                          category: category,
+                                    final category = selected == 'Outros'
+                                        ? InputSanitizer.sanitize(
+                                            customCategoryController.text,
+                                          )
+                                        : selected;
+
+                                    if (category.isEmpty) {
+                                      _showMessage(
+                                        context,
+                                        'Informe a categoria personalizada.',
+                                      );
+                                      return;
+                                    }
+
+                                    if (category.length > 100) {
+                                      _showMessage(
+                                        context,
+                                        'A categoria deve ter no máximo 100 caracteres.',
+                                      );
+                                      return;
+                                    }
+
+                                    final normalizedAmount = amountController
+                                        .text
+                                        .trim()
+                                        .replaceAll(',', '.');
+                                    final amount = double.tryParse(
+                                      normalizedAmount,
+                                    );
+
+                                    if (amount == null ||
+                                        !amount.isFinite ||
+                                        amount <= 0 ||
+                                        amount > 1000000000) {
+                                      _showMessage(
+                                        context,
+                                        'Informe um valor válido.',
+                                      );
+                                      return;
+                                    }
+
+                                    final transactionsAsync = ref.read(
+                                      financeStreamProvider,
+                                    );
+
+                                    if (!transactionsAsync.hasValue) {
+                                      if (context.mounted) {
+                                        _showMessage(
+                                          context,
+                                          'Não foi possível verificar suas transações agora. Tente novamente.',
                                         );
-                                  } catch (error, stackTrace) {
-                                    AppLogger.e(
-                                      'Falha ao criar transação.',
-                                      error,
-                                      stackTrace,
+                                      }
+                                      return;
+                                    }
+
+                                    final transactions =
+                                        transactionsAsync.requireValue;
+
+                                    final limits = ref.read(planLimitsProvider);
+                                    const quotaService = QuotaService();
+
+                                    final transactionLimit = limits.limitFor(
+                                      QuotaResource.transactions,
                                     );
 
-                                    if (context.mounted) {
-                                      setModalState(() => isSubmitting = false);
-                                      _showMessage(
-                                        context,
-                                        'Não foi possível salvar a transação. Tente novamente.',
-                                      );
-                                    }
-                                    return;
-                                  }
+                                    final canCreate = quotaService.canCreate(
+                                      limit: transactionLimit,
+                                      currentCount: transactions.length,
+                                    );
 
-                                  if (context.mounted) {
-                                    Navigator.pop(context);
-                                  }
-                                },
-                          child: const Text(
-                            'Confirmar lançamento',
-                            style: TextStyle(
-                              fontSize: 15,
-                              fontWeight: FontWeight.w700,
+                                    if (!canCreate) {
+                                      final message = switch (transactionLimit
+                                          .mode) {
+                                        QuotaMode.disabled =>
+                                          'Este recurso não está disponível no seu plano.',
+                                        QuotaMode.limited =>
+                                          'Você atingiu o limite de ${transactionLimit.maximum} transações do seu plano.',
+                                        QuotaMode.unlimited =>
+                                          'Você não possui limite de transações.',
+                                        QuotaMode.notConfigured =>
+                                          'O limite deste recurso ainda não está configurado.',
+                                      };
+
+                                      if (context.mounted) {
+                                        _showMessage(context, message);
+                                      }
+
+                                      return;
+                                    }
+
+                                    setModalState(() => isSubmitting = true);
+
+                                    try {
+                                      await ref
+                                          .read(financeRepositoryProvider)
+                                          .addTransaction(
+                                            title: title,
+                                            amount: amount,
+                                            type: selectedType,
+                                            category: category,
+                                          );
+                                    } catch (error, stackTrace) {
+                                      AppLogger.e(
+                                        'Falha ao criar transação.',
+                                        error,
+                                        stackTrace,
+                                      );
+
+                                      if (context.mounted) {
+                                        setModalState(
+                                          () => isSubmitting = false,
+                                        );
+                                        _showMessage(
+                                          context,
+                                          'Não foi possível salvar a transação. Tente novamente.',
+                                        );
+                                      }
+                                      return;
+                                    }
+
+                                    if (context.mounted) {
+                                      Navigator.pop(context);
+                                    }
+                                  },
+                            child: Row(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                if (isSubmitting) ...[
+                                  const SizedBox(
+                                    width: 17,
+                                    height: 17,
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2,
+                                      color: Colors.white,
+                                    ),
+                                  ),
+                                  const SizedBox(width: 10),
+                                ],
+                                const Text(
+                                  'Confirmar lançamento',
+                                  style: TextStyle(
+                                    fontSize: 15,
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                ),
+                              ],
                             ),
                           ),
                         ),
@@ -596,11 +665,11 @@ class _FinanceScreenState extends ConsumerState<FinanceScreen> {
       fillColor: _inputColor,
       contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
       enabledBorder: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(14),
-        borderSide: const BorderSide(color: Colors.white10),
+        borderRadius: BorderRadius.circular(18),
+        borderSide: BorderSide(color: Colors.white.withValues(alpha: 0.07)),
       ),
       focusedBorder: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(14),
+        borderRadius: BorderRadius.circular(18),
         borderSide: const BorderSide(color: _primaryColor, width: 1.2),
       ),
     );
@@ -616,64 +685,158 @@ class _FinanceScreenState extends ConsumerState<FinanceScreen> {
     return Scaffold(
       backgroundColor: _backgroundColor,
       floatingActionButton: FloatingActionButton(
-        backgroundColor: _primaryColor,
-        elevation: 8,
+        backgroundColor: Colors.transparent,
+        elevation: 0,
+        focusElevation: 0,
+        hoverElevation: 0,
+        highlightElevation: 0,
         onPressed: () => _showAddTransactionDialog(context, ref),
-        child: const Icon(Icons.add_rounded, color: Colors.white, size: 28),
-      ),
-      body: SafeArea(
-        child: allTransactionsAsync.when(
-          loading: () => const Center(
-            child: CircularProgressIndicator(color: _primaryColor),
-          ),
-          error: (error, stackTrace) {
-            AppLogger.e('Falha ao carregar transações.', error, stackTrace);
-            return const _FinanceLoadError();
-          },
-          data: (allTransactions) {
-            final summary = calculateFinanceSummary(allTransactions);
-
-            return visibleTransactionsAsync.when(
-              loading: () => const Center(
-                child: CircularProgressIndicator(color: _primaryColor),
+        child: Container(
+          width: 56,
+          height: 56,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            gradient: const LinearGradient(
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              colors: [_gradientStart, _primaryColor],
+            ),
+            boxShadow: [
+              BoxShadow(
+                color: _primaryColor.withValues(alpha: 0.30),
+                blurRadius: 22,
+                offset: const Offset(0, 8),
               ),
-              error: (error, stackTrace) {
-                AppLogger.e('Falha ao filtrar transações.', error, stackTrace);
-                return const _FinanceLoadError();
-              },
-              data: (visibleTransactions) {
-                return CustomScrollView(
-                  key: const PageStorageKey<String>('finance_scroll_position'),
-                  controller: _scrollController,
-                  cacheExtent: 500,
-                  physics: const BouncingScrollPhysics(),
-                  slivers: [
-                    _FinanceSummary(
-                      income: summary.income,
-                      expense: summary.expense,
-                      balance: summary.balance,
-                    ),
-                    _TransactionFilters(
-                      type: _typeFilter,
-                      category: _categoryFilter,
-                      onTypeChanged: _setTypeFilter,
-                      onCategoryChanged: _setCategoryFilter,
-                    ),
-                    _TransactionList(
-                      transactions: visibleTransactions,
-                      hasAnyTransactions: allTransactions.isNotEmpty,
-                      onDelete: (tx) =>
-                          _showDeleteConfirmation(context, ref, tx),
-                    ),
-                    if (_isLoadingMore)
-                      const SliverToBoxAdapter(child: SizedBox(height: 8)),
-                    const SliverToBoxAdapter(child: SizedBox(height: 90)),
-                  ],
-                );
-              },
-            );
-          },
+            ],
+          ),
+          child: const Icon(Icons.add_rounded, color: Colors.white, size: 27),
         ),
+      ),
+      body: DecoratedBox(
+        decoration: const BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [Color(0xFF090D1A), _backgroundColor],
+            stops: [0, 0.42],
+          ),
+        ),
+        child: SafeArea(
+          child: allTransactionsAsync.when(
+            loading: () => const Center(
+              child: CircularProgressIndicator(color: _primaryColor),
+            ),
+            error: (error, stackTrace) {
+              AppLogger.e('Falha ao carregar transações.', error, stackTrace);
+              return const _FinanceLoadError();
+            },
+            data: (allTransactions) {
+              final summary = calculateFinanceSummary(allTransactions);
+
+              return visibleTransactionsAsync.when(
+                loading: () => const Center(
+                  child: CircularProgressIndicator(color: _primaryColor),
+                ),
+                error: (error, stackTrace) {
+                  AppLogger.e(
+                    'Falha ao filtrar transações.',
+                    error,
+                    stackTrace,
+                  );
+                  return const _FinanceLoadError();
+                },
+                data: (visibleTransactions) {
+                  return CustomScrollView(
+                    key: const PageStorageKey<String>(
+                      'finance_scroll_position',
+                    ),
+                    controller: _scrollController,
+                    cacheExtent: 500,
+                    physics: const BouncingScrollPhysics(),
+                    slivers: [
+                      _FinanceSummary(
+                        income: summary.income,
+                        expense: summary.expense,
+                        balance: summary.balance,
+                      ),
+                      _TransactionFilters(
+                        type: _typeFilter,
+                        category: _categoryFilter,
+                        onTypeChanged: _setTypeFilter,
+                        onCategoryChanged: _setCategoryFilter,
+                      ),
+                      _TransactionList(
+                        transactions: visibleTransactions,
+                        hasAnyTransactions: allTransactions.isNotEmpty,
+                        onDelete: (tx) =>
+                            _showDeleteConfirmation(context, ref, tx),
+                      ),
+                      if (_isLoadingMore)
+                        const SliverToBoxAdapter(child: SizedBox(height: 8)),
+                      const SliverToBoxAdapter(child: SizedBox(height: 90)),
+                    ],
+                  );
+                },
+              );
+            },
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _FinanceHeaderIcon extends StatelessWidget {
+  const _FinanceHeaderIcon();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: 44,
+      height: 44,
+      decoration: BoxDecoration(
+        gradient: const LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [Color(0xFF5D0EFF), Color(0xFFB026FF)],
+        ),
+        borderRadius: BorderRadius.circular(15),
+        boxShadow: [
+          BoxShadow(
+            color: const Color(0xFFB026FF).withValues(alpha: 0.20),
+            blurRadius: 18,
+            offset: const Offset(0, 7),
+          ),
+        ],
+      ),
+      child: const Icon(
+        Icons.account_balance_wallet_outlined,
+        color: Colors.white,
+        size: 21,
+      ),
+    );
+  }
+}
+
+class _SheetHeaderIcon extends StatelessWidget {
+  const _SheetHeaderIcon();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: 44,
+      height: 44,
+      decoration: BoxDecoration(
+        color: const Color(0xFFB026FF).withValues(alpha: 0.13),
+        borderRadius: BorderRadius.circular(15),
+        border: Border.all(
+          color: const Color(0xFFB026FF).withValues(alpha: 0.24),
+        ),
+      ),
+      child: const Icon(
+        Icons.add_card_rounded,
+        color: Color(0xFFD8A1FF),
+        size: 21,
       ),
     );
   }
@@ -701,76 +864,109 @@ class _TransactionFilters extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return SliverPadding(
-      padding: const EdgeInsets.fromLTRB(20, 0, 20, 16),
+      padding: const EdgeInsets.fromLTRB(20, 0, 20, 18),
       sliver: SliverToBoxAdapter(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Wrap(
-              spacing: 8,
-              children: [
-                _FinanceFilterChip(
-                  key: const ValueKey('finance-type-filter-all'),
-                  label: 'Todas',
-                  selected: type == FinanceTypeFilter.all,
-                  onSelected: () => onTypeChanged(FinanceTypeFilter.all),
-                ),
-                _FinanceFilterChip(
-                  key: const ValueKey('finance-type-filter-income'),
-                  label: 'Entradas',
-                  selected: type == FinanceTypeFilter.income,
-                  onSelected: () => onTypeChanged(FinanceTypeFilter.income),
-                ),
-                _FinanceFilterChip(
-                  key: const ValueKey('finance-type-filter-expense'),
-                  label: 'Saídas',
-                  selected: type == FinanceTypeFilter.expense,
-                  onSelected: () => onTypeChanged(FinanceTypeFilter.expense),
-                ),
-              ],
-            ),
-            const SizedBox(height: 10),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 14),
-              decoration: BoxDecoration(
-                color: const Color(0xFF0B1020),
-                borderRadius: BorderRadius.circular(14),
-                border: Border.all(color: Colors.white10),
-              ),
-              child: DropdownButtonHideUnderline(
-                child: DropdownButton<String>(
-                  key: const ValueKey('finance-category-filter'),
-                  value: category ?? _allCategoriesValue,
-                  isExpanded: true,
-                  dropdownColor: const Color(0xFF11182E),
-                  iconEnabledColor: Colors.white54,
-                  style: const TextStyle(color: Colors.white70, fontSize: 13),
-                  items: [
-                    const DropdownMenuItem(
-                      value: _allCategoriesValue,
-                      child: Text('Todas as categorias'),
+        child: Container(
+          padding: const EdgeInsets.all(6),
+          decoration: BoxDecoration(
+            color: const Color(0xFF0C1224),
+            borderRadius: BorderRadius.circular(22),
+            border: Border.all(color: Colors.white.withValues(alpha: 0.055)),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Expanded(
+                    child: _FinanceFilterChip(
+                      key: const ValueKey('finance-type-filter-all'),
+                      label: 'Todas',
+                      selected: type == FinanceTypeFilter.all,
+                      onSelected: () => onTypeChanged(FinanceTypeFilter.all),
                     ),
-                    ...financeOfficialCategories.map(
-                      (item) => DropdownMenuItem(
-                        value: item,
-                        child: Text(
-                          item,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
+                  ),
+                  Expanded(
+                    child: _FinanceFilterChip(
+                      key: const ValueKey('finance-type-filter-income'),
+                      label: 'Entradas',
+                      selected: type == FinanceTypeFilter.income,
+                      onSelected: () => onTypeChanged(FinanceTypeFilter.income),
+                    ),
+                  ),
+                  Expanded(
+                    child: _FinanceFilterChip(
+                      key: const ValueKey('finance-type-filter-expense'),
+                      label: 'Saídas',
+                      selected: type == FinanceTypeFilter.expense,
+                      onSelected: () =>
+                          onTypeChanged(FinanceTypeFilter.expense),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 6),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 12),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF11182E),
+                  borderRadius: BorderRadius.circular(16),
+                  border: Border.all(
+                    color: Colors.white.withValues(alpha: 0.055),
+                  ),
+                ),
+                child: DropdownButtonHideUnderline(
+                  child: DropdownButton<String>(
+                    key: const ValueKey('finance-category-filter'),
+                    value: category ?? _allCategoriesValue,
+                    isExpanded: true,
+                    dropdownColor: const Color(0xFF11182E),
+                    icon: const Icon(
+                      Icons.keyboard_arrow_down_rounded,
+                      color: Colors.white54,
+                    ),
+                    style: const TextStyle(
+                      color: Colors.white70,
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                    ),
+                    items: [
+                      const DropdownMenuItem(
+                        value: _allCategoriesValue,
+                        child: Row(
+                          children: [
+                            Icon(
+                              Icons.tune_rounded,
+                              color: Colors.white38,
+                              size: 17,
+                            ),
+                            SizedBox(width: 9),
+                            Text('Todas as categorias'),
+                          ],
                         ),
                       ),
-                    ),
-                  ],
-                  onChanged: (value) {
-                    if (value == null) return;
-                    onCategoryChanged(
-                      value == _allCategoriesValue ? null : value,
-                    );
-                  },
+                      ...financeOfficialCategories.map(
+                        (item) => DropdownMenuItem(
+                          value: item,
+                          child: Text(
+                            item,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                      ),
+                    ],
+                    onChanged: (value) {
+                      if (value == null) return;
+                      onCategoryChanged(
+                        value == _allCategoriesValue ? null : value,
+                      );
+                    },
+                  ),
                 ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );
@@ -791,22 +987,38 @@ class _FinanceFilterChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return ChoiceChip(
-      label: Text(label),
-      selected: selected,
-      onSelected: (_) => onSelected(),
-      showCheckmark: false,
-      selectedColor: const Color(0xFFB45CFF).withValues(alpha: 0.20),
-      backgroundColor: const Color(0xFF0B1020),
-      side: BorderSide(
-        color: selected
-            ? const Color(0xFFB45CFF).withValues(alpha: 0.65)
-            : Colors.white10,
-      ),
-      labelStyle: TextStyle(
-        color: selected ? Colors.white : Colors.white60,
-        fontSize: 12,
-        fontWeight: FontWeight.w600,
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(16),
+        onTap: onSelected,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 200),
+          curve: Curves.easeOutCubic,
+          height: 42,
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            color: selected
+                ? const Color(0xFFB026FF).withValues(alpha: 0.16)
+                : Colors.transparent,
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(
+              color: selected
+                  ? const Color(0xFFB026FF).withValues(alpha: 0.48)
+                  : Colors.transparent,
+            ),
+          ),
+          child: Text(
+            label,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              color: selected ? Colors.white : Colors.white54,
+              fontSize: 12,
+              fontWeight: selected ? FontWeight.w700 : FontWeight.w600,
+            ),
+          ),
+        ),
       ),
     );
   }
@@ -817,15 +1029,26 @@ class _FinanceLoadError extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return const Center(
-      child: Padding(
-        padding: EdgeInsets.all(24),
-        child: Column(
+    return Center(
+      child: Container(
+        margin: const EdgeInsets.all(24),
+        padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 30),
+        decoration: BoxDecoration(
+          color: const Color(0xFF11182E),
+          borderRadius: BorderRadius.circular(22),
+          border: Border.all(color: Colors.white.withValues(alpha: 0.05)),
+        ),
+        child: const Column(
           mainAxisSize: MainAxisSize.min,
           children: [
+            Icon(Icons.cloud_off_outlined, color: Color(0xFFB026FF), size: 28),
+            SizedBox(height: 14),
             Text(
               'Não foi possível carregar suas transações.',
-              style: TextStyle(color: Colors.white70),
+              style: TextStyle(
+                color: Colors.white70,
+                fontWeight: FontWeight.w600,
+              ),
               textAlign: TextAlign.center,
             ),
             SizedBox(height: 6),
@@ -863,96 +1086,118 @@ class _FinanceSummary extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return SliverPadding(
-      padding: const EdgeInsets.fromLTRB(20, 22, 20, 0),
+      padding: const EdgeInsets.fromLTRB(20, 24, 20, 0),
       sliver: SliverList(
         delegate: SliverChildListDelegate([
-          const Text(
-            'Minhas Finanças',
-            style: TextStyle(
-              color: Colors.white,
-              fontSize: 27,
-              fontWeight: FontWeight.w800,
-              letterSpacing: -0.6,
-            ),
+          const Row(
+            children: [
+              _FinanceHeaderIcon(),
+              SizedBox(width: 13),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Finanças',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 28,
+                        fontWeight: FontWeight.w800,
+                        letterSpacing: -0.7,
+                      ),
+                    ),
+                    SizedBox(height: 2),
+                    Text(
+                      'Acompanhe suas movimentações.',
+                      style: TextStyle(color: Colors.white54, fontSize: 13),
+                    ),
+                  ],
+                ),
+              ),
+            ],
           ),
-          const SizedBox(height: 5),
-          const Text(
-            'Acompanhe sua vida financeira de forma simples.',
-            style: TextStyle(color: Colors.white54, fontSize: 13),
-          ),
-          const SizedBox(height: 20),
+          const SizedBox(height: 24),
           Container(
             width: double.infinity,
-            padding: const EdgeInsets.fromLTRB(20, 20, 20, 18),
+            padding: const EdgeInsets.fromLTRB(22, 21, 22, 23),
             decoration: BoxDecoration(
-              color: const Color(0xFF11182E),
-              borderRadius: BorderRadius.circular(24),
-              border: Border.all(color: Colors.white.withValues(alpha: 0.05)),
+              gradient: const LinearGradient(
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+                colors: [Color(0xFF171D39), Color(0xFF10162C)],
+              ),
+              borderRadius: BorderRadius.circular(26),
+              border: Border.all(
+                color: const Color(0xFFB026FF).withValues(alpha: 0.24),
+              ),
               boxShadow: [
                 BoxShadow(
-                  color: Colors.black.withValues(alpha: 0.20),
-                  blurRadius: 24,
-                  offset: const Offset(0, 10),
+                  color: const Color(0xFF5D0EFF).withValues(alpha: 0.13),
+                  blurRadius: 30,
+                  offset: const Offset(0, 14),
                 ),
               ],
             ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+            child: Stack(
               children: [
-                Row(
-                  children: [
-                    Container(
-                      width: 34,
-                      height: 34,
-                      decoration: BoxDecoration(
-                        color: const Color(0xFFB45CFF).withValues(alpha: 0.12),
-                        borderRadius: BorderRadius.circular(10),
-                      ),
-                      child: const Icon(
-                        Icons.account_balance_wallet_outlined,
-                        color: Color(0xFFB45CFF),
-                        size: 18,
-                      ),
+                Positioned(
+                  right: -10,
+                  top: -18,
+                  child: Container(
+                    width: 92,
+                    height: 92,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: const Color(0xFFB026FF).withValues(alpha: 0.07),
                     ),
-                    const SizedBox(width: 10),
-                    const Text(
-                      'Saldo disponível',
-                      style: TextStyle(
-                        color: Colors.white70,
-                        fontSize: 13,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 15),
-                Text(
-                  _formatCurrency(balance),
-                  style: TextStyle(
-                    color: balance >= 0 ? Colors.white : Colors.redAccent,
-                    fontSize: 31,
-                    fontWeight: FontWeight.w800,
-                    letterSpacing: -0.8,
                   ),
                 ),
-                const SizedBox(height: 20),
-                Row(
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Expanded(
-                      child: _SummaryMetric(
-                        icon: Icons.arrow_upward_rounded,
-                        title: 'Entradas',
-                        value: _formatCurrency(income),
-                        color: Colors.greenAccent,
-                      ),
+                    Row(
+                      children: [
+                        Container(
+                          width: 34,
+                          height: 34,
+                          decoration: BoxDecoration(
+                            color: const Color(
+                              0xFFB026FF,
+                            ).withValues(alpha: 0.14),
+                            borderRadius: BorderRadius.circular(11),
+                          ),
+                          child: const Icon(
+                            Icons.account_balance_wallet_outlined,
+                            color: Color(0xFFD8A1FF),
+                            size: 18,
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        const Text(
+                          'Saldo',
+                          style: TextStyle(
+                            color: Colors.white60,
+                            fontSize: 13,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ],
                     ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: _SummaryMetric(
-                        icon: Icons.arrow_downward_rounded,
-                        title: 'Gastos',
-                        value: _formatCurrency(expense),
-                        color: Colors.redAccent,
+                    const SizedBox(height: 20),
+                    FittedBox(
+                      alignment: Alignment.centerLeft,
+                      fit: BoxFit.scaleDown,
+                      child: Text(
+                        _formatCurrency(balance),
+                        maxLines: 1,
+                        style: TextStyle(
+                          color: balance >= 0
+                              ? Colors.white
+                              : const Color(0xFFFF8CA3),
+                          fontSize: 34,
+                          fontWeight: FontWeight.w800,
+                          letterSpacing: -1,
+                        ),
                       ),
                     ),
                   ],
@@ -960,14 +1205,43 @@ class _FinanceSummary extends StatelessWidget {
               ],
             ),
           ),
-          const SizedBox(height: 28),
-          const Text(
-            'Transações recentes',
-            style: TextStyle(
-              color: Colors.white,
-              fontSize: 18,
-              fontWeight: FontWeight.w700,
-            ),
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              Expanded(
+                child: _SummaryMetric(
+                  icon: Icons.arrow_upward_rounded,
+                  title: 'Entradas',
+                  value: _formatCurrency(income),
+                  color: const Color(0xFF69E6B6),
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: _SummaryMetric(
+                  icon: Icons.arrow_downward_rounded,
+                  title: 'Saídas',
+                  value: _formatCurrency(expense),
+                  color: const Color(0xFFFF6B8A),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 30),
+          const Row(
+            children: [
+              Icon(Icons.swap_vert_rounded, color: Color(0xFFB026FF), size: 21),
+              SizedBox(width: 8),
+              Text(
+                'Movimentações',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 18,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: -0.2,
+                ),
+              ),
+            ],
           ),
           const SizedBox(height: 12),
         ]),
@@ -996,45 +1270,54 @@ class _SummaryMetric extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+      padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 14),
       decoration: BoxDecoration(
-        color: const Color(0xFF070B14),
-        borderRadius: BorderRadius.circular(14),
+        color: const Color(0xFF11182E),
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.05)),
       ),
-      child: Row(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Container(
-            width: 30,
-            height: 30,
-            decoration: BoxDecoration(
-              color: color.withValues(alpha: 0.10),
-              shape: BoxShape.circle,
-            ),
-            child: Icon(icon, color: color, size: 16),
-          ),
-          const SizedBox(width: 9),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  title,
-                  style: const TextStyle(color: Colors.white54, fontSize: 11),
+          Row(
+            children: [
+              Container(
+                width: 28,
+                height: 28,
+                decoration: BoxDecoration(
+                  color: color.withValues(alpha: 0.11),
+                  borderRadius: BorderRadius.circular(9),
                 ),
-                const SizedBox(height: 2),
-                FittedBox(
-                  alignment: Alignment.centerLeft,
-                  fit: BoxFit.scaleDown,
-                  child: Text(
-                    value,
-                    style: TextStyle(
-                      color: color,
-                      fontSize: 14,
-                      fontWeight: FontWeight.w700,
-                    ),
+                child: Icon(icon, color: color, size: 16),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: Colors.white54,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w600,
                   ),
                 ),
-              ],
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          FittedBox(
+            alignment: Alignment.centerLeft,
+            fit: BoxFit.scaleDown,
+            child: Text(
+              value,
+              maxLines: 1,
+              style: TextStyle(
+                color: color,
+                fontSize: 15,
+                fontWeight: FontWeight.w700,
+                letterSpacing: -0.2,
+              ),
             ),
           ),
         ],
@@ -1102,79 +1385,99 @@ class _TransactionList extends StatelessWidget {
 
           return RepaintBoundary(
             child: Container(
-              margin: const EdgeInsets.only(bottom: 10),
+              margin: const EdgeInsets.only(bottom: 11),
+              padding: const EdgeInsets.fromLTRB(14, 13, 8, 13),
               decoration: BoxDecoration(
                 color: const Color(0xFF11182E),
-                borderRadius: BorderRadius.circular(18),
+                borderRadius: BorderRadius.circular(20),
                 border: Border.all(
-                  color: Colors.white.withValues(alpha: 0.035),
+                  color: Colors.white.withValues(alpha: 0.045),
                 ),
               ),
-              child: ListTile(
-                contentPadding: const EdgeInsets.symmetric(
-                  horizontal: 14,
-                  vertical: 7,
-                ),
-                leading: Container(
-                  width: 42,
-                  height: 42,
-                  decoration: BoxDecoration(
-                    color: isIncome
-                        ? Colors.greenAccent.withValues(alpha: 0.10)
-                        : Colors.redAccent.withValues(alpha: 0.10),
-                    shape: BoxShape.circle,
+              child: Row(
+                children: [
+                  Container(
+                    width: 42,
+                    height: 42,
+                    decoration: BoxDecoration(
+                      color: isIncome
+                          ? const Color(0xFF69E6B6).withValues(alpha: 0.10)
+                          : const Color(0xFFFF6B8A).withValues(alpha: 0.10),
+                      borderRadius: BorderRadius.circular(14),
+                    ),
+                    child: Icon(
+                      isIncome
+                          ? Icons.arrow_upward_rounded
+                          : Icons.arrow_downward_rounded,
+                      color: isIncome
+                          ? const Color(0xFF69E6B6)
+                          : const Color(0xFFFF6B8A),
+                      size: 20,
+                    ),
                   ),
-                  child: Icon(
-                    isIncome
-                        ? Icons.arrow_upward_rounded
-                        : Icons.arrow_downward_rounded,
-                    color: isIncome ? Colors.greenAccent : Colors.redAccent,
-                    size: 20,
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          tx.title,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 14,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                        const SizedBox(height: 5),
+                        Text(
+                          '${tx.category} · ${_formatDate(tx.date)}',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            color: Colors.white38,
+                            fontSize: 11,
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
-                ),
-                title: Text(
-                  tx.title,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 14,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-                subtitle: Padding(
-                  padding: const EdgeInsets.only(top: 4),
-                  child: Text(
-                    '${tx.category} · ${_formatDate(tx.date)}',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(color: Colors.white38, fontSize: 11),
-                  ),
-                ),
-                trailing: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(
-                      '${isIncome ? '+ ' : '- '}${_formatCurrency(tx.amount)}',
-                      style: TextStyle(
-                        color: isIncome ? Colors.greenAccent : Colors.redAccent,
-                        fontSize: 13,
-                        fontWeight: FontWeight.w700,
+                  const SizedBox(width: 8),
+                  ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 112),
+                    child: FittedBox(
+                      fit: BoxFit.scaleDown,
+                      alignment: Alignment.centerRight,
+                      child: Text(
+                        '${isIncome ? '+ ' : '- '}${_formatCurrency(tx.amount)}',
+                        maxLines: 1,
+                        style: TextStyle(
+                          color: isIncome
+                              ? const Color(0xFF69E6B6)
+                              : const Color(0xFFFF6B8A),
+                          fontSize: 13,
+                          fontWeight: FontWeight.w700,
+                        ),
                       ),
                     ),
-                    const SizedBox(width: 2),
-                    IconButton(
-                      visualDensity: VisualDensity.compact,
-                      tooltip: 'Excluir transação',
-                      icon: const Icon(
-                        Icons.delete_outline_rounded,
-                        color: Colors.white30,
-                        size: 19,
-                      ),
-                      onPressed: () => onDelete(tx),
+                  ),
+                  IconButton(
+                    visualDensity: VisualDensity.compact,
+                    constraints: const BoxConstraints(
+                      minWidth: 38,
+                      minHeight: 42,
                     ),
-                  ],
-                ),
+                    padding: const EdgeInsets.only(left: 6),
+                    tooltip: 'Excluir transação',
+                    icon: const Icon(
+                      Icons.delete_outline_rounded,
+                      color: Colors.white30,
+                      size: 19,
+                    ),
+                    onPressed: () => onDelete(tx),
+                  ),
+                ],
               ),
             ),
           );
@@ -1201,8 +1504,8 @@ class _EmptyTransactions extends StatelessWidget {
       padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 34),
       decoration: BoxDecoration(
         color: const Color(0xFF11182E),
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: Colors.white.withValues(alpha: 0.04)),
+        borderRadius: BorderRadius.circular(22),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.05)),
       ),
       child: Column(
         children: [
@@ -1210,12 +1513,14 @@ class _EmptyTransactions extends StatelessWidget {
             width: 52,
             height: 52,
             decoration: BoxDecoration(
-              color: const Color(0xFFB45CFF).withValues(alpha: 0.10),
-              shape: BoxShape.circle,
+              color: const Color(0xFFB026FF).withValues(alpha: 0.10),
+              borderRadius: BorderRadius.circular(17),
             ),
-            child: const Icon(
-              Icons.receipt_long_outlined,
-              color: Color(0xFFB45CFF),
+            child: Icon(
+              filtered
+                  ? Icons.filter_alt_off_outlined
+                  : Icons.receipt_long_outlined,
+              color: const Color(0xFFB026FF),
               size: 24,
             ),
           ),
@@ -1234,7 +1539,7 @@ class _EmptyTransactions extends StatelessWidget {
           Text(
             filtered
                 ? 'Ajuste os filtros para ver outras transações.'
-                : 'Suas movimentações financeiras aparecerão aqui.',
+                : 'Adicione sua primeira movimentação para começar.',
             textAlign: TextAlign.center,
             style: const TextStyle(
               color: Colors.white38,

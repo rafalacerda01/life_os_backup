@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:intl/intl.dart';
 import 'package:life_os/core/database/app_database.dart';
 import 'package:life_os/features/finance/data/repositories/finance_repository.dart';
 import 'package:life_os/features/finance/presentation/finance_screen.dart';
@@ -140,6 +141,59 @@ void main() {
     expect(find.textContaining('Pet ·'), findsOneWidget);
   });
 
+  testWidgets('resumo usa todas as transações mesmo com lista filtrada', (
+    tester,
+  ) async {
+    final repository = _RecordingFinanceRepository();
+    final transactions = [
+      Transaction(
+        id: 1,
+        firestoreId: 'income-1',
+        title: 'Salário',
+        amount: 1000,
+        type: 'income',
+        category: 'Salário',
+        date: DateTime(2026, 9, 7),
+        isDeleted: false,
+      ),
+      Transaction(
+        id: 2,
+        firestoreId: 'expense-1',
+        title: 'Mercado',
+        amount: 250,
+        type: 'expense',
+        category: 'Alimentação',
+        date: DateTime(2026, 9, 7),
+        isDeleted: false,
+      ),
+    ];
+    final currency = NumberFormat.currency(locale: 'pt_BR', symbol: 'R\$');
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          financeStreamProvider.overrideWith(
+            (ref) => Stream.value(transactions),
+          ),
+          financeRepositoryProvider.overrideWithValue(repository),
+        ],
+        child: const MaterialApp(home: FinanceScreen()),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text(currency.format(750)), findsOneWidget);
+    expect(find.text(currency.format(1000)), findsOneWidget);
+
+    await tester.tap(find.byKey(const ValueKey('finance-type-filter-expense')));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Salário'), findsNothing);
+    expect(find.text('Mercado'), findsOneWidget);
+    expect(find.text(currency.format(750)), findsOneWidget);
+    expect(find.text(currency.format(1000)), findsOneWidget);
+  });
+
   testWidgets('mudar filtros de tipo e categoria reseta paginação', (
     tester,
   ) async {
@@ -207,7 +261,7 @@ void main() {
 
     expect(find.text('Todas'), findsOneWidget);
     expect(find.text('Entradas'), findsWidgets);
-    expect(find.text('Saídas'), findsOneWidget);
+    expect(find.text('Saídas'), findsWidgets);
     expect(find.text('Todas as categorias'), findsOneWidget);
 
     await tester.tap(find.byType(FloatingActionButton));
