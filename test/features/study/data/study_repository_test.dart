@@ -207,14 +207,19 @@ void main() {
         ),
       )
       .then((_) {});
-  Future<void> card() => db
+  Future<void> card({
+    String id = 'card-1',
+    String subjectId = 'subject-1',
+    DateTime? lastReviewed,
+  }) => db
       .into(db.flashcards)
       .insert(
         FlashcardsCompanion.insert(
-          id: 'card-1',
-          subjectId: 'subject-1',
+          id: id,
+          subjectId: subjectId,
           question: 'Pergunta',
           answer: 'Resposta',
+          lastReviewed: Value(lastReviewed?.millisecondsSinceEpoch),
         ),
       )
       .then((_) {});
@@ -232,6 +237,192 @@ void main() {
     () async =>
         expect((await repository.getStudyStatsStream().first).reviewQueue, 0),
   );
+
+  test('cache persistido não é autoritativo para contadores due', () async {
+    final now = DateTime(2026, 9, 8, 12);
+    repository = StudyRepository(db, fire, auth, sync, reviewNow: () => now);
+    await subject(cards: 99);
+    await stats(queue: 99);
+    await card();
+
+    expect((await repository.getStudyStatsStream().first).reviewQueue, 1);
+    expect(
+      (await repository.getSubjectsStream().first).single.cardsToReview,
+      1,
+    );
+  });
+
+  test('due inclui nunca revisado e dia anterior, mas não hoje', () async {
+    final now = DateTime(2026, 9, 8, 12);
+    repository = StudyRepository(db, fire, auth, sync, reviewNow: () => now);
+    await subject();
+    await card(id: 'card-1');
+    await card(id: 'card-2', lastReviewed: DateTime(2026, 9, 7, 20));
+    await card(id: 'card-3', lastReviewed: DateTime(2026, 9, 8, 8));
+
+    final dueIds = (await repository.getFlashcardsStream().first)
+        .map((item) => item.id)
+        .toSet();
+    expect(dueIds, {'card-1', 'card-2'});
+    expect((await repository.getStudyStatsStream().first).reviewQueue, 2);
+  });
+
+  test('cardsToReview é agregado por subject a partir dos cards due', () async {
+    final now = DateTime(2026, 9, 8, 12);
+    repository = StudyRepository(db, fire, auth, sync, reviewNow: () => now);
+    await subject(id: 'subject-a', cards: 99);
+    await subject(id: 'subject-b', cards: 99);
+    await card(id: 'a-1', subjectId: 'subject-a');
+    await card(
+      id: 'a-2',
+      subjectId: 'subject-a',
+      lastReviewed: DateTime(2026, 9, 7, 20),
+    );
+    await card(
+      id: 'a-3',
+      subjectId: 'subject-a',
+      lastReviewed: DateTime(2026, 9, 8, 8),
+    );
+    await card(id: 'b-1', subjectId: 'subject-b');
+    await card(
+      id: 'b-2',
+      subjectId: 'subject-b',
+      lastReviewed: DateTime(2026, 9, 8, 9),
+    );
+
+    final subjects = {
+      for (final item in await repository.getSubjectsStream().first)
+        item.id: item.cardsToReview,
+    };
+    expect(subjects, {'subject-a': 2, 'subject-b': 1});
+    expect((await repository.getStudyStatsStream().first).reviewQueue, 3);
+  });
+
+  test('card revisado volta a ficar due no próximo dia local', () async {
+    var now = DateTime(2026, 9, 8, 12);
+    repository = StudyRepository(db, fire, auth, sync, reviewNow: () => now);
+    await subject();
+    await card(lastReviewed: DateTime(2026, 9, 8, 10));
+
+    expect(await repository.getFlashcardsStream().first, isEmpty);
+    expect((await repository.getStudyStatsStream().first).reviewQueue, 0);
+    expect(
+      (await repository.getSubjectsStream().first).single.cardsToReview,
+      0,
+    );
+
+    now = DateTime(2026, 9, 9, 0, 1);
+
+    expect(await repository.getFlashcardsStream().first, hasLength(1));
+    expect((await repository.getStudyStatsStream().first).reviewQueue, 1);
+    expect(
+      (await repository.getSubjectsStream().first).single.cardsToReview,
+      1,
+    );
+  });
+
+  test('cache remoto stale não domina contadores derivados', () async {
+    final now = DateTime(2026, 9, 8, 12);
+    repository = StudyRepository(db, fire, auth, sync, reviewNow: () => now);
+    fire.info.document.values = {
+      'streak': 2,
+      'reviewQueue': 99,
+      'progress': .2,
+    };
+    fire.subjects.documents = [
+      _QueryDoc('subject-1', {...remoteSubject(), 'cardsToReview': 99}),
+    ];
+    fire.cards.documents = [
+      _QueryDoc('card-due', {
+        'subjectId': 'subject-1',
+        'question': 'Pendente',
+        'answer': 'Resposta',
+        'lastReviewed': Timestamp.fromDate(DateTime(2026, 9, 7, 20)),
+      }),
+      _QueryDoc('card-reviewed', {
+        'subjectId': 'subject-1',
+        'question': 'Revisado',
+        'answer': 'Resposta',
+        'lastReviewed': Timestamp.fromDate(DateTime(2026, 9, 8, 8)),
+      }),
+    ];
+
+    await repository.syncStudyFromFirebaseToLocal();
+
+    expect((await repository.getStudyStatsStream().first).reviewQueue, 1);
+    expect(
+      (await repository.getSubjectsStream().first).single.cardsToReview,
+      1,
+    );
+  });
+
+  test('delete subject recalcula fila global pelo cascade real', () async {
+    final now = DateTime(2026, 9, 8, 12);
+    repository = StudyRepository(db, fire, auth, sync, reviewNow: () => now);
+    await stats(queue: 99);
+    await subject(id: 'subject-a', cards: 99);
+    await subject(id: 'subject-b', cards: 99);
+    await card(id: 'a-due', subjectId: 'subject-a');
+    await card(
+      id: 'a-reviewed',
+      subjectId: 'subject-a',
+      lastReviewed: DateTime(2026, 9, 8, 8),
+    );
+    await card(id: 'b-due-1', subjectId: 'subject-b');
+    await card(id: 'b-due-2', subjectId: 'subject-b');
+
+    expect((await repository.getStudyStatsStream().first).reviewQueue, 3);
+
+    await repository.removeSubject('subject-a');
+
+    expect((await repository.getStudyStatsStream().first).reviewQueue, 2);
+  });
+
+  test('streams abertos reagem ao cascade de subject', () async {
+    final now = DateTime(2026, 9, 8, 12);
+    repository = StudyRepository(db, fire, auth, sync, reviewNow: () => now);
+    await subject(id: 'subject-a');
+    await subject(id: 'subject-b');
+    await card(id: 'a-due', subjectId: 'subject-a');
+    await card(id: 'b-due', subjectId: 'subject-b');
+
+    final statsStream = StreamIterator(repository.getStudyStatsStream());
+    final subjectsStream = StreamIterator(repository.getSubjectsStream());
+    final cardsStream = StreamIterator(repository.getFlashcardsStream());
+    addTearDown(statsStream.cancel);
+    addTearDown(subjectsStream.cancel);
+    addTearDown(cardsStream.cancel);
+
+    expect(await statsStream.moveNext(), isTrue);
+    expect(await subjectsStream.moveNext(), isTrue);
+    expect(await cardsStream.moveNext(), isTrue);
+    expect(statsStream.current.reviewQueue, 2);
+    expect(subjectsStream.current, hasLength(2));
+    expect(cardsStream.current, hasLength(2));
+
+    await repository.removeSubject('subject-a');
+
+    expect(await statsStream.moveNext(), isTrue);
+    expect(await subjectsStream.moveNext(), isTrue);
+    expect(await cardsStream.moveNext(), isTrue);
+    expect(statsStream.current.reviewQueue, 1);
+    expect(subjectsStream.current.single.id, 'subject-b');
+    expect(cardsStream.current.single.id, 'b-due');
+  });
+
+  test('fila global mantém invariante com lista de flashcards due', () async {
+    final now = DateTime(2026, 9, 8, 12);
+    repository = StudyRepository(db, fire, auth, sync, reviewNow: () => now);
+    await subject();
+    await card(id: 'never');
+    await card(id: 'yesterday', lastReviewed: DateTime(2026, 9, 7, 23));
+    await card(id: 'today', lastReviewed: DateTime(2026, 9, 8, 1));
+
+    final dueCards = await repository.getFlashcardsStream().first;
+    final study = await repository.getStudyStatsStream().first;
+
+    expect(study.reviewQueue, dueCards.length);
+  });
 
   test('addFlashcard atualiza Drift, SyncQueue owner e agenda', () async {
     await subject();

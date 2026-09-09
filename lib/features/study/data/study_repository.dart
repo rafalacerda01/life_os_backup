@@ -69,84 +69,133 @@ class _RemoteFlashcard {
 }
 
 class StudyRepository {
+  static const _dueCardsPredicate =
+      '(cards.last_reviewed IS NULL OR cards.last_reviewed < ?)';
+
   final AppDatabase _db;
   final FirebaseFirestore _firestore;
   final FirebaseAuth _auth;
   final SyncManager _syncManager;
+  final DateTime Function() _reviewNow;
   final _uuid = const Uuid();
 
-  StudyRepository(this._db, this._firestore, this._auth, this._syncManager);
+  StudyRepository(
+    this._db,
+    this._firestore,
+    this._auth,
+    this._syncManager, {
+    DateTime Function()? reviewNow,
+  }) : _reviewNow = reviewNow ?? DateTime.now;
 
   // ===========================================================================
   // 1. LEITURA (STREAMS LOCAIS)
   // ===========================================================================
 
   Stream<StudyModel> getStudyStatsStream() {
-    return _db.select(_db.studyStats).watchSingleOrNull().map((row) {
-      if (row == null) {
-        return StudyModel.initial();
-      }
-
-      return StudyModel(
-        streak: row.streak,
-        reviewQueue: row.reviewQueue < 0 ? 0 : row.reviewQueue,
-        progress: row.progress,
-        lastStudyDate: row.lastStudyDate != null
-            ? DateTime.fromMillisecondsSinceEpoch(row.lastStudyDate!)
-            : null,
-      );
-    });
+    return _db
+        .customSelect(
+          '''
+          SELECT
+            stats.streak AS streak,
+            stats.progress AS progress,
+            stats.last_study_date AS last_study_date,
+            COUNT(cards.id) AS due_count
+          FROM (SELECT 1) AS singleton
+          LEFT JOIN study_stats AS stats ON stats.id = 'main'
+          LEFT JOIN flashcards AS cards ON $_dueCardsPredicate
+          GROUP BY stats.streak, stats.progress, stats.last_study_date
+          ''',
+          variables: [Variable.withInt(_startOfReviewDayEpoch())],
+          readsFrom: {_db.studyStats, _db.subjects, _db.flashcards},
+        )
+        .watchSingle()
+        .map((row) {
+          final lastStudyDate = row.readNullable<int>('last_study_date');
+          return StudyModel(
+            streak: row.readNullable<int>('streak') ?? 0,
+            reviewQueue: row.read<int>('due_count'),
+            progress: row.readNullable<double>('progress') ?? 0,
+            lastStudyDate: lastStudyDate != null
+                ? DateTime.fromMillisecondsSinceEpoch(lastStudyDate)
+                : null,
+          );
+        });
   }
 
   Stream<List<StudySubjectEntity>> getSubjectsStream() {
     return _db
-        .select(_db.subjects)
+        .customSelect(
+          '''
+          SELECT
+            subjects.id AS subject_id,
+            subjects.title AS title,
+            subjects.streak_days AS streak_days,
+            subjects.progress AS progress,
+            subjects.has_exam AS has_exam,
+            subjects.exam_date AS exam_date,
+            COUNT(cards.id) AS due_count
+          FROM subjects
+          LEFT JOIN flashcards AS cards
+            ON cards.subject_id = subjects.id
+            AND $_dueCardsPredicate
+          GROUP BY
+            subjects.id,
+            subjects.title,
+            subjects.streak_days,
+            subjects.progress,
+            subjects.has_exam,
+            subjects.exam_date
+          ''',
+          variables: [Variable.withInt(_startOfReviewDayEpoch())],
+          readsFrom: {_db.subjects, _db.flashcards},
+        )
         .watch()
         .map(
-          (rows) => rows
-              .map(
-                (r) => StudySubjectEntity(
-                  id: r.id,
-                  title: r.title,
-                  cardsToReview: r.cardsToReview,
-                  streakDays: r.streakDays,
-                  progress: r.progress,
-                  hasExam: r.hasExam,
-                  examDate: r.examDate != null
-                      ? DateTime.fromMillisecondsSinceEpoch(r.examDate!)
-                      : null,
-                ),
-              )
-              .toList(),
+          (rows) => rows.map((r) {
+            final examDate = r.readNullable<int>('exam_date');
+            return StudySubjectEntity(
+              id: r.read<String>('subject_id'),
+              title: r.read<String>('title'),
+              cardsToReview: r.read<int>('due_count'),
+              streakDays: r.read<int>('streak_days'),
+              progress: r.read<double>('progress'),
+              hasExam: r.read<bool>('has_exam'),
+              examDate: examDate != null
+                  ? DateTime.fromMillisecondsSinceEpoch(examDate)
+                  : null,
+            );
+          }).toList(),
         );
   }
 
   Stream<List<FlashcardModel>> getFlashcardsStream() {
-    final now = DateTime.now();
-
-    final startOfToday = DateTime(
-      now.year,
-      now.month,
-      now.day,
-    ).millisecondsSinceEpoch;
-
-    return (_db.select(_db.flashcards)..where(
-          (t) =>
-              t.lastReviewed.isNull() |
-              t.lastReviewed.isSmallerThanValue(startOfToday),
-        ))
+    return _db
+        .customSelect(
+          '''
+          SELECT cards.id, cards.question, cards.answer
+          FROM flashcards AS cards
+          WHERE $_dueCardsPredicate
+          ''',
+          variables: [Variable.withInt(_startOfReviewDayEpoch())],
+          readsFrom: {_db.subjects, _db.flashcards},
+        )
         .watch()
         .map(
           (rows) => rows
               .map(
                 (r) => FlashcardModel(
-                  id: r.id,
-                  question: r.question,
-                  answer: r.answer,
+                  id: r.read<String>('id'),
+                  question: r.read<String>('question'),
+                  answer: r.read<String>('answer'),
                 ),
               )
               .toList(),
         );
+  }
+
+  int _startOfReviewDayEpoch() {
+    final now = _reviewNow();
+    return DateTime(now.year, now.month, now.day).millisecondsSinceEpoch;
   }
 
   // ===========================================================================

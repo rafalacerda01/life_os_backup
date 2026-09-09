@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
@@ -20,15 +22,30 @@ final studyRepositoryProvider = Provider((ref) {
 });
 
 // --- PROVIDERS DE LEITURA (STREAMS) ---
+final _studyDayProvider = Provider.autoDispose<DateTime>((ref) {
+  final now = DateTime.now();
+  final today = DateTime(now.year, now.month, now.day);
+  final nextDay = DateTime(now.year, now.month, now.day + 1);
+  final timer = Timer(
+    nextDay.add(const Duration(milliseconds: 50)).difference(now),
+    ref.invalidateSelf,
+  );
+  ref.onDispose(timer.cancel);
+  return today;
+});
+
 final studyStreamProvider = StreamProvider<StudyModel>((ref) {
+  ref.watch(_studyDayProvider);
   return ref.watch(studyRepositoryProvider).getStudyStatsStream();
 });
 
 final subjectsStreamProvider =
     StreamProvider.autoDispose<List<StudySubjectEntity>>((ref) {
+      ref.watch(_studyDayProvider);
       return ref.watch(studyRepositoryProvider).getSubjectsStream();
     });
 
 final flashcardStreamProvider = StreamProvider<List<FlashcardModel>>((ref) {
+  ref.watch(_studyDayProvider);
   return ref.watch(studyRepositoryProvider).getFlashcardsStream();
 });
