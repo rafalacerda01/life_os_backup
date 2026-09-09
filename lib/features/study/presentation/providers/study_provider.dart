@@ -2,6 +2,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:life_os/core/database/database_provider.dart';
+import 'package:life_os/core/services/sync_manager_provider.dart';
 import 'package:life_os/features/study/data/models/study_model.dart';
 import 'package:life_os/features/study/data/models/flashcard_model.dart';
 import 'package:life_os/features/study/domain/entities/study_subject_entity.dart';
@@ -14,6 +15,7 @@ final studyRepositoryProvider = Provider((ref) {
     ref.watch(databaseProvider),
     FirebaseFirestore.instance,
     FirebaseAuth.instance,
+    ref.watch(syncManagerProvider),
   );
 });
 

@@ -34,8 +34,8 @@ class StudyModel {
       streak: map['streak'] ?? 0,
       reviewQueue: map['reviewQueue'] ?? 0,
       progress: (map['progress'] ?? 0.0).toDouble(),
-      lastStudyDate: map['lastStudyDate'] != null 
-          ? (map['lastStudyDate'] as Timestamp).toDate() 
+      lastStudyDate: map['lastStudyDate'] != null
+          ? (map['lastStudyDate'] as Timestamp).toDate()
           : null,
     );
   }
@@ -45,15 +45,13 @@ class StudyModel {
       'streak': streak,
       'reviewQueue': reviewQueue,
       'progress': progress,
-      'lastStudyDate': lastStudyDate != null ? Timestamp.fromDate(lastStudyDate!) : null,
+      'lastStudyDate': lastStudyDate != null
+          ? Timestamp.fromDate(lastStudyDate!)
+          : null,
     };
   }
 
   factory StudyModel.initial() {
-    return StudyModel(
-      streak: 0,
-      reviewQueue: 10,
-      progress: 0.0,
-    );
+    return StudyModel(streak: 0, reviewQueue: 0, progress: 0.0);
   }
 }

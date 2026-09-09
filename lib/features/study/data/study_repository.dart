@@ -5,19 +5,77 @@ import 'package:drift/drift.dart' hide Query;
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:life_os/core/database/app_database.dart';
 import 'package:life_os/core/security/input_sanitizer.dart';
+import 'package:life_os/core/services/sync_manager.dart';
 import 'package:life_os/core/utils/app_logger.dart';
 import 'package:life_os/features/study/data/models/flashcard_model.dart';
 import 'package:life_os/features/study/data/models/study_model.dart';
 import 'package:life_os/features/study/domain/entities/study_subject_entity.dart';
 import 'package:uuid/uuid.dart';
 
+class _StudySessionChanged implements Exception {
+  const _StudySessionChanged();
+}
+
+class _RemoteStudyStats {
+  final int? streak;
+  final int? reviewQueue;
+  final double? progress;
+  final bool hasLastStudyDate;
+  final DateTime? lastStudyDate;
+
+  const _RemoteStudyStats({
+    required this.streak,
+    required this.reviewQueue,
+    required this.progress,
+    required this.hasLastStudyDate,
+    required this.lastStudyDate,
+  });
+}
+
+class _RemoteStudySubject {
+  final String id;
+  final String title;
+  final int cardsToReview;
+  final int streakDays;
+  final double progress;
+  final bool hasExam;
+  final DateTime? examDate;
+
+  const _RemoteStudySubject({
+    required this.id,
+    required this.title,
+    required this.cardsToReview,
+    required this.streakDays,
+    required this.progress,
+    required this.hasExam,
+    required this.examDate,
+  });
+}
+
+class _RemoteFlashcard {
+  final String id;
+  final String subjectId;
+  final String question;
+  final String answer;
+  final DateTime? lastReviewed;
+
+  const _RemoteFlashcard({
+    required this.id,
+    required this.subjectId,
+    required this.question,
+    required this.answer,
+    required this.lastReviewed,
+  });
+}
+
 class StudyRepository {
   final AppDatabase _db;
   final FirebaseFirestore _firestore;
   final FirebaseAuth _auth;
+  final SyncManager _syncManager;
   final _uuid = const Uuid();
 
-  StudyRepository(this._db, this._firestore, this._auth);
+  StudyRepository(this._db, this._firestore, this._auth, this._syncManager);
 
   // ===========================================================================
   // 1. LEITURA (STREAMS LOCAIS)
@@ -100,19 +158,17 @@ class StudyRepository {
     bool hasExam = false,
     DateTime? examDate,
   }) async {
-    final user = _auth.currentUser;
-
-    if (user == null) {
-      return;
-    }
+    final expectedUid = _currentUid;
+    if (expectedUid == null) return;
 
     final id = _uuid.v4();
     final cleanTitle = InputSanitizer.sanitize(title);
 
     try {
       await _db.transactionWithSync(
-        ownerUid: user.uid,
+        ownerUid: expectedUid,
         localOperation: () async {
+          _requireCurrentUser(expectedUid);
           await _db
               .into(_db.subjects)
               .insert(
@@ -126,6 +182,7 @@ class StudyRepository {
                   examDate: Value(examDate?.millisecondsSinceEpoch),
                 ),
               );
+          _requireCurrentUser(expectedUid);
         },
         collection: 'subjects',
         docId: id,
@@ -136,6 +193,9 @@ class StudyRepository {
           'examDate': examDate?.toIso8601String(),
         }),
       );
+      _schedulePendingStudySync();
+    } on _StudySessionChanged {
+      return;
     } catch (e, stack) {
       AppLogger.e('Erro ao criar matéria localmente', e, stack);
       rethrow;
@@ -143,73 +203,71 @@ class StudyRepository {
   }
 
   Future<void> completeCard(String cardId) async {
-    if (_auth.currentUser == null) return;
+    final expectedUid = _currentUid;
+    if (expectedUid == null) return;
 
-    final nowEpoch = DateTime.now().millisecondsSinceEpoch;
+    final now = DateTime.now();
+    final nowEpoch = now.millisecondsSinceEpoch;
+    var didMutate = false;
 
     try {
-      final cardData = await (_db.select(
-        _db.flashcards,
-      )..where((t) => t.id.equals(cardId))).getSingleOrNull();
+      await _db.transaction(() async {
+        _requireCurrentUser(expectedUid);
+        final card = await (_db.select(
+          _db.flashcards,
+        )..where((table) => table.id.equals(cardId))).getSingleOrNull();
+        if (card == null || _isSameLocalDay(card.lastReviewed, now)) return;
 
-      if (cardData == null) return;
+        final subject = await (_db.select(
+          _db.subjects,
+        )..where((table) => table.id.equals(card.subjectId))).getSingleOrNull();
+        if (subject == null) {
+          AppLogger.w('Flashcard referencia uma matéria local inexistente.');
+          return;
+        }
 
-      final subjectId = cardData.subjectId;
+        final stats = await _db.select(_db.studyStats).getSingleOrNull();
+        _requireCurrentUser(expectedUid);
+        final newQueue = ((stats?.reviewQueue ?? 0) - 1)
+            .clamp(0, 99999)
+            .toInt();
+        final newProgress = ((stats?.progress ?? 0) + 0.05)
+            .clamp(0.0, 1.0)
+            .toDouble();
+        final newCardsToReview = (subject.cardsToReview - 1)
+            .clamp(0, 99999)
+            .toInt();
 
-      final subjectData = await (_db.select(
-        _db.subjects,
-      )..where((t) => t.id.equals(subjectId))).getSingleOrNull();
-
-      if (subjectData == null) {
-        AppLogger.w(
-          'Flashcard $cardId referencia uma matéria local inexistente: '
-          '$subjectId.',
+        await (_db.update(_db.flashcards)
+              ..where((table) => table.id.equals(cardId)))
+            .write(FlashcardsCompanion(lastReviewed: Value(nowEpoch)));
+        await _upsertStudyStats(
+          current: stats,
+          reviewQueue: newQueue,
+          progress: newProgress,
+          lastStudyDate: nowEpoch,
         );
-        return;
-      }
+        await (_db.update(_db.subjects)
+              ..where((table) => table.id.equals(card.subjectId)))
+            .write(SubjectsCompanion(cardsToReview: Value(newCardsToReview)));
 
-      final currentStats = await _db.select(_db.studyStats).getSingleOrNull();
+        await _enqueue(
+          ownerUid: expectedUid,
+          collection: 'review_queue',
+          docId: cardId,
+          operationType: 'update',
+          payload: {
+            'subjectId': card.subjectId,
+            'lastReviewed': now.toIso8601String(),
+          },
+        );
+        _requireCurrentUser(expectedUid);
+        didMutate = true;
+      });
 
-      final currentQueue = currentStats?.reviewQueue ?? 0;
-
-      final newQueue = currentQueue > 0
-          ? (currentQueue - 1).clamp(0, 99999).toInt()
-          : 0;
-
-      final currentProgress = currentStats?.progress ?? 0.0;
-
-      final newProgress = (currentProgress + 0.05).clamp(0.0, 1.0).toDouble();
-
-      final newCardsToReview = subjectData.cardsToReview > 0
-          ? subjectData.cardsToReview - 1
-          : 0;
-
-      await (_db.update(_db.flashcards)..where((t) => t.id.equals(cardId)))
-          .write(FlashcardsCompanion(lastReviewed: Value(nowEpoch)));
-
-      await (_db.update(
-        _db.studyStats,
-      )..where((t) => t.id.equals('main'))).write(
-        StudyStatsCompanion(
-          reviewQueue: Value(newQueue),
-          progress: Value(newProgress),
-          lastStudyDate: Value(nowEpoch),
-        ),
-      );
-
-      await (_db.update(_db.subjects)..where((t) => t.id.equals(subjectId)))
-          .write(SubjectsCompanion(cardsToReview: Value(newCardsToReview)));
-
-      unawaited(
-        _completeCardInFirestore(
-          cardId,
-          subjectId,
-          newQueue,
-          newProgress,
-          newCardsToReview,
-          nowEpoch,
-        ),
-      );
+      if (didMutate) _schedulePendingStudySync();
+    } on _StudySessionChanged {
+      return;
     } catch (e, stack) {
       AppLogger.e('Erro ao completar flashcard', e, stack);
       rethrow;
@@ -217,30 +275,26 @@ class StudyRepository {
   }
 
   Future<void> removeSubject(String id) async {
-    final user = _auth.currentUser;
-
-    if (user == null) {
-      return;
-    }
+    final expectedUid = _currentUid;
+    if (expectedUid == null) return;
 
     try {
-      final flashcardsQuery = await (_db.select(
-        _db.flashcards,
-      )..where((table) => table.subjectId.equals(id))).get();
-
-      final removedCardsCount = flashcardsQuery.length;
-
-      final currentStats = await _db.select(_db.studyStats).getSingleOrNull();
-
-      final currentQueue = currentStats?.reviewQueue ?? 0;
-
-      final newQueue = (currentQueue - removedCardsCount)
-          .clamp(0, 99999)
-          .toInt();
-
       await _db.transactionWithSync(
-        ownerUid: user.uid,
+        ownerUid: expectedUid,
         localOperation: () async {
+          _requireCurrentUser(expectedUid);
+          final flashcardsQuery = await (_db.select(
+            _db.flashcards,
+          )..where((table) => table.subjectId.equals(id))).get();
+          final currentStats = await _db
+              .select(_db.studyStats)
+              .getSingleOrNull();
+          _requireCurrentUser(expectedUid);
+          final currentQueue = currentStats?.reviewQueue ?? 0;
+          final newQueue = (currentQueue - flashcardsQuery.length)
+              .clamp(0, 99999)
+              .toInt();
+
           await (_db.delete(
             _db.flashcards,
           )..where((table) => table.subjectId.equals(id))).go();
@@ -253,15 +307,21 @@ class StudyRepository {
             _db.notificationsTable,
           )..where((table) => table.id.equals('exam_$id'))).go();
 
-          await (_db.update(_db.studyStats)
-                ..where((table) => table.id.equals('main')))
-              .write(StudyStatsCompanion(reviewQueue: Value(newQueue)));
+          if (currentStats != null) {
+            await (_db.update(_db.studyStats)
+                  ..where((table) => table.id.equals('main')))
+                .write(StudyStatsCompanion(reviewQueue: Value(newQueue)));
+          }
+          _requireCurrentUser(expectedUid);
         },
         collection: 'subjects',
         docId: id,
         operationType: 'delete',
         payloadJson: jsonEncode({'subjectId': id}),
       );
+      _schedulePendingStudySync();
+    } on _StudySessionChanged {
+      return;
     } catch (e, stack) {
       AppLogger.e('Erro ao deletar matéria', e, stack);
       rethrow;
@@ -273,28 +333,62 @@ class StudyRepository {
     String question,
     String answer,
   ) async {
-    if (_auth.currentUser == null) return;
+    final expectedUid = _currentUid;
+    if (expectedUid == null) return;
 
     final id = _uuid.v4();
-
     final cleanQuestion = InputSanitizer.sanitize(question);
     final cleanAnswer = InputSanitizer.sanitize(answer);
+    final createdAt = DateTime.now();
+    var didMutate = false;
 
     try {
-      await _db
-          .into(_db.flashcards)
-          .insert(
-            FlashcardsCompanion.insert(
-              id: id,
-              subjectId: subjectId,
-              question: cleanQuestion,
-              answer: cleanAnswer,
-            ),
-          );
+      await _db.transaction(() async {
+        _requireCurrentUser(expectedUid);
+        final subject = await (_db.select(
+          _db.subjects,
+        )..where((table) => table.id.equals(subjectId))).getSingleOrNull();
+        if (subject == null) return;
 
-      unawaited(
-        _addFlashcardInFirestore(id, subjectId, cleanQuestion, cleanAnswer),
-      );
+        final stats = await _db.select(_db.studyStats).getSingleOrNull();
+        _requireCurrentUser(expectedUid);
+        final newQueue = (stats?.reviewQueue ?? 0) + 1;
+        final newCardsToReview = subject.cardsToReview + 1;
+
+        await _db
+            .into(_db.flashcards)
+            .insert(
+              FlashcardsCompanion.insert(
+                id: id,
+                subjectId: subjectId,
+                question: cleanQuestion,
+                answer: cleanAnswer,
+              ),
+            );
+        await (_db.update(_db.subjects)
+              ..where((table) => table.id.equals(subjectId)))
+            .write(SubjectsCompanion(cardsToReview: Value(newCardsToReview)));
+        await _upsertStudyStats(current: stats, reviewQueue: newQueue);
+
+        await _enqueue(
+          ownerUid: expectedUid,
+          collection: 'review_queue',
+          docId: id,
+          operationType: 'create',
+          payload: {
+            'subjectId': subjectId,
+            'question': cleanQuestion,
+            'answer': cleanAnswer,
+            'createdAt': createdAt.toIso8601String(),
+          },
+        );
+        _requireCurrentUser(expectedUid);
+        didMutate = true;
+      });
+
+      if (didMutate) _schedulePendingStudySync();
+    } on _StudySessionChanged {
+      return;
     } catch (e, stack) {
       AppLogger.e('Erro ao criar flashcard', e, stack);
       rethrow;
@@ -302,48 +396,49 @@ class StudyRepository {
   }
 
   Future<void> logStudySession(StudyModel currentStatus) async {
-    if (_auth.currentUser == null) return;
+    final expectedUid = _currentUid;
+    if (expectedUid == null) return;
 
     final now = DateTime.now();
-
-    final today = DateTime(now.year, now.month, now.day);
-
-    int newStreak = currentStatus.streak;
-
-    if (currentStatus.lastStudyDate != null) {
-      final last = currentStatus.lastStudyDate!;
-
-      final lastDate = DateTime(last.year, last.month, last.day);
-
-      final difference = today.difference(lastDate).inDays;
-
-      if (difference == 1) {
-        newStreak++;
-      } else if (difference > 1) {
-        newStreak = 1;
-      }
-    } else {
-      newStreak = 1;
-    }
-
+    final newStreak = _nextStreak(
+      currentStatus.streak,
+      currentStatus.lastStudyDate,
+      now,
+    );
     final newProgress = (currentStatus.progress + 0.1)
         .clamp(0.0, 1.0)
         .toDouble();
 
     try {
-      await _db
-          .into(_db.studyStats)
-          .insertOnConflictUpdate(
-            StudyStatsCompanion(
-              id: const Value('main'),
-              streak: Value(newStreak),
-              progress: Value(newProgress),
-              reviewQueue: Value(currentStatus.reviewQueue),
-              lastStudyDate: Value(now.millisecondsSinceEpoch),
-            ),
-          );
-
-      unawaited(_logStudySessionInFirestore(newStreak, newProgress, now));
+      await _db.transactionWithSync(
+        ownerUid: expectedUid,
+        localOperation: () async {
+          _requireCurrentUser(expectedUid);
+          await _db
+              .into(_db.studyStats)
+              .insertOnConflictUpdate(
+                StudyStatsCompanion.insert(
+                  id: 'main',
+                  streak: newStreak,
+                  reviewQueue: currentStatus.reviewQueue,
+                  progress: newProgress,
+                  lastStudyDate: Value(now.millisecondsSinceEpoch),
+                ),
+              );
+          _requireCurrentUser(expectedUid);
+        },
+        collection: 'study_info',
+        docId: 'main',
+        operationType: 'update',
+        payloadJson: jsonEncode({
+          'streak': newStreak,
+          'progress': newProgress,
+          'lastStudyDate': now.toIso8601String(),
+        }),
+      );
+      _schedulePendingStudySync();
+    } on _StudySessionChanged {
+      return;
     } catch (e, stack) {
       AppLogger.e('Erro ao logar sessão', e, stack);
     }
@@ -354,100 +449,74 @@ class StudyRepository {
   // ===========================================================================
 
   Future<void> addStudyTime(String subjectId, int elapsedSeconds) async {
-    if (_auth.currentUser == null) return;
+    final expectedUid = _currentUid;
+    if (expectedUid == null) return;
 
     final safeElapsed = elapsedSeconds <= 0 ? 1500 : elapsedSeconds;
-
     final now = DateTime.now();
-
-    final today = DateTime(now.year, now.month, now.day);
-
     final nowEpoch = now.millisecondsSinceEpoch;
 
     try {
-      final currentStats = await _db.select(_db.studyStats).getSingleOrNull();
+      await _db.transaction(() async {
+        _requireCurrentUser(expectedUid);
+        final stats = await _db.select(_db.studyStats).getSingleOrNull();
+        final subject = await (_db.select(
+          _db.subjects,
+        )..where((table) => table.id.equals(subjectId))).getSingleOrNull();
+        _requireCurrentUser(expectedUid);
 
-      int newStreak = currentStats?.streak ?? 0;
-
-      final lastStudyMillis = currentStats?.lastStudyDate;
-
-      if (lastStudyMillis != null) {
-        final last = DateTime.fromMillisecondsSinceEpoch(lastStudyMillis);
-
-        final lastDate = DateTime(last.year, last.month, last.day);
-
-        final difference = today.difference(lastDate).inDays;
-
-        if (difference == 1) {
-          newStreak++;
-        } else if (difference > 1) {
-          newStreak = 1;
-        }
-      } else {
-        newStreak = 1;
-      }
-
-      final currentProgress = currentStats?.progress ?? 0.0;
-
-      double sessionProgressBonus = (safeElapsed / 1500) * 0.25;
-
-      if (sessionProgressBonus < 0.05) {
-        sessionProgressBonus = 0.05;
-      }
-
-      final newProgress = (currentProgress + sessionProgressBonus)
-          .clamp(0.0, 1.0)
-          .toDouble();
-
-      await _db
-          .into(_db.studyStats)
-          .insertOnConflictUpdate(
-            StudyStatsCompanion(
-              id: const Value('main'),
-              streak: Value(newStreak),
-              progress: Value(newProgress),
-              reviewQueue: Value(currentStats?.reviewQueue ?? 0),
-              lastStudyDate: Value(nowEpoch),
-            ),
-          );
-
-      final subjectData = await (_db.select(
-        _db.subjects,
-      )..where((t) => t.id.equals(subjectId))).getSingleOrNull();
-
-      double subjectProgress = 0.0;
-
-      if (subjectData != null) {
-        subjectProgress = (subjectData.progress + sessionProgressBonus)
+        final lastStudyDate = stats?.lastStudyDate == null
+            ? null
+            : DateTime.fromMillisecondsSinceEpoch(stats!.lastStudyDate!);
+        final newStreak = _nextStreak(stats?.streak ?? 0, lastStudyDate, now);
+        final bonus = ((safeElapsed / 1500) * 0.25).clamp(0.05, 1.0).toDouble();
+        final newProgress = ((stats?.progress ?? 0) + bonus)
             .clamp(0.0, 1.0)
             .toDouble();
 
-        await (_db.update(
-          _db.subjects,
-        )..where((t) => t.id.equals(subjectId))).write(
-          SubjectsCompanion(
-            progress: Value(subjectProgress),
-            streakDays: Value(newStreak),
-          ),
+        await _upsertStudyStats(
+          current: stats,
+          streak: newStreak,
+          progress: newProgress,
+          lastStudyDate: nowEpoch,
         );
-      }
+        await _enqueue(
+          ownerUid: expectedUid,
+          collection: 'study_info',
+          docId: 'main',
+          operationType: 'update',
+          payload: {
+            'streak': newStreak,
+            'progress': newProgress,
+            'lastStudyDate': now.toIso8601String(),
+          },
+        );
 
-      AppLogger.i(
-        '🔥 Foco Concluído! '
-        'Bônus: +${(sessionProgressBonus * 100).toStringAsFixed(1)}% | '
-        'Progresso Total: '
-        '${(newProgress * 100).toStringAsFixed(1)}%',
-      );
-
-      unawaited(
-        _syncStudyTimeInFirestore(
-          subjectId,
-          newStreak,
-          newProgress,
-          subjectProgress,
-          now,
-        ),
-      );
+        if (subject != null) {
+          final subjectProgress = (subject.progress + bonus)
+              .clamp(0.0, 1.0)
+              .toDouble();
+          await (_db.update(
+            _db.subjects,
+          )..where((table) => table.id.equals(subjectId))).write(
+            SubjectsCompanion(
+              progress: Value(subjectProgress),
+              streakDays: Value(newStreak),
+            ),
+          );
+          await _enqueue(
+            ownerUid: expectedUid,
+            collection: 'subjects',
+            docId: subjectId,
+            operationType: 'update',
+            payload: {'progress': subjectProgress, 'streakDays': newStreak},
+          );
+        }
+        _requireCurrentUser(expectedUid);
+      });
+      _schedulePendingStudySync();
+    } on _StudySessionChanged {
+      return;
     } catch (e, stack) {
       AppLogger.e('Erro ao processar tempo de estudo', e, stack);
       rethrow;
@@ -455,32 +524,64 @@ class StudyRepository {
   }
 
   Future<void> completeReview(StudyModel currentStatus) async {
-    if (_auth.currentUser == null || currentStatus.reviewQueue <= 0) {
-      return;
-    }
+    final expectedUid = _currentUid;
+    if (expectedUid == null || currentStatus.reviewQueue <= 0) return;
 
     final safeNewQueue = (currentStatus.reviewQueue - 1)
         .clamp(0, 99999)
         .toInt();
 
     try {
-      await (_db.update(_db.studyStats)..where((t) => t.id.equals('main')))
-          .write(StudyStatsCompanion(reviewQueue: Value(safeNewQueue)));
-
-      unawaited(_completeReviewInFirestore(safeNewQueue));
+      await _db.transactionWithSync(
+        ownerUid: expectedUid,
+        localOperation: () async {
+          _requireCurrentUser(expectedUid);
+          final stats = await _db.select(_db.studyStats).getSingleOrNull();
+          await _upsertStudyStats(
+            current: stats,
+            fallback: currentStatus,
+            reviewQueue: safeNewQueue,
+          );
+          _requireCurrentUser(expectedUid);
+        },
+        collection: 'study_info',
+        docId: 'main',
+        operationType: 'update',
+        payloadJson: jsonEncode({'reviewQueue': safeNewQueue}),
+      );
+      _schedulePendingStudySync();
+    } on _StudySessionChanged {
+      return;
     } catch (e, stack) {
       AppLogger.e('Erro ao completar revisão geral', e, stack);
     }
   }
 
   Future<void> resetDailyProgress(StudyModel currentStatus) async {
-    if (_auth.currentUser == null) return;
+    final expectedUid = _currentUid;
+    if (expectedUid == null) return;
 
     try {
-      await (_db.update(_db.studyStats)..where((t) => t.id.equals('main')))
-          .write(const StudyStatsCompanion(progress: Value(0.0)));
-
-      unawaited(_resetDailyProgressInFirestore());
+      await _db.transactionWithSync(
+        ownerUid: expectedUid,
+        localOperation: () async {
+          _requireCurrentUser(expectedUid);
+          final stats = await _db.select(_db.studyStats).getSingleOrNull();
+          await _upsertStudyStats(
+            current: stats,
+            fallback: currentStatus,
+            progress: 0,
+          );
+          _requireCurrentUser(expectedUid);
+        },
+        collection: 'study_info',
+        docId: 'main',
+        operationType: 'update',
+        payloadJson: jsonEncode({'progress': 0.0}),
+      );
+      _schedulePendingStudySync();
+    } on _StudySessionChanged {
+      return;
     } catch (e, stack) {
       AppLogger.e('Erro ao resetar progresso diário', e, stack);
     }
@@ -491,487 +592,435 @@ class StudyRepository {
   // ===========================================================================
 
   Future<void> syncStudyFromFirebaseToLocal() async {
-    final user = _auth.currentUser;
-
-    if (user == null) return;
-
-    final userRef = _firestore.collection('users').doc(user.uid);
-
-    // -------------------------------------------------------------------------
-    // Retry para documento
-    // -------------------------------------------------------------------------
-
-    Future<DocumentSnapshot<Map<String, dynamic>>?> getDocumentWithRetry(
-      DocumentReference<Map<String, dynamic>> reference,
-    ) async {
-      const maxAttempts = 3;
-
-      for (var attempt = 1; attempt <= maxAttempts; attempt++) {
-        try {
-          return await reference.get();
-        } on FirebaseException catch (e, stack) {
-          final isTransient =
-              e.code == 'unavailable' ||
-              e.code == 'deadline-exceeded' ||
-              e.code == 'network-request-failed';
-
-          if (!isTransient || attempt == maxAttempts) {
-            AppLogger.e('Study Firebase Pull falhou.', e, stack);
-
-            return null;
-          }
-
-          final delay = Duration(milliseconds: 500 * (1 << (attempt - 1)));
-
-          AppLogger.w(
-            'Firestore indisponível no Study. '
-            'Tentativa $attempt/$maxAttempts. '
-            'Retry em ${delay.inMilliseconds}ms.',
-          );
-
-          await Future<void>.delayed(delay);
-        } catch (e, stack) {
-          AppLogger.e('Erro inesperado ao ler documento do Study', e, stack);
-
-          return null;
-        }
-      }
-
-      return null;
-    }
-
-    // -------------------------------------------------------------------------
-    // Retry para coleção
-    // -------------------------------------------------------------------------
-
-    Future<QuerySnapshot<Map<String, dynamic>>?> getCollectionWithRetry(
-      Future<QuerySnapshot<Map<String, dynamic>>> Function() operation,
-    ) async {
-      const maxAttempts = 3;
-
-      for (var attempt = 1; attempt <= maxAttempts; attempt++) {
-        try {
-          return await operation();
-        } on FirebaseException catch (e, stack) {
-          final isTransient =
-              e.code == 'unavailable' ||
-              e.code == 'deadline-exceeded' ||
-              e.code == 'network-request-failed';
-
-          if (!isTransient || attempt == maxAttempts) {
-            AppLogger.e('Study Firebase Pull falhou.', e, stack);
-
-            return null;
-          }
-
-          final delay = Duration(milliseconds: 500 * (1 << (attempt - 1)));
-
-          AppLogger.w(
-            'Firestore indisponível no Study. '
-            'Tentativa $attempt/$maxAttempts. '
-            'Retry em ${delay.inMilliseconds}ms.',
-          );
-
-          await Future<void>.delayed(delay);
-        } catch (e, stack) {
-          AppLogger.e(
-            'Erro inesperado ao consultar coleção do Study',
-            e,
-            stack,
-          );
-
-          return null;
-        }
-      }
-
-      return null;
-    }
-
-    // =========================================================================
-    // 1. STUDY INFO / MAIN
-    // =========================================================================
+    final expectedUid = _currentUid;
+    if (expectedUid == null) return;
 
     try {
-      final mainDoc = await getDocumentWithRetry(
+      final pullStartedAt = DateTime.now().millisecondsSinceEpoch;
+      final queueDrained = await _syncManager.processPendingItems();
+      if (!queueDrained || !_isCurrentUser(expectedUid)) return;
+
+      final userRef = _firestore.collection('users').doc(expectedUid);
+      final mainDoc = await _getStudyDocument(
         userRef.collection('study_info').doc('main'),
       );
+      if (mainDoc == null) return;
+      final subjectsSnapshot = await _getStudyCollection(
+        userRef.collection('subjects'),
+      );
+      if (subjectsSnapshot == null) return;
+      final flashcardsSnapshot = await _getStudyCollection(
+        userRef.collection('review_queue'),
+      );
+      if (flashcardsSnapshot == null) return;
+      _requireCurrentUser(expectedUid);
 
-      if (mainDoc != null && mainDoc.exists) {
-        final data = mainDoc.data();
+      final remoteStats = mainDoc.exists
+          ? _parseRemoteStudyStats(mainDoc.data())
+          : null;
+      if (mainDoc.exists && remoteStats == null) {
+        AppLogger.w('SYNC Study: informações remotas inválidas ignoradas.');
+      }
 
-        if (data != null) {
-          final rawQueue = data['reviewQueue'];
+      final remoteSubjects = <_RemoteStudySubject>[];
+      for (final doc in subjectsSnapshot.docs) {
+        final parsed = _parseRemoteSubject(doc.id, doc.data());
+        if (parsed == null) {
+          AppLogger.w('SYNC Study: matéria remota inválida ignorada.');
+        } else {
+          remoteSubjects.add(parsed);
+        }
+      }
 
-          final reviewQueue = rawQueue is num
-              ? rawQueue.toInt().clamp(0, 1 << 31).toInt()
-              : 0;
+      final remoteFlashcards = <_RemoteFlashcard>[];
+      for (final doc in flashcardsSnapshot.docs) {
+        final parsed = _parseRemoteFlashcard(doc.id, doc.data());
+        if (parsed == null) {
+          AppLogger.w('SYNC Study: flashcard remoto inválido ignorado.');
+        } else {
+          remoteFlashcards.add(parsed);
+        }
+      }
 
-          final progress = data['progress'] is num
-              ? (data['progress'] as num).toDouble().clamp(0.0, 1.0).toDouble()
-              : 0.0;
+      await _reconcileStudySnapshot(
+        expectedUid: expectedUid,
+        pullStartedAt: pullStartedAt,
+        remoteStats: remoteStats,
+        remoteSubjects: remoteSubjects,
+        remoteFlashcards: remoteFlashcards,
+      );
+    } on _StudySessionChanged {
+      return;
+    } catch (_) {
+      AppLogger.w('Não foi possível sincronizar os estudos neste momento.');
+    }
+  }
 
-          final rawStreak = data['streak'];
+  String? get _currentUid {
+    final uid = _auth.currentUser?.uid.trim();
+    return uid == null || uid.isEmpty ? null : uid;
+  }
 
-          final streak = rawStreak is num
-              ? rawStreak.toInt().clamp(0, 1 << 31).toInt()
-              : 0;
+  bool _isCurrentUser(String expectedUid) =>
+      _auth.currentUser?.uid == expectedUid;
 
-          final lastStudyDate = data['lastStudyDate'];
+  void _requireCurrentUser(String expectedUid) {
+    if (!_isCurrentUser(expectedUid)) {
+      throw const _StudySessionChanged();
+    }
+  }
 
-          final lastStudyDateEpoch = lastStudyDate is Timestamp
-              ? lastStudyDate.millisecondsSinceEpoch
+  void _schedulePendingStudySync() {
+    unawaited(
+      _syncManager.processPendingItems().catchError((Object _, StackTrace _) {
+        AppLogger.w('Não foi possível enviar estudos pendentes agora.');
+        return false;
+      }),
+    );
+  }
+
+  Future<void> _enqueue({
+    required String ownerUid,
+    required String collection,
+    required String docId,
+    required String operationType,
+    required Map<String, dynamic> payload,
+  }) async {
+    await _db.insertSyncItem(
+      ownerUid: ownerUid,
+      collection: collection,
+      docId: docId,
+      operationType: operationType,
+      payloadJson: jsonEncode(payload),
+    );
+  }
+
+  Future<void> _upsertStudyStats({
+    required StudyStat? current,
+    StudyModel? fallback,
+    int? streak,
+    int? reviewQueue,
+    double? progress,
+    int? lastStudyDate,
+  }) async {
+    await _db
+        .into(_db.studyStats)
+        .insertOnConflictUpdate(
+          StudyStatsCompanion.insert(
+            id: 'main',
+            streak: streak ?? current?.streak ?? fallback?.streak ?? 0,
+            reviewQueue:
+                reviewQueue ??
+                current?.reviewQueue ??
+                fallback?.reviewQueue ??
+                0,
+            progress: progress ?? current?.progress ?? fallback?.progress ?? 0,
+            lastStudyDate: Value(
+              lastStudyDate ??
+                  current?.lastStudyDate ??
+                  fallback?.lastStudyDate?.millisecondsSinceEpoch,
+            ),
+          ),
+        );
+  }
+
+  int _nextStreak(int current, DateTime? lastStudyDate, DateTime now) {
+    if (lastStudyDate == null) return 1;
+    final today = DateTime(now.year, now.month, now.day);
+    final last = DateTime(
+      lastStudyDate.year,
+      lastStudyDate.month,
+      lastStudyDate.day,
+    );
+    final difference = today.difference(last).inDays;
+    if (difference == 1) return current + 1;
+    if (difference > 1) return 1;
+    return current;
+  }
+
+  bool _isSameLocalDay(int? epoch, DateTime now) {
+    if (epoch == null) return false;
+    final date = DateTime.fromMillisecondsSinceEpoch(epoch);
+    return date.year == now.year &&
+        date.month == now.month &&
+        date.day == now.day;
+  }
+
+  Future<DocumentSnapshot<Map<String, dynamic>>?> _getStudyDocument(
+    DocumentReference<Map<String, dynamic>> reference,
+  ) async {
+    try {
+      return await reference.get(const GetOptions(source: Source.server));
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<QuerySnapshot<Map<String, dynamic>>?> _getStudyCollection(
+    CollectionReference<Map<String, dynamic>> reference,
+  ) async {
+    try {
+      return await reference.get(const GetOptions(source: Source.server));
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<void> _reconcileStudySnapshot({
+    required String expectedUid,
+    required int pullStartedAt,
+    required _RemoteStudyStats? remoteStats,
+    required List<_RemoteStudySubject> remoteSubjects,
+    required List<_RemoteFlashcard> remoteFlashcards,
+  }) async {
+    await _db.transaction(() async {
+      _requireCurrentUser(expectedUid);
+      final authoritativeItems =
+          await (_db.select(_db.syncQueueTable)..where(
+                (item) =>
+                    item.ownerUid.equals(expectedUid) &
+                    (item.collection.equals('study_info') |
+                        item.collection.equals('subjects') |
+                        item.collection.equals('review_queue')) &
+                    (item.status.equals(SyncQueuePersistenceStatus.pending) |
+                        (item.status.equals(
+                              SyncQueuePersistenceStatus.succeeded,
+                            ) &
+                            item.createdAt.isBiggerOrEqualValue(
+                              pullStartedAt,
+                            ))),
+              ))
+              .get();
+
+      final reviewMutations = authoritativeItems.where(
+        (item) =>
+            item.collection == 'review_queue' &&
+            (item.operationType == 'create' || item.operationType == 'update'),
+      );
+      final protectStats =
+          authoritativeItems.any(
+            (item) => item.collection == 'study_info' && item.docId == 'main',
+          ) ||
+          reviewMutations.isNotEmpty;
+      final protectSubjects = authoritativeItems
+          .where((item) => item.collection == 'subjects')
+          .map((item) => item.docId)
+          .toSet();
+      var protectAllSubjects = false;
+      for (final item in reviewMutations) {
+        try {
+          final payload = jsonDecode(item.payloadJson);
+          final subjectId = payload is Map<String, dynamic>
+              ? payload['subjectId']
               : null;
-
-          await _db
-              .into(_db.studyStats)
-              .insertOnConflictUpdate(
-                StudyStatsCompanion(
-                  id: const Value('main'),
-                  streak: Value(streak),
-                  reviewQueue: Value(reviewQueue),
-                  progress: Value(progress),
-                  lastStudyDate: Value(lastStudyDateEpoch),
-                ),
-              );
-        }
-      }
-    } catch (e, stack) {
-      AppLogger.e('Erro ao aplicar Study Info do Firebase no Drift', e, stack);
-    }
-
-    // =========================================================================
-    // 2. SUBJECTS
-    // =========================================================================
-
-    try {
-      final subjectsSnapshot = await getCollectionWithRetry(
-        () => userRef.collection('subjects').get(),
-      );
-
-      if (subjectsSnapshot != null) {
-        for (final doc in subjectsSnapshot.docs) {
-          try {
-            final data = doc.data();
-
-            final examDate = data['examDate'];
-
-            final examDateEpoch = examDate is Timestamp
-                ? examDate.millisecondsSinceEpoch
-                : null;
-
-            final rawCardsToReview = data['cardsToReview'];
-
-            final cardsToReview = rawCardsToReview is num
-                ? rawCardsToReview.toInt().clamp(0, 1 << 31).toInt()
-                : 0;
-
-            final rawStreakDays = data['streakDays'];
-
-            final streakDays = rawStreakDays is num
-                ? rawStreakDays.toInt().clamp(0, 1 << 31).toInt()
-                : 0;
-
-            final rawProgress = data['progress'];
-
-            final progress = rawProgress is num
-                ? rawProgress.toDouble().clamp(0.0, 1.0).toDouble()
-                : 0.0;
-
-            await _db
-                .into(_db.subjects)
-                .insertOnConflictUpdate(
-                  SubjectsCompanion(
-                    id: Value(doc.id),
-                    title: Value(data['title']?.toString() ?? ''),
-                    cardsToReview: Value(cardsToReview),
-                    streakDays: Value(streakDays),
-                    progress: Value(progress),
-                    hasExam: Value(data['hasExam'] == true),
-                    examDate: Value(examDateEpoch),
-                  ),
-                );
-          } catch (e, stack) {
-            AppLogger.e(
-              'Erro ao sincronizar subject do Firebase.',
-              e,
-              stack,
-            );
+          if (subjectId is String && subjectId.trim().isNotEmpty) {
+            protectSubjects.add(subjectId);
+          } else {
+            protectAllSubjects = true;
           }
+        } on FormatException {
+          protectAllSubjects = true;
         }
       }
-    } catch (e, stack) {
-      AppLogger.e('Erro ao sincronizar coleção subjects do Study', e, stack);
-    }
+      final protectCards = authoritativeItems
+          .where((item) => item.collection == 'review_queue')
+          .map((item) => item.docId)
+          .toSet();
+      _requireCurrentUser(expectedUid);
 
-    // =========================================================================
-    // 3. REVIEW QUEUE / FLASHCARDS
-    // =========================================================================
+      if (!protectStats && remoteStats != null) {
+        await _applyRemoteStudyStats(expectedUid, remoteStats);
+      }
 
-    try {
-      final flashcardsSnapshot = await getCollectionWithRetry(
-        () => userRef.collection('review_queue').get(),
-      );
-
-      if (flashcardsSnapshot != null) {
-        for (final doc in flashcardsSnapshot.docs) {
-          try {
-            final data = doc.data();
-
-            final lastReviewed = data['lastReviewed'];
-
-            final lastReviewedEpoch = lastReviewed is Timestamp
-                ? lastReviewed.millisecondsSinceEpoch
-                : null;
-
-            await _db
-                .into(_db.flashcards)
-                .insertOnConflictUpdate(
-                  FlashcardsCompanion(
-                    id: Value(doc.id),
-                    subjectId: Value(data['subjectId']?.toString() ?? ''),
-                    question: Value(data['question']?.toString() ?? ''),
-                    answer: Value(data['answer']?.toString() ?? ''),
-                    lastReviewed: Value(lastReviewedEpoch),
-                  ),
-                );
-          } catch (e, stack) {
-            AppLogger.e(
-              'Erro ao sincronizar flashcard do Firebase.',
-              e,
-              stack,
+      for (final subject in remoteSubjects) {
+        _requireCurrentUser(expectedUid);
+        if (protectAllSubjects || protectSubjects.contains(subject.id))
+          continue;
+        await _db
+            .into(_db.subjects)
+            .insertOnConflictUpdate(
+              SubjectsCompanion.insert(
+                id: subject.id,
+                title: subject.title,
+                cardsToReview: subject.cardsToReview,
+                streakDays: subject.streakDays,
+                progress: subject.progress,
+                hasExam: subject.hasExam,
+                examDate: Value(subject.examDate?.millisecondsSinceEpoch),
+              ),
             );
-          }
-        }
+        _requireCurrentUser(expectedUid);
       }
-    } catch (e, stack) {
-      AppLogger.e(
-        'Erro ao sincronizar coleção review_queue do Study',
-        e,
-        stack,
-      );
-    }
+
+      for (final card in remoteFlashcards) {
+        _requireCurrentUser(expectedUid);
+        if (protectCards.contains(card.id)) continue;
+        final subject = await (_db.select(
+          _db.subjects,
+        )..where((table) => table.id.equals(card.subjectId))).getSingleOrNull();
+        _requireCurrentUser(expectedUid);
+        if (subject == null) {
+          AppLogger.w('SYNC Study: flashcard sem matéria válida ignorado.');
+          continue;
+        }
+        await _db
+            .into(_db.flashcards)
+            .insertOnConflictUpdate(
+              FlashcardsCompanion.insert(
+                id: card.id,
+                subjectId: card.subjectId,
+                question: card.question,
+                answer: card.answer,
+                lastReviewed: Value(card.lastReviewed?.millisecondsSinceEpoch),
+              ),
+            );
+        _requireCurrentUser(expectedUid);
+      }
+    });
   }
 
-  Future<void> _completeCardInFirestore(
-    String cardId,
-    String subjectId,
-    int newQueue,
-    double newProgress,
-    int newCardsToReview,
-    int nowEpoch,
-  ) async {
-    final user = _auth.currentUser;
-
-    if (user == null) return;
-
-    try {
-      final uid = user.uid;
-
-      final batch = _firestore.batch();
-
-      final reviewQueueRef = _firestore
-          .collection('users')
-          .doc(uid)
-          .collection('review_queue')
-          .doc(cardId);
-
-      batch.update(reviewQueueRef, {
-        'lastReviewed': Timestamp.fromMillisecondsSinceEpoch(nowEpoch),
-      });
-
-      batch.set(
-        _firestore
-            .collection('users')
-            .doc(uid)
-            .collection('study_info')
-            .doc('main'),
-        {
-          'reviewQueue': newQueue,
-          'progress': newProgress,
-          'lastStudyDate': Timestamp.fromMillisecondsSinceEpoch(nowEpoch),
-        },
-        SetOptions(merge: true),
-      );
-
-      final subjectRef = _firestore
-          .collection('users')
-          .doc(uid)
-          .collection('subjects')
-          .doc(subjectId);
-
-      batch.update(subjectRef, {'cardsToReview': newCardsToReview});
-
-      await batch.commit();
-    } catch (e, stack) {
-      AppLogger.e('Sync Error: Completar Flashcard', e, stack);
+  _RemoteStudyStats? _parseRemoteStudyStats(Map<String, dynamic>? data) {
+    if (data == null || data.isEmpty) return null;
+    final streak = data['streak'];
+    final queue = data['reviewQueue'];
+    final progress = data['progress'];
+    final hasDate = data.containsKey('lastStudyDate');
+    final date = hasDate ? _parseRemoteDate(data['lastStudyDate']) : null;
+    if ((data.containsKey('streak') && (streak is! int || streak < 0)) ||
+        (data.containsKey('reviewQueue') && (queue is! int || queue < 0)) ||
+        (data.containsKey('progress') && !_isValidProgress(progress)) ||
+        (hasDate && date == null)) {
+      return null;
     }
+    return _RemoteStudyStats(
+      streak: streak as int?,
+      reviewQueue: queue as int?,
+      progress: progress == null ? null : (progress as num).toDouble(),
+      hasLastStudyDate: hasDate,
+      lastStudyDate: date,
+    );
   }
 
-  Future<void> _addFlashcardInFirestore(
+  _RemoteStudySubject? _parseRemoteSubject(
     String id,
-    String subjectId,
-    String question,
-    String answer,
+    Map<String, dynamic> data,
+  ) {
+    final title = data['title'];
+    final cards = data['cardsToReview'];
+    final streak = data['streakDays'];
+    final progress = data['progress'];
+    final hasExam = data['hasExam'];
+    final rawExamDate = data['examDate'];
+    final examDate = rawExamDate == null ? null : _parseRemoteDate(rawExamDate);
+    if (id.trim().isEmpty ||
+        title is! String ||
+        title.trim().isEmpty ||
+        cards is! int ||
+        cards < 0 ||
+        streak is! int ||
+        streak < 0 ||
+        !_isValidProgress(progress) ||
+        hasExam is! bool ||
+        (rawExamDate != null && examDate == null)) {
+      return null;
+    }
+    return _RemoteStudySubject(
+      id: id,
+      title: title,
+      cardsToReview: cards,
+      streakDays: streak,
+      progress: (progress as num).toDouble(),
+      hasExam: hasExam,
+      examDate: examDate,
+    );
+  }
+
+  _RemoteFlashcard? _parseRemoteFlashcard(
+    String id,
+    Map<String, dynamic> data,
+  ) {
+    final subjectId = data['subjectId'];
+    final question = data['question'];
+    final answer = data['answer'];
+    final rawReviewed = data['lastReviewed'];
+    final reviewed = rawReviewed == null ? null : _parseRemoteDate(rawReviewed);
+    if (id.trim().isEmpty ||
+        subjectId is! String ||
+        subjectId.trim().isEmpty ||
+        question is! String ||
+        question.trim().isEmpty ||
+        answer is! String ||
+        answer.trim().isEmpty ||
+        (rawReviewed != null && reviewed == null)) {
+      return null;
+    }
+    return _RemoteFlashcard(
+      id: id,
+      subjectId: subjectId,
+      question: question,
+      answer: answer,
+      lastReviewed: reviewed,
+    );
+  }
+
+  bool _isValidProgress(Object? value) {
+    if (value is! num) return false;
+    final progress = value.toDouble();
+    return progress.isFinite && progress >= 0 && progress <= 1;
+  }
+
+  DateTime? _parseRemoteDate(Object? value) => switch (value) {
+    Timestamp timestamp => timestamp.toDate(),
+    DateTime date => date,
+    String text => DateTime.tryParse(text),
+    _ => null,
+  };
+
+  Future<void> _applyRemoteStudyStats(
+    String expectedUid,
+    _RemoteStudyStats remote,
   ) async {
-    final user = _auth.currentUser;
-
-    if (user == null) return;
-
-    try {
-      final uid = user.uid;
-
-      final batch = _firestore.batch();
-
-      batch.set(
-        _firestore
-            .collection('users')
-            .doc(uid)
-            .collection('review_queue')
-            .doc(id),
-        {
-          'subjectId': subjectId,
-          'question': question,
-          'answer': answer,
-          'createdAt': FieldValue.serverTimestamp(),
-        },
-        SetOptions(merge: true),
-      );
-
-      batch.set(
-        _firestore
-            .collection('users')
-            .doc(uid)
-            .collection('study_info')
-            .doc('main'),
-        {'reviewQueue': FieldValue.increment(1)},
-        SetOptions(merge: true),
-      );
-
-      final subjectRef = _firestore
-          .collection('users')
-          .doc(uid)
-          .collection('subjects')
-          .doc(subjectId);
-
-      batch.update(subjectRef, {'cardsToReview': FieldValue.increment(1)});
-
-      await batch.commit();
-    } catch (e, stack) {
-      AppLogger.e('Sync Error: Adicionar Flashcard', e, stack);
+    _requireCurrentUser(expectedUid);
+    final current = await _db.select(_db.studyStats).getSingleOrNull();
+    _requireCurrentUser(expectedUid);
+    if (current == null) {
+      await _db
+          .into(_db.studyStats)
+          .insert(
+            StudyStatsCompanion.insert(
+              id: 'main',
+              streak: remote.streak ?? 0,
+              reviewQueue: remote.reviewQueue ?? 0,
+              progress: remote.progress ?? 0,
+              lastStudyDate: Value(
+                remote.hasLastStudyDate
+                    ? remote.lastStudyDate?.millisecondsSinceEpoch
+                    : null,
+              ),
+            ),
+          );
+      _requireCurrentUser(expectedUid);
+      return;
     }
-  }
 
-  Future<void> _logStudySessionInFirestore(
-    int streak,
-    double progress,
-    DateTime now,
-  ) async {
-    final user = _auth.currentUser;
-
-    if (user == null) return;
-
-    try {
-      await _firestore
-          .collection('users')
-          .doc(user.uid)
-          .collection('study_info')
-          .doc('main')
-          .set({
-            'streak': streak,
-            'progress': progress,
-            'lastStudyDate': Timestamp.fromDate(now),
-          }, SetOptions(merge: true));
-    } catch (e, stack) {
-      AppLogger.e('Sync Error: Logar Sessão', e, stack);
-    }
-  }
-
-  Future<void> _completeReviewInFirestore(int safeNewQueue) async {
-    final user = _auth.currentUser;
-
-    if (user == null) return;
-
-    try {
-      await _firestore
-          .collection('users')
-          .doc(user.uid)
-          .collection('study_info')
-          .doc('main')
-          .set({'reviewQueue': safeNewQueue}, SetOptions(merge: true));
-    } catch (e, stack) {
-      AppLogger.e('Sync Error: Fila de revisão', e, stack);
-    }
-  }
-
-  Future<void> _resetDailyProgressInFirestore() async {
-    final user = _auth.currentUser;
-
-    if (user == null) return;
-
-    try {
-      await _firestore
-          .collection('users')
-          .doc(user.uid)
-          .collection('study_info')
-          .doc('main')
-          .set({'progress': 0.0}, SetOptions(merge: true));
-    } catch (e, stack) {
-      AppLogger.e('Sync Error: Reset de progresso', e, stack);
-    }
-  }
-
-  Future<void> _syncStudyTimeInFirestore(
-    String subjectId,
-    int streak,
-    double progress,
-    double subjectProgress,
-    DateTime now,
-  ) async {
-    final user = _auth.currentUser;
-
-    if (user == null) return;
-
-    try {
-      final uid = user.uid;
-
-      final batch = _firestore.batch();
-
-      // -----------------------------------------------------------------------
-      // 1. Dados globais
-      // -----------------------------------------------------------------------
-
-      batch.set(
-        _firestore
-            .collection('users')
-            .doc(uid)
-            .collection('study_info')
-            .doc('main'),
-        {
-          'streak': streak,
-          'progress': progress,
-          'lastStudyDate': Timestamp.fromDate(now),
-        },
-        SetOptions(merge: true),
-      );
-
-      // -----------------------------------------------------------------------
-      // 2. Dados específicos da matéria
-      // -----------------------------------------------------------------------
-
-      final subjectRef = _firestore
-          .collection('users')
-          .doc(uid)
-          .collection('subjects')
-          .doc(subjectId);
-
-      batch.update(subjectRef, {
-        'progress': subjectProgress,
-        'streakDays': streak,
-      });
-
-      await batch.commit();
-    } catch (e, stack) {
-      AppLogger.e('Sync Error: Sincronizar Tempo de Estudo do Foco', e, stack);
-    }
+    await (_db.update(
+      _db.studyStats,
+    )..where((table) => table.id.equals('main'))).write(
+      StudyStatsCompanion(
+        streak: remote.streak == null
+            ? const Value.absent()
+            : Value(remote.streak!),
+        reviewQueue: remote.reviewQueue == null
+            ? const Value.absent()
+            : Value(remote.reviewQueue!),
+        progress: remote.progress == null
+            ? const Value.absent()
+            : Value(remote.progress!),
+        lastStudyDate: remote.hasLastStudyDate
+            ? Value(remote.lastStudyDate?.millisecondsSinceEpoch)
+            : const Value.absent(),
+      ),
+    );
+    _requireCurrentUser(expectedUid);
   }
 }

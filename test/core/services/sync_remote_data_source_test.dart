@@ -7,7 +7,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
-import 'package:life_os/core/database/app_database.dart';
+import 'package:life_os/core/database/app_database.dart' hide Transaction;
 import 'package:life_os/core/services/sync_remote_data_source.dart';
 
 class _RecordingHealthDocumentReference extends Fake
@@ -66,7 +66,10 @@ class _RecordingUserDocumentReference extends Fake
 
   @override
   CollectionReference<Map<String, dynamic>> collection(String path) {
-    if (path != 'health_info' && path != 'goals') {
+    if (path != 'health_info' &&
+        path != 'goals' &&
+        path != 'study_info' &&
+        path != 'review_queue') {
       throw UnsupportedError('Unexpected collection: $path');
     }
 
@@ -98,6 +101,146 @@ class _RecordingFirestore extends Fake implements FirebaseFirestore {
     }
 
     return usersCollection;
+  }
+}
+
+class _MemoryDocumentSnapshot extends Fake
+    implements DocumentSnapshot<Map<String, dynamic>> {
+  final Map<String, dynamic>? values;
+
+  _MemoryDocumentSnapshot(this.values);
+
+  @override
+  bool get exists => values != null;
+
+  @override
+  Map<String, dynamic>? data() =>
+      values == null ? null : Map<String, dynamic>.from(values!);
+}
+
+class _MemoryDocumentReference extends Fake
+    implements DocumentReference<Map<String, dynamic>> {
+  final _TransactionalStudyFirestore owner;
+
+  @override
+  final String path;
+
+  _MemoryDocumentReference(this.owner, this.path);
+
+  @override
+  CollectionReference<Map<String, dynamic>> collection(String path) {
+    return _MemoryCollectionReference(owner, '${this.path}/$path');
+  }
+}
+
+class _MemoryCollectionReference extends Fake
+    implements CollectionReference<Map<String, dynamic>> {
+  final _TransactionalStudyFirestore owner;
+
+  @override
+  final String path;
+
+  _MemoryCollectionReference(this.owner, this.path);
+
+  @override
+  DocumentReference<Map<String, dynamic>> doc([String? path]) {
+    return _MemoryDocumentReference(owner, '${this.path}/$path');
+  }
+}
+
+class _MemoryTransaction extends Fake implements Transaction {
+  final Map<String, Map<String, dynamic>> workingData;
+
+  _MemoryTransaction(Map<String, Map<String, dynamic>> source)
+    : workingData = {
+        for (final entry in source.entries)
+          entry.key: Map<String, dynamic>.from(entry.value),
+      };
+
+  String _path(DocumentReference reference) =>
+      (reference as _MemoryDocumentReference).path;
+
+  @override
+  Future<DocumentSnapshot<T>> get<T extends Object?>(
+    DocumentReference<T> documentReference,
+  ) async {
+    final values = workingData[_path(documentReference)];
+    return _MemoryDocumentSnapshot(values) as DocumentSnapshot<T>;
+  }
+
+  @override
+  Transaction set<T>(
+    DocumentReference<T> documentReference,
+    T data, [
+    SetOptions? options,
+  ]) {
+    final path = _path(documentReference);
+    final incoming = Map<String, dynamic>.from(data! as Map);
+    final target = options?.merge == true
+        ? Map<String, dynamic>.from(workingData[path] ?? const {})
+        : <String, dynamic>{};
+    _applyFields(target, incoming);
+    workingData[path] = target;
+    return this;
+  }
+
+  @override
+  Transaction update(
+    DocumentReference documentReference,
+    Map<String, dynamic> data,
+  ) {
+    final path = _path(documentReference);
+    final current = workingData[path];
+    if (current == null) {
+      throw FirebaseException(plugin: 'cloud_firestore', code: 'not-found');
+    }
+    _applyFields(current, data);
+    return this;
+  }
+
+  void _applyFields(
+    Map<String, dynamic> target,
+    Map<String, dynamic> incoming,
+  ) {
+    for (final entry in incoming.entries) {
+      if (entry.value is FieldValue) {
+        if (entry.key != 'reviewQueue' && entry.key != 'cardsToReview') {
+          throw UnsupportedError('Unexpected transform: ${entry.key}');
+        }
+        target[entry.key] = (target[entry.key] as int? ?? 0) + 1;
+      } else {
+        target[entry.key] = entry.value;
+      }
+    }
+  }
+}
+
+class _TransactionalStudyFirestore extends Fake implements FirebaseFirestore {
+  Map<String, Map<String, dynamic>> data = {};
+  int transactionCommits = 0;
+
+  void seed(String path, Map<String, dynamic> values) {
+    data[path] = Map<String, dynamic>.from(values);
+  }
+
+  Map<String, dynamic>? read(String path) => data[path];
+
+  @override
+  CollectionReference<Map<String, dynamic>> collection(String path) {
+    return _MemoryCollectionReference(this, path);
+  }
+
+  @override
+  Future<T> runTransaction<T>(
+    TransactionHandler<T> transactionHandler, {
+    Duration timeout = const Duration(seconds: 30),
+    int maxAttempts = 5,
+  }) async {
+    final transaction = _MemoryTransaction(data);
+    final result = await transactionHandler(transaction);
+    data = transaction.workingData;
+    transactionCommits += 1;
+    return result;
   }
 }
 
@@ -248,6 +391,26 @@ SyncQueueTableData createGoalUpdateItem(Map<String, dynamic> payload) {
   );
 }
 
+SyncQueueTableData createStudyItem({
+  required String collection,
+  required String docId,
+  required String operationType,
+  required Map<String, dynamic> payload,
+}) {
+  return SyncQueueTableData(
+    id: 7,
+    ownerUid: 'user-123',
+    collection: collection,
+    docId: docId,
+    operationType: operationType,
+    payloadJson: jsonEncode(payload),
+    createdAt: DateTime.now().millisecondsSinceEpoch,
+    isSynced: false,
+    status: SyncQueuePersistenceStatus.pending,
+    attemptCount: 0,
+  );
+}
+
 void main() {
   late _RecordingHealthDocumentReference healthDoc;
   late FirestoreSyncRemoteDataSource remote;
@@ -296,6 +459,357 @@ void main() {
     expect(healthDoc.lastData?['mood'], 'Radiante');
     expect(healthDoc.lastData?['date'], isA<Timestamp>());
     expect(healthDoc.lastOptions?.merge, isTrue);
+  });
+
+  test('study_info update usa set merge e converte data ISO', () async {
+    final result = await remote.process(
+      'user-123',
+      createStudyItem(
+        collection: 'study_info',
+        docId: 'main',
+        operationType: 'update',
+        payload: {
+          'reviewQueue': 2,
+          'progress': 0.5,
+          'streak': 3,
+          'lastStudyDate': '2026-09-08T10:00:00.000Z',
+        },
+      ),
+    );
+
+    expect(result.isSuccess, isTrue);
+    expect(healthDoc.lastOptions?.merge, isTrue);
+    expect(healthDoc.lastData?['lastStudyDate'], isA<Timestamp>());
+    expect(healthDoc.updateCalls, 0);
+  });
+
+  test('study_info rejeita docId e campos extras sem write', () async {
+    for (final item in [
+      createStudyItem(
+        collection: 'study_info',
+        docId: 'other',
+        operationType: 'update',
+        payload: {'reviewQueue': 1},
+      ),
+      createStudyItem(
+        collection: 'study_info',
+        docId: 'main',
+        operationType: 'update',
+        payload: {'reviewQueue': 1, 'extra': true},
+      ),
+    ]) {
+      final result = await remote.process('user-123', item);
+      expect(result.isPermanentFailure, isTrue);
+      expect(result.code, 'INVALID_PAYLOAD');
+    }
+    expect(healthDoc.lastData, isNull);
+    expect(healthDoc.updateCalls, 0);
+  });
+
+  SyncQueueTableData reviewCreateItem(String cardId) => createStudyItem(
+    collection: 'review_queue',
+    docId: cardId,
+    operationType: 'create',
+    payload: {
+      'subjectId': 'subject-1',
+      'question': 'Pergunta',
+      'answer': 'Resposta',
+      'createdAt': '2026-09-08T10:00:00.000Z',
+    },
+  );
+
+  SyncQueueTableData reviewUpdateItem(
+    String cardId, {
+    String subjectId = 'subject-1',
+    String lastReviewed = '2026-09-08T10:00:00.000Z',
+  }) => createStudyItem(
+    collection: 'review_queue',
+    docId: cardId,
+    operationType: 'update',
+    payload: {'subjectId': subjectId, 'lastReviewed': lastReviewed},
+  );
+
+  void seedReviewState(
+    _TransactionalStudyFirestore firestore, {
+    List<String> cardIds = const ['card-1'],
+    int reviewQueue = 2,
+    int cardsToReview = 2,
+    double progress = 0.20,
+  }) {
+    firestore
+      ..seed('users/user-123/study_info/main', {
+        'reviewQueue': reviewQueue,
+        'progress': progress,
+      })
+      ..seed('users/user-123/subjects/subject-1', {
+        'cardsToReview': cardsToReview,
+      });
+    for (final cardId in cardIds) {
+      firestore.seed('users/user-123/review_queue/$cardId', {
+        'subjectId': 'subject-1',
+        'lastReviewed': null,
+      });
+    }
+  }
+
+  FirestoreSyncRemoteDataSource transactionalStudyRemote(
+    _TransactionalStudyFirestore firestore,
+  ) => FirestoreSyncRemoteDataSource(firestore, _FakeFirebaseAuth());
+
+  test(
+    'review_queue create grava card e incrementa contadores atomicamente',
+    () async {
+      final firestore = _TransactionalStudyFirestore()
+        ..seed('users/user-123/subjects/subject-1', {'cardsToReview': 0});
+      final result = await transactionalStudyRemote(
+        firestore,
+      ).process('user-123', reviewCreateItem('card-1'));
+
+      expect(result.isSuccess, isTrue);
+      expect(
+        firestore.read('users/user-123/review_queue/card-1')?['createdAt'],
+        isA<Timestamp>(),
+      );
+      expect(
+        firestore.read('users/user-123/study_info/main')?['reviewQueue'],
+        1,
+      );
+      expect(
+        firestore.read('users/user-123/subjects/subject-1')?['cardsToReview'],
+        1,
+      );
+      expect(firestore.transactionCommits, 1);
+    },
+  );
+
+  test('replay do mesmo card não incrementa contadores novamente', () async {
+    final firestore = _TransactionalStudyFirestore()
+      ..seed('users/user-123/subjects/subject-1', {'cardsToReview': 0});
+    final dataSource = transactionalStudyRemote(firestore);
+    final item = reviewCreateItem('card-1');
+
+    expect((await dataSource.process('user-123', item)).isSuccess, isTrue);
+    expect((await dataSource.process('user-123', item)).isSuccess, isTrue);
+
+    expect(firestore.read('users/user-123/study_info/main')?['reviewQueue'], 1);
+    expect(
+      firestore.read('users/user-123/subjects/subject-1')?['cardsToReview'],
+      1,
+    );
+    expect(firestore.transactionCommits, 2);
+  });
+
+  test('cards distintos incrementam contadores sem lost update', () async {
+    final firestore = _TransactionalStudyFirestore()
+      ..seed('users/user-123/subjects/subject-1', {'cardsToReview': 0});
+    final dataSource = transactionalStudyRemote(firestore);
+
+    await dataSource.process('user-123', reviewCreateItem('card-1'));
+    await dataSource.process('user-123', reviewCreateItem('card-2'));
+
+    expect(firestore.read('users/user-123/study_info/main')?['reviewQueue'], 2);
+    expect(
+      firestore.read('users/user-123/subjects/subject-1')?['cardsToReview'],
+      2,
+    );
+  });
+
+  test('subject remoto ausente rejeita create sem escrita parcial', () async {
+    final firestore = _TransactionalStudyFirestore();
+    final result = await transactionalStudyRemote(
+      firestore,
+    ).process('user-123', reviewCreateItem('card-1'));
+
+    expect(result.isPermanentFailure, isTrue);
+    expect(result.code, 'INVALID_PAYLOAD');
+    expect(firestore.data, isEmpty);
+    expect(firestore.transactionCommits, 0);
+  });
+
+  test('review atualiza card e contadores na mesma transação', () async {
+    final firestore = _TransactionalStudyFirestore();
+    seedReviewState(firestore);
+    final result = await transactionalStudyRemote(
+      firestore,
+    ).process('user-123', reviewUpdateItem('card-1'));
+
+    expect(result.isSuccess, isTrue);
+    expect(firestore.read('users/user-123/study_info/main'), {
+      'reviewQueue': 1,
+      'progress': 0.25,
+      'lastStudyDate': isA<Timestamp>(),
+    });
+    expect(
+      firestore.read('users/user-123/subjects/subject-1')?['cardsToReview'],
+      1,
+    );
+    expect(
+      firestore.read('users/user-123/review_queue/card-1')?['lastReviewed'],
+      isA<Timestamp>(),
+    );
+  });
+
+  test('replay da mesma revisão não altera contadores novamente', () async {
+    final firestore = _TransactionalStudyFirestore();
+    seedReviewState(firestore);
+    final dataSource = transactionalStudyRemote(firestore);
+    final item = reviewUpdateItem('card-1');
+
+    expect((await dataSource.process('user-123', item)).isSuccess, isTrue);
+    expect((await dataSource.process('user-123', item)).isSuccess, isTrue);
+
+    expect(firestore.read('users/user-123/study_info/main')?['reviewQueue'], 1);
+    expect(firestore.read('users/user-123/study_info/main')?['progress'], 0.25);
+    expect(
+      firestore.read('users/user-123/subjects/subject-1')?['cardsToReview'],
+      1,
+    );
+  });
+
+  test('revisões de dois cards preservam contadores multi-device', () async {
+    final firestore = _TransactionalStudyFirestore();
+    seedReviewState(firestore, cardIds: ['card-1', 'card-2']);
+    final dataSource = transactionalStudyRemote(firestore);
+
+    await dataSource.process('user-123', reviewUpdateItem('card-1'));
+    await dataSource.process('user-123', reviewUpdateItem('card-2'));
+
+    expect(firestore.read('users/user-123/study_info/main')?['reviewQueue'], 0);
+    expect(firestore.read('users/user-123/study_info/main')?['progress'], 0.30);
+    expect(
+      firestore.read('users/user-123/subjects/subject-1')?['cardsToReview'],
+      0,
+    );
+  });
+
+  test('timestamps diferentes no mesmo dia revisam o card uma vez', () async {
+    final firestore = _TransactionalStudyFirestore();
+    seedReviewState(firestore);
+    final dataSource = transactionalStudyRemote(firestore);
+
+    await dataSource.process('user-123', reviewUpdateItem('card-1'));
+    await dataSource.process(
+      'user-123',
+      reviewUpdateItem('card-1', lastReviewed: '2026-09-08T18:00:00.000Z'),
+    );
+
+    expect(firestore.read('users/user-123/study_info/main')?['reviewQueue'], 1);
+    expect(firestore.read('users/user-123/study_info/main')?['progress'], 0.25);
+    expect(
+      firestore.read('users/user-123/subjects/subject-1')?['cardsToReview'],
+      1,
+    );
+  });
+
+  test('card remoto ausente rejeita review sem escrita parcial', () async {
+    final firestore = _TransactionalStudyFirestore();
+    seedReviewState(firestore, cardIds: const []);
+    final result = await transactionalStudyRemote(
+      firestore,
+    ).process('user-123', reviewUpdateItem('card-1'));
+
+    expect(result.isPermanentFailure, isTrue);
+    expect(result.code, 'INVALID_PAYLOAD');
+    expect(firestore.read('users/user-123/study_info/main')?['reviewQueue'], 2);
+    expect(
+      firestore.read('users/user-123/subjects/subject-1')?['cardsToReview'],
+      2,
+    );
+    expect(firestore.transactionCommits, 0);
+  });
+
+  test('subject remoto ausente rejeita review sem escrita parcial', () async {
+    final firestore = _TransactionalStudyFirestore()
+      ..seed('users/user-123/study_info/main', {
+        'reviewQueue': 2,
+        'progress': 0.20,
+      })
+      ..seed('users/user-123/review_queue/card-1', {
+        'subjectId': 'subject-1',
+        'lastReviewed': null,
+      });
+    final result = await transactionalStudyRemote(
+      firestore,
+    ).process('user-123', reviewUpdateItem('card-1'));
+
+    expect(result.isPermanentFailure, isTrue);
+    expect(result.code, 'INVALID_PAYLOAD');
+    expect(firestore.read('users/user-123/study_info/main')?['reviewQueue'], 2);
+    expect(
+      firestore.read('users/user-123/review_queue/card-1')?['lastReviewed'],
+      null,
+    );
+    expect(firestore.transactionCommits, 0);
+  });
+
+  test('subjectId divergente rejeita review sem escrita parcial', () async {
+    final firestore = _TransactionalStudyFirestore();
+    seedReviewState(firestore);
+    firestore.seed('users/user-123/subjects/subject-other', {
+      'cardsToReview': 2,
+    });
+    final result = await transactionalStudyRemote(firestore).process(
+      'user-123',
+      reviewUpdateItem('card-1', subjectId: 'subject-other'),
+    );
+
+    expect(result.isPermanentFailure, isTrue);
+    expect(result.code, 'INVALID_PAYLOAD');
+    expect(firestore.read('users/user-123/study_info/main')?['reviewQueue'], 2);
+    expect(
+      firestore.read('users/user-123/review_queue/card-1')?['lastReviewed'],
+      null,
+    );
+    expect(firestore.transactionCommits, 0);
+  });
+
+  test('review update exige subjectId, data ISO e campos exatos', () async {
+    for (final payload in [
+      {'lastReviewed': '2026-09-08T10:00:00.000Z'},
+      {'subjectId': '', 'lastReviewed': '2026-09-08T10:00:00.000Z'},
+      {'subjectId': 'subject-1', 'lastReviewed': 'inválida'},
+      {
+        'subjectId': 'subject-1',
+        'lastReviewed': '2026-09-08T10:00:00.000Z',
+        'extra': true,
+      },
+    ]) {
+      final firestore = _TransactionalStudyFirestore();
+      seedReviewState(firestore);
+      final result = await transactionalStudyRemote(firestore).process(
+        'user-123',
+        createStudyItem(
+          collection: 'review_queue',
+          docId: 'card-1',
+          operationType: 'update',
+          payload: payload,
+        ),
+      );
+      expect(result.isPermanentFailure, isTrue);
+      expect(result.code, 'INVALID_PAYLOAD');
+      expect(firestore.transactionCommits, 0);
+    }
+  });
+
+  test('review_queue inválido é rejeitado sem write', () async {
+    final result = await remote.process(
+      'user-123',
+      createStudyItem(
+        collection: 'review_queue',
+        docId: 'card-1',
+        operationType: 'create',
+        payload: {
+          'subjectId': '',
+          'question': 'Pergunta',
+          'answer': 'Resposta',
+          'createdAt': 'inválida',
+        },
+      ),
+    );
+    expect(result.isPermanentFailure, isTrue);
+    expect(result.code, 'INVALID_PAYLOAD');
+    expect(healthDoc.lastData, isNull);
+    expect(healthDoc.updateCalls, 0);
   });
 
   test('goals update preserva currentValue inteiro', () async {
