@@ -664,6 +664,13 @@ class StudyRepository {
       if (flashcardsSnapshot == null) return;
       _requireCurrentUser(expectedUid);
 
+      final remoteSubjectDocIds = subjectsSnapshot.docs
+          .map((doc) => doc.id)
+          .toSet();
+      final remoteFlashcardDocIds = flashcardsSnapshot.docs
+          .map((doc) => doc.id)
+          .toSet();
+
       final remoteStats = mainDoc.exists
           ? _parseRemoteStudyStats(mainDoc.data())
           : null;
@@ -697,6 +704,8 @@ class StudyRepository {
         remoteStats: remoteStats,
         remoteSubjects: remoteSubjects,
         remoteFlashcards: remoteFlashcards,
+        remoteSubjectDocIds: remoteSubjectDocIds,
+        remoteFlashcardDocIds: remoteFlashcardDocIds,
       );
     } on _StudySessionChanged {
       return;
@@ -821,6 +830,8 @@ class StudyRepository {
     required _RemoteStudyStats? remoteStats,
     required List<_RemoteStudySubject> remoteSubjects,
     required List<_RemoteFlashcard> remoteFlashcards,
+    required Set<String> remoteSubjectDocIds,
+    required Set<String> remoteFlashcardDocIds,
   }) async {
     await _db.transaction(() async {
       _requireCurrentUser(expectedUid);
@@ -923,6 +934,37 @@ class StudyRepository {
                 lastReviewed: Value(card.lastReviewed?.millisecondsSinceEpoch),
               ),
             );
+        _requireCurrentUser(expectedUid);
+      }
+
+      _requireCurrentUser(expectedUid);
+      final localFlashcards = await _db.select(_db.flashcards).get();
+      _requireCurrentUser(expectedUid);
+      for (final card in localFlashcards) {
+        if (remoteFlashcardDocIds.contains(card.id) ||
+            protectCards.contains(card.id)) {
+          protectSubjects.add(card.subjectId);
+          continue;
+        }
+        _requireCurrentUser(expectedUid);
+        await (_db.delete(
+          _db.flashcards,
+        )..where((table) => table.id.equals(card.id))).go();
+        _requireCurrentUser(expectedUid);
+      }
+
+      final localSubjects = await _db.select(_db.subjects).get();
+      _requireCurrentUser(expectedUid);
+      for (final subject in localSubjects) {
+        if (remoteSubjectDocIds.contains(subject.id) ||
+            protectAllSubjects ||
+            protectSubjects.contains(subject.id)) {
+          continue;
+        }
+        _requireCurrentUser(expectedUid);
+        await (_db.delete(
+          _db.subjects,
+        )..where((table) => table.id.equals(subject.id))).go();
         _requireCurrentUser(expectedUid);
       }
     });

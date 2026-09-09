@@ -356,6 +356,82 @@ void main() {
     );
   });
 
+  test('ausência remota remove subject e flashcard locais stale', () async {
+    final now = DateTime(2026, 9, 8, 12);
+    repository = StudyRepository(db, fire, auth, sync, reviewNow: () => now);
+    await subject(id: 'subject-a');
+    await subject(id: 'subject-b');
+    await card(id: 'card-a', subjectId: 'subject-a');
+    await card(id: 'card-b', subjectId: 'subject-b');
+    fire.subjects.documents = [
+      _QueryDoc('subject-b', remoteSubject('Matemática B')),
+    ];
+    fire.cards.documents = [
+      _QueryDoc('card-b', {
+        'subjectId': 'subject-b',
+        'question': 'Pergunta B',
+        'answer': 'Resposta B',
+        'lastReviewed': null,
+      }),
+    ];
+
+    await repository.syncStudyFromFirebaseToLocal();
+
+    expect((await db.select(db.subjects).get()).map((item) => item.id), [
+      'subject-b',
+    ]);
+    expect((await db.select(db.flashcards).get()).map((item) => item.id), [
+      'card-b',
+    ]);
+    expect((await repository.getStudyStatsStream().first).reviewQueue, 1);
+  });
+
+  test('documento remoto inválido presente não apaga cópia local', () async {
+    await subject();
+    await card();
+    fire.subjects.documents = [
+      _QueryDoc('subject-1', {'title': ''}),
+    ];
+    fire.cards.documents = [
+      _QueryDoc('card-1', {'subjectId': ''}),
+    ];
+
+    await repository.syncStudyFromFirebaseToLocal();
+
+    final localSubject = await db.select(db.subjects).getSingle();
+    final localCard = await db.select(db.flashcards).getSingle();
+    expect(localSubject.id, 'subject-1');
+    expect(localSubject.title, 'Matemática');
+    expect(localCard.id, 'card-1');
+    expect(localCard.question, 'Pergunta');
+  });
+
+  test('troca de UID durante remote delete faz rollback integral', () async {
+    await subject(id: 'subject-a');
+    await subject(id: 'subject-b');
+    await card(id: 'card-a', subjectId: 'subject-a');
+    await card(id: 'card-b', subjectId: 'subject-b');
+    var observedFirstDelete = false;
+    auth.uidForRead = (_) {
+      final count =
+          rawDb
+                  .select('SELECT COUNT(*) AS count FROM flashcards')
+                  .first['count']!
+              as int;
+      if (count < 2) {
+        observedFirstDelete = true;
+        return 'user-b';
+      }
+      return 'user-a';
+    };
+
+    await repository.syncStudyFromFirebaseToLocal();
+
+    expect(observedFirstDelete, isTrue);
+    expect(await db.select(db.subjects).get(), hasLength(2));
+    expect(await db.select(db.flashcards).get(), hasLength(2));
+  });
+
   test('delete subject recalcula fila global pelo cascade real', () async {
     final now = DateTime(2026, 9, 8, 12);
     repository = StudyRepository(db, fire, auth, sync, reviewNow: () => now);

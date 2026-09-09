@@ -162,6 +162,7 @@ class AuthNotifier extends Notifier<AuthState> {
         ref.read(goalRepositoryProvider).syncGoalsFromFirebaseToLocal,
         ref.read(checkInRepositoryProvider).syncCheckinsFromFirebaseToLocal,
         ref.read(healthRepositoryProvider).syncHealthFromFirebase,
+        ref.read(studyRepositoryProvider).syncStudyFromFirebaseToLocal,
         ref.read(focusRepositoryProvider).syncFocusFromFirebaseToLocal,
       ];
 
