@@ -448,6 +448,7 @@ class StudyRepository {
     final expectedUid = _currentUid;
     if (expectedUid == null) return;
 
+    final activityId = _uuid.v4();
     final now = DateTime.now();
     final newStreak = _nextStreak(
       currentStatus.streak,
@@ -476,16 +477,17 @@ class StudyRepository {
               );
           _requireCurrentUser(expectedUid);
         },
-        collection: 'study_info',
-        docId: 'main',
-        operationType: 'update',
+        collection: 'study_activity',
+        docId: activityId,
+        operationType: 'create',
         payloadJson: jsonEncode({
-          'streak': newStreak,
-          'progress': newProgress,
-          'lastStudyDate': now.toIso8601String(),
+          'subjectId': null,
+          'progressDelta': 0.1,
+          'occurredAt': now.toUtc().toIso8601String(),
+          'timeZoneOffsetMinutes': now.timeZoneOffset.inMinutes,
         }),
       );
-      _schedulePendingStudySync();
+      unawaited(syncStudyFromFirebaseToLocal());
     } on _StudySessionChanged {
       return;
     } catch (e, stack) {
@@ -501,6 +503,7 @@ class StudyRepository {
     final expectedUid = _currentUid;
     if (expectedUid == null) return;
 
+    final activityId = _uuid.v4();
     final safeElapsed = elapsedSeconds <= 0 ? 1500 : elapsedSeconds;
     final now = DateTime.now();
     final nowEpoch = now.millisecondsSinceEpoch;
@@ -529,18 +532,6 @@ class StudyRepository {
           progress: newProgress,
           lastStudyDate: nowEpoch,
         );
-        await _enqueue(
-          ownerUid: expectedUid,
-          collection: 'study_info',
-          docId: 'main',
-          operationType: 'update',
-          payload: {
-            'streak': newStreak,
-            'progress': newProgress,
-            'lastStudyDate': now.toIso8601String(),
-          },
-        );
-
         if (subject != null) {
           final subjectProgress = (subject.progress + bonus)
               .clamp(0.0, 1.0)
@@ -553,17 +544,22 @@ class StudyRepository {
               streakDays: Value(newStreak),
             ),
           );
-          await _enqueue(
-            ownerUid: expectedUid,
-            collection: 'subjects',
-            docId: subjectId,
-            operationType: 'update',
-            payload: {'progress': subjectProgress, 'streakDays': newStreak},
-          );
         }
+        await _enqueue(
+          ownerUid: expectedUid,
+          collection: 'study_activity',
+          docId: activityId,
+          operationType: 'create',
+          payload: {
+            'subjectId': subject == null ? null : subjectId,
+            'progressDelta': bonus,
+            'occurredAt': now.toUtc().toIso8601String(),
+            'timeZoneOffsetMinutes': now.timeZoneOffset.inMinutes,
+          },
+        );
         _requireCurrentUser(expectedUid);
       });
-      _schedulePendingStudySync();
+      unawaited(syncStudyFromFirebaseToLocal());
     } on _StudySessionChanged {
       return;
     } catch (e, stack) {
@@ -841,7 +837,8 @@ class StudyRepository {
                     item.ownerUid.equals(expectedUid) &
                     (item.collection.equals('study_info') |
                         item.collection.equals('subjects') |
-                        item.collection.equals('review_queue')) &
+                        item.collection.equals('review_queue') |
+                        item.collection.equals('study_activity')) &
                     (item.status.equals(SyncQueuePersistenceStatus.pending) |
                         (item.status.equals(
                               SyncQueuePersistenceStatus.succeeded,
@@ -857,15 +854,34 @@ class StudyRepository {
             item.collection == 'review_queue' &&
             (item.operationType == 'create' || item.operationType == 'update'),
       );
+      final studyActivities = authoritativeItems.where(
+        (item) =>
+            item.collection == 'study_activity' &&
+            item.operationType == 'create',
+      );
       final protectStats =
           authoritativeItems.any(
             (item) => item.collection == 'study_info' && item.docId == 'main',
           ) ||
-          reviewMutations.isNotEmpty;
+          reviewMutations.isNotEmpty ||
+          studyActivities.isNotEmpty;
       final protectSubjects = authoritativeItems
           .where((item) => item.collection == 'subjects')
           .map((item) => item.docId)
           .toSet();
+      for (final item in studyActivities) {
+        try {
+          final payload = jsonDecode(item.payloadJson);
+          final subjectId = payload is Map<String, dynamic>
+              ? payload['subjectId']
+              : null;
+          if (subjectId is String && subjectId.trim().isNotEmpty) {
+            protectSubjects.add(subjectId);
+          }
+        } on FormatException {
+          // Stats remain protected even when the subject cannot be identified.
+        }
+      }
       var protectAllSubjects = false;
       for (final item in reviewMutations) {
         try {

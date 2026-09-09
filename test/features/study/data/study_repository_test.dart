@@ -724,18 +724,104 @@ void main() {
     expect(sync.calls, 2);
   });
 
-  test('addStudyTime enfileira subject somente quando existe', () async {
+  test('addStudyTime cria um único intent study_activity', () async {
+    sync.drains = false;
     await subject();
+    await stats();
+
     await repository.addStudyTime('subject-1', 1500);
+
+    final queue = await db.getPendingSyncItems('user-a');
+    expect(queue, hasLength(1));
+    expect(queue.single.collection, 'study_activity');
+    expect(queue.single.operationType, 'create');
     expect(
-      (await db.getPendingSyncItems('user-a')).map((e) => e.collection),
-      containsAll(['study_info', 'subjects']),
+      queue.single.docId,
+      matches(
+        RegExp(
+          r'^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$',
+          caseSensitive: false,
+        ),
+      ),
     );
-    await db.delete(db.syncQueueTable).go();
+    final payload =
+        jsonDecode(queue.single.payloadJson) as Map<String, dynamic>;
+    expect(payload.keys.toSet(), {
+      'subjectId',
+      'progressDelta',
+      'occurredAt',
+      'timeZoneOffsetMinutes',
+    });
+    expect(payload['subjectId'], 'subject-1');
+    expect(payload['progressDelta'], .25);
+    expect(DateTime.parse(payload['occurredAt'] as String).isUtc, isTrue);
+    expect(payload['timeZoneOffsetMinutes'], isA<int>());
+    expect((await db.select(db.studyStats).getSingle()).progress, .45);
+    expect((await db.select(db.subjects).getSingle()).progress, .45);
+  });
+
+  test('addStudyTime sem subject preserva optimistic global', () async {
+    sync.drains = false;
+    await stats();
+
     await repository.addStudyTime('missing', 1500);
-    expect((await db.getPendingSyncItems('user-a')).map((e) => e.collection), [
-      'study_info',
-    ]);
+
+    final queue = await db.getPendingSyncItems('user-a');
+    final payload =
+        jsonDecode(queue.single.payloadJson) as Map<String, dynamic>;
+    expect(queue, hasLength(1));
+    expect(queue.single.collection, 'study_activity');
+    expect(payload['subjectId'], null);
+    expect((await db.select(db.studyStats).getSingle()).progress, .45);
+    expect(await db.select(db.subjects).get(), isEmpty);
+  });
+
+  test('logStudySession cria intent study_activity global', () async {
+    sync.drains = false;
+    final state = StudyModel(streak: 2, reviewQueue: 3, progress: .2);
+
+    await repository.logStudySession(state);
+
+    final queue = await db.getPendingSyncItems('user-a');
+    expect(queue, hasLength(1));
+    expect(queue.single.collection, 'study_activity');
+    expect(queue.single.operationType, 'create');
+    final payload =
+        jsonDecode(queue.single.payloadJson) as Map<String, dynamic>;
+    expect(payload['subjectId'], null);
+    expect(payload['progressDelta'], .1);
+    expect(DateTime.parse(payload['occurredAt'] as String).isUtc, isTrue);
+    expect(payload['timeZoneOffsetMinutes'], isA<int>());
+    expect(
+      (await db.select(db.studyStats).getSingle()).progress,
+      closeTo(.3, 1e-9),
+    );
+  });
+
+  test('troca de UID durante addStudyTime faz rollback integral', () async {
+    await subject();
+    await stats();
+    var observedActivity = false;
+    auth.uidForRead = (_) {
+      final count =
+          rawDb
+                  .select('SELECT COUNT(*) AS count FROM sync_queue_table')
+                  .first['count']!
+              as int;
+      if (count > 0) {
+        observedActivity = true;
+        return 'user-b';
+      }
+      return 'user-a';
+    };
+
+    await repository.addStudyTime('subject-1', 1500);
+
+    expect(observedActivity, isTrue);
+    expect((await db.select(db.studyStats).getSingle()).progress, .2);
+    expect((await db.select(db.subjects).getSingle()).progress, .2);
+    expect(await db.getPendingSyncItems('user-a'), isEmpty);
+    expect(sync.calls, 0);
   });
 
   test('completeReview e reset criam main com intents duráveis', () async {
@@ -869,6 +955,102 @@ void main() {
         );
     });
   }
+
+  test('pending study_activity protege stats durante pull stale', () async {
+    await stats(progress: .45);
+    fire.info.document.values = {'streak': 1, 'reviewQueue': 0, 'progress': .1};
+    await db.insertSyncItem(
+      ownerUid: 'user-a',
+      collection: 'study_activity',
+      docId: '7d287d4e-190f-42ab-90a8-a93696f8c462',
+      operationType: 'create',
+      payloadJson: jsonEncode({
+        'subjectId': null,
+        'progressDelta': .25,
+        'occurredAt': '2026-09-09T12:00:00.000Z',
+        'timeZoneOffsetMinutes': -180,
+      }),
+    );
+
+    await repository.syncStudyFromFirebaseToLocal();
+
+    expect((await db.select(db.studyStats).getSingle()).progress, .45);
+  });
+
+  test('pending study_activity protege a matéria identificada', () async {
+    await subject();
+    fire.subjects.documents = [
+      _QueryDoc('subject-1', remoteSubject('Remota stale')),
+    ];
+    await db.insertSyncItem(
+      ownerUid: 'user-a',
+      collection: 'study_activity',
+      docId: '7d287d4e-190f-42ab-90a8-a93696f8c462',
+      operationType: 'create',
+      payloadJson: jsonEncode({
+        'subjectId': 'subject-1',
+        'progressDelta': .25,
+        'occurredAt': '2026-09-09T12:00:00.000Z',
+        'timeZoneOffsetMinutes': -180,
+      }),
+    );
+
+    await repository.syncStudyFromFirebaseToLocal();
+
+    expect((await db.select(db.subjects).getSingle()).title, 'Matemática');
+  });
+
+  test(
+    'study_activity inválida protege stats sem proteger toda matéria',
+    () async {
+      await subject();
+      await stats(progress: .45);
+      fire.info.document.values = {
+        'streak': 1,
+        'reviewQueue': 0,
+        'progress': .1,
+      };
+      await db.insertSyncItem(
+        ownerUid: 'user-a',
+        collection: 'study_activity',
+        docId: '7d287d4e-190f-42ab-90a8-a93696f8c462',
+        operationType: 'create',
+        payloadJson: '{',
+      );
+
+      await repository.syncStudyFromFirebaseToLocal();
+
+      expect((await db.select(db.studyStats).getSingle()).progress, .45);
+      expect(await db.select(db.subjects).get(), isEmpty);
+    },
+  );
+
+  test('study_activity criada durante pull não é sobrescrita', () async {
+    await subject();
+    await stats();
+    fire.info.document.values = {'streak': 1, 'reviewQueue': 0, 'progress': .1};
+    fire.subjects.documents = [
+      _QueryDoc('subject-1', remoteSubject('Remota stale')),
+    ];
+    final started = Completer<void>();
+    final release = Completer<void>();
+    fire.info.document.beforeGet = () {
+      started.complete();
+      return release.future;
+    };
+
+    final pull = repository.syncStudyFromFirebaseToLocal();
+    await started.future;
+    sync.drains = false;
+    await repository.addStudyTime('subject-1', 1500);
+    release.complete();
+    await pull;
+
+    expect((await db.select(db.studyStats).getSingle()).progress, .45);
+    final localSubject = await db.select(db.subjects).getSingle();
+    expect(localSubject.title, 'Matemática');
+    expect(localSubject.progress, .45);
+  });
 
   test('succeeded recente protege subject', () async {
     await subject();

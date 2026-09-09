@@ -127,6 +127,10 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
         return _deleteSubjectServerSide(expectedUid: uid, item: item);
       }
 
+      if (collection == 'study_activity' && operationType == 'create') {
+        return _applyStudyActivityServerSide(expectedUid: uid, item: item);
+      }
+
       // ----------------------------------------------------------------------
       // CREATE DE MEDICATIONS
       // Obrigatoriamente passa pelo backend para enforcement de quota.
@@ -617,6 +621,59 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
     return _postToSyncBackend(expectedUid, {
       'operation': 'delete_subject',
       'subjectId': item.docId,
+    });
+  }
+
+  Future<SyncOperationResult> _applyStudyActivityServerSide({
+    required String expectedUid,
+    required SyncQueueTableData item,
+  }) async {
+    final data = _decodePayload(item.payloadJson);
+    if (!_uuidV4Pattern.hasMatch(item.docId) ||
+        !_hasExactFields(data, const {
+          'subjectId',
+          'progressDelta',
+          'occurredAt',
+          'timeZoneOffsetMinutes',
+        })) {
+      return const SyncOperationResult.invalidPayload(
+        message: 'Payload de atividade de estudo inválido.',
+      );
+    }
+
+    final subjectId = data['subjectId'];
+    final progressDelta = data['progressDelta'];
+    final occurredAt = data['occurredAt'];
+    final timeZoneOffsetMinutes = data['timeZoneOffsetMinutes'];
+    final parsedOccurredAt = occurredAt is String
+        ? DateTime.tryParse(occurredAt)
+        : null;
+    final delta = progressDelta is num ? progressDelta.toDouble() : double.nan;
+
+    if ((subjectId != null &&
+            (subjectId is! String ||
+                subjectId.trim().isEmpty ||
+                subjectId.length > 128 ||
+                subjectId.contains('/'))) ||
+        !delta.isFinite ||
+        delta <= 0 ||
+        delta > 1 ||
+        parsedOccurredAt == null ||
+        timeZoneOffsetMinutes is! int ||
+        timeZoneOffsetMinutes < -840 ||
+        timeZoneOffsetMinutes > 840) {
+      return const SyncOperationResult.invalidPayload(
+        message: 'Payload de atividade de estudo inválido.',
+      );
+    }
+
+    return _postToSyncBackend(expectedUid, {
+      'operation': 'apply_study_activity',
+      'mutationId': item.docId,
+      'subjectId': subjectId,
+      'progressDelta': delta,
+      'occurredAt': occurredAt,
+      'timeZoneOffsetMinutes': timeZoneOffsetMinutes,
     });
   }
 

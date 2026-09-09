@@ -411,6 +411,36 @@ SyncQueueTableData createStudyItem({
   );
 }
 
+SyncQueueTableData createStudyActivityItem({
+  String mutationId = '7d287d4e-190f-42ab-90a8-a93696f8c462',
+  Object? subjectId = 'subject-1',
+  Object? progressDelta = .25,
+  Object? occurredAt = '2026-09-09T12:00:00.000Z',
+  Object? timeZoneOffsetMinutes = -180,
+  Map<String, dynamic>? payload,
+}) {
+  return SyncQueueTableData(
+    id: 8,
+    ownerUid: 'user-123',
+    collection: 'study_activity',
+    docId: mutationId,
+    operationType: 'create',
+    payloadJson: jsonEncode(
+      payload ??
+          {
+            'subjectId': subjectId,
+            'progressDelta': progressDelta,
+            'occurredAt': occurredAt,
+            'timeZoneOffsetMinutes': timeZoneOffsetMinutes,
+          },
+    ),
+    createdAt: DateTime.now().millisecondsSinceEpoch,
+    isSynced: false,
+    status: SyncQueuePersistenceStatus.pending,
+    attemptCount: 0,
+  );
+}
+
 void main() {
   late _RecordingHealthDocumentReference healthDoc;
   late FirestoreSyncRemoteDataSource remote;
@@ -1524,5 +1554,131 @@ void main() {
     expect(result.isPermanentFailure, isTrue);
     expect(result.code, 'INVALID_PAYLOAD');
     expect(clientCreated, isFalse);
+  });
+
+  test(
+    'study_activity create envia intent ao backend sem write direto',
+    () async {
+      late Map<String, dynamic> payload;
+      final client = _RecordingHttpClient((request) async {
+        payload = jsonDecode(await request.finalize().bytesToString());
+        return _jsonResponse(200);
+      });
+      final source = serverDataSource(
+        auth: _FakeFirebaseAuth(_FakeFirebaseUser('user-123')),
+        clientFactory: () => client,
+        idTokenProvider: (_, _) async => 'token',
+        appCheckTokenProvider: _validAppCheckToken,
+      );
+
+      final result = await source.process(
+        'user-123',
+        createStudyActivityItem(),
+      );
+
+      expect(result.isSuccess, isTrue);
+      expect(payload, {
+        'operation': 'apply_study_activity',
+        'mutationId': '7d287d4e-190f-42ab-90a8-a93696f8c462',
+        'subjectId': 'subject-1',
+        'progressDelta': .25,
+        'occurredAt': '2026-09-09T12:00:00.000Z',
+        'timeZoneOffsetMinutes': -180,
+      });
+      expect(healthDoc.lastData, isNull);
+      expect(healthDoc.updateCalls, 0);
+      expect(client.wasClosed, isTrue);
+    },
+  );
+
+  test('study_activity mutationId inválido falha sem HTTP', () async {
+    var clientCreated = false;
+    final source = serverDataSource(
+      auth: _FakeFirebaseAuth(_FakeFirebaseUser('user-123')),
+      clientFactory: () {
+        clientCreated = true;
+        return _RecordingHttpClient((_) async => _jsonResponse(200));
+      },
+      idTokenProvider: (_, _) async => 'token',
+      appCheckTokenProvider: _validAppCheckToken,
+    );
+
+    final result = await source.process(
+      'user-123',
+      createStudyActivityItem(mutationId: 'not-a-uuid'),
+    );
+
+    expect(result.isPermanentFailure, isTrue);
+    expect(result.code, 'INVALID_PAYLOAD');
+    expect(clientCreated, isFalse);
+  });
+
+  test('study_activity progressDelta inválido falha sem HTTP', () async {
+    var clientCreated = false;
+    final source = serverDataSource(
+      auth: _FakeFirebaseAuth(_FakeFirebaseUser('user-123')),
+      clientFactory: () {
+        clientCreated = true;
+        return _RecordingHttpClient((_) async => _jsonResponse(200));
+      },
+      idTokenProvider: (_, _) async => 'token',
+      appCheckTokenProvider: _validAppCheckToken,
+    );
+
+    final result = await source.process(
+      'user-123',
+      createStudyActivityItem(progressDelta: 0),
+    );
+
+    expect(result.isPermanentFailure, isTrue);
+    expect(result.code, 'INVALID_PAYLOAD');
+    expect(clientCreated, isFalse);
+  });
+
+  test('study_activity timezone inválido falha sem HTTP', () async {
+    var clientCreated = false;
+    final source = serverDataSource(
+      auth: _FakeFirebaseAuth(_FakeFirebaseUser('user-123')),
+      clientFactory: () {
+        clientCreated = true;
+        return _RecordingHttpClient((_) async => _jsonResponse(200));
+      },
+      idTokenProvider: (_, _) async => 'token',
+      appCheckTokenProvider: _validAppCheckToken,
+    );
+
+    final result = await source.process(
+      'user-123',
+      createStudyActivityItem(timeZoneOffsetMinutes: 841),
+    );
+
+    expect(result.isPermanentFailure, isTrue);
+    expect(result.code, 'INVALID_PAYLOAD');
+    expect(clientCreated, isFalse);
+  });
+
+  test('study_activity subject ausente é falha permanente', () async {
+    final client = _RecordingHttpClient(
+      (_) async => _jsonResponse(
+        409,
+        jsonEncode({
+          'code': 'STUDY_ACTIVITY_SUBJECT_NOT_FOUND',
+          'error': 'A matéria da atividade de estudo não foi encontrada.',
+        }),
+      ),
+    );
+    final source = serverDataSource(
+      auth: _FakeFirebaseAuth(_FakeFirebaseUser('user-123')),
+      clientFactory: () => client,
+      idTokenProvider: (_, _) async => 'token',
+      appCheckTokenProvider: _validAppCheckToken,
+    );
+
+    final result = await source.process('user-123', createStudyActivityItem());
+
+    expect(result.isPermanentFailure, isTrue);
+    expect(result.code, 'INVALID_PAYLOAD');
+    expect(result.message, contains('STUDY_ACTIVITY_SUBJECT_NOT_FOUND'));
+    expect(client.wasClosed, isTrue);
   });
 }
