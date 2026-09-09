@@ -607,12 +607,120 @@ void main() {
     );
   });
 
-  test('create e remove subject agendam imediatamente', () async {
-    await repository.createSubject('Matemática');
-    expect(sync.calls, 1);
-    await repository.removeSubject(
-      (await db.select(db.subjects).getSingle()).id,
+  test('quota terminal reconcilia matéria local ausente no servidor', () async {
+    fire.subjects.documents = [
+      _QueryDoc('remote-a', remoteSubject('Remota A')),
+      _QueryDoc('remote-b', remoteSubject('Remota B')),
+      _QueryDoc('remote-c', remoteSubject('Remota C')),
+    ];
+    sync.duringDrain = () async {
+      final pending = await db.getPendingSyncItems('user-a');
+      expect(pending, hasLength(1));
+      expect(pending.single.collection, 'subjects');
+      expect(pending.single.operationType, 'create');
+      await db.markSyncItemRejected(
+        pending.single.id,
+        'user-a',
+        'QUOTA_EXCEEDED',
+      );
+    };
+    final reconciled = repository.getSubjectsStream().firstWhere(
+      (subjects) =>
+          subjects.map((subject) => subject.id).toSet().containsAll({
+            'remote-a',
+            'remote-b',
+            'remote-c',
+          }) &&
+          subjects.length == 3,
     );
+
+    await repository.createSubject('Matemática local');
+    final subjects = await reconciled;
+
+    expect(subjects.map((subject) => subject.id).toSet(), {
+      'remote-a',
+      'remote-b',
+      'remote-c',
+    });
+  });
+
+  test(
+    'create aceito remotamente preserva matéria após reconciliação',
+    () async {
+      sync.duringDrain = () async {
+        final local = await db.select(db.subjects).getSingle();
+        final pending = await db.getPendingSyncItems('user-a');
+        expect(pending, hasLength(1));
+        await (db.update(db.syncQueueTable)
+              ..where((item) => item.id.equals(pending.single.id)))
+            .write(const SyncQueueTableCompanion(createdAt: Value(0)));
+        await db.markSyncItemAsSucceeded(pending.single.id, 'user-a');
+        fire.subjects.documents = [
+          _QueryDoc(local.id, remoteSubject('Matéria confirmada')),
+        ];
+      };
+      final reconciled = repository.getSubjectsStream().firstWhere(
+        (subjects) =>
+            subjects.length == 1 &&
+            subjects.single.title == 'Matéria confirmada',
+      );
+
+      await repository.createSubject('Matemática local');
+      final subject = (await reconciled).single;
+
+      expect(subject.title, 'Matéria confirmada');
+      expect(fire.subjects.calls, 1);
+    },
+  );
+
+  test('create retryable preserva matéria e fila sem iniciar GET', () async {
+    sync.drains = false;
+    final started = Completer<void>();
+    final release = Completer<void>();
+    sync.duringDrain = () async {
+      started.complete();
+      await release.future;
+    };
+
+    await repository.createSubject('Matemática local');
+    await started.future;
+
+    expect(await db.select(db.subjects).get(), hasLength(1));
+    expect(await db.getPendingSyncItems('user-a'), hasLength(1));
+    expect(
+      fire.info.document.calls + fire.subjects.calls + fire.cards.calls,
+      0,
+    );
+
+    release.complete();
+    await pumpEventQueue();
+    expect(
+      fire.info.document.calls + fire.subjects.calls + fire.cards.calls,
+      0,
+    );
+  });
+
+  test('create e remove subject agendam imediatamente', () async {
+    sync.duringDrain = () async {
+      final local = await db.select(db.subjects).getSingle();
+      final pending = await db.getPendingSyncItems('user-a');
+      await (db.update(db.syncQueueTable)
+            ..where((item) => item.id.equals(pending.single.id)))
+          .write(const SyncQueueTableCompanion(createdAt: Value(0)));
+      await db.markSyncItemAsSucceeded(pending.single.id, 'user-a');
+      fire.subjects.documents = [
+        _QueryDoc(local.id, remoteSubject('Matéria confirmada')),
+      ];
+    };
+    final reconciled = repository.getSubjectsStream().firstWhere(
+      (subjects) =>
+          subjects.length == 1 && subjects.single.title == 'Matéria confirmada',
+    );
+    await repository.createSubject('Matemática');
+    final created = (await reconciled).single;
+    expect(sync.calls, 1);
+    sync.duringDrain = null;
+    await repository.removeSubject(created.id);
     expect(sync.calls, 2);
   });
 

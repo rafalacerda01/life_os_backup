@@ -242,7 +242,7 @@ class StudyRepository {
           'examDate': examDate?.toIso8601String(),
         }),
       );
-      _schedulePendingStudySync();
+      unawaited(syncStudyFromFirebaseToLocal());
     } on _StudySessionChanged {
       return;
     } catch (e, stack) {
