@@ -255,7 +255,7 @@ class StudyRepository {
     final expectedUid = _currentUid;
     if (expectedUid == null) return;
 
-    final now = DateTime.now();
+    final now = _reviewNow();
     final nowEpoch = now.millisecondsSinceEpoch;
     var didMutate = false;
 
@@ -283,6 +283,18 @@ class StudyRepository {
         final newProgress = ((stats?.progress ?? 0) + 0.05)
             .clamp(0.0, 1.0)
             .toDouble();
+        final currentLastStudyDate = stats?.lastStudyDate == null
+            ? null
+            : DateTime.fromMillisecondsSinceEpoch(stats!.lastStudyDate!);
+        final newStreak = _nextStreak(
+          stats?.streak ?? 0,
+          currentLastStudyDate,
+          now,
+        );
+        final newLastStudyDate =
+            stats?.lastStudyDate != null && stats!.lastStudyDate! > nowEpoch
+            ? stats.lastStudyDate!
+            : nowEpoch;
         final newCardsToReview = (subject.cardsToReview - 1)
             .clamp(0, 99999)
             .toInt();
@@ -292,9 +304,10 @@ class StudyRepository {
             .write(FlashcardsCompanion(lastReviewed: Value(nowEpoch)));
         await _upsertStudyStats(
           current: stats,
+          streak: newStreak,
           reviewQueue: newQueue,
           progress: newProgress,
-          lastStudyDate: nowEpoch,
+          lastStudyDate: newLastStudyDate,
         );
         await (_db.update(_db.subjects)
               ..where((table) => table.id.equals(card.subjectId)))

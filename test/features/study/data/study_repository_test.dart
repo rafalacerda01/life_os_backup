@@ -196,14 +196,20 @@ void main() {
         ),
       )
       .then((_) {});
-  Future<void> stats({int queue = 0, double progress = .2}) => db
+  Future<void> stats({
+    int queue = 0,
+    double progress = .2,
+    int streak = 2,
+    DateTime? lastStudyDate,
+  }) => db
       .into(db.studyStats)
       .insert(
         StudyStatsCompanion.insert(
           id: 'main',
-          streak: 2,
+          streak: streak,
           reviewQueue: queue,
           progress: progress,
+          lastStudyDate: Value(lastStudyDate?.millisecondsSinceEpoch),
         ),
       )
       .then((_) {});
@@ -546,13 +552,19 @@ void main() {
   });
 
   test('completeCard é atômico e idempotente no mesmo dia', () async {
+    final now = DateTime(2026, 9, 10, 12);
+    repository = StudyRepository(db, fire, auth, sync, reviewNow: () => now);
+    sync.drains = false;
     await subject(cards: 1);
-    await stats(queue: 1);
+    await stats(queue: 1, streak: 5, lastStudyDate: DateTime(2026, 9, 9, 12));
     await card();
     await repository.completeCard('card-1');
     await repository.completeCard('card-1');
-    expect((await db.select(db.studyStats).getSingle()).reviewQueue, 0);
-    expect((await db.select(db.studyStats).getSingle()).progress, .25);
+    final updatedStats = await db.select(db.studyStats).getSingle();
+    expect(updatedStats.reviewQueue, 0);
+    expect(updatedStats.progress, .25);
+    expect(updatedStats.streak, 6);
+    expect(updatedStats.lastStudyDate, now.millisecondsSinceEpoch);
     expect((await db.select(db.subjects).getSingle()).cardsToReview, 0);
     final queue = await db.getPendingSyncItems('user-a');
     expect(queue, hasLength(1));
@@ -561,19 +573,42 @@ void main() {
     expect(queue.single.docId, 'card-1');
     final payload =
         jsonDecode(queue.single.payloadJson) as Map<String, dynamic>;
-    expect(payload.keys.toSet(), {
-      'subjectId',
-      'lastReviewed',
-      'timeZoneOffsetMinutes',
+    expect(payload, {
+      'subjectId': 'subject-1',
+      'lastReviewed': now.toUtc().toIso8601String(),
+      'timeZoneOffsetMinutes': now.timeZoneOffset.inMinutes,
     });
-    expect(payload['subjectId'], 'subject-1');
-    expect(DateTime.parse(payload['lastReviewed'] as String).isUtc, isTrue);
-    expect(payload['timeZoneOffsetMinutes'], isA<int>());
-    expect(
-      (payload['timeZoneOffsetMinutes'] as int).abs(),
-      lessThanOrEqualTo(840),
-    );
     expect(sync.calls, 1);
+  });
+
+  test('completeCard no mesmo dia local mantém streak', () async {
+    final now = DateTime(2026, 9, 10, 12);
+    repository = StudyRepository(db, fire, auth, sync, reviewNow: () => now);
+    sync.drains = false;
+    await subject(cards: 1);
+    await stats(queue: 1, streak: 5, lastStudyDate: DateTime(2026, 9, 10, 8));
+    await card();
+
+    await repository.completeCard('card-1');
+
+    final updatedStats = await db.select(db.studyStats).getSingle();
+    expect(updatedStats.streak, 5);
+    expect(updatedStats.lastStudyDate, now.millisecondsSinceEpoch);
+  });
+
+  test('completeCard após gap reinicia streak', () async {
+    final now = DateTime(2026, 9, 10, 12);
+    repository = StudyRepository(db, fire, auth, sync, reviewNow: () => now);
+    sync.drains = false;
+    await subject(cards: 1);
+    await stats(queue: 1, streak: 5, lastStudyDate: DateTime(2026, 9, 7, 12));
+    await card();
+
+    await repository.completeCard('card-1');
+
+    final updatedStats = await db.select(db.studyStats).getSingle();
+    expect(updatedStats.streak, 1);
+    expect(updatedStats.lastStudyDate, now.millisecondsSinceEpoch);
   });
 
   test(
