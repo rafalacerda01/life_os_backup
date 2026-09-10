@@ -597,13 +597,15 @@ service cloud.firestore {
           'reviewQueue',
           'progress',
           'streak',
-          'lastStudyDate'
+          'lastStudyDate',
+          'updatedAt'
         ])
         && request.resource.data.keys().hasAny([
           'reviewQueue',
           'progress',
           'streak',
-          'lastStudyDate'
+          'lastStudyDate',
+          'updatedAt'
         ])
         && (
           !request.resource.data.keys().hasAny(['reviewQueue']) ||
@@ -630,7 +632,28 @@ service cloud.firestore {
         && (
           !request.resource.data.keys().hasAny(['lastStudyDate']) ||
           request.resource.data.lastStudyDate is timestamp
+        )
+        && (
+          !request.resource.data.keys().hasAny(['updatedAt']) ||
+          request.resource.data.updatedAt is timestamp
         );
+    }
+
+    function validStudyInfoCreate() {
+      return request.resource.data.keys().hasOnly(['reviewQueue'])
+        && request.resource.data.keys().hasAll(['reviewQueue'])
+        && request.resource.data.reviewQueue is int
+        && request.resource.data.reviewQueue >= 0;
+    }
+
+    function validStudyInfoUpdate() {
+      return validStudyInfoData()
+        && request.resource.data
+          .diff(resource.data)
+          .affectedKeys()
+          .hasOnly(['reviewQueue'])
+        && request.resource.data.reviewQueue is int
+        && request.resource.data.reviewQueue >= 0;
     }
 
     function validReviewQueueCreate() {
@@ -923,10 +946,22 @@ service cloud.firestore {
 
       match /study_info/{studyInfoId} {
         allow read: if isOwner(userId);
-        allow create, update: if isOwner(userId)
+        allow create: if isOwner(userId)
           && studyInfoId == 'main'
-          && validStudyInfoData();
+          && validStudyInfoCreate();
+        allow update: if isOwner(userId)
+          && studyInfoId == 'main'
+          && validStudyInfoUpdate();
         allow delete: if false;
+      }
+
+      match /study_progress_state/{stateId} {
+        allow read: if isOwner(userId) && stateId == 'main';
+        allow create, update, delete: if false;
+      }
+
+      match /study_progress_events/{eventId} {
+        allow read, create, update, delete: if false;
       }
 
       match /review_queue/{reviewId} {
@@ -935,9 +970,7 @@ service cloud.firestore {
   allow create: if isOwner(userId)
     && validReviewQueueCreate();
 
-  allow update: if isOwner(userId)
-    && isUpdatingOnly(['lastReviewed'])
-    && request.resource.data.lastReviewed is timestamp;
+  allow update: if false;
 
   allow delete: if false;
 }

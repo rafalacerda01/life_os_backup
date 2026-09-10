@@ -561,12 +561,113 @@ void main() {
     expect(queue.single.docId, 'card-1');
     final payload =
         jsonDecode(queue.single.payloadJson) as Map<String, dynamic>;
+    expect(payload.keys.toSet(), {
+      'subjectId',
+      'lastReviewed',
+      'timeZoneOffsetMinutes',
+    });
     expect(payload['subjectId'], 'subject-1');
+    expect(DateTime.parse(payload['lastReviewed'] as String).isUtc, isTrue);
+    expect(payload['timeZoneOffsetMinutes'], isA<int>());
     expect(
-      DateTime.tryParse(payload['lastReviewed'] as String) != null,
-      isTrue,
+      (payload['timeZoneOffsetMinutes'] as int).abs(),
+      lessThanOrEqualTo(840),
     );
     expect(sync.calls, 1);
+  });
+
+  test(
+    'no-op remoto de review reconcilia incremento otimista pelo pull',
+    () async {
+      await subject(cards: 1);
+      await stats(queue: 1);
+      await card();
+      DateTime? remoteReviewedAt;
+
+      sync.duringDrain = () async {
+        final pending = await db.getPendingSyncItems('user-a');
+        expect(pending, hasLength(1));
+        final item = pending.single;
+        final payload = jsonDecode(item.payloadJson) as Map<String, dynamic>;
+        remoteReviewedAt = DateTime.parse(payload['lastReviewed']! as String);
+
+        rawDb.execute(
+          'UPDATE sync_queue_table SET created_at = 0 WHERE id = ?',
+          [item.id],
+        );
+        await db.markSyncItemAsSucceeded(item.id, 'user-a');
+        fire.info.document.values = {
+          'streak': 2,
+          'reviewQueue': 0,
+          'progress': .2,
+          'lastStudyDate': Timestamp.fromDate(remoteReviewedAt!),
+        };
+        fire.subjects.documents = [
+          _QueryDoc('subject-1', {
+            ...remoteSubject(),
+            'cardsToReview': 0,
+            'progress': .2,
+          }),
+        ];
+        fire.cards.documents = [
+          _QueryDoc('card-1', {
+            'subjectId': 'subject-1',
+            'question': 'Pergunta',
+            'answer': 'Resposta',
+            'lastReviewed': Timestamp.fromDate(remoteReviewedAt!),
+          }),
+        ];
+      };
+
+      final reconciled = repository.getStudyStatsStream().firstWhere(
+        (value) => value.reviewQueue == 0 && value.progress == .2,
+      );
+
+      await repository.completeCard('card-1');
+      await reconciled;
+
+      expect((await db.select(db.studyStats).getSingle()).progress, .2);
+      expect((await db.select(db.subjects).getSingle()).cardsToReview, 0);
+      expect(
+        (await db.select(db.flashcards).getSingle()).lastReviewed,
+        remoteReviewedAt!.millisecondsSinceEpoch,
+      );
+      expect(await db.getPendingSyncItems('user-a'), isEmpty);
+      expect(sync.calls, 1);
+    },
+  );
+
+  test('troca de UID durante completeCard faz rollback integral', () async {
+    await subject(cards: 1);
+    await stats(queue: 1);
+    await card();
+    var observedReview = false;
+    auth.uidForRead = (_) {
+      final count =
+          rawDb
+                  .select(
+                    "SELECT COUNT(*) AS count FROM sync_queue_table "
+                    "WHERE collection = 'review_queue' "
+                    "AND operation_type = 'update'",
+                  )
+                  .first['count']!
+              as int;
+      if (count > 0) {
+        observedReview = true;
+        return 'user-b';
+      }
+      return 'user-a';
+    };
+
+    await repository.completeCard('card-1');
+
+    expect(observedReview, isTrue);
+    expect((await db.select(db.studyStats).getSingle()).reviewQueue, 1);
+    expect((await db.select(db.studyStats).getSingle()).progress, .2);
+    expect((await db.select(db.subjects).getSingle()).cardsToReview, 1);
+    expect((await db.select(db.flashcards).getSingle()).lastReviewed, null);
+    expect(await db.getPendingSyncItems('user-a'), isEmpty);
+    expect(sync.calls, 0);
   });
 
   test('intent único de review protege dados durante pull antigo', () async {
@@ -824,13 +925,59 @@ void main() {
     expect(sync.calls, 0);
   });
 
-  test('completeReview e reset criam main com intents duráveis', () async {
+  test('completeReview e reset criam intents duráveis', () async {
     final state = StudyModel(streak: 1, reviewQueue: 2, progress: .8);
     await repository.completeReview(state);
     await repository.resetDailyProgress(state);
     expect((await db.select(db.studyStats).getSingle()).reviewQueue, 1);
     expect((await db.select(db.studyStats).getSingle()).progress, 0);
-    expect(await db.getPendingSyncItems('user-a'), hasLength(2));
+    final queue = await db.getPendingSyncItems('user-a');
+    expect(queue, hasLength(2));
+    final reset = queue.singleWhere(
+      (item) => item.collection == 'study_progress_reset',
+    );
+    expect(reset.operationType, 'create');
+    expect(
+      reset.docId,
+      matches(
+        RegExp(
+          r'^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$',
+          caseSensitive: false,
+        ),
+      ),
+    );
+    final payload = jsonDecode(reset.payloadJson) as Map<String, dynamic>;
+    expect(payload.keys, {'occurredAt'});
+    expect(DateTime.parse(payload['occurredAt'] as String).isUtc, isTrue);
+  });
+
+  test('troca de UID durante reset faz rollback integral', () async {
+    await stats(progress: .8);
+    var observedReset = false;
+    auth.uidForRead = (_) {
+      final count =
+          rawDb
+                  .select(
+                    "SELECT COUNT(*) AS count FROM sync_queue_table "
+                    "WHERE collection = 'study_progress_reset'",
+                  )
+                  .first['count']!
+              as int;
+      if (count > 0) {
+        observedReset = true;
+        return 'user-b';
+      }
+      return 'user-a';
+    };
+
+    await repository.resetDailyProgress(
+      StudyModel(streak: 1, reviewQueue: 0, progress: .8),
+    );
+
+    expect(observedReset, isTrue);
+    expect((await db.select(db.studyStats).getSingle()).progress, .8);
+    expect(await db.getPendingSyncItems('user-a'), isEmpty);
+    expect(sync.calls, 0);
   });
 
   test('fila não drenada impede GET', () async {
@@ -977,6 +1124,30 @@ void main() {
     expect((await db.select(db.studyStats).getSingle()).progress, .45);
   });
 
+  test('pending study_progress_reset protege somente stats', () async {
+    await stats(progress: .45);
+    await subject();
+    fire.info.document.values = {'streak': 1, 'reviewQueue': 0, 'progress': .1};
+    fire.subjects.documents = [
+      _QueryDoc('subject-1', remoteSubject('Matemática remota')),
+    ];
+    await db.insertSyncItem(
+      ownerUid: 'user-a',
+      collection: 'study_progress_reset',
+      docId: '5a3ccf1f-d43e-4a34-823d-61ed255e568a',
+      operationType: 'create',
+      payloadJson: jsonEncode({'occurredAt': '2026-09-09T10:00:00.000Z'}),
+    );
+
+    await repository.syncStudyFromFirebaseToLocal();
+
+    expect((await db.select(db.studyStats).getSingle()).progress, .45);
+    expect(
+      (await db.select(db.subjects).getSingle()).title,
+      'Matemática remota',
+    );
+  });
+
   test('pending study_activity protege a matéria identificada', () async {
     await subject();
     fire.subjects.documents = [
@@ -1050,6 +1221,33 @@ void main() {
     final localSubject = await db.select(db.subjects).getSingle();
     expect(localSubject.title, 'Matemática');
     expect(localSubject.progress, .45);
+  });
+
+  test('study_progress_reset criado durante pull não é sobrescrito', () async {
+    await stats(progress: .8);
+    fire.info.document.values = {'streak': 1, 'reviewQueue': 0, 'progress': .6};
+    final started = Completer<void>();
+    final release = Completer<void>();
+    fire.info.document.beforeGet = () {
+      started.complete();
+      return release.future;
+    };
+
+    final pull = repository.syncStudyFromFirebaseToLocal();
+    await started.future;
+    sync.drains = false;
+    await repository.resetDailyProgress(
+      StudyModel(streak: 1, reviewQueue: 0, progress: .8),
+    );
+    release.complete();
+    await pull;
+
+    expect((await db.select(db.studyStats).getSingle()).progress, 0);
+    final queue = await db.getPendingSyncItems('user-a');
+    expect(
+      queue.where((item) => item.collection == 'study_progress_reset'),
+      hasLength(1),
+    );
   });
 
   test('succeeded recente protege subject', () async {

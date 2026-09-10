@@ -204,10 +204,13 @@ class _MemoryTransaction extends Fake implements Transaction {
   ) {
     for (final entry in incoming.entries) {
       if (entry.value is FieldValue) {
-        if (entry.key != 'reviewQueue' && entry.key != 'cardsToReview') {
+        if (entry.key == 'createdAt') {
+          target[entry.key] = Timestamp.fromDate(DateTime.utc(2026, 9, 9, 15));
+        } else if (entry.key != 'reviewQueue' && entry.key != 'cardsToReview') {
           throw UnsupportedError('Unexpected transform: ${entry.key}');
+        } else {
+          target[entry.key] = (target[entry.key] as int? ?? 0) + 1;
         }
-        target[entry.key] = (target[entry.key] as int? ?? 0) + 1;
       } else {
         target[entry.key] = entry.value;
       }
@@ -441,6 +444,25 @@ SyncQueueTableData createStudyActivityItem({
   );
 }
 
+SyncQueueTableData createStudyProgressResetItem({
+  String mutationId = '5a3ccf1f-d43e-4a34-823d-61ed255e568a',
+  Object? occurredAt = '2026-09-09T10:00:00.000Z',
+  Map<String, dynamic>? payload,
+}) {
+  return SyncQueueTableData(
+    id: 9,
+    ownerUid: 'user-123',
+    collection: 'study_progress_reset',
+    docId: mutationId,
+    operationType: 'create',
+    payloadJson: jsonEncode(payload ?? {'occurredAt': occurredAt}),
+    createdAt: DateTime.now().millisecondsSinceEpoch,
+    isSynced: false,
+    status: SyncQueuePersistenceStatus.pending,
+    attemptCount: 0,
+  );
+}
+
 void main() {
   late _RecordingHealthDocumentReference healthDoc;
   late FirestoreSyncRemoteDataSource remote;
@@ -491,26 +513,42 @@ void main() {
     expect(healthDoc.lastOptions?.merge, isTrue);
   });
 
-  test('study_info update usa set merge e converte data ISO', () async {
+  test('study_info permite somente reviewQueue client-side', () async {
     final result = await remote.process(
       'user-123',
       createStudyItem(
         collection: 'study_info',
         docId: 'main',
         operationType: 'update',
-        payload: {
-          'reviewQueue': 2,
-          'progress': 0.5,
-          'streak': 3,
-          'lastStudyDate': '2026-09-08T10:00:00.000Z',
-        },
+        payload: {'reviewQueue': 2},
       ),
     );
 
     expect(result.isSuccess, isTrue);
     expect(healthDoc.lastOptions?.merge, isTrue);
-    expect(healthDoc.lastData?['lastStudyDate'], isA<Timestamp>());
+    expect(healthDoc.lastData, {'reviewQueue': 2});
     expect(healthDoc.updateCalls, 0);
+  });
+
+  test('study_info rejeita campos competitivos client-side', () async {
+    for (final payload in [
+      {'progress': .5},
+      {'streak': 3},
+      {'lastStudyDate': '2026-09-08T10:00:00.000Z'},
+      {'reviewQueue': 2, 'progress': .5},
+    ]) {
+      final result = await remote.process(
+        'user-123',
+        createStudyItem(
+          collection: 'study_info',
+          docId: 'main',
+          operationType: 'update',
+          payload: payload,
+        ),
+      );
+      expect(result.isPermanentFailure, isTrue);
+      expect(result.code, 'INVALID_PAYLOAD');
+    }
   });
 
   test('study_info rejeita docId e campos extras sem write', () async {
@@ -552,11 +590,19 @@ void main() {
     String cardId, {
     String subjectId = 'subject-1',
     String lastReviewed = '2026-09-08T10:00:00.000Z',
+    Object? timeZoneOffsetMinutes = -180,
+    Map<String, dynamic>? payload,
   }) => createStudyItem(
     collection: 'review_queue',
     docId: cardId,
     operationType: 'update',
-    payload: {'subjectId': subjectId, 'lastReviewed': lastReviewed},
+    payload:
+        payload ??
+        {
+          'subjectId': subjectId,
+          'lastReviewed': lastReviewed,
+          'timeZoneOffsetMinutes': timeZoneOffsetMinutes,
+        },
   );
 
   void seedReviewState(
@@ -654,171 +700,6 @@ void main() {
     expect(result.code, 'INVALID_PAYLOAD');
     expect(firestore.data, isEmpty);
     expect(firestore.transactionCommits, 0);
-  });
-
-  test('review atualiza card e contadores na mesma transação', () async {
-    final firestore = _TransactionalStudyFirestore();
-    seedReviewState(firestore);
-    final result = await transactionalStudyRemote(
-      firestore,
-    ).process('user-123', reviewUpdateItem('card-1'));
-
-    expect(result.isSuccess, isTrue);
-    expect(firestore.read('users/user-123/study_info/main'), {
-      'reviewQueue': 1,
-      'progress': 0.25,
-      'lastStudyDate': isA<Timestamp>(),
-    });
-    expect(
-      firestore.read('users/user-123/subjects/subject-1')?['cardsToReview'],
-      1,
-    );
-    expect(
-      firestore.read('users/user-123/review_queue/card-1')?['lastReviewed'],
-      isA<Timestamp>(),
-    );
-  });
-
-  test('replay da mesma revisão não altera contadores novamente', () async {
-    final firestore = _TransactionalStudyFirestore();
-    seedReviewState(firestore);
-    final dataSource = transactionalStudyRemote(firestore);
-    final item = reviewUpdateItem('card-1');
-
-    expect((await dataSource.process('user-123', item)).isSuccess, isTrue);
-    expect((await dataSource.process('user-123', item)).isSuccess, isTrue);
-
-    expect(firestore.read('users/user-123/study_info/main')?['reviewQueue'], 1);
-    expect(firestore.read('users/user-123/study_info/main')?['progress'], 0.25);
-    expect(
-      firestore.read('users/user-123/subjects/subject-1')?['cardsToReview'],
-      1,
-    );
-  });
-
-  test('revisões de dois cards preservam contadores multi-device', () async {
-    final firestore = _TransactionalStudyFirestore();
-    seedReviewState(firestore, cardIds: ['card-1', 'card-2']);
-    final dataSource = transactionalStudyRemote(firestore);
-
-    await dataSource.process('user-123', reviewUpdateItem('card-1'));
-    await dataSource.process('user-123', reviewUpdateItem('card-2'));
-
-    expect(firestore.read('users/user-123/study_info/main')?['reviewQueue'], 0);
-    expect(firestore.read('users/user-123/study_info/main')?['progress'], 0.30);
-    expect(
-      firestore.read('users/user-123/subjects/subject-1')?['cardsToReview'],
-      0,
-    );
-  });
-
-  test('timestamps diferentes no mesmo dia revisam o card uma vez', () async {
-    final firestore = _TransactionalStudyFirestore();
-    seedReviewState(firestore);
-    final dataSource = transactionalStudyRemote(firestore);
-
-    await dataSource.process('user-123', reviewUpdateItem('card-1'));
-    await dataSource.process(
-      'user-123',
-      reviewUpdateItem('card-1', lastReviewed: '2026-09-08T18:00:00.000Z'),
-    );
-
-    expect(firestore.read('users/user-123/study_info/main')?['reviewQueue'], 1);
-    expect(firestore.read('users/user-123/study_info/main')?['progress'], 0.25);
-    expect(
-      firestore.read('users/user-123/subjects/subject-1')?['cardsToReview'],
-      1,
-    );
-  });
-
-  test('card remoto ausente rejeita review sem escrita parcial', () async {
-    final firestore = _TransactionalStudyFirestore();
-    seedReviewState(firestore, cardIds: const []);
-    final result = await transactionalStudyRemote(
-      firestore,
-    ).process('user-123', reviewUpdateItem('card-1'));
-
-    expect(result.isPermanentFailure, isTrue);
-    expect(result.code, 'INVALID_PAYLOAD');
-    expect(firestore.read('users/user-123/study_info/main')?['reviewQueue'], 2);
-    expect(
-      firestore.read('users/user-123/subjects/subject-1')?['cardsToReview'],
-      2,
-    );
-    expect(firestore.transactionCommits, 0);
-  });
-
-  test('subject remoto ausente rejeita review sem escrita parcial', () async {
-    final firestore = _TransactionalStudyFirestore()
-      ..seed('users/user-123/study_info/main', {
-        'reviewQueue': 2,
-        'progress': 0.20,
-      })
-      ..seed('users/user-123/review_queue/card-1', {
-        'subjectId': 'subject-1',
-        'lastReviewed': null,
-      });
-    final result = await transactionalStudyRemote(
-      firestore,
-    ).process('user-123', reviewUpdateItem('card-1'));
-
-    expect(result.isPermanentFailure, isTrue);
-    expect(result.code, 'INVALID_PAYLOAD');
-    expect(firestore.read('users/user-123/study_info/main')?['reviewQueue'], 2);
-    expect(
-      firestore.read('users/user-123/review_queue/card-1')?['lastReviewed'],
-      null,
-    );
-    expect(firestore.transactionCommits, 0);
-  });
-
-  test('subjectId divergente rejeita review sem escrita parcial', () async {
-    final firestore = _TransactionalStudyFirestore();
-    seedReviewState(firestore);
-    firestore.seed('users/user-123/subjects/subject-other', {
-      'cardsToReview': 2,
-    });
-    final result = await transactionalStudyRemote(firestore).process(
-      'user-123',
-      reviewUpdateItem('card-1', subjectId: 'subject-other'),
-    );
-
-    expect(result.isPermanentFailure, isTrue);
-    expect(result.code, 'INVALID_PAYLOAD');
-    expect(firestore.read('users/user-123/study_info/main')?['reviewQueue'], 2);
-    expect(
-      firestore.read('users/user-123/review_queue/card-1')?['lastReviewed'],
-      null,
-    );
-    expect(firestore.transactionCommits, 0);
-  });
-
-  test('review update exige subjectId, data ISO e campos exatos', () async {
-    for (final payload in [
-      {'lastReviewed': '2026-09-08T10:00:00.000Z'},
-      {'subjectId': '', 'lastReviewed': '2026-09-08T10:00:00.000Z'},
-      {'subjectId': 'subject-1', 'lastReviewed': 'inválida'},
-      {
-        'subjectId': 'subject-1',
-        'lastReviewed': '2026-09-08T10:00:00.000Z',
-        'extra': true,
-      },
-    ]) {
-      final firestore = _TransactionalStudyFirestore();
-      seedReviewState(firestore);
-      final result = await transactionalStudyRemote(firestore).process(
-        'user-123',
-        createStudyItem(
-          collection: 'review_queue',
-          docId: 'card-1',
-          operationType: 'update',
-          payload: payload,
-        ),
-      );
-      expect(result.isPermanentFailure, isTrue);
-      expect(result.code, 'INVALID_PAYLOAD');
-      expect(firestore.transactionCommits, 0);
-    }
   });
 
   test('review_queue inválido é rejeitado sem write', () async {
@@ -1680,5 +1561,201 @@ void main() {
     expect(result.code, 'INVALID_PAYLOAD');
     expect(result.message, contains('STUDY_ACTIVITY_SUBJECT_NOT_FOUND'));
     expect(client.wasClosed, isTrue);
+  });
+
+  test('review update chama backend sem transaction ou write direto', () async {
+    late Map<String, dynamic> payload;
+    final firestore = _TransactionalStudyFirestore();
+    seedReviewState(firestore);
+    final before = {
+      for (final entry in firestore.data.entries)
+        entry.key: Map<String, dynamic>.from(entry.value),
+    };
+    final client = _RecordingHttpClient((request) async {
+      payload = jsonDecode(await request.finalize().bytesToString());
+      return _jsonResponse(200);
+    });
+    final source = FirestoreSyncRemoteDataSource(
+      firestore,
+      _FakeFirebaseAuth(_FakeFirebaseUser('user-123')),
+      clientFactory: () => client,
+      idTokenProvider: (_, _) async => 'token',
+      appCheckTokenProvider: _validAppCheckToken,
+    );
+
+    final result = await source.process('user-123', reviewUpdateItem('card-1'));
+
+    expect(result.isSuccess, isTrue);
+    expect(payload, {
+      'operation': 'apply_study_review',
+      'cardId': 'card-1',
+      'subjectId': 'subject-1',
+      'occurredAt': '2026-09-08T10:00:00.000Z',
+      'timeZoneOffsetMinutes': -180,
+    });
+    expect(firestore.transactionCommits, 0);
+    expect(firestore.data, before);
+    expect(client.wasClosed, isTrue);
+  });
+
+  final invalidReviewUpdates = <({String name, SyncQueueTableData item})>[
+    (name: 'cardId vazio', item: reviewUpdateItem('')),
+    (name: 'cardId com barra', item: reviewUpdateItem('invalid/id')),
+    (name: 'subjectId vazio', item: reviewUpdateItem('card-1', subjectId: '')),
+    (
+      name: 'subjectId com barra',
+      item: reviewUpdateItem('card-1', subjectId: 'invalid/id'),
+    ),
+    (
+      name: 'lastReviewed inválido',
+      item: reviewUpdateItem('card-1', lastReviewed: 'invalid'),
+    ),
+    (
+      name: 'lastReviewed sem timezone',
+      item: reviewUpdateItem('card-1', lastReviewed: '2026-09-08T10:00:00.000'),
+    ),
+    (
+      name: 'timezone fora do limite',
+      item: reviewUpdateItem('card-1', timeZoneOffsetMinutes: 841),
+    ),
+    (
+      name: 'campo extra',
+      item: reviewUpdateItem(
+        'card-1',
+        payload: {
+          'subjectId': 'subject-1',
+          'lastReviewed': '2026-09-08T10:00:00.000Z',
+          'timeZoneOffsetMinutes': -180,
+          'extra': true,
+        },
+      ),
+    ),
+  ];
+
+  for (final invalidReviewUpdate in invalidReviewUpdates) {
+    test(
+      'review update rejeita ${invalidReviewUpdate.name} sem HTTP',
+      () async {
+        var clientCreated = false;
+        final source = serverDataSource(
+          auth: _FakeFirebaseAuth(_FakeFirebaseUser('user-123')),
+          clientFactory: () {
+            clientCreated = true;
+            return _RecordingHttpClient((_) async => _jsonResponse(200));
+          },
+          idTokenProvider: (_, _) async => 'token',
+          appCheckTokenProvider: _validAppCheckToken,
+        );
+
+        final result = await source.process(
+          'user-123',
+          invalidReviewUpdate.item,
+        );
+
+        expect(result.isPermanentFailure, isTrue);
+        expect(result.code, 'INVALID_PAYLOAD');
+        expect(clientCreated, isFalse);
+      },
+    );
+  }
+
+  test('review backend 409 vira falha terminal sanitizada', () async {
+    final client = _RecordingHttpClient(
+      (_) async => _jsonResponse(
+        409,
+        jsonEncode({
+          'code': 'STUDY_REVIEW_STATE_INVALID',
+          'error': 'O estado remoto da revisão de estudo está inconsistente.',
+        }),
+      ),
+    );
+    final source = serverDataSource(
+      auth: _FakeFirebaseAuth(_FakeFirebaseUser('user-123')),
+      clientFactory: () => client,
+      idTokenProvider: (_, _) async => 'token',
+      appCheckTokenProvider: _validAppCheckToken,
+    );
+
+    final result = await source.process('user-123', reviewUpdateItem('card-1'));
+
+    expect(result.isPermanentFailure, isTrue);
+    expect(result.code, 'INVALID_PAYLOAD');
+    expect(result.message, contains('STUDY_REVIEW_STATE_INVALID'));
+    expect(client.wasClosed, isTrue);
+  });
+
+  test('review HTTP transitório continua retryable', () async {
+    final client = _RecordingHttpClient((_) async => _jsonResponse(503));
+    final source = serverDataSource(
+      auth: _FakeFirebaseAuth(_FakeFirebaseUser('user-123')),
+      clientFactory: () => client,
+      idTokenProvider: (_, _) async => 'token',
+      appCheckTokenProvider: _validAppCheckToken,
+    );
+
+    final result = await source.process('user-123', reviewUpdateItem('card-1'));
+
+    expect(result.shouldRetry, isTrue);
+    expect(client.wasClosed, isTrue);
+  });
+
+  test(
+    'study_progress_reset envia intent ao backend sem write direto',
+    () async {
+      late Map<String, dynamic> payload;
+      final client = _RecordingHttpClient((request) async {
+        payload = jsonDecode(await request.finalize().bytesToString());
+        return _jsonResponse(200);
+      });
+      final source = serverDataSource(
+        auth: _FakeFirebaseAuth(_FakeFirebaseUser('user-123')),
+        clientFactory: () => client,
+        idTokenProvider: (_, _) async => 'token',
+        appCheckTokenProvider: _validAppCheckToken,
+      );
+
+      final result = await source.process(
+        'user-123',
+        createStudyProgressResetItem(),
+      );
+
+      expect(result.isSuccess, isTrue);
+      expect(payload, {
+        'operation': 'apply_study_progress_reset',
+        'mutationId': '5a3ccf1f-d43e-4a34-823d-61ed255e568a',
+        'occurredAt': '2026-09-09T10:00:00.000Z',
+      });
+      expect(healthDoc.lastData, isNull);
+      expect(healthDoc.updateCalls, 0);
+      expect(client.wasClosed, isTrue);
+    },
+  );
+
+  test('study_progress_reset inválido falha sem HTTP', () async {
+    for (final item in [
+      createStudyProgressResetItem(mutationId: 'not-a-uuid'),
+      createStudyProgressResetItem(
+        payload: {'occurredAt': '2026-09-09T10:00:00.000Z', 'extra': true},
+      ),
+      createStudyProgressResetItem(occurredAt: 'invalid'),
+      createStudyProgressResetItem(occurredAt: '2026-09-09T10:00:00.000'),
+    ]) {
+      var clientCreated = false;
+      final source = serverDataSource(
+        auth: _FakeFirebaseAuth(_FakeFirebaseUser('user-123')),
+        clientFactory: () {
+          clientCreated = true;
+          return _RecordingHttpClient((_) async => _jsonResponse(200));
+        },
+        idTokenProvider: (_, _) async => 'token',
+        appCheckTokenProvider: _validAppCheckToken,
+      );
+
+      final result = await source.process('user-123', item);
+
+      expect(result.isPermanentFailure, isTrue);
+      expect(result.code, 'INVALID_PAYLOAD');
+      expect(clientCreated, isFalse);
+    }
   });
 }

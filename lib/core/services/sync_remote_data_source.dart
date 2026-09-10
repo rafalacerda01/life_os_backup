@@ -131,6 +131,14 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
         return _applyStudyActivityServerSide(expectedUid: uid, item: item);
       }
 
+      if (collection == 'study_progress_reset' && operationType == 'create') {
+        return _applyStudyProgressResetServerSide(expectedUid: uid, item: item);
+      }
+
+      if (collection == 'review_queue' && operationType == 'update') {
+        return _applyStudyReviewServerSide(expectedUid: uid, item: item);
+      }
+
       // ----------------------------------------------------------------------
       // CREATE DE MEDICATIONS
       // Obrigatoriamente passa pelo backend para enforcement de quota.
@@ -219,82 +227,6 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
         return const SyncOperationResult.success();
       }
 
-      if (collection == 'review_queue' && operationType == 'update') {
-        final data = _decodePayload(item.payloadJson);
-        final prepared = _prepareReviewQueueUpdatePayload(data);
-        final subjectId = prepared['subjectId']! as String;
-        final lastReviewed = prepared['lastReviewed']! as Timestamp;
-        final userRef = _firestore.collection('users').doc(uid);
-        final subjectRef = userRef.collection('subjects').doc(subjectId);
-        final studyInfoRef = userRef.collection('study_info').doc('main');
-
-        await _firestore.runTransaction((transaction) async {
-          final cardSnapshot = await transaction.get(documentRef);
-          final subjectSnapshot = await transaction.get(subjectRef);
-          final studyInfoSnapshot = await transaction.get(studyInfoRef);
-
-          final cardData = cardSnapshot.data();
-          final subjectData = subjectSnapshot.data();
-          final studyInfoData = studyInfoSnapshot.data();
-          if (!cardSnapshot.exists || cardData == null) {
-            throw const FormatException('Flashcard remoto não encontrado.');
-          }
-          if (!subjectSnapshot.exists || subjectData == null) {
-            throw const FormatException('Matéria remota não encontrada.');
-          }
-          if (cardData['subjectId'] != subjectId) {
-            throw const FormatException('Matéria do flashcard inválida.');
-          }
-
-          final currentLastReviewed = cardData['lastReviewed'];
-          final currentReviewDate = switch (currentLastReviewed) {
-            null => null,
-            Timestamp timestamp => timestamp.toDate(),
-            DateTime date => date,
-            _ => throw const FormatException(
-              'Data de revisão remota inválida.',
-            ),
-          };
-          if (currentReviewDate != null &&
-              _isSameLocalDay(currentReviewDate, lastReviewed.toDate())) {
-            return;
-          }
-
-          final currentReviewQueue = studyInfoData?['reviewQueue'];
-          final currentProgress = studyInfoData?['progress'];
-          final currentCardsToReview = subjectData['cardsToReview'];
-          if (currentReviewQueue != null &&
-              (currentReviewQueue is! int || currentReviewQueue < 0)) {
-            throw const FormatException('Fila de revisão remota inválida.');
-          }
-          if (currentProgress != null && !_isFiniteProgress(currentProgress)) {
-            throw const FormatException('Progresso remoto inválido.');
-          }
-          if (currentCardsToReview is! int || currentCardsToReview < 0) {
-            throw const FormatException('Contador remoto da matéria inválido.');
-          }
-
-          final newReviewQueue = ((currentReviewQueue as int? ?? 0) - 1)
-              .clamp(0, 1 << 31)
-              .toInt();
-          final newCardsToReview = (currentCardsToReview - 1)
-              .clamp(0, 1 << 31)
-              .toInt();
-          final newProgress = ((currentProgress as num? ?? 0).toDouble() + 0.05)
-              .clamp(0.0, 1.0)
-              .toDouble();
-
-          transaction.update(documentRef, {'lastReviewed': lastReviewed});
-          transaction.set(studyInfoRef, {
-            'reviewQueue': newReviewQueue,
-            'progress': newProgress,
-            'lastStudyDate': lastReviewed,
-          }, SetOptions(merge: true));
-          transaction.update(subjectRef, {'cardsToReview': newCardsToReview});
-        });
-        return const SyncOperationResult.success();
-      }
-
       switch (operationType) {
         case 'create':
         case 'update':
@@ -359,48 +291,15 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
   }
 
   Map<String, dynamic> _prepareStudyInfoPayload(Map<String, dynamic> data) {
-    const allowedFields = {
-      'reviewQueue',
-      'progress',
-      'streak',
-      'lastStudyDate',
-    };
-    if (data.isEmpty || data.keys.any((key) => !allowedFields.contains(key))) {
+    if (!_hasExactFields(data, const {'reviewQueue'})) {
       throw const FormatException('Payload de informações de estudo inválido.');
     }
 
-    final prepared = Map<String, dynamic>.from(data);
-    if (data.containsKey('reviewQueue')) {
-      final reviewQueue = data['reviewQueue'];
-      if (reviewQueue is! int || reviewQueue < 0) {
-        throw const FormatException('Fila de revisão inválida.');
-      }
+    final reviewQueue = data['reviewQueue'];
+    if (reviewQueue is! int || reviewQueue < 0) {
+      throw const FormatException('Fila de revisão inválida.');
     }
-
-    if (data.containsKey('progress')) {
-      final progress = data['progress'];
-      final value = progress is num ? progress.toDouble() : double.nan;
-      if (!value.isFinite || value < 0 || value > 1) {
-        throw const FormatException('Progresso de estudo inválido.');
-      }
-      prepared['progress'] = value;
-    }
-
-    if (data.containsKey('streak')) {
-      final streak = data['streak'];
-      if (streak is! int || streak < 0) {
-        throw const FormatException('Sequência de estudo inválida.');
-      }
-    }
-
-    if (data.containsKey('lastStudyDate')) {
-      prepared['lastStudyDate'] = _parseQueuedTimestamp(
-        data['lastStudyDate'],
-        fieldName: 'Data de estudo',
-      );
-    }
-
-    return prepared;
+    return {'reviewQueue': reviewQueue};
   }
 
   Map<String, dynamic> _prepareReviewQueueCreatePayload(
@@ -429,45 +328,8 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
     };
   }
 
-  Map<String, dynamic> _prepareReviewQueueUpdatePayload(
-    Map<String, dynamic> data,
-  ) {
-    if (!_hasExactFields(data, const {'subjectId', 'lastReviewed'})) {
-      throw const FormatException(
-        'Payload de atualização de flashcard inválido.',
-      );
-    }
-
-    final subjectId = data['subjectId'];
-    if (subjectId is! String || subjectId.trim().isEmpty) {
-      throw const FormatException('Matéria do flashcard inválida.');
-    }
-
-    return {
-      'subjectId': subjectId,
-      'lastReviewed': _parseQueuedTimestamp(
-        data['lastReviewed'],
-        fieldName: 'Data de revisão',
-      ),
-    };
-  }
-
   bool _hasExactFields(Map<String, dynamic> data, Set<String> fields) {
     return data.length == fields.length && data.keys.every(fields.contains);
-  }
-
-  bool _isFiniteProgress(Object? value) {
-    if (value is! num) return false;
-    final progress = value.toDouble();
-    return progress.isFinite && progress >= 0 && progress <= 1;
-  }
-
-  bool _isSameLocalDay(DateTime first, DateTime second) {
-    final firstLocal = first.toLocal();
-    final secondLocal = second.toLocal();
-    return firstLocal.year == secondLocal.year &&
-        firstLocal.month == secondLocal.month &&
-        firstLocal.day == secondLocal.day;
   }
 
   Timestamp _parseQueuedTimestamp(Object? value, {required String fieldName}) {
@@ -673,6 +535,75 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
       'subjectId': subjectId,
       'progressDelta': delta,
       'occurredAt': occurredAt,
+      'timeZoneOffsetMinutes': timeZoneOffsetMinutes,
+    });
+  }
+
+  Future<SyncOperationResult> _applyStudyProgressResetServerSide({
+    required String expectedUid,
+    required SyncQueueTableData item,
+  }) async {
+    final data = _decodePayload(item.payloadJson);
+    final occurredAt = data['occurredAt'];
+    final parsedOccurredAt = occurredAt is String
+        ? DateTime.tryParse(occurredAt)
+        : null;
+    if (!_uuidV4Pattern.hasMatch(item.docId) ||
+        !_hasExactFields(data, const {'occurredAt'}) ||
+        parsedOccurredAt == null ||
+        !parsedOccurredAt.isUtc ||
+        !occurredAt.endsWith('Z')) {
+      return const SyncOperationResult.invalidPayload(
+        message: 'Payload de reset de progresso inválido.',
+      );
+    }
+
+    return _postToSyncBackend(expectedUid, {
+      'operation': 'apply_study_progress_reset',
+      'mutationId': item.docId,
+      'occurredAt': occurredAt,
+    });
+  }
+
+  Future<SyncOperationResult> _applyStudyReviewServerSide({
+    required String expectedUid,
+    required SyncQueueTableData item,
+  }) async {
+    final data = _decodePayload(item.payloadJson);
+    final subjectId = data['subjectId'];
+    final lastReviewed = data['lastReviewed'];
+    final timeZoneOffsetMinutes = data['timeZoneOffsetMinutes'];
+    final parsedLastReviewed = lastReviewed is String
+        ? DateTime.tryParse(lastReviewed)
+        : null;
+    if (item.docId.trim().isEmpty ||
+        item.docId.length > 128 ||
+        item.docId.contains('/') ||
+        !_hasExactFields(data, const {
+          'subjectId',
+          'lastReviewed',
+          'timeZoneOffsetMinutes',
+        }) ||
+        subjectId is! String ||
+        subjectId.trim().isEmpty ||
+        subjectId.length > 128 ||
+        subjectId.contains('/') ||
+        parsedLastReviewed == null ||
+        !parsedLastReviewed.isUtc ||
+        !lastReviewed.endsWith('Z') ||
+        timeZoneOffsetMinutes is! int ||
+        timeZoneOffsetMinutes < -840 ||
+        timeZoneOffsetMinutes > 840) {
+      return const SyncOperationResult.invalidPayload(
+        message: 'Payload de revisão de estudo inválido.',
+      );
+    }
+
+    return _postToSyncBackend(expectedUid, {
+      'operation': 'apply_study_review',
+      'cardId': item.docId,
+      'subjectId': subjectId,
+      'occurredAt': lastReviewed,
       'timeZoneOffsetMinutes': timeZoneOffsetMinutes,
     });
   }

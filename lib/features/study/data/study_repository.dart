@@ -307,14 +307,15 @@ class StudyRepository {
           operationType: 'update',
           payload: {
             'subjectId': card.subjectId,
-            'lastReviewed': now.toIso8601String(),
+            'lastReviewed': now.toUtc().toIso8601String(),
+            'timeZoneOffsetMinutes': now.timeZoneOffset.inMinutes,
           },
         );
         _requireCurrentUser(expectedUid);
         didMutate = true;
       });
 
-      if (didMutate) _schedulePendingStudySync();
+      if (didMutate) unawaited(syncStudyFromFirebaseToLocal());
     } on _StudySessionChanged {
       return;
     } catch (e, stack) {
@@ -606,25 +607,28 @@ class StudyRepository {
     final expectedUid = _currentUid;
     if (expectedUid == null) return;
 
+    final resetId = _uuid.v4();
+    final now = DateTime.now();
+
     try {
-      await _db.transactionWithSync(
-        ownerUid: expectedUid,
-        localOperation: () async {
-          _requireCurrentUser(expectedUid);
-          final stats = await _db.select(_db.studyStats).getSingleOrNull();
-          await _upsertStudyStats(
-            current: stats,
-            fallback: currentStatus,
-            progress: 0,
-          );
-          _requireCurrentUser(expectedUid);
-        },
-        collection: 'study_info',
-        docId: 'main',
-        operationType: 'update',
-        payloadJson: jsonEncode({'progress': 0.0}),
-      );
-      _schedulePendingStudySync();
+      await _db.transaction(() async {
+        _requireCurrentUser(expectedUid);
+        final stats = await _db.select(_db.studyStats).getSingleOrNull();
+        await _upsertStudyStats(
+          current: stats,
+          fallback: currentStatus,
+          progress: 0,
+        );
+        await _enqueue(
+          ownerUid: expectedUid,
+          collection: 'study_progress_reset',
+          docId: resetId,
+          operationType: 'create',
+          payload: {'occurredAt': now.toUtc().toIso8601String()},
+        );
+        _requireCurrentUser(expectedUid);
+      });
+      unawaited(syncStudyFromFirebaseToLocal());
     } on _StudySessionChanged {
       return;
     } catch (e, stack) {
@@ -838,7 +842,8 @@ class StudyRepository {
                     (item.collection.equals('study_info') |
                         item.collection.equals('subjects') |
                         item.collection.equals('review_queue') |
-                        item.collection.equals('study_activity')) &
+                        item.collection.equals('study_activity') |
+                        item.collection.equals('study_progress_reset')) &
                     (item.status.equals(SyncQueuePersistenceStatus.pending) |
                         (item.status.equals(
                               SyncQueuePersistenceStatus.succeeded,
@@ -859,12 +864,18 @@ class StudyRepository {
             item.collection == 'study_activity' &&
             item.operationType == 'create',
       );
+      final progressResets = authoritativeItems.where(
+        (item) =>
+            item.collection == 'study_progress_reset' &&
+            item.operationType == 'create',
+      );
       final protectStats =
           authoritativeItems.any(
             (item) => item.collection == 'study_info' && item.docId == 'main',
           ) ||
           reviewMutations.isNotEmpty ||
-          studyActivities.isNotEmpty;
+          studyActivities.isNotEmpty ||
+          progressResets.isNotEmpty;
       final protectSubjects = authoritativeItems
           .where((item) => item.collection == 'subjects')
           .map((item) => item.docId)
