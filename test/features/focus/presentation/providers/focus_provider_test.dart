@@ -175,9 +175,16 @@ class _ControlledPeriodicTimer implements Timer {
   int _tick = 0;
 
   void fire({bool force = false}) {
-    if (!_isActive && !force) return;
+    fireAtTick(_tick + 1, force: force);
+  }
 
-    _tick++;
+  void fireAtTick(int tick, {bool force = false}) {
+    if (!_isActive && !force) return;
+    if (tick <= _tick) {
+      throw ArgumentError.value(tick, 'tick', 'must increase monotonically');
+    }
+
+    _tick = tick;
     _callback(this);
   }
 
@@ -345,6 +352,32 @@ void main() {
     ]);
   });
 
+  test('skipped timer ticks reconcile elapsed time and finish once', () async {
+    final notifier = container.read(focusProvider.notifier);
+    configureTarget(notifier, FocusTargetType.task);
+    await startAndFlush(notifier);
+
+    expect(container.read(focusProvider).durationRemaining, 60);
+
+    timer.fireAtTick(20);
+
+    expect(container.read(focusProvider).durationRemaining, 40);
+    expect(container.read(focusProvider).durationRemaining, isNot(59));
+
+    timer.fireAtTick(60);
+
+    expect(container.read(focusProvider).durationRemaining, 0);
+    expect(container.read(focusProvider).isRunning, isFalse);
+
+    await pumpEventQueue();
+    timer.fire();
+    await pumpEventQueue();
+
+    expect(remoteDataSource.finishCalls, 1);
+    expect(focusRepository.saveCalls, 1);
+    expect(tasksRepository.toggleCalls, 1);
+  });
+
   test('SUBJECT full session finishes verified and adds study time', () async {
     final notifier = container.read(focusProvider.notifier);
     configureTarget(notifier, FocusTargetType.subject);
@@ -416,15 +449,24 @@ void main() {
     configureTarget(notifier, FocusTargetType.task);
     await startAndFlush(notifier);
 
-    timer.fire();
+    final firstTimer = timer;
+    firstTimer.fireAtTick(20);
+    expect(container.read(focusProvider).durationRemaining, 40);
+
     notifier.pauseTimer();
     await pumpEventQueue();
     notifier.startTimer();
 
+    final resumedTimer = timer;
     expect(container.read(focusProvider).isRunning, isTrue);
     expect(remoteDataSource.startCalls, 1);
+    expect(resumedTimer, isNot(same(firstTimer)));
+    expect(resumedTimer.tick, 0);
 
-    finishCurrentTimer(59);
+    resumedTimer.fireAtTick(15);
+    expect(container.read(focusProvider).durationRemaining, 25);
+
+    resumedTimer.fireAtTick(40);
     await pumpEventQueue();
 
     expect(remoteDataSource.finishCalls, 0);
@@ -608,7 +650,11 @@ void main() {
     notifier.toggleSessionType();
 
     notifier.startTimer();
-    finishCurrentTimer(300);
+    timer.fireAtTick(120);
+
+    expect(container.read(focusProvider).durationRemaining, 180);
+
+    timer.fireAtTick(300);
     await pumpEventQueue();
 
     expect(remoteDataSource.startCalls, 0);

@@ -269,15 +269,15 @@ class FocusNotifier extends Notifier<FocusState> {
 
   void _startLocalTimer(_FocusCycleContext? cycle) {
     _activeCycle = cycle;
+    final startingRemaining = state.durationRemaining;
     state = state.copyWith(isRunning: true);
 
     _timer = ref.read(focusPeriodicTimerFactoryProvider)(
       const Duration(seconds: 1),
       (timer) {
-        if (state.durationRemaining > 1) {
-          state = state.copyWith(
-            durationRemaining: state.durationRemaining - 1,
-          );
+        final remaining = startingRemaining - timer.tick;
+        if (remaining > 0) {
+          state = state.copyWith(durationRemaining: remaining);
         } else {
           _timer?.cancel();
           state = state.copyWith(durationRemaining: 0, isRunning: false);
