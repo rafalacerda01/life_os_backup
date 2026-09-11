@@ -4,15 +4,6 @@ import 'package:go_router/go_router.dart';
 import 'package:life_os/features/onboarding/presentation/onboarding_provider.dart';
 import 'package:life_os/features/settings/presentation/providers/analytics_provider.dart';
 
-// Modelo para organizar as cores e ícones de cada área
-class AreaConfig {
-  final String name;
-  final IconData icon;
-  final Color color;
-
-  AreaConfig(this.name, this.icon, this.color);
-}
-
 class OnboardingScreen extends ConsumerWidget {
   const OnboardingScreen({super.key});
 
@@ -21,17 +12,17 @@ class OnboardingScreen extends ConsumerWidget {
     final onboardingState = ref.watch(onboardingProvider);
     final analyticsState = ref.watch(analyticsPreferenceProvider);
     final canContinue =
-        onboardingState.selectedFocusAreas.isNotEmpty &&
+        !onboardingState.operationInProgress &&
         !analyticsState.operationInProgress;
 
-    final List<AreaConfig> areas = [
-      AreaConfig("Produtividade", Icons.track_changes, Colors.blueAccent),
-      AreaConfig("Finanças", Icons.account_balance_wallet_outlined, Colors.greenAccent),
-      AreaConfig("Estudos", Icons.school_outlined, Colors.orangeAccent),
-      AreaConfig("Saúde", Icons.favorite_border, Colors.pinkAccent),
-      AreaConfig("Relacionamentos", Icons.people_outline, Colors.cyanAccent),
-      AreaConfig("Hábitos", Icons.refresh, Colors.purpleAccent),
-    ];
+    Future<void> finishOnboarding() async {
+      final completed = await ref
+          .read(onboardingProvider.notifier)
+          .completeOnboarding();
+      if (completed && context.mounted) {
+        context.go('/login');
+      }
+    }
 
     return Scaffold(
       backgroundColor: const Color(0xFF070B14),
@@ -42,62 +33,46 @@ class OnboardingScreen extends ConsumerWidget {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               const SizedBox(height: 40),
-              const Text("Vamos te conhecer melhor", 
-                style: TextStyle(color: Colors.white, fontSize: 32, fontWeight: FontWeight.bold)),
-              const SizedBox(height: 10),
-              const Text("Selecione as áreas que você quer melhorar na sua vida", 
-                style: TextStyle(color: Colors.white54, fontSize: 15)),
-              const SizedBox(height: 30),
-              
-              Expanded(
-                child: GridView.builder(
-                  gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                    crossAxisCount: 2, 
-                    crossAxisSpacing: 16, 
-                    mainAxisSpacing: 16, 
-                    childAspectRatio: 2.6, // Ajustado levemente para dar mais espaço
-                  ),
-                  itemCount: areas.length,
-                  itemBuilder: (context, index) {
-                    final area = areas[index];
-                    final isSelected = onboardingState.selectedFocusAreas.contains(area.name);
-                    
-                    return InkWell(
-                      onTap: () => ref.read(onboardingProvider.notifier).toggleArea(area.name),
-                      borderRadius: BorderRadius.circular(16),
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 12),
-                        decoration: BoxDecoration(
-                          color: isSelected ? area.color.withOpacity(0.15) : const Color(0xFF11182E),
-                          borderRadius: BorderRadius.circular(16),
-                          border: Border.all(
-                            color: isSelected ? area.color : Colors.transparent, 
-                            width: 2
-                          ),
-                        ),
-                        child: Row(
-                          children: [
-                            Icon(area.icon, color: isSelected ? area.color : Colors.white60, size: 20),
-                            const SizedBox(width: 8),
-                            // ✅ AQUI ESTÁ A CORREÇÃO: O Expanded garante que o texto não cause overflow
-                            Expanded(
-                              child: Text(area.name, 
-                                style: TextStyle(
-                                  color: isSelected ? Colors.white : Colors.white70, 
-                                  fontWeight: FontWeight.bold, 
-                                  fontSize: 13 // Reduzi levemente a fonte para garantir caber
-                                ),
-                                overflow: TextOverflow.ellipsis, // Caso o texto seja muito longo
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    );
-                  },
+              const Text(
+                "Seu Life OS começa aqui",
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 32,
+                  fontWeight: FontWeight.bold,
                 ),
               ),
-              
+              const SizedBox(height: 10),
+              const Text(
+                "Um espaço para organizar sua rotina e acompanhar sua evolução.",
+                style: TextStyle(color: Colors.white54, fontSize: 15),
+              ),
+              const SizedBox(height: 30),
+              Expanded(
+                child: ListView(
+                  children: const [
+                    _OnboardingPillar(
+                      icon: Icons.calendar_today_outlined,
+                      title: "Organize sua rotina",
+                      description:
+                          "Reúna tarefas, hábitos e estudos em um só lugar.",
+                    ),
+                    SizedBox(height: 14),
+                    _OnboardingPillar(
+                      icon: Icons.insights_outlined,
+                      title: "Acompanhe sua evolução",
+                      description:
+                          "Visualize seu progresso com clareza ao longo do tempo.",
+                    ),
+                    SizedBox(height: 14),
+                    _OnboardingPillar(
+                      icon: Icons.shield_outlined,
+                      title: "Mantenha seus dados sob controle",
+                      description:
+                          "Gerencie suas preferências e sua experiência no Life OS.",
+                    ),
+                  ],
+                ),
+              ),
               Padding(
                 padding: const EdgeInsets.only(bottom: 20),
                 child: Column(
@@ -144,29 +119,27 @@ class OnboardingScreen extends ConsumerWidget {
                           backgroundColor: canContinue
                               ? const Color(0xFF5D0EFF)
                               : const Color(0xFF11182E),
-                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(14),
+                          ),
                         ),
-                        onPressed: canContinue
-                            ? () async {
-                                await ref.read(onboardingProvider.notifier).completeOnboarding();
-                                if (context.mounted) {
-                                  context.go('/login');
-                                }
-                              }
-                            : null,
-                        child: Text("Continuar", 
+                        onPressed: canContinue ? finishOnboarding : null,
+                        child: Text(
+                          "Continuar",
                           style: TextStyle(
                             color: canContinue ? Colors.white : Colors.white24,
-                            fontSize: 16, 
-                            fontWeight: FontWeight.bold
-                          )),
+                            fontSize: 16,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
                       ),
                     ),
                     TextButton(
-                      onPressed: analyticsState.operationInProgress
-                          ? null
-                          : () => context.go('/login'),
-                      child: const Text("Pular", style: TextStyle(color: Colors.white54)),
+                      onPressed: canContinue ? finishOnboarding : null,
+                      child: const Text(
+                        "Pular",
+                        style: TextStyle(color: Colors.white54),
+                      ),
                     ),
                   ],
                 ),
@@ -174,6 +147,56 @@ class OnboardingScreen extends ConsumerWidget {
             ],
           ),
         ),
+      ),
+    );
+  }
+}
+
+class _OnboardingPillar extends StatelessWidget {
+  const _OnboardingPillar({
+    required this.icon,
+    required this.title,
+    required this.description,
+  });
+
+  final IconData icon;
+  final String title;
+  final String description;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: const Color(0xFF11182E),
+        borderRadius: BorderRadius.circular(16),
+      ),
+      child: Row(
+        children: [
+          const SizedBox(width: 2),
+          Icon(icon, color: const Color(0xFFB026FF), size: 24),
+          const SizedBox(width: 16),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  title,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 15,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  description,
+                  style: const TextStyle(color: Colors.white54, height: 1.35),
+                ),
+              ],
+            ),
+          ),
+        ],
       ),
     );
   }

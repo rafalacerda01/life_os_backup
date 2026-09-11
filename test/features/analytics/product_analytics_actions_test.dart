@@ -50,6 +50,18 @@ class _BlockingAnalyticsPlatform extends RecordingAnalyticsPlatform {
   }
 }
 
+class _OnboardingStore implements OnboardingCompletionStore {
+  bool completed = false;
+
+  @override
+  Future<bool> hasCompleted() async => completed;
+
+  @override
+  Future<void> markCompleted() async {
+    completed = true;
+  }
+}
+
 ProviderContainer _actionsContainer({
   required RecordingAnalyticsPlatform analytics,
   _TasksRepository? tasks,
@@ -239,13 +251,14 @@ void main() {
           analyticsServiceProvider.overrideWithValue(
             AnalyticsService(platform: analytics),
           ),
-          onboardingCurrentUserProvider.overrideWithValue(null),
+          onboardingCompletionStoreProvider.overrideWithValue(
+            _OnboardingStore(),
+          ),
         ],
       );
       addTearDown(container.dispose);
 
       final notifier = container.read(onboardingProvider.notifier);
-      notifier.toggleArea('Produtividade');
       await notifier.completeOnboarding();
       await notifier.completeOnboarding();
 
@@ -263,7 +276,9 @@ void main() {
           analyticsServiceProvider.overrideWithValue(
             AnalyticsService(platform: analytics),
           ),
-          onboardingCurrentUserProvider.overrideWithValue(null),
+          onboardingCompletionStoreProvider.overrideWithValue(
+            _OnboardingStore(),
+          ),
         ],
       );
       addTearDown(container.dispose);
@@ -281,9 +296,11 @@ void main() {
       await tester.pumpWidget(
         ProviderScope(
           overrides: [
-            onboardingCurrentUserProvider.overrideWithValue(null),
             analyticsServiceProvider.overrideWithValue(
               AnalyticsService(platform: analytics),
+            ),
+            onboardingCompletionStoreProvider.overrideWithValue(
+              _OnboardingStore(),
             ),
           ],
           child: const MaterialApp(home: OnboardingScreen()),
@@ -307,9 +324,11 @@ void main() {
       final analytics = _BlockingAnalyticsPlatform();
       final container = ProviderContainer(
         overrides: [
-          onboardingCurrentUserProvider.overrideWithValue(null),
           analyticsServiceProvider.overrideWithValue(
             AnalyticsService(platform: analytics),
+          ),
+          onboardingCompletionStoreProvider.overrideWithValue(
+            _OnboardingStore(),
           ),
         ],
       );
@@ -322,8 +341,6 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      await tester.tap(find.text('Produtividade'));
-      await tester.pump();
 
       await tester.tap(find.byType(Switch));
       await tester.pump();

@@ -1,20 +1,50 @@
 import 'dart:async';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:firebase_auth/firebase_auth.dart';
-import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:life_os/core/utils/app_logger.dart';
 import 'package:life_os/features/settings/presentation/providers/analytics_provider.dart';
 import 'package:life_os/features/onboarding/domain/entities/onboarding_prefs.dart';
 
-final onboardingCurrentUserProvider = Provider<User?>((ref) {
-  return FirebaseAuth.instance.currentUser;
+const onboardingCompletedPreferenceKey = 'life_os_onboarding_completed_v1';
+
+abstract interface class OnboardingCompletionStore {
+  Future<bool> hasCompleted();
+
+  Future<void> markCompleted();
+}
+
+class SharedPreferencesOnboardingCompletionStore
+    implements OnboardingCompletionStore {
+  SharedPreferencesOnboardingCompletionStore({SharedPreferencesAsync? prefs})
+    : _prefs = prefs ?? SharedPreferencesAsync();
+
+  final SharedPreferencesAsync _prefs;
+
+  @override
+  Future<bool> hasCompleted() async {
+    return await _prefs.getBool(onboardingCompletedPreferenceKey) ?? false;
+  }
+
+  @override
+  Future<void> markCompleted() {
+    return _prefs.setBool(onboardingCompletedPreferenceKey, true);
+  }
+}
+
+final onboardingCompletionStoreProvider = Provider<OnboardingCompletionStore>(
+  (ref) => SharedPreferencesOnboardingCompletionStore(),
+);
+
+final onboardingCompletionStatusProvider = FutureProvider<bool>((ref) async {
+  try {
+    return await ref.read(onboardingCompletionStoreProvider).hasCompleted();
+  } catch (_) {
+    AppLogger.w('Não foi possível ler o estado local do onboarding.');
+    return false;
+  }
 });
 
-final onboardingFirestoreProvider = Provider<FirebaseFirestore>((ref) {
-  return FirebaseFirestore.instance;
-});
-
-// Mudamos de StateNotifier para Notifier
 class OnboardingNotifier extends Notifier<OnboardingPrefs> {
   bool _completionInProgress = false;
   bool _completionRecorded = false;
@@ -23,61 +53,43 @@ class OnboardingNotifier extends Notifier<OnboardingPrefs> {
   OnboardingPrefs build() {
     _completionInProgress = false;
     _completionRecorded = false;
-    // Estado inicial movido para o build()
-    return const OnboardingPrefs(
-      selectedFocusAreas: [],
-      hasCompletedOnboarding: false,
-    );
+    return const OnboardingPrefs(hasCompletedOnboarding: false);
   }
 
-  void toggleArea(String area) {
-    final currentAreas = List<String>.from(state.selectedFocusAreas);
-    if (currentAreas.contains(area)) {
-      currentAreas.remove(area);
-    } else {
-      currentAreas.add(area);
-    }
-    // A variável 'state' já está disponível na classe Notifier
-    state = OnboardingPrefs(
-      selectedFocusAreas: currentAreas,
-      hasCompletedOnboarding: state.hasCompletedOnboarding,
-    );
-  }
+  Future<bool> completeOnboarding() async {
+    if (_completionInProgress) return false;
+    if (state.hasCompletedOnboarding) return true;
 
-  Future<void> completeOnboarding() async {
-    if (_completionInProgress || _completionRecorded) return;
     _completionInProgress = true;
-    final user = ref.read(onboardingCurrentUserProvider);
-    final analytics = ref.read(analyticsServiceProvider);
+    state = const OnboardingPrefs(
+      hasCompletedOnboarding: false,
+      operationInProgress: true,
+    );
 
     try {
-      // Atualiza o estado local
-      state = OnboardingPrefs(
-        selectedFocusAreas: state.selectedFocusAreas,
-        hasCompletedOnboarding: true,
-      );
-
-      // Salva no Firestore se o usuário estiver logado
-      if (user != null) {
-        await ref
-            .read(onboardingFirestoreProvider)
-            .collection('users')
-            .doc(user.uid)
-            .set({
-              'selectedFocusAreas': state.selectedFocusAreas,
-              'hasCompletedOnboarding': true,
-            }, SetOptions(merge: true));
+      try {
+        await ref.read(onboardingCompletionStoreProvider).markCompleted();
+      } catch (_) {
+        AppLogger.w('Não foi possível salvar o estado local do onboarding.');
       }
 
-      unawaited(analytics.logOnboardingCompleted());
-      _completionRecorded = true;
+      state = const OnboardingPrefs(hasCompletedOnboarding: true);
+      if (!_completionRecorded) {
+        _completionRecorded = true;
+        unawaited(ref.read(analyticsServiceProvider).logOnboardingCompleted());
+      }
+      return true;
     } finally {
       _completionInProgress = false;
+      if (state.operationInProgress) {
+        state = OnboardingPrefs(
+          hasCompletedOnboarding: state.hasCompletedOnboarding,
+        );
+      }
     }
   }
 }
 
-// Atualizado para NotifierProvider
 final onboardingProvider =
     NotifierProvider<OnboardingNotifier, OnboardingPrefs>(
       OnboardingNotifier.new,

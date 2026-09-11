@@ -1,11 +1,14 @@
 import 'package:equatable/equatable.dart';
 
 class OnboardingPrefs extends Equatable {
-  final List<String> selectedFocusAreas;
   final bool hasCompletedOnboarding;
+  final bool operationInProgress;
 
-  const OnboardingPrefs({required this.selectedFocusAreas, required this.hasCompletedOnboarding});
+  const OnboardingPrefs({
+    required this.hasCompletedOnboarding,
+    this.operationInProgress = false,
+  });
 
   @override
-  List<Object?> get props => [selectedFocusAreas, hasCompletedOnboarding];
+  List<Object?> get props => [hasCompletedOnboarding, operationInProgress];
 }
