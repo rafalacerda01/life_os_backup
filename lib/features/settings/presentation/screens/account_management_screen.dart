@@ -10,49 +10,6 @@ import 'package:life_os/features/settings/presentation/screens/edit_profile_scre
 class AccountManagementScreen extends ConsumerWidget {
   const AccountManagementScreen({super.key});
 
-  void _handleExportHistory(BuildContext context, UserEntity user) {
-    if (!user.isPremium) {
-      showDialog(
-        context: context,
-        builder: (dialogContext) => AlertDialog(
-          backgroundColor: const Color(0xFF11182E),
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(16),
-          ),
-          title: const Row(
-            children: [
-              Icon(Icons.workspace_premium, color: Colors.amberAccent),
-              SizedBox(width: 8),
-              Text('Recurso Premium', style: TextStyle(color: Colors.white)),
-            ],
-          ),
-          content: const Text(
-            'A exportação avançada de histórico e backups em formato '
-            'universal estará disponível em breve exclusivamente para '
-            'assinantes Premium.',
-            style: TextStyle(color: Colors.white70),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(dialogContext),
-              child: const Text(
-                'Entendi',
-                style: TextStyle(color: Colors.purpleAccent),
-              ),
-            ),
-          ],
-        ),
-      );
-      return;
-    }
-
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('Exportação de histórico em desenvolvimento.'),
-      ),
-    );
-  }
-
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final authState = ref.watch(authNotifierProvider);
@@ -82,20 +39,6 @@ class AccountManagementScreen extends ConsumerWidget {
                 context,
                 MaterialPageRoute(builder: (_) => const EditProfileScreen()),
               ),
-            ),
-            const SizedBox(height: 24),
-            _buildSectionHeader('DADOS E BACKUP'),
-            _buildSettingsTile(
-              icon: Icons.history,
-              title: 'Exportar Histórico',
-              trailingWidget: user.isPremium
-                  ? const Icon(Icons.chevron_right, color: Colors.white24)
-                  : const Icon(
-                      Icons.lock_outline,
-                      size: 18,
-                      color: Colors.amberAccent,
-                    ),
-              onTap: () => _handleExportHistory(context, user),
             ),
             const SizedBox(height: 24),
             _buildSectionHeader('SEGURANÇA'),

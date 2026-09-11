@@ -3,7 +3,6 @@ import 'package:life_os/features/settings/presentation/screens/account_managemen
 import 'package:life_os/features/settings/presentation/screens/security_privacy_screen.dart';
 import 'package:life_os/features/settings/presentation/screens/subscription_screen.dart';
 import 'package:life_os/features/settings/presentation/screens/notifications_screen.dart';
-import 'package:life_os/features/settings/presentation/screens/appearance_screen.dart';
 import 'package:life_os/features/settings/presentation/screens/privacy_policy_screen.dart';
 // 🚀 Import da nova tela de Contato e Reportes
 import 'package:life_os/features/settings/presentation/screens/contact_screen.dart';
@@ -20,7 +19,7 @@ class SettingsScreen extends StatelessWidget {
         backgroundColor: Colors.transparent,
         elevation: 0,
         title: const Text(
-          "Painel Operacional",
+          "Ajustes",
           style: TextStyle(fontWeight: FontWeight.bold, color: Colors.white),
         ),
       ),
@@ -44,7 +43,7 @@ class SettingsScreen extends StatelessWidget {
           _buildSettingsTile(
             Icons.security,
             "Segurança & Privacidade",
-            "Isolamento e chaves de acesso",
+            "Biometria e preferências de privacidade",
             onTap: () => Navigator.push(
               context,
               MaterialPageRoute(
@@ -81,7 +80,7 @@ class SettingsScreen extends StatelessWidget {
           _buildSettingsTile(
             Icons.notifications_none,
             "Notificações Inteligentes",
-            "Alertas e revisões do Anki",
+            "Estudos, hábitos e medicamentos",
             onTap: () => Navigator.push(
               context,
               MaterialPageRoute(
@@ -90,22 +89,7 @@ class SettingsScreen extends StatelessWidget {
             ),
           ),
 
-          // 6. Aparência
-          _buildSettingsTile(
-            Icons.palette_outlined,
-            "Aparência (Interface)",
-            "Tema escuro neon premium",
-            onTap: () {
-              Navigator.push(
-                context,
-                MaterialPageRoute(
-                  builder: (context) => const AppearanceScreen(),
-                ),
-              );
-            },
-          ),
-
-          // 7. Política de Privacidade
+          // 6. Política de Privacidade
           _buildSettingsTile(
             Icons.privacy_tip_outlined,
             "Política de Privacidade",
@@ -120,7 +104,7 @@ class SettingsScreen extends StatelessWidget {
             },
           ),
 
-          // 8. NOVO: Suporte e Contato
+          // 7. Suporte e Contato
           _buildSettingsTile(
             Icons.support_agent_rounded,
             "Suporte & Reporte de Bugs",
