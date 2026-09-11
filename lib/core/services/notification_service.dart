@@ -3,6 +3,7 @@ import 'dart:io';
 import 'dart:math';
 
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:flutter_timezone/flutter_timezone.dart';
 import 'package:life_os/core/services/notification_preferences.dart';
 import 'package:life_os/core/utils/app_logger.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -18,6 +19,12 @@ const String cycleReminderPillActionCategoryId =
 
 typedef NotificationResponseHandler =
     Future<void> Function(NotificationResponse response);
+typedef DeviceTimeZoneResolver = Future<String> Function();
+
+Future<String> _resolveDeviceTimeZone() async {
+  final timeZone = await FlutterTimezone.getLocalTimezone();
+  return timeZone.identifier;
+}
 
 DateTime nextDailyMedicationOccurrence(DateTime scheduledDate, DateTime now) {
   if (!scheduledDate.isBefore(now)) return scheduledDate;
@@ -45,8 +52,11 @@ class NotificationService {
   NotificationService({
     FlutterLocalNotificationsPlugin? notificationsPlugin,
     AndroidFlutterLocalNotificationsPlugin? androidPlugin,
+    DeviceTimeZoneResolver? deviceTimeZoneResolver,
     this.isAndroidOverride,
   }) : _androidPluginOverride = androidPlugin,
+       _deviceTimeZoneResolver =
+           deviceTimeZoneResolver ?? _resolveDeviceTimeZone,
        _notificationsPlugin =
            notificationsPlugin ?? FlutterLocalNotificationsPlugin();
 
@@ -54,6 +64,7 @@ class NotificationService {
 
   final FlutterLocalNotificationsPlugin _notificationsPlugin;
   final AndroidFlutterLocalNotificationsPlugin? _androidPluginOverride;
+  final DeviceTimeZoneResolver _deviceTimeZoneResolver;
   final bool? isAndroidOverride;
 
   bool _initialized = false;
@@ -298,6 +309,7 @@ class NotificationService {
       if (!repeatDaily && validDate.isBefore(now)) {
         validDate = validDate.add(const Duration(days: 1));
       }
+      final location = await _resolveTimeZoneLocation();
 
       const AndroidNotificationDetails androidDetails =
           AndroidNotificationDetails(
@@ -317,7 +329,7 @@ class NotificationService {
         id: id,
         title: title,
         body: body,
-        scheduledDate: tz.TZDateTime.from(validDate, tz.local),
+        scheduledDate: _wallClockInLocation(validDate, location),
         notificationDetails: notificationDetails,
 
         androidScheduleMode: scheduleMode,
@@ -327,6 +339,9 @@ class NotificationService {
 
       return true;
     } catch (_) {
+      AppLogger.w(
+        '[NotificationService] Falha no agendamento local de medicamento.',
+      );
       // O medicamento já foi salvo.
       // Uma falha no sistema de notificações não pode
       // cancelar ou quebrar o cadastro.
@@ -392,6 +407,7 @@ class NotificationService {
             ? AndroidScheduleMode.exactAllowWhileIdle
             : AndroidScheduleMode.inexactAllowWhileIdle;
       }
+      final location = await _resolveTimeZoneLocation();
 
       final actions = includeDoneAction
           ? const <AndroidNotificationAction>[
@@ -438,7 +454,7 @@ class NotificationService {
         id: id,
         title: title,
         body: body,
-        scheduledDate: tz.TZDateTime.from(scheduledDate, tz.local),
+        scheduledDate: _wallClockInLocation(scheduledDate, location),
         notificationDetails: notificationDetails,
         androidScheduleMode: scheduleMode,
         matchDateTimeComponents: matchDateTimeComponents,
@@ -447,6 +463,9 @@ class NotificationService {
 
       return true;
     } catch (_) {
+      AppLogger.w(
+        '[NotificationService] Falha no agendamento local de lembrete.',
+      );
       return false;
     }
   }
@@ -519,5 +538,27 @@ class NotificationService {
     } catch (_) {
       return false;
     }
+  }
+
+  Future<tz.Location> _resolveTimeZoneLocation() async {
+    final identifier = (await _deviceTimeZoneResolver()).trim();
+    if (identifier.isEmpty) {
+      throw StateError('DEVICE_TIME_ZONE_UNAVAILABLE');
+    }
+    return tz.getLocation(identifier);
+  }
+
+  tz.TZDateTime _wallClockInLocation(DateTime value, tz.Location location) {
+    return tz.TZDateTime(
+      location,
+      value.year,
+      value.month,
+      value.day,
+      value.hour,
+      value.minute,
+      value.second,
+      value.millisecond,
+      value.microsecond,
+    );
   }
 }

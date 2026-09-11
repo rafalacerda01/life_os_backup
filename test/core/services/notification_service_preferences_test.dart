@@ -135,6 +135,9 @@ class _FakeAndroidNotificationsPlugin extends Fake
   }
 }
 
+DeviceTimeZoneResolver _timeZoneResolver(String identifier) =>
+    () async => identifier;
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
@@ -439,6 +442,7 @@ void main() {
     final service = NotificationService(
       notificationsPlugin: plugin,
       androidPlugin: androidPlugin,
+      deviceTimeZoneResolver: _timeZoneResolver('UTC'),
       isAndroidOverride: true,
     );
 
@@ -466,6 +470,7 @@ void main() {
       final service = NotificationService(
         notificationsPlugin: plugin,
         androidPlugin: androidPlugin,
+        deviceTimeZoneResolver: _timeZoneResolver('UTC'),
         isAndroidOverride: true,
       );
 
@@ -490,6 +495,7 @@ void main() {
     final service = NotificationService(
       notificationsPlugin: plugin,
       androidPlugin: _FakeAndroidNotificationsPlugin(capabilityResults: [true]),
+      deviceTimeZoneResolver: _timeZoneResolver('UTC'),
       isAndroidOverride: true,
     );
 
@@ -504,11 +510,121 @@ void main() {
     expect(plugin.scheduleCalls, 1);
   });
 
+  test(
+    'medicamento recorrente usa timezone real e preserva wall-clock',
+    () async {
+      final plugin = _RecordingNotificationsPlugin();
+      final service = NotificationService(
+        notificationsPlugin: plugin,
+        deviceTimeZoneResolver: _timeZoneResolver('America/Sao_Paulo'),
+        isAndroidOverride: false,
+      );
+
+      final scheduled = await service.scheduleMedicationNotification(
+        id: 6,
+        title: 'Título privado',
+        body: 'Conteúdo privado',
+        scheduledDate: DateTime(2099, 8, 26, 21),
+        repeatDaily: true,
+      );
+
+      expect(scheduled, isTrue);
+      expect(plugin.lastScheduledDate?.location.name, 'America/Sao_Paulo');
+      expect(plugin.lastScheduledDate?.hour, 21);
+      expect(plugin.lastScheduledDate?.minute, 0);
+      expect(plugin.lastDateTimeComponents, DateTimeComponents.time);
+    },
+  );
+
+  test(
+    'timezone diferente preserva os mesmos componentes wall-clock',
+    () async {
+      final plugin = _RecordingNotificationsPlugin();
+      final service = NotificationService(
+        notificationsPlugin: plugin,
+        deviceTimeZoneResolver: _timeZoneResolver('America/New_York'),
+        isAndroidOverride: false,
+      );
+
+      final scheduled = await service.scheduleMedicationNotification(
+        id: 7,
+        title: 'Título privado',
+        body: 'Conteúdo privado',
+        scheduledDate: DateTime(2099, 8, 26, 21, 35),
+      );
+
+      expect(scheduled, isTrue);
+      expect(plugin.lastScheduledDate?.location.name, 'America/New_York');
+      expect(plugin.lastScheduledDate?.hour, 21);
+      expect(plugin.lastScheduledDate?.minute, 35);
+    },
+  );
+
+  test('timezone inválida falha sem chamar zonedSchedule', () async {
+    final plugin = _RecordingNotificationsPlugin();
+    final service = NotificationService(
+      notificationsPlugin: plugin,
+      deviceTimeZoneResolver: _timeZoneResolver('Invalid/Time_Zone'),
+      isAndroidOverride: false,
+    );
+
+    final scheduled = await service.scheduleMedicationNotification(
+      id: 8,
+      title: 'Título privado',
+      body: 'Conteúdo privado',
+      scheduledDate: DateTime(2099, 8, 26, 21),
+    );
+
+    expect(scheduled, isFalse);
+    expect(plugin.scheduleCalls, 0);
+  });
+
+  test('timezone vazia falha sem chamar zonedSchedule', () async {
+    final plugin = _RecordingNotificationsPlugin();
+    final service = NotificationService(
+      notificationsPlugin: plugin,
+      deviceTimeZoneResolver: _timeZoneResolver('   '),
+      isAndroidOverride: false,
+    );
+
+    final scheduled = await service.scheduleMedicationNotification(
+      id: 9,
+      title: 'Título privado',
+      body: 'Conteúdo privado',
+      scheduledDate: DateTime(2099, 8, 26, 21),
+    );
+
+    expect(scheduled, isFalse);
+    expect(plugin.scheduleCalls, 0);
+  });
+
+  test('falha do resolver retorna false sem chamar zonedSchedule', () async {
+    final plugin = _RecordingNotificationsPlugin();
+    final service = NotificationService(
+      notificationsPlugin: plugin,
+      deviceTimeZoneResolver: () async {
+        throw StateError('private timezone failure');
+      },
+      isAndroidOverride: false,
+    );
+
+    final scheduled = await service.scheduleMedicationNotification(
+      id: 9,
+      title: 'Título privado',
+      body: 'Conteúdo privado',
+      scheduledDate: DateTime(2099, 8, 26, 21),
+    );
+
+    expect(scheduled, isFalse);
+    expect(plugin.scheduleCalls, 0);
+  });
+
   test('cycle reminder usa canal neutro privado e exact disponível', () async {
     final plugin = _RecordingNotificationsPlugin();
     final service = NotificationService(
       notificationsPlugin: plugin,
       androidPlugin: _FakeAndroidNotificationsPlugin(capabilityResults: [true]),
+      deviceTimeZoneResolver: _timeZoneResolver('America/Sao_Paulo'),
       isAndroidOverride: true,
     );
 
@@ -525,6 +641,9 @@ void main() {
     expect(scheduled, isTrue);
     expect(plugin.lastScheduleMode, AndroidScheduleMode.exactAllowWhileIdle);
     expect(plugin.lastDateTimeComponents, DateTimeComponents.time);
+    expect(plugin.lastScheduledDate?.location.name, 'America/Sao_Paulo');
+    expect(plugin.lastScheduledDate?.hour, 9);
+    expect(plugin.lastScheduledDate?.minute, 0);
     expect(android?.channelId, 'cycle_personal_reminders_channel');
     expect(android?.channelName, 'Lembretes pessoais');
     expect(android?.visibility, NotificationVisibility.private);
@@ -577,6 +696,7 @@ void main() {
     final service = NotificationService(
       notificationsPlugin: plugin,
       androidPlugin: _FakeAndroidNotificationsPlugin(capabilityResults: [true]),
+      deviceTimeZoneResolver: _timeZoneResolver('UTC'),
       isAndroidOverride: true,
     );
 
@@ -607,6 +727,36 @@ void main() {
   });
 
   test(
+    'cycle weekly usa timezone real e preserva recorrência semanal',
+    () async {
+      final plugin = _RecordingNotificationsPlugin();
+      final service = NotificationService(
+        notificationsPlugin: plugin,
+        deviceTimeZoneResolver: _timeZoneResolver('America/Sao_Paulo'),
+        isAndroidOverride: false,
+      );
+
+      final scheduled = await service.scheduleCycleReminderNotification(
+        id: 812,
+        title: 'Lembrete pessoal',
+        body: 'Você tem um lembrete programado.',
+        scheduledDate: DateTime(2099, 8, 26, 18, 40),
+        matchDateTimeComponents: DateTimeComponents.dayOfWeekAndTime,
+        payload: 'private-action-payload',
+      );
+
+      expect(scheduled, isTrue);
+      expect(plugin.lastScheduledDate?.location.name, 'America/Sao_Paulo');
+      expect(plugin.lastScheduledDate?.hour, 18);
+      expect(plugin.lastScheduledDate?.minute, 40);
+      expect(
+        plugin.lastDateTimeComponents,
+        DateTimeComponents.dayOfWeekAndTime,
+      );
+    },
+  );
+
+  test(
     'cycle reminder mantém fallback inexact quando exact está negado',
     () async {
       final plugin = _RecordingNotificationsPlugin();
@@ -615,6 +765,7 @@ void main() {
         androidPlugin: _FakeAndroidNotificationsPlugin(
           capabilityResults: [false],
         ),
+        deviceTimeZoneResolver: _timeZoneResolver('UTC'),
         isAndroidOverride: true,
       );
 
@@ -643,6 +794,7 @@ void main() {
     final service = NotificationService(
       notificationsPlugin: plugin,
       androidPlugin: androidPlugin,
+      deviceTimeZoneResolver: _timeZoneResolver('America/Sao_Paulo'),
       isAndroidOverride: true,
     );
 
@@ -656,6 +808,9 @@ void main() {
 
     expect(scheduled, isTrue);
     expect(plugin.lastDateTimeComponents, isNull);
+    expect(plugin.lastScheduledDate?.location.name, 'America/Sao_Paulo');
+    expect(plugin.lastScheduledDate?.hour, 9);
+    expect(plugin.lastScheduledDate?.minute, 15);
     expect(plugin.lastScheduleMode, AndroidScheduleMode.exactAllowWhileIdle);
     expect(androidPlugin.permissionRequests, 0);
     expect(androidPlugin.notificationPermissionRequests, 0);
@@ -676,6 +831,7 @@ void main() {
     final service = NotificationService(
       notificationsPlugin: plugin,
       androidPlugin: _FakeAndroidNotificationsPlugin(capabilityResults: [true]),
+      deviceTimeZoneResolver: _timeZoneResolver('UTC'),
       isAndroidOverride: true,
     );
 
@@ -708,6 +864,7 @@ void main() {
     final service = NotificationService(
       notificationsPlugin: plugin,
       androidPlugin: androidPlugin,
+      deviceTimeZoneResolver: _timeZoneResolver('UTC'),
       isAndroidOverride: true,
     );
 
@@ -721,6 +878,29 @@ void main() {
 
     expect(plugin.lastScheduleMode, AndroidScheduleMode.inexactAllowWhileIdle);
     expect(androidPlugin.permissionRequests, 0);
+  });
+
+  test('show e cancelamento não dependem do resolver de timezone', () async {
+    final plugin = _RecordingNotificationsPlugin();
+    var resolverCalls = 0;
+    final service = NotificationService(
+      notificationsPlugin: plugin,
+      deviceTimeZoneResolver: () async {
+        resolverCalls += 1;
+        throw StateError('private timezone failure');
+      },
+    );
+
+    await service.showNotification(
+      'Título privado',
+      'Conteúdo privado',
+      id: 90,
+    );
+    await service.cancelNotification(90);
+
+    expect(plugin.showCalls, 1);
+    expect(plugin.cancelledIds, <int>[90]);
+    expect(resolverCalls, 0);
   });
 
   test('duas chamadas concorrentes compartilham um initialize', () async {
