@@ -93,10 +93,23 @@ class NotificationScreen extends ConsumerWidget {
           );
         },
         loading: () => const Center(child: CircularProgressIndicator()),
-        error: (error, stackTrace) => Center(
+        error: (_, _) => Center(
           child: Padding(
             padding: const EdgeInsets.all(24),
-            child: Text('Erro ao carregar notificações: $error'),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Text(
+                  'Não foi possível carregar suas notificações.',
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: 12),
+                TextButton(
+                  onPressed: () => ref.invalidate(notificationEngineProvider),
+                  child: const Text('Tentar novamente'),
+                ),
+              ],
+            ),
           ),
         ),
       ),

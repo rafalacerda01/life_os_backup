@@ -61,10 +61,25 @@ class AccountManagementScreen extends ConsumerWidget {
         loading: () => const Center(
           child: CircularProgressIndicator(color: Colors.purpleAccent),
         ),
-        error: (message) => Center(
-          child: Text(
-            'Erro: $message',
-            style: const TextStyle(color: Colors.red),
+        error: (_) => const Center(
+          child: Padding(
+            padding: EdgeInsets.all(24),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  'Não foi possível carregar os dados da sua conta.',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(color: Colors.redAccent),
+                ),
+                SizedBox(height: 8),
+                Text(
+                  'Volte e tente novamente em instantes.',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(color: Colors.white60),
+                ),
+              ],
+            ),
           ),
         ),
         orElse: () => const SizedBox.shrink(),

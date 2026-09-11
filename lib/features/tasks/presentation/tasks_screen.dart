@@ -529,11 +529,21 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
           loading: () => const Center(
             child: CircularProgressIndicator(color: Colors.purpleAccent),
           ),
-          error: (err, stack) => Center(
-            child: Text(
-              "Erro ao carregar tarefas:\n$err",
-              textAlign: TextAlign.center,
-              style: const TextStyle(color: Colors.redAccent),
+          error: (_, _) => Center(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Text(
+                  'Não foi possível carregar suas tarefas.',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(color: Colors.redAccent),
+                ),
+                const SizedBox(height: 12),
+                TextButton(
+                  onPressed: () => ref.invalidate(tasksStreamProvider),
+                  child: const Text('Tentar novamente'),
+                ),
+              ],
             ),
           ),
           data: (tasks) {

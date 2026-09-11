@@ -548,7 +548,8 @@ class _GoalsScreenState extends ConsumerState<GoalsScreen> {
               strokeWidth: 2.5,
             ),
           ),
-          error: (err, _) => _ErrorState(error: err),
+          error: (_, _) =>
+              _ErrorState(onRetry: () => ref.invalidate(goalsStreamProvider)),
           data: (goalsList) {
             // =================================================================
             // LÓGICA ORIGINAL DE RESET
@@ -1113,9 +1114,9 @@ class _EmptyGoalsState extends StatelessWidget {
 // =============================================================================
 
 class _ErrorState extends StatelessWidget {
-  final Object error;
+  final VoidCallback onRetry;
 
-  const _ErrorState({required this.error});
+  const _ErrorState({required this.onRetry});
 
   @override
   Widget build(BuildContext context) {
@@ -1141,13 +1142,15 @@ class _ErrorState extends StatelessWidget {
               ),
             ),
             const SizedBox(height: 8),
-            Text(
-              '$error',
+            const Text(
+              'Tente novamente em instantes.',
               textAlign: TextAlign.center,
-              style: const TextStyle(
-                color: _GoalsScreenState._white45,
-                fontSize: 12,
-              ),
+              style: TextStyle(color: _GoalsScreenState._white45, fontSize: 12),
+            ),
+            const SizedBox(height: 12),
+            TextButton(
+              onPressed: onRetry,
+              child: const Text('Tentar novamente'),
             ),
           ],
         ),

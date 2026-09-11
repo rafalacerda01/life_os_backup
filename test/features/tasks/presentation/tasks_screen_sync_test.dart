@@ -55,4 +55,41 @@ void main() {
       expect(tester.takeException(), isNull);
     });
   }
+
+  testWidgets('erro de tarefas é sanitizado e permite tentar novamente', (
+    tester,
+  ) async {
+    const technicalError = 'technical-tasks-database-error';
+    final manager = _SyncManager()..drained.complete(false);
+    final repository = _Repository();
+    var streamBuilds = 0;
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          syncManagerProvider.overrideWithValue(manager),
+          tasksRepositoryProvider.overrideWithValue(repository),
+          tasksStreamProvider.overrideWith((ref) {
+            streamBuilds++;
+            return Stream<List<TaskModel>>.error(StateError(technicalError));
+          }),
+        ],
+        child: const MaterialApp(home: TasksScreen()),
+      ),
+    );
+    await tester.pump();
+
+    expect(
+      find.text('Não foi possível carregar suas tarefas.'),
+      findsOneWidget,
+    );
+    expect(find.text('Tentar novamente'), findsOneWidget);
+    expect(find.textContaining(technicalError), findsNothing);
+
+    final buildsBeforeRetry = streamBuilds;
+    await tester.tap(find.text('Tentar novamente'));
+    await tester.pump();
+
+    expect(streamBuilds, greaterThan(buildsBeforeRetry));
+  });
 }
