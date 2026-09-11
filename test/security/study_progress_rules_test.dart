@@ -24,6 +24,16 @@ void main() {
     expect(rules, isNot(contains("request.resource.data.kind == 'review'")));
   });
 
+  test('study streak ranges são integralmente server-owned', () {
+    expect(
+      RegExp(
+        r'match /study_streak_ranges/\{rangeId\} \{\s*'
+        r'allow read, create, update, delete: if false;\s*\}',
+      ).hasMatch(rules),
+      isTrue,
+    );
+  });
+
   test('review update é server-owned e create permanece validado', () {
     expect(rules, contains('validReviewQueueCreate()'));
     expect(rules, contains('allow update: if false;'));

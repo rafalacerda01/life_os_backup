@@ -964,6 +964,10 @@ service cloud.firestore {
         allow read, create, update, delete: if false;
       }
 
+      match /study_streak_ranges/{rangeId} {
+        allow read, create, update, delete: if false;
+      }
+
       match /review_queue/{reviewId} {
   allow read: if isOwner(userId);
 
