@@ -52,8 +52,8 @@ class CheckInController extends _$CheckInController {
 
   // Lógica de submissão
   Future<void> submitCheckIn({
-    required Function onSuccess,
-    required Function(String error) onError,
+    required void Function() onSuccess,
+    required void Function() onError,
   }) async {
     state = state.copyWith(isLoading: true);
 
@@ -68,9 +68,8 @@ class CheckInController extends _$CheckInController {
 
       onSuccess();
     } catch (error, stackTrace) {
-      // 🚀 Registra o erro no sistema antes de repassar para a UI mostrar o Toast/Snackbar
       AppLogger.e('Erro ao submeter check-in', error, stackTrace);
-      onError(error.toString());
+      onError();
     } finally {
       state = state.copyWith(isLoading: false);
     }

@@ -79,11 +79,11 @@ class CheckInScreen extends ConsumerWidget {
                           );
                           Navigator.pop(context);
                         },
-                        onError: (error) {
+                        onError: () {
                           ScaffoldMessenger.of(context).showSnackBar(
-                            SnackBar(
+                            const SnackBar(
                               content: Text(
-                                "Erro ao registrar métricas: $error",
+                                "Não foi possível registrar seu check-in. Tente novamente.",
                               ),
                               backgroundColor: Colors.red,
                             ),

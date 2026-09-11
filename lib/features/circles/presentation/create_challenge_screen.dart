@@ -77,13 +77,13 @@ class _CreateChallengeScreenState extends ConsumerState<CreateChallengeScreen> {
           );
 
       if (mounted) Navigator.pop(context);
-    } catch (error) {
+    } catch (_) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
+          const SnackBar(
             content: Text(
-              'Erro ao criar desafio: $error',
-              style: const TextStyle(color: Colors.white),
+              'Não foi possível criar o desafio. Tente novamente.',
+              style: TextStyle(color: Colors.white),
             ),
             backgroundColor: Colors.redAccent,
           ),

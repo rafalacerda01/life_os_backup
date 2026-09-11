@@ -132,7 +132,7 @@ class CirclesNotifier extends Notifier<CirclesState> {
     } catch (error, stackTrace) {
       AppLogger.e('Erro ao entrar no círculo', error, stackTrace);
       state = state.copyWith(isLoading: false);
-      return error.toString().replaceAll('Exception: ', '');
+      return 'Não foi possível entrar no círculo. Verifique o código e tente novamente.';
     }
   }
 

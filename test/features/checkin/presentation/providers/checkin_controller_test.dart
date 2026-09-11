@@ -70,15 +70,15 @@ void main() {
         ).thenAnswer((_) async {});
 
         bool successCalled = false;
-        String? errorCaptured;
+        var errorCalls = 0;
 
         await notifier.submitCheckIn(
           onSuccess: () => successCalled = true,
-          onError: (err) => errorCaptured = err,
+          onError: () => errorCalls++,
         );
 
         expect(successCalled, isTrue);
-        expect(errorCaptured, isNull);
+        expect(errorCalls, 0);
         verify(
           mockCheckInRepository.saveDailyMetrics(
             energy: 3.0,
@@ -105,18 +105,15 @@ void main() {
         ).thenThrow(Exception('Erro ao gravar no banco local'));
 
         bool successCalled = false;
-        String? errorCaptured;
+        var errorCalls = 0;
 
         await notifier.submitCheckIn(
           onSuccess: () => successCalled = true,
-          onError: (err) => errorCaptured = err,
+          onError: () => errorCalls++,
         );
 
         expect(successCalled, isFalse);
-        expect(
-          errorCaptured,
-          contains('Exception: Erro ao gravar no banco local'),
-        );
+        expect(errorCalls, 1);
         expect(container.read(checkInControllerProvider).isLoading, isFalse);
       },
     );
