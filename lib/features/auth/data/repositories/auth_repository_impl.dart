@@ -111,7 +111,7 @@ class AuthRepositoryImpl implements AuthRepository {
         );
       }
 
-      return _getUserFromFirestore(credential.user!.uid);
+      return _getOrProvisionUser(credential.user!);
     } on fb.FirebaseAuthException catch (e) {
       return Error(
         AuthFailure(e.message ?? 'Erro de Autenticação', code: e.code),
@@ -139,27 +139,11 @@ class AuthRepositoryImpl implements AuthRepository {
         );
       }
 
-      final newUser = UserModel(
-        uid: credential.user!.uid,
-        email: InputSanitizer.sanitize(email),
-        displayName: InputSanitizer.sanitize(name),
-        isPremium: false,
-        xp: 0,
-        level: 1,
-        streak: 0,
+      return _getOrProvisionUser(
+        credential.user!,
+        fallbackEmail: InputSanitizer.sanitize(email),
+        fallbackDisplayName: InputSanitizer.sanitize(name),
       );
-
-      await _firestore.collection('users').doc(newUser.uid).set({
-        ...newUser.toFirestore(),
-        'habitsCount': 0,
-        'tasksCount': 0,
-        'goalsCount': 0,
-        'subjectsCount': 0,
-        'medicationsCount': 0,
-        'transactionsCount': 0,
-      });
-
-      return Success(newUser);
     } on fb.FirebaseAuthException catch (e) {
       return Error(
         AuthFailure(e.message ?? 'Erro ao criar conta', code: e.code),
@@ -199,36 +183,7 @@ class AuthRepositoryImpl implements AuthRepository {
         );
       }
 
-      final doc = await _firestore.collection('users').doc(fbUser.uid).get();
-
-      if (!doc.exists) {
-        final newUser = UserModel(
-          uid: fbUser.uid,
-          email: InputSanitizer.sanitize(fbUser.email ?? ''),
-          displayName: InputSanitizer.sanitize(
-            fbUser.displayName ?? 'Novo Usuário',
-          ),
-          photoUrl: fbUser.photoURL,
-          isPremium: false,
-          xp: 0,
-          level: 1,
-          streak: 0,
-        );
-
-        await _firestore.collection('users').doc(newUser.uid).set({
-          ...newUser.toFirestore(),
-          'habitsCount': 0,
-          'tasksCount': 0,
-          'goalsCount': 0,
-          'subjectsCount': 0,
-          'medicationsCount': 0,
-          'transactionsCount': 0,
-        });
-
-        return Success(newUser);
-      }
-
-      return _getUserFromFirestore(fbUser.uid);
+      return _getOrProvisionUser(fbUser);
     } on fb.FirebaseAuthException catch (e) {
       return Error(
         AuthFailure(
@@ -304,7 +259,7 @@ class AuthRepositoryImpl implements AuthRepository {
         return const Error(AuthFailure('Nenhum usuário logado.'));
       }
 
-      return _getUserFromFirestore(currentUser.uid);
+      return _getOrProvisionUser(currentUser);
     } catch (e) {
       return Error(ServerFailure(e.toString()));
     }
@@ -323,4 +278,69 @@ class AuthRepositoryImpl implements AuthRepository {
 
     return Success(UserModel.fromFirestore(doc.data()!, doc.id));
   }
+
+  Future<Result<UserEntity, Failure>> _getOrProvisionUser(
+    fb.User firebaseUser, {
+    String? fallbackDisplayName,
+    String? fallbackEmail,
+  }) async {
+    try {
+      final userRef = _firestore.collection('users').doc(firebaseUser.uid);
+      final doc = await userRef.get();
+
+      if (doc.exists) {
+        return Success(UserModel.fromFirestore(doc.data()!, doc.id));
+      }
+
+      final newUser = UserModel(
+        uid: firebaseUser.uid,
+        email: InputSanitizer.sanitize(
+          fallbackEmail ?? firebaseUser.email ?? '',
+        ),
+        displayName: InputSanitizer.sanitize(
+          fallbackDisplayName ?? firebaseUser.displayName ?? 'Novo Usuário',
+        ),
+        photoUrl: firebaseUser.photoURL,
+        isPremium: false,
+        xp: 0,
+        level: 1,
+        streak: 0,
+      );
+
+      try {
+        await userRef.set({
+          ...newUser.toFirestore(),
+          'habitsCount': 0,
+          'tasksCount': 0,
+          'goalsCount': 0,
+          'subjectsCount': 0,
+          'medicationsCount': 0,
+          'transactionsCount': 0,
+        });
+      } catch (_) {
+        try {
+          final reconciledDoc = await userRef.get();
+          if (reconciledDoc.exists) {
+            return Success(
+              UserModel.fromFirestore(reconciledDoc.data()!, reconciledDoc.id),
+            );
+          }
+        } catch (_) {
+          return _profileProvisionFailure();
+        }
+        return _profileProvisionFailure();
+      }
+
+      return Success(newUser);
+    } catch (_) {
+      return _profileProvisionFailure();
+    }
+  }
+
+  Result<UserEntity, Failure> _profileProvisionFailure() => const Error(
+    ServerFailure(
+      'Não foi possível preparar seu perfil. Tente novamente.',
+      code: 'USER_PROFILE_PROVISION_FAILED',
+    ),
+  );
 }
