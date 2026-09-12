@@ -80,25 +80,26 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
             ),
             onPressed: () async {
               if (emailController.text.isNotEmpty) {
-                await ref
+                final succeeded = await ref
                     .read(authNotifierProvider.notifier)
                     .resetPassword(emailController.text.trim().toLowerCase());
 
-                if (mounted) {
-                  Navigator.pop(context);
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(
-                      content: const Text(
-                        "E-mail de recuperação enviado com sucesso!",
-                      ),
-                      backgroundColor: Colors.green.shade700,
-                      behavior: SnackBarBehavior.floating,
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(10),
-                      ),
+                if (!succeeded || !context.mounted) return;
+                Navigator.pop(context);
+                if (!mounted) return;
+                ScaffoldMessenger.of(this.context).showSnackBar(
+                  SnackBar(
+                    content: const Text(
+                      'Se houver uma conta para este e-mail, você receberá '
+                      'as instruções de recuperação.',
                     ),
-                  );
-                }
+                    backgroundColor: const Color(0xFFB026FF),
+                    behavior: SnackBarBehavior.floating,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                  ),
+                );
               }
             },
             child: const Text(

@@ -15,10 +15,14 @@ class FakeFirebaseAuth extends Fake implements FirebaseAuth {
   User? user;
   UserCredential? signInCredential;
   UserCredential? signUpCredential;
+  Object? signInError;
+  Object? signUpError;
+  Object? passwordResetError;
   Object? signOutError;
   int signOutCalls = 0;
   int signInCalls = 0;
   int signUpCalls = 0;
+  int passwordResetCalls = 0;
 
   @override
   User? get currentUser => user;
@@ -35,6 +39,7 @@ class FakeFirebaseAuth extends Fake implements FirebaseAuth {
     required String password,
   }) async {
     signInCalls += 1;
+    if (signInError != null) throw signInError!;
     return signInCredential!;
   }
 
@@ -44,7 +49,17 @@ class FakeFirebaseAuth extends Fake implements FirebaseAuth {
     required String password,
   }) async {
     signUpCalls += 1;
+    if (signUpError != null) throw signUpError!;
     return signUpCredential!;
+  }
+
+  @override
+  Future<void> sendPasswordResetEmail({
+    required String email,
+    ActionCodeSettings? actionCodeSettings,
+  }) async {
+    passwordResetCalls += 1;
+    if (passwordResetError != null) throw passwordResetError!;
   }
 }
 
@@ -348,6 +363,188 @@ void main() {
     expect(user.reloadCalls, 1);
     expect(auth.signOutCalls, 0);
     expect(auth.currentUser?.uid, 'user-b');
+  });
+
+  group('feedback sanitizado de autenticação', () {
+    for (final code in <String>[
+      'invalid-credential',
+      'wrong-password',
+      'user-not-found',
+    ]) {
+      test('login $code usa mensagem genérica de credenciais', () async {
+        auth.signInError = FirebaseAuthException(
+          code: code,
+          message: 'technical-login-marker',
+        );
+
+        final result = await repository.signInWithEmailAndPassword(
+          'user@example.invalid',
+          'password',
+        );
+
+        Failure? failure;
+        result.when((_) {}, (value) => failure = value);
+        expect(
+          failure?.message,
+          'E-mail ou senha inválidos. Verifique seus dados.',
+        );
+        expect(failure?.message, isNot(contains('technical-login-marker')));
+      });
+    }
+
+    test('login Firebase desconhecido não expõe mensagem técnica', () async {
+      auth.signInError = FirebaseAuthException(
+        code: 'unknown',
+        message: 'technical-login-marker',
+      );
+
+      final result = await repository.signInWithEmailAndPassword(
+        'user@example.invalid',
+        'password',
+      );
+
+      Failure? failure;
+      result.when((_) {}, (value) => failure = value);
+      expect(failure?.message, 'Não foi possível entrar. Tente novamente.');
+      expect(failure?.message, isNot(contains('technical-login-marker')));
+    });
+
+    test('cadastro informa e-mail já utilizado sem mensagem técnica', () async {
+      auth.signUpError = FirebaseAuthException(
+        code: 'email-already-in-use',
+        message: 'technical-sign-up-marker',
+      );
+
+      final result = await repository.signUpWithEmailAndPassword(
+        'user@example.invalid',
+        'password',
+        'User',
+      );
+
+      Failure? failure;
+      result.when((_) {}, (value) => failure = value);
+      expect(failure?.message, 'Este e-mail já está em uso por outra conta.');
+      expect(failure?.message, isNot(contains('technical-sign-up-marker')));
+    });
+
+    test('cadastro informa senha fraca sem mensagem técnica', () async {
+      auth.signUpError = FirebaseAuthException(
+        code: 'weak-password',
+        message: 'technical-sign-up-marker',
+      );
+
+      final result = await repository.signUpWithEmailAndPassword(
+        'user@example.invalid',
+        'password',
+        'User',
+      );
+
+      Failure? failure;
+      result.when((_) {}, (value) => failure = value);
+      expect(failure?.message, 'A senha informada é muito fraca.');
+      expect(failure?.message, isNot(contains('technical-sign-up-marker')));
+    });
+
+    test('cadastro Firebase desconhecido não expõe mensagem técnica', () async {
+      auth.signUpError = FirebaseAuthException(
+        code: 'unknown',
+        message: 'technical-sign-up-marker',
+      );
+
+      final result = await repository.signUpWithEmailAndPassword(
+        'user@example.invalid',
+        'password',
+        'User',
+      );
+
+      Failure? failure;
+      result.when((_) {}, (value) => failure = value);
+      expect(
+        failure?.message,
+        'Não foi possível criar a conta. Tente novamente.',
+      );
+      expect(failure?.message, isNot(contains('technical-sign-up-marker')));
+    });
+  });
+
+  group('recuperação de senha', () {
+    test('sucesso retorna Success', () async {
+      final result = await repository.sendPasswordResetEmail(
+        'user@example.invalid',
+      );
+
+      var succeeded = false;
+      result.when((_) => succeeded = true, (_) {});
+      expect(succeeded, isTrue);
+      expect(auth.passwordResetCalls, 1);
+    });
+
+    test(
+      'user-not-found retorna Success sem expor mensagem Firebase',
+      () async {
+        auth.passwordResetError = FirebaseAuthException(
+          code: 'user-not-found',
+          message: 'technical-reset-marker',
+        );
+
+        final result = await repository.sendPasswordResetEmail(
+          'missing@example.invalid',
+        );
+
+        var succeeded = false;
+        Failure? failure;
+        result.when((_) => succeeded = true, (value) => failure = value);
+        expect(succeeded, isTrue);
+        expect(failure, isNull);
+      },
+    );
+
+    test('falha de rede retorna Failure amigável', () async {
+      auth.passwordResetError = FirebaseAuthException(
+        code: 'network-request-failed',
+        message: 'technical-reset-marker',
+      );
+
+      final result = await repository.sendPasswordResetEmail(
+        'user@example.invalid',
+      );
+
+      Failure? failure;
+      result.when((_) {}, (value) => failure = value);
+      expect(failure, isA<ServerFailure>());
+      expect(failure?.code, 'NETWORK_ERROR');
+      expect(failure?.message, isNot(contains('technical-reset-marker')));
+    });
+
+    test('falha Firebase desconhecida não expõe marcador técnico', () async {
+      auth.passwordResetError = FirebaseAuthException(
+        code: 'unknown',
+        message: 'technical-reset-marker',
+      );
+
+      final result = await repository.sendPasswordResetEmail(
+        'user@example.invalid',
+      );
+
+      Failure? failure;
+      result.when((_) {}, (value) => failure = value);
+      expect(failure?.code, 'PASSWORD_RESET_FAILED');
+      expect(failure?.message, isNot(contains('technical-reset-marker')));
+    });
+
+    test('falha não Firebase não expõe marcador técnico', () async {
+      auth.passwordResetError = StateError('technical-reset-marker');
+
+      final result = await repository.sendPasswordResetEmail(
+        'user@example.invalid',
+      );
+
+      Failure? failure;
+      result.when((_) {}, (value) => failure = value);
+      expect(failure, isA<ServerFailure>());
+      expect(failure?.code, 'UNEXPECTED_ERROR');
+      expect(failure?.message, isNot(contains('technical-reset-marker')));
+    });
   });
 
   group('provisionamento de perfil', () {

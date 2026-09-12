@@ -62,6 +62,8 @@ class _AuthRepository extends Fake implements AuthRepository {
   bool failLogin = false;
   bool failRegistration = false;
   bool failGoogle = false;
+  Result<void, Failure> passwordResetResult = const Success(null);
+  int passwordResetCalls = 0;
 
   @override
   Future<Result<UserEntity, Failure>> getCurrentUser() {
@@ -97,6 +99,12 @@ class _AuthRepository extends Fake implements AuthRepository {
     if (failGoogle) return const Error(AuthFailure('google failed'));
     auth.user = _FirebaseUser();
     return const Success(_user);
+  }
+
+  @override
+  Future<Result<void, Failure>> sendPasswordResetEmail(String email) async {
+    passwordResetCalls += 1;
+    return passwordResetResult;
   }
 }
 
@@ -283,4 +291,41 @@ void main() {
 
     expect(harness.state, isA<AuthAuthenticated>());
   });
+
+  test('password reset success returns true and unauthenticates', () async {
+    final harness = _harness();
+
+    final succeeded = await harness.notifier.resetPassword(
+      'user@example.invalid',
+    );
+
+    expect(succeeded, isTrue);
+    expect(harness.state, isA<AuthUnauthenticated>());
+    expect(harness.repository.passwordResetCalls, 1);
+  });
+
+  test(
+    'password reset failure returns false and exposes friendly state',
+    () async {
+      final harness = _harness();
+      harness.repository.passwordResetResult = const Error(
+        AuthFailure(
+          'Não foi possível solicitar a recuperação de senha. Tente novamente.',
+          code: 'PASSWORD_RESET_FAILED',
+        ),
+      );
+
+      final succeeded = await harness.notifier.resetPassword(
+        'user@example.invalid',
+      );
+
+      expect(succeeded, isFalse);
+      expect(harness.state, isA<AuthError>());
+      expect(
+        (harness.state as AuthError).message,
+        'Não foi possível solicitar a recuperação de senha. Tente novamente.',
+      );
+      expect(harness.repository.passwordResetCalls, 1);
+    },
+  );
 }

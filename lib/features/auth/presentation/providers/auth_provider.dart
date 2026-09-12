@@ -484,16 +484,18 @@ class AuthNotifier extends Notifier<AuthState> {
     }
   }
 
-  Future<void> resetPassword(String email) async {
+  Future<bool> resetPassword(String email) async {
     state = AuthState.loading();
     final result = await _repository.sendPasswordResetEmail(email);
 
-    result.when(
+    return result.when(
       (success) {
         state = AuthState.unauthenticated();
+        return true;
       },
       (failure) {
         state = AuthState.error(failure.message);
+        return false;
       },
     );
   }

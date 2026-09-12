@@ -86,11 +86,10 @@ class AuthRepositoryImpl implements AuthRepository {
 
       return const Success(null);
     } on fb.FirebaseAuthException catch (e) {
-      return Error(
-        AuthFailure(e.message ?? 'Erro ao enviar e-mail', code: e.code),
-      );
-    } catch (e) {
-      return Error(ServerFailure(e.toString()));
+      if (e.code == 'user-not-found') return const Success(null);
+      return Error(_passwordResetFailure(e.code));
+    } catch (_) {
+      return Error(ServerFailure.unexpected());
     }
   }
 
@@ -106,18 +105,14 @@ class AuthRepositoryImpl implements AuthRepository {
       );
 
       if (credential.user == null) {
-        return const Error(
-          AuthFailure('Usuário nulo retornado pelo Firebase.'),
-        );
+        return Error(_emailSignInFailure('unknown'));
       }
 
       return _getOrProvisionUser(credential.user!);
     } on fb.FirebaseAuthException catch (e) {
-      return Error(
-        AuthFailure(e.message ?? 'Erro de Autenticação', code: e.code),
-      );
-    } catch (e) {
-      return Error(ServerFailure(e.toString()));
+      return Error(_emailSignInFailure(e.code));
+    } catch (_) {
+      return Error(ServerFailure.unexpected());
     }
   }
 
@@ -134,9 +129,7 @@ class AuthRepositoryImpl implements AuthRepository {
       );
 
       if (credential.user == null) {
-        return const Error(
-          AuthFailure('Falha ao instanciar usuário de destino.'),
-        );
+        return Error(_emailSignUpFailure('unknown'));
       }
 
       return _getOrProvisionUser(
@@ -145,11 +138,9 @@ class AuthRepositoryImpl implements AuthRepository {
         fallbackDisplayName: InputSanitizer.sanitize(name),
       );
     } on fb.FirebaseAuthException catch (e) {
-      return Error(
-        AuthFailure(e.message ?? 'Erro ao criar conta', code: e.code),
-      );
-    } catch (e) {
-      return Error(ServerFailure(e.toString()));
+      return Error(_emailSignUpFailure(e.code));
+    } catch (_) {
+      return Error(ServerFailure.unexpected());
     }
   }
 
@@ -178,19 +169,12 @@ class AuthRepositoryImpl implements AuthRepository {
       final fbUser = userCredential.user;
 
       if (fbUser == null) {
-        return const Error(
-          AuthFailure('Falha ao autenticar com Google no Firebase.'),
-        );
+        return Error(_googleSignInFailure('unknown'));
       }
 
       return _getOrProvisionUser(fbUser);
     } on fb.FirebaseAuthException catch (e) {
-      return Error(
-        AuthFailure(
-          e.message ?? 'Erro na autenticação com Google',
-          code: e.code,
-        ),
-      );
+      return Error(_googleSignInFailure(e.code));
     } catch (e) {
       final errorStr = e.toString();
 
@@ -205,7 +189,7 @@ class AuthRepositoryImpl implements AuthRepository {
         );
       }
 
-      return Error(ServerFailure('Erro inesperado ao entrar com o Google.'));
+      return Error(_googleSignInFailure('unknown'));
     }
   }
 
@@ -343,4 +327,103 @@ class AuthRepositoryImpl implements AuthRepository {
       code: 'USER_PROFILE_PROVISION_FAILED',
     ),
   );
+
+  Failure _emailSignInFailure(String code) {
+    switch (code) {
+      case 'invalid-credential':
+      case 'wrong-password':
+      case 'user-not-found':
+        return AuthFailure.invalidCredentials();
+      case 'invalid-email':
+        return const AuthFailure(
+          'Insira um e-mail válido.',
+          code: 'INVALID_EMAIL',
+        );
+      case 'network-request-failed':
+        return ServerFailure.connection();
+      case 'too-many-requests':
+        return const AuthFailure(
+          'Muitas tentativas em pouco tempo. Aguarde e tente novamente.',
+          code: 'TOO_MANY_REQUESTS',
+        );
+      default:
+        return const AuthFailure(
+          'Não foi possível entrar. Tente novamente.',
+          code: 'AUTH_SIGN_IN_FAILED',
+        );
+    }
+  }
+
+  Failure _emailSignUpFailure(String code) {
+    switch (code) {
+      case 'email-already-in-use':
+        return AuthFailure.emailAlreadyInUse();
+      case 'weak-password':
+        return const AuthFailure(
+          'A senha informada é muito fraca.',
+          code: 'WEAK_PASSWORD',
+        );
+      case 'invalid-email':
+        return const AuthFailure(
+          'Insira um e-mail válido.',
+          code: 'INVALID_EMAIL',
+        );
+      case 'network-request-failed':
+        return ServerFailure.connection();
+      case 'too-many-requests':
+        return const AuthFailure(
+          'Muitas tentativas em pouco tempo. Aguarde e tente novamente.',
+          code: 'TOO_MANY_REQUESTS',
+        );
+      default:
+        return const AuthFailure(
+          'Não foi possível criar a conta. Tente novamente.',
+          code: 'AUTH_SIGN_UP_FAILED',
+        );
+    }
+  }
+
+  Failure _googleSignInFailure(String code) {
+    switch (code) {
+      case 'network-request-failed':
+        return ServerFailure.connection();
+      case 'too-many-requests':
+        return const AuthFailure(
+          'Muitas tentativas em pouco tempo. Aguarde e tente novamente.',
+          code: 'TOO_MANY_REQUESTS',
+        );
+      case 'account-exists-with-different-credential':
+        return const AuthFailure(
+          'Já existe uma conta com este e-mail usando outro método de acesso.',
+          code: 'ACCOUNT_EXISTS_WITH_DIFFERENT_CREDENTIAL',
+        );
+      default:
+        return const AuthFailure(
+          'Não foi possível entrar com o Google. Tente novamente.',
+          code: 'GOOGLE_SIGN_IN_FAILED',
+        );
+    }
+  }
+
+  Failure _passwordResetFailure(String code) {
+    switch (code) {
+      case 'invalid-email':
+        return const AuthFailure(
+          'Insira um e-mail válido.',
+          code: 'INVALID_EMAIL',
+        );
+      case 'network-request-failed':
+        return ServerFailure.connection();
+      case 'too-many-requests':
+        return const AuthFailure(
+          'Muitas tentativas em pouco tempo. Aguarde e tente novamente.',
+          code: 'TOO_MANY_REQUESTS',
+        );
+      default:
+        return const AuthFailure(
+          'Não foi possível solicitar a recuperação de senha. Tente novamente.',
+          code: 'PASSWORD_RESET_FAILED',
+        );
+    }
+  }
 }
