@@ -7,6 +7,7 @@ import 'package:life_os/features/focus/presentation/providers/screens/focus_scre
 import 'package:life_os/features/auth/presentation/screens/login_screen.dart';
 import 'package:life_os/features/auth/presentation/screens/register_screen.dart';
 import 'package:life_os/features/auth/presentation/providers/auth_provider.dart';
+import 'package:life_os/features/auth/presentation/providers/auth_state.dart';
 import 'package:life_os/features/onboarding/presentation/splash_screen.dart';
 import 'package:life_os/features/onboarding/presentation/onboarding_screen.dart';
 import 'package:life_os/features/ai_companion/presentation/ai_companion_screen.dart';
@@ -35,6 +36,25 @@ class AuthRefreshListenable extends ChangeNotifier {
   }
 }
 
+String? authRedirectFor({
+  required AuthState authState,
+  required String location,
+}) {
+  final isAuthEntryRoute =
+      location == '/splash' ||
+      location == '/onboarding' ||
+      location == '/login' ||
+      location == '/register';
+  final isPublicRoute = location == '/privacy-policy';
+
+  return authState.maybeWhen(
+    authenticated: (_) => isAuthEntryRoute ? '/home' : null,
+    unauthenticated: () =>
+        !isAuthEntryRoute && !isPublicRoute ? '/login' : null,
+    orElse: () => null,
+  );
+}
+
 final routerProvider = Provider<GoRouter>((ref) {
   // Agora usamos a classe que escuta o provider, não o stream
   final refreshListenable = AuthRefreshListenable(ref);
@@ -44,17 +64,9 @@ final routerProvider = Provider<GoRouter>((ref) {
     refreshListenable: refreshListenable,
     redirect: (context, state) {
       final authState = ref.read(authNotifierProvider);
-
-      final isFreeAccessRoute =
-          state.matchedLocation == '/splash' ||
-          state.matchedLocation == '/onboarding' ||
-          state.matchedLocation == '/login' ||
-          state.matchedLocation == '/register';
-
-      return authState.maybeWhen(
-        authenticated: (_) => isFreeAccessRoute ? '/home' : null,
-        unauthenticated: () => !isFreeAccessRoute ? '/login' : null,
-        orElse: () => null,
+      return authRedirectFor(
+        authState: authState,
+        location: state.matchedLocation,
       );
     },
     routes: [
@@ -70,6 +82,10 @@ final routerProvider = Provider<GoRouter>((ref) {
       GoRoute(
         path: '/register',
         builder: (context, state) => const RegisterScreen(),
+      ),
+      GoRoute(
+        path: '/privacy-policy',
+        builder: (context, state) => const PrivacyPolicyScreen(),
       ),
 
       ShellRoute(
@@ -139,10 +155,6 @@ final routerProvider = Provider<GoRouter>((ref) {
           GoRoute(
             path: '/analytics',
             builder: (context, state) => const AnalyticsScreen(),
-          ),
-          GoRoute(
-            path: '/privacy-policy',
-            builder: (context, state) => const PrivacyPolicyScreen(),
           ),
           GoRoute(
             path: '/contact',

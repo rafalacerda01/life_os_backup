@@ -96,7 +96,24 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
                     validator: (val) => val == null || val.length < 6 ? "Mínimo de 6 dígitos" : null,
                   ),
                   const SizedBox(height: 24),
-                  
+
+                  const Text(
+                    'Antes de criar sua conta, consulte nossa Política de Privacidade.',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(color: Colors.white54, fontSize: 13),
+                  ),
+                  TextButton(
+                    onPressed: () => context.push('/privacy-policy'),
+                    child: const Text(
+                      'Política de Privacidade',
+                      style: TextStyle(
+                        color: Color(0xFFB026FF),
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+
                   // Botão de Registro
                   ElevatedButton(
                     onPressed: authState.maybeWhen(
