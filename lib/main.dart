@@ -15,13 +15,11 @@ import 'package:life_os/core/services/analytics_service.dart';
 import 'package:life_os/core/utils/app_logger.dart';
 import 'package:life_os/features/health/services/cycle_reminder_action_bootstrap.dart';
 import 'package:life_os/firebase_options.dart';
-import 'package:timezone/data/latest.dart' as tz;
 
 void main() {
   runZonedGuarded(
     () async {
       WidgetsFlutterBinding.ensureInitialized();
-      tz.initializeTimeZones();
       // 1. Inicialização síncrona obrigatória do núcleo do Firebase
       await Firebase.initializeApp(
         options: DefaultFirebaseOptions.currentPlatform,
