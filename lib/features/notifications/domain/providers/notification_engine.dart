@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:riverpod_annotation/riverpod_annotation.dart';
 import 'package:life_os/core/database/app_database.dart';
 import 'package:life_os/core/database/database_provider.dart';
@@ -11,10 +12,131 @@ import 'package:life_os/features/notifications/domain/models/notification_model.
 
 part 'notification_engine.g.dart';
 
+final notificationBootstrapCoordinatorProvider =
+    Provider<NotificationBootstrapCoordinator>((ref) {
+      return NotificationBootstrapCoordinator();
+    });
+
+class NotificationBootstrapCoordinator {
+  String? _completedUid;
+  DateTime? _completedDay;
+  String? _inFlightUid;
+  DateTime? _inFlightDay;
+  Future<void>? _inFlightJob;
+  Object? _inFlightToken;
+  int? _inFlightGeneration;
+  int _generation = 0;
+  bool _isDraining = false;
+
+  Future<void> ensureBootstrapped({
+    required String uid,
+    required DateTime now,
+    required Future<void> Function() bootstrap,
+  }) {
+    final normalizedUid = uid.trim();
+    if (normalizedUid.isEmpty) return Future<void>.value();
+
+    if (_isDraining) {
+      return _inFlightJob ?? Future<void>.value();
+    }
+
+    final day = DateTime(now.year, now.month, now.day);
+    if (_completedUid == normalizedUid && _completedDay == day) {
+      return Future<void>.value();
+    }
+
+    final currentJob = _inFlightJob;
+    if (currentJob != null) {
+      if (_inFlightUid == normalizedUid &&
+          _inFlightDay == day &&
+          _inFlightGeneration == _generation) {
+        return currentJob;
+      }
+      return _startBootstrap(
+        uid: normalizedUid,
+        day: day,
+        bootstrap: () => _runAfter(currentJob, bootstrap),
+      );
+    }
+
+    return _startBootstrap(uid: normalizedUid, day: day, bootstrap: bootstrap);
+  }
+
+  Future<void> _startBootstrap({
+    required String uid,
+    required DateTime day,
+    required Future<void> Function() bootstrap,
+  }) {
+    final generation = _generation;
+    final token = Object();
+    final job = Future<void>.sync(bootstrap)
+        .then((_) {
+          if (_generation != generation) return;
+          _completedUid = uid;
+          _completedDay = day;
+        })
+        .whenComplete(() {
+          if (!identical(_inFlightToken, token)) return;
+          _inFlightUid = null;
+          _inFlightDay = null;
+          _inFlightJob = null;
+          _inFlightToken = null;
+          _inFlightGeneration = null;
+        });
+
+    _inFlightUid = uid;
+    _inFlightDay = day;
+    _inFlightJob = job;
+    _inFlightToken = token;
+    _inFlightGeneration = generation;
+    return job;
+  }
+
+  Future<void> _runAfter(
+    Future<void> previous,
+    Future<void> Function() bootstrap,
+  ) async {
+    try {
+      await previous;
+    } on Object {
+      // O próximo bootstrap ainda precisa executar após uma falha anterior.
+    }
+    await bootstrap();
+  }
+
+  void reset() {
+    _generation += 1;
+    _completedUid = null;
+    _completedDay = null;
+  }
+
+  Future<void> resetAndDrain() async {
+    _generation += 1;
+    _completedUid = null;
+    _completedDay = null;
+    _isDraining = true;
+
+    try {
+      final currentJob = _inFlightJob;
+      if (currentJob == null) return;
+
+      try {
+        await currentJob;
+      } on Object {
+        // A limpeza local depende do término, não do resultado do bootstrap.
+      }
+    } finally {
+      _isDraining = false;
+    }
+  }
+}
+
+class _NotificationBootstrapCancelled implements Exception {
+  const _NotificationBootstrapCancelled();
+}
+
 @riverpod
 class NotificationEngine extends _$NotificationEngine {
-  Future<void>? _bootstrapJob;
-  DateTime? _lastBootstrapDay;
   bool _disposed = false;
 
   @override
@@ -25,7 +147,6 @@ class NotificationEngine extends _$NotificationEngine {
 
     ref.onDispose(() {
       _disposed = true;
-      _bootstrapJob = null;
     });
 
     _scheduleBootstrap(
@@ -43,67 +164,61 @@ class NotificationEngine extends _$NotificationEngine {
     required NotificationPreferencesStore preferencesStore,
   }) {
     final today = _startOfDay(DateTime.now());
+    final uid = repository.auth.currentUser?.uid.trim();
 
-    if (_disposed) return;
+    if (_disposed || uid == null || uid.isEmpty) return;
 
-    if (_bootstrapJob != null) return;
-
-    if (_lastBootstrapDay != null && _lastBootstrapDay == today) {
-      return;
-    }
-
-    final job = _bootstrap(
-      today: today,
-      repository: repository,
-      db: db,
-      preferencesStore: preferencesStore,
-    );
-
-    _bootstrapJob = job;
-
+    final job = ref
+        .read(notificationBootstrapCoordinatorProvider)
+        .ensureBootstrapped(
+          uid: uid,
+          now: today,
+          bootstrap: () => _runBootstrap(
+            uid: uid,
+            today: today,
+            repository: repository,
+            db: db,
+            preferencesStore: preferencesStore,
+          ),
+        );
     unawaited(
-      job.whenComplete(() {
-        if (_disposed) return;
-
-        _bootstrapJob = null;
+      job.catchError((Object error, StackTrace stackTrace) {
+        if (error is _NotificationBootstrapCancelled) return;
+        AppLogger.e(
+          'NotificationEngine: falha no bootstrap inicial',
+          error,
+          stackTrace,
+        );
       }),
     );
   }
 
-  Future<void> _bootstrap({
+  Future<void> _runBootstrap({
+    required String uid,
     required DateTime today,
     required NotificationsRepository repository,
     required AppDatabase db,
     required NotificationPreferencesStore preferencesStore,
   }) async {
-    if (_disposed) return;
-
-    try {
-      final preferences = await preferencesStore.load();
-
-      if (_disposed) return;
-
-      await repository.syncNotificationsFromFirebaseToLocal();
-
-      if (_disposed) return;
-
-      await syncExistingModules(
-        repository: repository,
-        db: db,
-        preferences: preferences,
-        today: today,
-      );
-
-      if (_disposed) return;
-
-      _lastBootstrapDay = today;
-    } catch (error, stackTrace) {
-      AppLogger.e(
-        'NotificationEngine: falha no bootstrap inicial',
-        error,
-        stackTrace,
-      );
+    void requireCurrentUser() {
+      if (repository.auth.currentUser?.uid != uid) {
+        throw const _NotificationBootstrapCancelled();
+      }
     }
+
+    requireCurrentUser();
+    final preferences = await preferencesStore.load();
+    requireCurrentUser();
+    await repository.syncNotificationsFromFirebaseToLocal();
+    requireCurrentUser();
+    await const NotificationModuleReconciler().sync(
+      repository: repository,
+      db: db,
+      preferences: preferences,
+      today: today,
+      isCancelled: () => repository.auth.currentUser?.uid != uid,
+    );
+    requireCurrentUser();
   }
 
   /// Reconcilia notificações derivadas dos módulos existentes.

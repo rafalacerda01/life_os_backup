@@ -26,6 +26,7 @@ import 'package:life_os/features/ai_companion/presentation/providers/ai_consent_
 import 'package:life_os/features/circles/presentation/circles_provider.dart';
 import 'package:life_os/features/premium/presentation/premium_provider.dart';
 import 'package:life_os/features/settings/presentation/providers/analytics_provider.dart';
+import 'package:life_os/features/notifications/domain/providers/notification_engine.dart';
 
 import 'package:life_os/features/dashboard/presentation/providers/dashboard_provider.dart';
 import 'package:life_os/features/auth/data/repositories/auth_repository_impl.dart';
@@ -768,6 +769,11 @@ class AuthNotifier extends Notifier<AuthState> {
       await hydration.timeout(const Duration(seconds: 20));
     }
 
+    await ref
+        .read(notificationBootstrapCoordinatorProvider)
+        .resetAndDrain()
+        .timeout(const Duration(seconds: 20));
+
     final secureStorage = _secureStorage;
     final db = ref.read(databaseProvider);
     var cleanupFailed = false;
@@ -883,6 +889,8 @@ class AuthNotifier extends Notifier<AuthState> {
   }
 
   void _invalidateSessionProviders() {
+    ref.read(notificationBootstrapCoordinatorProvider).reset();
+    ref.invalidate(notificationEngineProvider);
     ref.invalidate(financeStreamProvider);
     ref.invalidate(tasksStreamProvider);
     ref.invalidate(tasksProvider);

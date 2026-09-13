@@ -1,11 +1,14 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:drift/drift.dart' hide isNotNull, isNull;
 import 'package:drift/native.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:life_os/core/database/app_database.dart';
+import 'package:life_os/core/database/database_provider.dart';
 import 'package:life_os/core/services/notification_preferences.dart';
 import 'package:life_os/features/notifications/data/repositories/notifications_repository.dart';
 import 'package:life_os/features/notifications/domain/models/notification_model.dart';
@@ -13,21 +16,57 @@ import 'package:life_os/features/notifications/domain/providers/notification_eng
 
 class _FakeFirebaseFirestore extends Fake implements FirebaseFirestore {}
 
-class _FakeFirebaseAuth extends Fake implements FirebaseAuth {
+class _FakeUser extends Fake implements User {
+  _FakeUser(this.uid);
+
   @override
-  User? get currentUser => null;
+  final String uid;
+}
+
+class _FakeFirebaseAuth extends Fake implements FirebaseAuth {
+  _FakeFirebaseAuth([this.user]);
+
+  User? user;
+
+  @override
+  User? get currentUser => user;
+}
+
+class _FakeNotificationPreferencesStore extends NotificationPreferencesStore {
+  const _FakeNotificationPreferencesStore();
+
+  @override
+  Future<NotificationPreferences> load() async {
+    return const NotificationPreferences.enabled();
+  }
 }
 
 class _TrackingNotificationsRepository extends NotificationsRepository {
-  _TrackingNotificationsRepository(AppDatabase db, {super.remoteDelete})
-    : super(
-        firestore: _FakeFirebaseFirestore(),
-        auth: _FakeFirebaseAuth(),
-        localDao: db.notificationDao,
-      );
+  _TrackingNotificationsRepository(
+    AppDatabase db, {
+    FirebaseAuth? auth,
+    super.remoteDelete,
+  }) : super(
+         firestore: _FakeFirebaseFirestore(),
+         auth: auth ?? _FakeFirebaseAuth(),
+         localDao: db.notificationDao,
+       );
 
   final savedIds = <String>[];
   final deletedIds = <String>[];
+  int syncCalls = 0;
+  int watchCalls = 0;
+
+  @override
+  Stream<List<NotificationModel>> watchLocalNotifications() {
+    watchCalls += 1;
+    return super.watchLocalNotifications();
+  }
+
+  @override
+  Future<void> syncNotificationsFromFirebaseToLocal() async {
+    syncCalls += 1;
+  }
 
   @override
   Future<void> saveLocalNotification(NotificationModel notification) async {
@@ -51,6 +90,354 @@ void main() {
 
   late AppDatabase db;
   late _TrackingNotificationsRepository repository;
+
+  group('NotificationBootstrapCoordinator', () {
+    test('compartilha bootstrap concorrente do mesmo UID e dia', () async {
+      final coordinator = NotificationBootstrapCoordinator();
+      final release = Completer<void>();
+      var calls = 0;
+
+      Future<void> bootstrap() async {
+        calls += 1;
+        await release.future;
+      }
+
+      final first = coordinator.ensureBootstrapped(
+        uid: 'user-a',
+        now: DateTime(2026, 9, 13, 8),
+        bootstrap: bootstrap,
+      );
+      final second = coordinator.ensureBootstrapped(
+        uid: 'user-a',
+        now: DateTime(2026, 9, 13, 18),
+        bootstrap: bootstrap,
+      );
+
+      expect(identical(first, second), isTrue);
+      expect(calls, 1);
+
+      release.complete();
+      await Future.wait([first, second]);
+
+      await coordinator.ensureBootstrapped(
+        uid: 'user-a',
+        now: DateTime(2026, 9, 13, 23),
+        bootstrap: bootstrap,
+      );
+      expect(calls, 1);
+    });
+
+    test('bootstrap de UID diferente aguarda o job em voo', () async {
+      final coordinator = NotificationBootstrapCoordinator();
+      final releaseA = Completer<void>();
+      var callsA = 0;
+      var callsB = 0;
+      var running = 0;
+      var maxRunning = 0;
+
+      Future<void> track(Future<void> Function() operation) async {
+        running += 1;
+        if (running > maxRunning) maxRunning = running;
+        try {
+          await operation();
+        } finally {
+          running -= 1;
+        }
+      }
+
+      final bootstrapA = coordinator.ensureBootstrapped(
+        uid: 'user-a',
+        now: DateTime(2026, 9, 13),
+        bootstrap: () => track(() async {
+          callsA += 1;
+          await releaseA.future;
+        }),
+      );
+      final bootstrapB = coordinator.ensureBootstrapped(
+        uid: 'user-b',
+        now: DateTime(2026, 9, 13),
+        bootstrap: () => track(() async {
+          callsB += 1;
+        }),
+      );
+
+      expect(callsA, 1);
+      expect(callsB, 0);
+
+      releaseA.complete();
+      await Future.wait([bootstrapA, bootstrapB]);
+
+      expect(callsB, 1);
+      expect(maxRunning, 1);
+    });
+
+    test('novo UID e novo dia executam seus próprios bootstraps', () async {
+      final coordinator = NotificationBootstrapCoordinator();
+      var calls = 0;
+
+      Future<void> bootstrap() async {
+        calls += 1;
+      }
+
+      await coordinator.ensureBootstrapped(
+        uid: 'user-a',
+        now: DateTime(2026, 9, 13),
+        bootstrap: bootstrap,
+      );
+      await coordinator.ensureBootstrapped(
+        uid: 'user-b',
+        now: DateTime(2026, 9, 13),
+        bootstrap: bootstrap,
+      );
+      await coordinator.ensureBootstrapped(
+        uid: 'user-b',
+        now: DateTime(2026, 9, 14),
+        bootstrap: bootstrap,
+      );
+
+      expect(calls, 3);
+    });
+
+    test('falha não conclui gate e permite nova tentativa', () async {
+      final coordinator = NotificationBootstrapCoordinator();
+      var calls = 0;
+
+      Future<void> bootstrap() async {
+        calls += 1;
+        if (calls == 1) throw StateError('bootstrap failed');
+      }
+
+      await expectLater(
+        coordinator.ensureBootstrapped(
+          uid: 'user-a',
+          now: DateTime(2026, 9, 13),
+          bootstrap: bootstrap,
+        ),
+        throwsStateError,
+      );
+      await coordinator.ensureBootstrapped(
+        uid: 'user-a',
+        now: DateTime(2026, 9, 13),
+        bootstrap: bootstrap,
+      );
+
+      expect(calls, 2);
+    });
+
+    test(
+      'reset durante bootstrap enfileira nova execução sem sobrepor',
+      () async {
+        final coordinator = NotificationBootstrapCoordinator();
+        final release = Completer<void>();
+        var calls = 0;
+        var running = 0;
+        var maxRunning = 0;
+
+        Future<void> bootstrap() async {
+          calls += 1;
+          running += 1;
+          if (running > maxRunning) maxRunning = running;
+          if (calls == 1) await release.future;
+          running -= 1;
+        }
+
+        final first = coordinator.ensureBootstrapped(
+          uid: 'user-a',
+          now: DateTime(2026, 9, 13),
+          bootstrap: bootstrap,
+        );
+        coordinator.reset();
+        final afterReset = coordinator.ensureBootstrapped(
+          uid: 'user-a',
+          now: DateTime(2026, 9, 13),
+          bootstrap: bootstrap,
+        );
+
+        expect(calls, 1);
+        release.complete();
+        await Future.wait([first, afterReset]);
+
+        expect(calls, 2);
+        expect(maxRunning, 1);
+      },
+    );
+
+    test('resetAndDrain aguarda e não conclui o gate antigo', () async {
+      final coordinator = NotificationBootstrapCoordinator();
+      final release = Completer<void>();
+      var calls = 0;
+      var drainCompleted = false;
+
+      final bootstrap = coordinator.ensureBootstrapped(
+        uid: 'user-a',
+        now: DateTime(2026, 9, 13),
+        bootstrap: () async {
+          calls += 1;
+          await release.future;
+        },
+      );
+      final drain = coordinator.resetAndDrain().then((_) {
+        drainCompleted = true;
+      });
+
+      await Future<void>.value();
+      expect(drainCompleted, isFalse);
+
+      release.complete();
+      await Future.wait([bootstrap, drain]);
+      expect(drainCompleted, isTrue);
+
+      await coordinator.ensureBootstrapped(
+        uid: 'user-a',
+        now: DateTime(2026, 9, 13),
+        bootstrap: () async {
+          calls += 1;
+        },
+      );
+      expect(calls, 2);
+    });
+
+    test('reset comum não reabre admissões durante resetAndDrain', () async {
+      final coordinator = NotificationBootstrapCoordinator();
+      final releaseA = Completer<void>();
+      var callsA = 0;
+      var callsB = 0;
+      var running = 0;
+      var maxRunning = 0;
+
+      Future<void> track(Future<void> Function() operation) async {
+        running += 1;
+        if (running > maxRunning) maxRunning = running;
+        try {
+          await operation();
+        } finally {
+          running -= 1;
+        }
+      }
+
+      final bootstrapA = coordinator.ensureBootstrapped(
+        uid: 'user-a',
+        now: DateTime(2026, 9, 13),
+        bootstrap: () => track(() async {
+          callsA += 1;
+          await releaseA.future;
+        }),
+      );
+      final drain = coordinator.resetAndDrain();
+
+      coordinator.reset();
+      final blockedB = coordinator.ensureBootstrapped(
+        uid: 'user-b',
+        now: DateTime(2026, 9, 13),
+        bootstrap: () => track(() async {
+          callsB += 1;
+        }),
+      );
+
+      expect(callsA, 1);
+      expect(callsB, 0);
+
+      releaseA.complete();
+      await Future.wait([bootstrapA, drain, blockedB]);
+
+      expect(callsB, 0);
+      expect(maxRunning, 1);
+
+      await coordinator.ensureBootstrapped(
+        uid: 'user-b',
+        now: DateTime(2026, 9, 13),
+        bootstrap: () => track(() async {
+          callsB += 1;
+        }),
+      );
+
+      expect(callsB, 1);
+      expect(maxRunning, 1);
+    });
+
+    test('resetAndDrain absorve falha operacional do job antigo', () async {
+      final coordinator = NotificationBootstrapCoordinator();
+      final bootstrap = coordinator.ensureBootstrapped(
+        uid: 'user-a',
+        now: DateTime(2026, 9, 13),
+        bootstrap: () async => throw StateError('bootstrap failed'),
+      );
+
+      final drain = coordinator.resetAndDrain();
+
+      await expectLater(bootstrap, throwsStateError);
+      await expectLater(drain, completes);
+    });
+
+    test(
+      'gate sobrevive ao autoDispose do engine e reset força novo bootstrap',
+      () async {
+        final auth = _FakeFirebaseAuth(_FakeUser('user-a'));
+        repository = _TrackingNotificationsRepository(db, auth: auth);
+        final container = ProviderContainer(
+          overrides: [
+            databaseProvider.overrideWithValue(db),
+            notificationsRepositoryProvider.overrideWithValue(repository),
+            notificationPreferencesStoreProvider.overrideWithValue(
+              const _FakeNotificationPreferencesStore(),
+            ),
+          ],
+        );
+
+        try {
+          final first = container.listen(
+            notificationEngineProvider,
+            (_, _) {},
+            fireImmediately: true,
+          );
+          await container.pump();
+          await container
+              .read(notificationBootstrapCoordinatorProvider)
+              .ensureBootstrapped(
+                uid: 'user-a',
+                now: DateTime.now(),
+                bootstrap: () async => fail('bootstrap duplicado'),
+              );
+          expect(repository.syncCalls, 1);
+
+          first.close();
+          await container.pump();
+
+          final second = container.listen(
+            notificationEngineProvider,
+            (_, _) {},
+            fireImmediately: true,
+          );
+          await container.pump();
+          expect(repository.watchCalls, 2);
+          expect(repository.syncCalls, 1);
+
+          second.close();
+          await container.pump();
+          container.read(notificationBootstrapCoordinatorProvider).reset();
+
+          final third = container.listen(
+            notificationEngineProvider,
+            (_, _) {},
+            fireImmediately: true,
+          );
+          await container.pump();
+          await container
+              .read(notificationBootstrapCoordinatorProvider)
+              .ensureBootstrapped(
+                uid: 'user-a',
+                now: DateTime.now(),
+                bootstrap: () async => fail('bootstrap duplicado'),
+              );
+
+          expect(repository.syncCalls, 2);
+          third.close();
+        } finally {
+          container.dispose();
+        }
+      },
+    );
+  });
 
   setUp(() {
     db = AppDatabase(executor: NativeDatabase.memory());

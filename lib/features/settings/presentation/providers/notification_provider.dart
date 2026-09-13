@@ -16,7 +16,10 @@ final notificationServiceProvider = Provider<NotificationService>((ref) {
 });
 
 final notificationPreferencesChangedProvider = Provider<void Function()>((ref) {
-  return () => ref.invalidate(notificationEngineProvider);
+  return () {
+    ref.read(notificationBootstrapCoordinatorProvider).reset();
+    ref.invalidate(notificationEngineProvider);
+  };
 });
 
 final medicationReminderLifecycleProvider =
