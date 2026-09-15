@@ -1,12 +1,55 @@
 import 'dart:async';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:life_os/features/premium/data/remote/billing_remote_data_source.dart';
+import 'package:life_os/features/premium/data/repositories/google_play_premium_repository.dart';
+import 'package:life_os/features/premium/data/services/google_play_billing_client.dart';
+import 'package:life_os/features/premium/domain/entities/premium_plan_offer_entity.dart';
+import 'package:url_launcher/url_launcher.dart';
 import '../domain/entities/premium_status_entity.dart';
 import '../domain/repositories/i_premium_repository.dart';
-import '../data/repositories/mock_premium_repository.dart';
 
-// Injeção de dependência do Repositório
+final googlePlayBillingClientProvider = Provider<GooglePlayBillingClient>((
+  ref,
+) {
+  return InAppPurchaseGooglePlayBillingClient();
+});
+
+final billingRemoteDataSourceProvider = Provider<BillingRemoteDataSource>((
+  ref,
+) {
+  final dataSource = BillingRemoteDataSource();
+  ref.onDispose(dataSource.close);
+  return dataSource;
+});
+
 final premiumRepositoryProvider = Provider<IPremiumRepository>((ref) {
-  return MockPremiumRepository(); // No futuro, troque para RevenueCatPremiumRepository()
+  final repository = GooglePlayPremiumRepository(
+    firestore: FirebaseFirestore.instance,
+    billingClient: ref.watch(googlePlayBillingClientProvider),
+    remoteDataSource: ref.watch(billingRemoteDataSourceProvider),
+    currentUserIdProvider: () => FirebaseAuth.instance.currentUser?.uid,
+  );
+  ref.onDispose(repository.dispose);
+  return repository;
+});
+
+final premiumCatalogProvider = FutureProvider<List<PremiumPlanOfferEntity>>((
+  ref,
+) {
+  return ref.watch(premiumRepositoryProvider).loadAvailablePlans();
+});
+
+final subscriptionManagementLauncherProvider = Provider<Future<bool> Function()>((
+  ref,
+) {
+  return () => launchUrl(
+    Uri.parse(
+      'https://play.google.com/store/account/subscriptions?sku=life_os_premium&package=com.rafalacerda.lifeos',
+    ),
+    mode: LaunchMode.externalApplication,
+  );
 });
 
 class PremiumNotifier extends Notifier<PremiumStatusEntity> {
@@ -18,7 +61,6 @@ class PremiumNotifier extends Notifier<PremiumStatusEntity> {
 
     final repository = ref.watch(premiumRepositoryProvider);
 
-    // Ouve o repositório e atualiza o estado automaticamente
     _subscription = repository.watchPremiumStatus().listen((status) {
       state = status;
     });
@@ -26,16 +68,16 @@ class PremiumNotifier extends Notifier<PremiumStatusEntity> {
     return const PremiumStatusEntity(
       isPremium: false,
       tier: PremiumTier.free,
-      activatedFeatures: ["Tarefas Básicas"],
+      activatedFeatures: ['Recursos essenciais'],
     );
   }
 
-  Future<void> restorePurchase() async {
-    await ref.read(premiumRepositoryProvider).restorePurchases();
+  Future<bool> restorePurchase() {
+    return ref.read(premiumRepositoryProvider).restorePurchases();
   }
 
-  Future<bool> processSecureCheckout(PremiumTier tier) async {
-    return await ref.read(premiumRepositoryProvider).purchasePlan(tier);
+  Future<bool> processSecureCheckout(PremiumTier tier) {
+    return ref.read(premiumRepositoryProvider).purchasePlan(tier);
   }
 }
 

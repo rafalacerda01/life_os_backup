@@ -256,6 +256,12 @@ class AuthNotifier extends Notifier<AuthState> {
     if (isPrepared) {
       _activeLocalSessionUid = uid;
       _firestoreLocalStateCleared = false;
+      try {
+        ref.read(premiumProvider);
+      } catch (_) {
+        // Falha fechada: sem listener válido, nenhum entitlement é concedido.
+        AppLogger.w('[Billing] Falha ao iniciar monitoramento Premium.');
+      }
       _notifyCycleReminderActionSessionPrepared(uid);
       _restoreCycleReminderForPreparedSession(uid);
     }
@@ -906,7 +912,9 @@ class AuthNotifier extends Notifier<AuthState> {
     ref.invalidate(circlesProvider);
     ref.invalidate(aiCompanionProvider);
     ref.invalidate(aiConsentProvider);
+    ref.invalidate(premiumCatalogProvider);
     ref.invalidate(premiumProvider);
+    ref.invalidate(premiumRepositoryProvider);
     ref.invalidate(dashboardStateProvider);
   }
 }

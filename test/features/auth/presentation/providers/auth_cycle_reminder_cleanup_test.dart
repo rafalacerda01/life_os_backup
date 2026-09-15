@@ -24,6 +24,11 @@ import 'package:life_os/features/health/services/cycle_reminder_operation_epoch.
 import 'package:life_os/features/health/services/cycle_reminder_session_authority.dart';
 import 'package:life_os/features/health/services/cycle_reminder_session_cleanup.dart';
 import 'package:life_os/features/health/services/cycle_reminder_session_reconciler.dart';
+import 'package:life_os/features/premium/data/repositories/google_play_premium_repository.dart';
+import 'package:life_os/features/premium/domain/entities/premium_plan_offer_entity.dart';
+import 'package:life_os/features/premium/domain/entities/premium_status_entity.dart';
+import 'package:life_os/features/premium/domain/repositories/i_premium_repository.dart';
+import 'package:life_os/features/premium/presentation/premium_provider.dart';
 import 'package:multiple_result/multiple_result.dart';
 
 const _userA = UserEntity(
@@ -404,6 +409,7 @@ class _Harness {
     Future<void> Function(String userId, AppDatabase database)?
     onGetCurrentUser,
     List<String>? lifecycleEvents,
+    IPremiumRepository Function(String? uid)? createPremiumRepository,
   }) async {
     final auth = _FirebaseAuth(
       firebaseUserId == null ? null : _FirebaseUser(firebaseUserId),
@@ -447,6 +453,12 @@ class _Harness {
     );
     final container = ProviderContainer(
       overrides: [
+        if (createPremiumRepository != null)
+          premiumRepositoryProvider.overrideWith((ref) {
+            final premium = createPremiumRepository(auth.currentUser?.uid);
+            ref.onDispose(premium.dispose);
+            return premium;
+          }),
         firebaseAuthProvider.overrideWithValue(auth),
         firestoreProvider.overrideWithValue(localFirestore),
         authRepositoryProvider.overrideWithValue(repository),
@@ -509,8 +521,96 @@ class _Harness {
   }
 }
 
+class _SessionPremiumRepository implements IPremiumRepository {
+  _SessionPremiumRepository(this.uid);
+
+  final String? uid;
+  final statuses = StreamController<PremiumStatusEntity>.broadcast();
+  Completer<bool>? activePurchase;
+  bool disposed = false;
+
+  @override
+  Stream<PremiumStatusEntity> watchPremiumStatus() => statuses.stream;
+  @override
+  Future<List<PremiumPlanOfferEntity>> loadAvailablePlans() async => [];
+  @override
+  Future<bool> purchasePlan(PremiumTier tier) {
+    activePurchase = Completer<bool>();
+    return activePurchase!.future;
+  }
+
+  @override
+  Future<bool> restorePurchases() async => false;
+  @override
+  void dispose() {
+    disposed = true;
+    final active = activePurchase;
+    if (active != null && !active.isCompleted) {
+      active.completeError(
+        const PremiumPurchaseException(
+          'PURCHASE_INTERRUPTED',
+          'A operação de compra foi interrompida.',
+        ),
+      );
+    }
+    unawaited(statuses.close());
+  }
+}
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+
+  test(
+    'logout disposes Billing A before preparing a fresh Billing B',
+    () async {
+      final repositories = <_SessionPremiumRepository>[];
+      final harness = await _Harness.create(
+        <int>[0, 0],
+        createPremiumRepository: (uid) {
+          if (uid == _userB.uid) expect(repositories.first.disposed, isTrue);
+          final repository = _SessionPremiumRepository(uid);
+          repositories.add(repository);
+          return repository;
+        },
+      );
+      addTearDown(harness.dispose);
+      final first = repositories.single;
+      expect(first.uid, _userA.uid);
+      expect(first.statuses.hasListener, isTrue);
+      await harness.container.read(premiumCatalogProvider.future);
+      final purchaseA = harness.container
+          .read(premiumProvider.notifier)
+          .processSecureCheckout(PremiumTier.monthly);
+      final interrupted = expectLater(
+        purchaseA,
+        throwsA(
+          isA<PremiumPurchaseException>().having(
+            (error) => error.code,
+            'code',
+            'PURCHASE_INTERRUPTED',
+          ),
+        ),
+      );
+      await harness.notifier.logout();
+      await interrupted;
+      expect(first.disposed, isTrue);
+      expect(first.statuses.hasListener, isFalse);
+      harness.auth.emit(_FirebaseUser(_userB.uid));
+      await harness.notifier.checkCurrentUser();
+      await harness.waitForState<AuthAuthenticated>();
+      final second =
+          harness.container.read(premiumRepositoryProvider)
+              as _SessionPremiumRepository;
+      expect(second, isNot(same(first)));
+      expect(second.uid, _userB.uid);
+      expect(second.statuses.hasListener, isTrue);
+      final purchaseB = harness.container
+          .read(premiumProvider.notifier)
+          .processSecureCheckout(PremiumTier.annual);
+      second.activePurchase!.complete(false);
+      expect(await purchaseB, isFalse);
+    },
+  );
 
   test(
     'falha SQLite preserva barrier e impede signOut ate retry seguro',

@@ -16,6 +16,7 @@ import 'package:life_os/features/circles/presentation/circle_detail_screen.dart'
 import 'package:life_os/features/circles/presentation/circles_provider.dart';
 import 'package:life_os/features/circles/presentation/circles_screen.dart';
 import 'package:life_os/features/home/presentation/screens/main_navigation_screen.dart';
+import 'package:life_os/features/premium/domain/entities/premium_plan_offer_entity.dart';
 import 'package:life_os/features/premium/domain/entities/premium_status_entity.dart';
 import 'package:life_os/features/premium/domain/repositories/i_premium_repository.dart';
 import 'package:life_os/features/premium/presentation/premium_provider.dart';
@@ -79,6 +80,26 @@ class _PendingPremiumRepository implements IPremiumRepository {
   final purchase = Completer<bool>();
 
   @override
+  Future<List<PremiumPlanOfferEntity>> loadAvailablePlans() async => const [
+    PremiumPlanOfferEntity(
+      tier: PremiumTier.monthly,
+      productId: 'life_os_premium',
+      basePlanId: 'monthly',
+      formattedPrice: 'R\$ 1,00',
+      rawPrice: 1,
+      currencyCode: 'BRL',
+    ),
+    PremiumPlanOfferEntity(
+      tier: PremiumTier.annual,
+      productId: 'life_os_premium',
+      basePlanId: 'annual',
+      formattedPrice: 'R\$ 10,00',
+      rawPrice: 10,
+      currencyCode: 'BRL',
+    ),
+  ];
+
+  @override
   Future<bool> purchasePlan(PremiumTier tier) => purchase.future;
 
   @override
@@ -86,6 +107,9 @@ class _PendingPremiumRepository implements IPremiumRepository {
 
   @override
   Stream<PremiumStatusEntity> watchPremiumStatus() => Stream.value(_freeStatus);
+
+  @override
+  void dispose() {}
 }
 
 class _StaticCirclesNotifier extends CirclesNotifier {
@@ -166,14 +190,14 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('NÍVEL DE ACESSO: GRATUITO'), findsOneWidget);
+    expect(find.text('ACESSO ATUAL: GRATUITO'), findsOneWidget);
     expect(find.text('Acesso Premium'), findsOneWidget);
     expect(find.text('Acesso Cyber-Premium'), findsNothing);
-    expect(find.text('Gráficos semanais de análise'), findsOneWidget);
+    expect(find.text('Análises da sua evolução'), findsOneWidget);
     expect(find.textContaining('Gratuito:'), findsNWidgets(4));
     expect(find.textContaining('Free:'), findsNothing);
 
-    final subscribeButton = find.text('Assinar Mensal');
+    final subscribeButton = find.text('Assinar plano mensal');
     await tester.ensureVisible(subscribeButton);
     await tester.pumpAndSettle();
     await tester.tap(subscribeButton);
@@ -203,9 +227,12 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
-    expect(find.text('Acesso ao Companion IA'), findsOneWidget);
+    expect(
+      find.text('Companion IA disponível com limites de uso'),
+      findsOneWidget,
+    );
     expect(find.textContaining('Ilimitada'), findsNothing);
-    expect(find.text('Plano Premium ativo'), findsOneWidget);
+    expect(find.text('Plano Premium mensal'), findsOneWidget);
     expect(find.text('Plano PRO Ativo'), findsNothing);
   });
 

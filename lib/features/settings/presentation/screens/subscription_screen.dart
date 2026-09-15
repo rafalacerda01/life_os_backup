@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:intl/intl.dart';
 import 'package:life_os/features/auth/presentation/providers/auth_provider.dart';
+import 'package:life_os/features/premium/domain/entities/premium_status_entity.dart';
 import 'package:life_os/features/premium/presentation/premium_screen.dart';
 import 'package:life_os/features/premium/presentation/premium_provider.dart';
 
@@ -31,12 +33,17 @@ class SubscriptionScreen extends ConsumerWidget {
             authenticated: (user) => Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                // CORRIGIMOS AQUI: Passamos a usar a variável do premiumProvider
-                _buildStatusCard(premiumState.isPremium),
+                _buildStatusCard(premiumState),
                 const SizedBox(height: 30),
                 // CORRIGIMOS AQUI TAMBÉM
                 if (premiumState.isPremium) ...[
                   _buildBenefitsSection(),
+                  const SizedBox(height: 20),
+                  OutlinedButton.icon(
+                    onPressed: () => _manageSubscription(context, ref),
+                    icon: const Icon(Icons.open_in_new_rounded),
+                    label: const Text('Gerenciar assinatura na Google Play'),
+                  ),
                 ] else ...[
                   ElevatedButton(
                     onPressed: () => Navigator.push(
@@ -78,7 +85,13 @@ class SubscriptionScreen extends ConsumerWidget {
     );
   }
 
-  Widget _buildStatusCard(bool isPremium) {
+  Widget _buildStatusCard(PremiumStatusEntity status) {
+    final isPremium = status.isPremium;
+    final plan = switch (status.tier) {
+      PremiumTier.monthly => 'Plano Premium mensal',
+      PremiumTier.annual => 'Plano Premium anual',
+      PremiumTier.free => 'Plano gratuito',
+    };
     return Container(
       padding: const EdgeInsets.all(24),
       decoration: BoxDecoration(
@@ -98,7 +111,7 @@ class SubscriptionScreen extends ConsumerWidget {
           ),
           const SizedBox(height: 16),
           Text(
-            isPremium ? "Plano Premium ativo" : "Plano Gratuito",
+            plan,
             style: const TextStyle(
               color: Colors.white,
               fontSize: 20,
@@ -108,8 +121,8 @@ class SubscriptionScreen extends ConsumerWidget {
           const SizedBox(height: 8),
           Text(
             isPremium
-                ? "Você tem acesso total à IA e rituais avançados."
-                : "Desbloqueie todo o poder da inteligência artificial do Life OS.",
+                ? _premiumExpiryText(status.expirationDate)
+                : 'Use os recursos essenciais ou conheça os planos Premium.',
             textAlign: TextAlign.center,
             style: const TextStyle(color: Colors.white54, fontSize: 14),
           ),
@@ -131,10 +144,10 @@ class SubscriptionScreen extends ConsumerWidget {
           ),
         ),
         const SizedBox(height: 16),
-        _buildFeatureItem("Acesso ao Companion IA"),
-        _buildFeatureItem("Disciplinas Infinitas"),
-        _buildFeatureItem("Métricas Avançadas de Evolução"),
-        _buildFeatureItem("Sincronização em Tempo Real"),
+        _buildFeatureItem('Companion IA disponível com limites de uso'),
+        _buildFeatureItem('Limites de criação ampliados'),
+        _buildFeatureItem('Análises avançadas de evolução'),
+        _buildFeatureItem('Focus e check-ins incluídos'),
       ],
     );
   }
@@ -157,5 +170,20 @@ class SubscriptionScreen extends ConsumerWidget {
         ],
       ),
     );
+  }
+
+  String _premiumExpiryText(DateTime? expirationDate) {
+    if (expirationDate == null) return 'Assinatura validada pela Google Play.';
+    return 'Válida até '
+        '${DateFormat('dd/MM/yyyy').format(expirationDate.toLocal())}.';
+  }
+
+  Future<void> _manageSubscription(BuildContext context, WidgetRef ref) async {
+    final opened = await ref.read(subscriptionManagementLauncherProvider)();
+    if (context.mounted && !opened) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Não foi possível abrir a Google Play.')),
+      );
+    }
   }
 }

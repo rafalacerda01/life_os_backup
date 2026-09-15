@@ -1,11 +1,15 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import '../../domain/entities/premium_status_entity.dart';
+import '../../domain/entities/premium_plan_offer_entity.dart';
 import '../../domain/repositories/i_premium_repository.dart';
 
 class MockPremiumRepository implements IPremiumRepository {
   final _firestore = FirebaseFirestore.instance;
   final _auth = FirebaseAuth.instance;
+
+  @override
+  Future<List<PremiumPlanOfferEntity>> loadAvailablePlans() async => const [];
 
   @override
   Stream<PremiumStatusEntity> watchPremiumStatus() {
@@ -27,8 +31,8 @@ class MockPremiumRepository implements IPremiumRepository {
         tier: isPremium ? PremiumTier.annual : PremiumTier.free,
         expirationDate: null,
         activatedFeatures: isPremium
-            ? ["IA Ilimitada", "Círculos Estendidos", "Métricas Avançadas"]
-            : ["Tarefas Básicas"],
+            ? ['Companion IA', 'Limites ampliados', 'Análises avançadas']
+            : ['Recursos essenciais'],
       );
     });
   }
@@ -56,11 +60,14 @@ class MockPremiumRepository implements IPremiumRepository {
     return false;
   }
 
+  @override
+  void dispose() {}
+
   PremiumStatusEntity _getFreeTier() {
     return const PremiumStatusEntity(
       isPremium: false,
       tier: PremiumTier.free,
-      activatedFeatures: ["Tarefas Básicas"],
+      activatedFeatures: ['Recursos essenciais'],
     );
   }
 }

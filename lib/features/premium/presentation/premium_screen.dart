@@ -1,5 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:intl/intl.dart';
+import 'package:life_os/features/premium/data/repositories/google_play_premium_repository.dart';
+import 'package:life_os/features/premium/domain/entities/premium_plan_offer_entity.dart';
 import 'package:life_os/features/premium/presentation/premium_provider.dart';
 import 'package:life_os/features/premium/domain/entities/premium_status_entity.dart';
 
@@ -9,6 +12,7 @@ class PremiumScreen extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final premiumState = ref.watch(premiumProvider);
+    final catalog = ref.watch(premiumCatalogProvider);
 
     return Scaffold(
       backgroundColor: const Color(0xFF070B14),
@@ -21,17 +25,12 @@ class PremiumScreen extends ConsumerWidget {
         ),
         actions: [
           TextButton(
-            onPressed: () {
-              ref.read(premiumProvider.notifier).restorePurchase();
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(
-                  content: Text("Histórico de compras verificado."),
-                ),
-              );
-            },
-            child: const Text(
-              "Restaurar",
-              style: TextStyle(color: Colors.white54),
+            onPressed: premiumState.isPremium
+                ? () => _manageSubscription(context, ref)
+                : () => _restorePurchase(context, ref),
+            child: Text(
+              premiumState.isPremium ? 'Gerenciar' : 'Restaurar',
+              style: const TextStyle(color: Colors.white54),
             ),
           ),
         ],
@@ -56,8 +55,8 @@ class PremiumScreen extends ConsumerWidget {
                 children: [
                   Text(
                     premiumState.isPremium
-                        ? "SISTEMA OPERACIONAL DESBLOQUEADO"
-                        : "NÍVEL DE ACESSO: GRATUITO",
+                        ? 'ASSINATURA ATIVA'
+                        : 'ACESSO ATUAL: GRATUITO',
                     style: const TextStyle(
                       color: Colors.white,
                       fontWeight: FontWeight.bold,
@@ -67,8 +66,8 @@ class PremiumScreen extends ConsumerWidget {
                   const SizedBox(height: 8),
                   Text(
                     premiumState.isPremium
-                        ? "Você possui acesso irrestrito a todos os módulos neurais."
-                        : "Atualize sua licença para desbloquear a inteligência analítica e o motor de IA.",
+                        ? _activePlanDescription(premiumState)
+                        : 'Escolha um plano da Google Play para ampliar limites e análises.',
                     style: TextStyle(
                       color: Colors.white.withValues(alpha: 0.8),
                       fontSize: 13,
@@ -80,7 +79,7 @@ class PremiumScreen extends ConsumerWidget {
 
             const SizedBox(height: 30),
             const Text(
-              "Comparativo de Arquitetura",
+              'Comparativo de recursos',
               style: TextStyle(
                 color: Colors.white,
                 fontSize: 18,
@@ -91,27 +90,27 @@ class PremiumScreen extends ConsumerWidget {
 
             // TABELA COMPARATIVA ATRIBUTOS
             _buildComparisonRow(
-              "Acesso à IA do Sistema",
-              "Bloqueado",
-              "Ilimitado",
+              'Companion IA',
+              'Indisponível',
+              'Disponível com limites de uso',
               true,
             ),
             _buildComparisonRow(
-              "Gráficos semanais de análise",
-              "Básico",
-              "Avançado",
+              'Análises da sua evolução',
+              'Básicas',
+              'Avançadas',
               false,
             ),
             _buildComparisonRow(
-              "Módulos de Finanças & Estudos",
-              "Apenas Leitura",
-              "Escrita Total",
+              'Criação de itens',
+              'Limites básicos',
+              'Limites ampliados',
               false,
             ),
             _buildComparisonRow(
-              "Suporte a Subtarefas e Anexos",
-              "Não possui",
-              "Ilimitado",
+              'Focus e check-ins',
+              'Incluídos',
+              'Incluídos',
               false,
             ),
 
@@ -119,24 +118,46 @@ class PremiumScreen extends ConsumerWidget {
 
             // BOTÕES DE CHECKOUT PROTEGIDO
             if (!premiumState.isPremium) ...[
-              _buildCheckoutButton(
-                context,
-                ref,
-                tier: PremiumTier.monthly,
-                title: "Assinar Mensal",
-                subtitle: "R\$ 19,90 / mês",
-                backgroundColor: const Color(0xFF1E2640),
-                borderColor: Colors.white24,
-              ),
-              const SizedBox(height: 16),
-              _buildCheckoutButton(
-                context,
-                ref,
-                tier: PremiumTier.annual,
-                title: "Assinar Anual (Recomendado)",
-                subtitle: "R\$ 149,90 / ano",
-                backgroundColor: const Color(0xFFB026FF),
-                borderColor: Colors.transparent,
+              catalog.when(
+                loading: () => const Center(child: CircularProgressIndicator()),
+                error: (_, _) => Center(
+                  child: Column(
+                    children: [
+                      const Text(
+                        'Não foi possível carregar os planos da Google Play.',
+                        style: TextStyle(color: Colors.white70),
+                      ),
+                      TextButton(
+                        onPressed: () => ref.invalidate(premiumCatalogProvider),
+                        child: const Text('Tentar novamente'),
+                      ),
+                    ],
+                  ),
+                ),
+                data: (offers) => Column(
+                  children: offers
+                      .map((offer) {
+                        final annual = offer.tier == PremiumTier.annual;
+                        return Padding(
+                          padding: const EdgeInsets.only(bottom: 16),
+                          child: _buildCheckoutButton(
+                            context,
+                            ref,
+                            offer: offer,
+                            title: annual
+                                ? 'Assinar plano anual'
+                                : 'Assinar plano mensal',
+                            backgroundColor: annual
+                                ? const Color(0xFFB026FF)
+                                : const Color(0xFF1E2640),
+                            borderColor: annual
+                                ? Colors.transparent
+                                : Colors.white24,
+                          ),
+                        );
+                      })
+                      .toList(growable: false),
+                ),
               ),
             ] else ...[
               Container(
@@ -155,7 +176,7 @@ class PremiumScreen extends ConsumerWidget {
                     Icon(Icons.verified, color: Colors.greenAccent),
                     SizedBox(width: 8),
                     Text(
-                      "Sua assinatura está ativa e segura",
+                      'Sua assinatura está ativa e validada',
                       style: TextStyle(
                         color: Colors.greenAccent,
                         fontWeight: FontWeight.bold,
@@ -164,6 +185,12 @@ class PremiumScreen extends ConsumerWidget {
                   ],
                 ),
               ),
+              const SizedBox(height: 16),
+              OutlinedButton.icon(
+                onPressed: () => _manageSubscription(context, ref),
+                icon: const Icon(Icons.open_in_new_rounded),
+                label: const Text('Gerenciar assinatura na Google Play'),
+              ),
             ],
           ],
         ),
@@ -171,20 +198,17 @@ class PremiumScreen extends ConsumerWidget {
     );
   }
 
-  void _showProcessingDialog(BuildContext context) {
+  void _showProcessingDialog(BuildContext context, String message) {
     showDialog(
       context: context,
       barrierDismissible: false,
-      builder: (context) => const AlertDialog(
-        backgroundColor: Color(0xFF11182E),
+      builder: (context) => AlertDialog(
+        backgroundColor: const Color(0xFF11182E),
         content: Row(
           children: [
-            CircularProgressIndicator(color: Color(0xFF5D0EFF)),
-            SizedBox(width: 20),
-            Text(
-              "Processando assinatura...",
-              style: TextStyle(color: Colors.white),
-            ),
+            const CircularProgressIndicator(color: Color(0xFF5D0EFF)),
+            const SizedBox(width: 20),
+            Text(message, style: const TextStyle(color: Colors.white)),
           ],
         ),
       ),
@@ -237,9 +261,8 @@ class PremiumScreen extends ConsumerWidget {
   Widget _buildCheckoutButton(
     BuildContext context,
     WidgetRef ref, {
-    required PremiumTier tier,
+    required PremiumPlanOfferEntity offer,
     required String title,
-    required String subtitle,
     required Color backgroundColor,
     required Color borderColor,
   }) {
@@ -251,38 +274,46 @@ class PremiumScreen extends ConsumerWidget {
           borderRadius: BorderRadius.circular(16),
           side: BorderSide(color: borderColor),
         ),
-        elevation: tier == PremiumTier.annual ? 4 : 0,
+        elevation: offer.tier == PremiumTier.annual ? 4 : 0,
       ),
       onPressed: () async {
-        _showProcessingDialog(context);
+        _showProcessingDialog(context, 'Processando assinatura...');
 
         try {
           final success = await ref
               .read(premiumProvider.notifier)
-              .processSecureCheckout(tier);
+              .processSecureCheckout(offer.tier);
 
           if (context.mounted) {
             if (success) {
               ScaffoldMessenger.of(context).showSnackBar(
                 const SnackBar(
-                  content: Text("Licença assinada com sucesso!"),
+                  content: Text('Assinatura confirmada com segurança.'),
                   backgroundColor: Colors.green,
                 ),
               );
             } else {
               ScaffoldMessenger.of(context).showSnackBar(
                 const SnackBar(
-                  content: Text("Erro ao contatar o servidor."),
+                  content: Text('A compra não foi concluída.'),
                   backgroundColor: Colors.red,
                 ),
               );
             }
           }
-        } catch (e) {
+        } on PremiumPurchaseException catch (error) {
           if (context.mounted) {
             ScaffoldMessenger.of(
               context,
-            ).showSnackBar(SnackBar(content: Text("Erro inesperado: $e")));
+            ).showSnackBar(SnackBar(content: Text(error.message)));
+          }
+        } catch (_) {
+          if (context.mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('Não foi possível concluir a compra.'),
+              ),
+            );
           }
         } finally {
           if (context.mounted) {
@@ -303,11 +334,63 @@ class PremiumScreen extends ConsumerWidget {
           ),
           const SizedBox(height: 4),
           Text(
-            subtitle,
+            offer.formattedPrice,
             style: const TextStyle(color: Colors.white70, fontSize: 13),
           ),
         ],
       ),
     );
+  }
+
+  Future<void> _restorePurchase(BuildContext context, WidgetRef ref) async {
+    _showProcessingDialog(context, 'Restaurando compras...');
+    try {
+      final restored = await ref
+          .read(premiumProvider.notifier)
+          .restorePurchase();
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            restored
+                ? 'Assinatura restaurada com segurança.'
+                : 'Nenhuma assinatura ativa foi encontrada.',
+          ),
+        ),
+      );
+    } on PremiumPurchaseException catch (error) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(error.message)));
+      }
+    } catch (_) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Não foi possível restaurar as compras.'),
+          ),
+        );
+      }
+    } finally {
+      if (context.mounted) Navigator.of(context, rootNavigator: true).pop();
+    }
+  }
+
+  Future<void> _manageSubscription(BuildContext context, WidgetRef ref) async {
+    final opened = await ref.read(subscriptionManagementLauncherProvider)();
+    if (context.mounted && !opened) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Não foi possível abrir a Google Play.')),
+      );
+    }
+  }
+
+  String _activePlanDescription(PremiumStatusEntity status) {
+    final plan = status.tier == PremiumTier.annual ? 'anual' : 'mensal';
+    final expiry = status.expirationDate;
+    if (expiry == null) return 'Plano Premium $plan validado pela Google Play.';
+    return 'Plano Premium $plan válido até '
+        '${DateFormat('dd/MM/yyyy').format(expiry.toLocal())}.';
   }
 }
