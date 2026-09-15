@@ -147,18 +147,33 @@ service cloud.firestore {
         );
     }
 
+    function hasTrustedPremium(data) {
+      return data.get('isPremium', false) == true
+        && data.get('premiumProvider', null) == 'google_play'
+        && data.get('premiumProductId', null) == 'life_os_premium'
+        && data.get('premiumTier', null) in ['monthly', 'annual']
+        && data.get('premiumBasePlanId', null) == data.premiumTier
+        && data.get('premiumSubscriptionState', null) in [
+          'SUBSCRIPTION_STATE_ACTIVE',
+          'SUBSCRIPTION_STATE_IN_GRACE_PERIOD',
+          'SUBSCRIPTION_STATE_CANCELED'
+        ]
+        && data.get('premiumExpiresAt', null) is timestamp
+        && data.premiumExpiresAt > request.time;
+    }
+
+    function hasTrustedAdminPremium(adminId) {
+      return exists(userPath(adminId))
+        && hasTrustedPremium(get(userPath(adminId)).data);
+    }
+
     function validAdminMemberLimit(adminId, memberLimit) {
       return exists(userPath(adminId))
-        && (
-          (
-            get(userPath(adminId)).data.isPremium == true
-            && memberLimit == 10
-          )
-          || (
-            get(userPath(adminId)).data.isPremium == false
-            && memberLimit == 3
-          )
-        );
+        && memberLimit == (hasTrustedAdminPremium(adminId) ? 30 : 3);
+    }
+
+    function effectiveMemberLimit(data) {
+      return hasTrustedAdminPremium(data.adminId) ? data.memberLimit : 3;
     }
 
     function validCircleCreate(circleId) {
@@ -220,8 +235,9 @@ service cloud.firestore {
         && (
           resource.data.memberLimit == 3
           || resource.data.memberLimit == 10
+          || resource.data.memberLimit == 30
         )
-        && resource.data.memberCount < resource.data.memberLimit
+        && resource.data.memberCount < effectiveMemberLimit(resource.data)
         && isUpdatingOnly([
           'memberCount',
           'updatedAt'
@@ -229,7 +245,7 @@ service cloud.firestore {
         && request.resource.data.memberCount ==
             resource.data.memberCount + 1
         && request.resource.data.memberCount <=
-            resource.data.memberLimit
+            effectiveMemberLimit(resource.data)
         && request.resource.data.updatedAt == request.time
         && userActivatesCircle(request.auth.uid, circleId)
         && !exists(memberPath(circleId, request.auth.uid))

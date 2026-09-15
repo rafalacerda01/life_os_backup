@@ -104,6 +104,11 @@ class _CreateCircleScreenState extends ConsumerState<CreateCircleScreen> {
                 "Crie um espaço para evoluir junto com seus amigos, estabelecer metas e competir de forma saudável.",
                 style: TextStyle(color: AppColors.textHint, fontSize: 14),
               ),
+              const SizedBox(height: 8),
+              const Text(
+                "Novos círculos: até 3 membros no Free ou 30 com Premium válido.",
+                style: TextStyle(color: AppColors.textHint, fontSize: 14),
+              ),
               const SizedBox(height: 32),
 
               // --- CAMPO NOME ---

@@ -4,6 +4,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:life_os/core/utils/app_logger.dart';
+import 'package:life_os/features/premium/data/repositories/google_play_premium_repository.dart';
 import 'package:life_os/features/circles/data/remote/circle_delete_remote_data_source.dart';
 import 'package:life_os/features/circles/domain/entities/challenge_entity.dart';
 import 'package:life_os/features/circles/domain/entities/circle_entity.dart';
@@ -21,7 +22,8 @@ final circlesRepositoryProvider = Provider((ref) {
 class CirclesRepository {
   static const int _schemaVersion = 2;
   static const int _freeMemberLimit = 3;
-  static const int _premiumMemberLimit = 10;
+  static const int _premiumMemberLimit = 30;
+  static const int _legacyPremiumMemberLimit = 10;
   static const int _maxCircleNameLength = 100;
   static const int _maxCircleDescriptionLength = 500;
   static const int _maxChallengeTitleLength = 200;
@@ -425,7 +427,8 @@ class CirclesRepository {
       throw StateError('Usuário já participa de um círculo');
     }
 
-    final memberLimit = userData['isPremium'] == true
+    final memberLimit =
+        premiumStatusFromRoot(userData, now: DateTime.now()).isPremium
         ? _premiumMemberLimit
         : _freeMemberLimit;
     final displayName = _normalizeMemberName(
@@ -538,9 +541,12 @@ class CirclesRepository {
           memberCount < 1 ||
           memberLimit is! int ||
           (memberLimit != _freeMemberLimit &&
-              memberLimit != _premiumMemberLimit)) {
+              memberLimit != _premiumMemberLimit &&
+              memberLimit != _legacyPremiumMemberLimit)) {
         throw StateError('Dados de capacidade do círculo inválidos');
       }
+      // Rules revalidate the admin entitlement and enforce the effective cap.
+      // The admin profile is private and cannot be read by joining users.
       if (memberCount >= memberLimit) {
         throw StateError(
           'Este círculo atingiu o limite de $memberLimit membros.',
