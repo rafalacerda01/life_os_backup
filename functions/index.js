@@ -3,7 +3,7 @@ const admin = require("firebase-admin");
 const {Timestamp} = require("firebase-admin/firestore");
 
 const CIRCLE_SCHEMA_VERSION = 2;
-const MAX_CIRCLE_MEMBERS = 10;
+const MAX_CIRCLE_MEMBERS = 30;
 const MAX_CIRCLE_CHALLENGES_TO_SCAN = 240;
 const PROCESSED_EVENT_DELETE_PAGE_SIZE = 200;
 const MAX_PROCESSED_EVENTS_PER_CHALLENGE = 20000;
@@ -64,7 +64,9 @@ function validateCircle(circle) {
     !isSafeDocumentId(circle.adminId) ||
     !Number.isInteger(circle.memberCount) ||
     circle.memberCount < 1 ||
-    (circle.memberLimit !== 3 && circle.memberLimit !== 10) ||
+    (circle.memberLimit !== 3 &&
+      circle.memberLimit !== 10 &&
+      circle.memberLimit !== 30) ||
     circle.memberCount > circle.memberLimit
   ) {
     throw new Error("INVALID_CIRCLE_STATE");

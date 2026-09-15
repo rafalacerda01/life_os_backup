@@ -489,6 +489,33 @@ function seedNormalMemberCircle(db) {
 }
 
 /**
+ * Prepara um Circle de membro comum com a quantidade indicada de memberships.
+ * @param {FakeFirestore} db Banco fake.
+ * @param {number} memberLimit Limite persistido no Circle.
+ * @param {number} membershipCount Quantidade de memberships existentes.
+ * @return {void}
+ */
+function seedNormalMemberCircleWithMemberships(
+    db, memberLimit, membershipCount) {
+  db.seed(rootPath, {activeCircleId: circleId});
+  db.seed(`circles/${circleId}`, circleData({
+    memberCount: membershipCount,
+    memberLimit,
+  }));
+  db.seed(
+      `circles/${circleId}/members/${adminUid}`,
+      memberData("admin"),
+  );
+  db.seed(`circles/${circleId}/members/${uid}`, memberData("member"));
+  for (let index = 2; index < membershipCount; index += 1) {
+    db.seed(
+        `circles/${circleId}/members/member-${index}`,
+        memberData("member"),
+    );
+  }
+}
+
+/**
  * Prepara um Circle administrado pelo usuario excluido.
  * @param {FakeFirestore} db Banco fake.
  * @param {boolean} withRemainingMember Se inclui outro membro.
@@ -648,6 +675,109 @@ test("membro comum sai atomicamente e Circle permanece", async () => {
   assert.equal(activeDb.data(`circles/${circleId}`).memberCount, 1);
   assert.equal(activeDb.data(`circles/${circleId}`) !== undefined, true);
   assert.equal(activeDb.data(rootPath), undefined);
+});
+
+test("memberLimit 30 aceita exclusão de membro comum", async () => {
+  activeDb = new FakeFirestore();
+  seedNormalMemberCircleWithMemberships(activeDb, 30, 2);
+
+  await cleanupUserData.run({uid});
+
+  assert.equal(activeDb.data(`circles/${circleId}/members/${uid}`), undefined);
+  assert.equal(activeDb.data(`circles/${circleId}`).memberCount, 1);
+  assert.equal(activeDb.data(rootPath), undefined);
+});
+
+test("memberLimit 30 aceita exclusão do administrador", async () => {
+  activeDb = new FakeFirestore();
+  activeDb.seed(rootPath, {activeCircleId: circleId});
+  activeDb.seed(`circles/${circleId}`, circleData({
+    adminId: uid,
+    memberCount: 30,
+    memberLimit: 30,
+  }));
+  activeDb.seed(`circles/${circleId}/members/${uid}`, memberData("admin"));
+  for (let index = 1; index < 30; index += 1) {
+    activeDb.seed(
+        `circles/${circleId}/members/member-${index}`,
+        memberData("member"),
+    );
+  }
+
+  await cleanupUserData.run({uid});
+
+  assert.equal(activeDb.data(`circles/${circleId}`), undefined);
+  assert.equal(activeDb.data(rootPath), undefined);
+  assert.deepEqual(activeDb.recursiveDeletes, [
+    `circles/${circleId}`,
+    rootPath,
+  ]);
+});
+
+test("Circle válido com 30 memberships conclui cleanup", async () => {
+  activeDb = new FakeFirestore();
+  seedNormalMemberCircleWithMemberships(activeDb, 30, 30);
+
+  await cleanupUserData.run({uid});
+
+  assert.equal(activeDb.data(`circles/${circleId}`).memberCount, 29);
+  assert.equal(activeDb.data(`circles/${circleId}/members/${uid}`), undefined);
+  assert.deepEqual(
+      activeDb.data(`circles/${circleId}/members/member-29`),
+      memberData("member"),
+  );
+  assert.equal(activeDb.data(rootPath), undefined);
+});
+
+test("mais de 30 memberships falha fechado", async () => {
+  const privatePath = `${rootPath}/tasks/task-1`;
+  activeDb = new FakeFirestore();
+  seedNormalMemberCircleWithMemberships(activeDb, 30, 30);
+  activeDb.seed(
+      `circles/${circleId}/members/overflow-member`,
+      memberData("member"),
+  );
+  activeDb.seed(privatePath, {title: "private"});
+
+  await withoutErrorLog(() => assert.rejects(
+      cleanupUserData.run({uid}),
+      {message: "USER_DATA_CLEANUP_FAILED"},
+  ));
+
+  assert.deepEqual(activeDb.data(rootPath), {activeCircleId: circleId});
+  assert.deepEqual(activeDb.data(privatePath), {title: "private"});
+  assert.equal(activeDb.data(`circles/${circleId}`).memberCount, 30);
+  assert.deepEqual(activeDb.recursiveDeletes, []);
+});
+
+test("memberLimit legado 10 continua aceito", async () => {
+  activeDb = new FakeFirestore();
+  seedNormalMemberCircleWithMemberships(activeDb, 10, 10);
+
+  await cleanupUserData.run({uid});
+
+  assert.equal(activeDb.data(`circles/${circleId}`).memberCount, 9);
+  assert.equal(activeDb.data(`circles/${circleId}/members/${uid}`), undefined);
+  assert.equal(activeDb.data(rootPath), undefined);
+});
+
+test("memberLimit fora de 3, 10 e 30 falha fechado", async () => {
+  for (const memberLimit of [11, 31]) {
+    const privatePath = `${rootPath}/tasks/task-${memberLimit}`;
+    activeDb = new FakeFirestore();
+    seedNormalMemberCircleWithMemberships(activeDb, memberLimit, 2);
+    activeDb.seed(privatePath, {title: "private"});
+
+    await withoutErrorLog(() => assert.rejects(
+        cleanupUserData.run({uid}),
+        {message: "USER_DATA_CLEANUP_FAILED"},
+    ));
+
+    assert.deepEqual(activeDb.data(rootPath), {activeCircleId: circleId});
+    assert.deepEqual(activeDb.data(privatePath), {title: "private"});
+    assert.equal(activeDb.data(`circles/${circleId}`).memberLimit, memberLimit);
+    assert.deepEqual(activeDb.recursiveDeletes, []);
+  }
 });
 
 test("cleanup preserva dados de outros UIDs nos challenges", async () => {
