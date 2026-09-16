@@ -1,6 +1,7 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const {createHash} = require("node:crypto");
 const test = require("node:test");
 const {Timestamp} = require("firebase-admin/firestore");
 
@@ -27,6 +28,9 @@ require.cache[adminPath].exports = originalAdmin;
 
 const uid = "sensitive-uid";
 const rootPath = `users/${uid}`;
+const accountHash = createHash("sha256").update(uid, "utf8").digest("hex");
+const billingAccountPath = `billing_google_accounts/${accountHash}`;
+const billingTokenPath = (id) => `billing_google_tokens/${id}`;
 
 /** Referencia fake de documento. */
 class FakeDocumentReference {
@@ -665,6 +669,234 @@ test("activeCircleId null preserva cleanup simples", async () => {
   assert.equal(activeDb.store.size, 0);
 });
 
+test("usuário sem billing usa barrier transitória e não deixa índices", async () => {
+  activeDb = new FakeFirestore();
+  activeDb.seed(rootPath, {activeCircleId: null});
+
+  await cleanupUserData.run({uid});
+
+  assert.equal(activeDb.data(billingAccountPath), undefined);
+  assert.equal(activeDb.data(rootPath), undefined);
+  assert.deepEqual(activeDb.operationLog, [
+    `set:${billingAccountPath}`,
+    `recursive:${rootPath}`,
+    `delete:${billingAccountPath}`,
+  ]);
+});
+
+test("account ACTIVE fecha barrier antes de tokens e finaliza por último", async () => {
+  activeDb = new FakeFirestore();
+  activeDb.seed(rootPath, {activeCircleId: null});
+  activeDb.seed(billingAccountPath, {uid, state: "ACTIVE", future: true});
+  activeDb.seed(billingTokenPath("token-a"), {accountHash});
+  activeDb.seed(billingTokenPath("token-b"), {accountHash});
+
+  await cleanupUserData.run({uid});
+
+  const barrier = activeDb.operationLog.indexOf(`update:${billingAccountPath}`);
+  const firstToken = activeDb.operationLog.indexOf(
+      `delete:${billingTokenPath("token-a")}`,
+  );
+  const userDelete = activeDb.operationLog.indexOf(`recursive:${rootPath}`);
+  const accountDelete = activeDb.operationLog.indexOf(
+      `delete:${billingAccountPath}`,
+  );
+  assert.ok(barrier >= 0);
+  assert.ok(barrier < firstToken);
+  assert.ok(firstToken < userDelete);
+  assert.ok(userDelete < accountDelete);
+  assert.equal(activeDb.data(billingAccountPath), undefined);
+  assert.equal(activeDb.data(billingTokenPath("token-a")), undefined);
+  assert.equal(activeDb.data(billingTokenPath("token-b")), undefined);
+  assert.equal(activeDb.data(rootPath), undefined);
+});
+
+test("orphan DELETING sem user conclui idempotentemente", async () => {
+  activeDb = new FakeFirestore();
+  activeDb.seed(billingAccountPath, {uid, state: "DELETING"});
+
+  await cleanupUserData.run({uid});
+
+  assert.equal(activeDb.data(billingAccountPath), undefined);
+  assert.deepEqual(activeDb.recursiveDeletes, [rootPath]);
+});
+
+test("205 token indexes são removidos em páginas limitadas", async () => {
+  activeDb = new FakeFirestore();
+  activeDb.seed(rootPath, {activeCircleId: null});
+  activeDb.seed(billingAccountPath, {uid, state: "ACTIVE"});
+  for (let index = 0; index < 205; index += 1) {
+    activeDb.seed(billingTokenPath(`token-${String(index).padStart(3, "0")}`), {
+      accountHash,
+    });
+  }
+
+  await cleanupUserData.run({uid});
+
+  assert.deepEqual(activeDb.batchSizes, [100, 100, 5]);
+  assert.equal([...activeDb.store.keys()].some(
+      (path) => path.startsWith("billing_google_tokens/")), false);
+  assert.equal(activeDb.data(billingAccountPath), undefined);
+});
+
+test("falha no cleanup de tokens mantém barrier e user para retry", async () => {
+  activeDb = new FakeFirestore();
+  activeDb.seed(rootPath, {activeCircleId: null});
+  activeDb.seed(billingAccountPath, {uid, state: "ACTIVE"});
+  activeDb.seed(billingTokenPath("token-a"), {accountHash});
+  activeDb.failBatchAt = 1;
+
+  await withoutErrorLog(() => assert.rejects(
+      cleanupUserData.run({uid}),
+      {message: "USER_DATA_CLEANUP_FAILED"},
+  ));
+
+  assert.deepEqual(activeDb.data(billingAccountPath), {
+    uid,
+    state: "DELETING",
+  });
+  assert.equal(activeDb.data(rootPath) !== undefined, true);
+  assert.equal(activeDb.data(billingTokenPath("token-a")) !== undefined, true);
+  assert.deepEqual(activeDb.recursiveDeletes, []);
+
+  activeDb.failBatchAt = null;
+  await cleanupUserData.run({uid});
+  assert.equal(activeDb.data(billingAccountPath), undefined);
+  assert.equal(activeDb.data(billingTokenPath("token-a")), undefined);
+  assert.equal(activeDb.data(rootPath), undefined);
+});
+
+test("falha no recursiveDelete mantém barrier para retry", async () => {
+  activeDb = new FakeFirestore();
+  activeDb.seed(rootPath, {activeCircleId: null});
+  activeDb.seed(billingAccountPath, {uid, state: "ACTIVE"});
+  activeDb.seed(billingTokenPath("token-a"), {accountHash});
+  activeDb.failRecursiveDeleteOnce.set(rootPath, 1);
+
+  await withoutErrorLog(() => assert.rejects(
+      cleanupUserData.run({uid}),
+      {message: "USER_DATA_CLEANUP_FAILED"},
+  ));
+
+  assert.equal(activeDb.data(billingAccountPath).state, "DELETING");
+  assert.equal(activeDb.data(rootPath) !== undefined, true);
+  assert.equal(activeDb.data(billingTokenPath("token-a")), undefined);
+
+  await cleanupUserData.run({uid});
+  assert.equal(activeDb.data(billingAccountPath), undefined);
+  assert.equal(activeDb.data(rootPath), undefined);
+});
+
+test("falha na finalização deixa orphan DELETING recuperável", async () => {
+  activeDb = new FakeFirestore();
+  activeDb.seed(rootPath, {activeCircleId: null});
+  activeDb.seed(billingAccountPath, {uid, state: "ACTIVE"});
+  activeDb.beforeTransactions[2] = () => {
+    throw new Error("private finalizer failure");
+  };
+
+  await withoutErrorLog(() => assert.rejects(
+      cleanupUserData.run({uid}),
+      {message: "USER_DATA_CLEANUP_FAILED"},
+  ));
+
+  assert.equal(activeDb.data(rootPath), undefined);
+  assert.equal(activeDb.data(billingAccountPath).state, "DELETING");
+
+  await cleanupUserData.run({uid});
+  assert.equal(activeDb.data(billingAccountPath), undefined);
+  assert.equal(activeDb.data(rootPath), undefined);
+});
+
+test("account UID divergente falha fechado antes de cleanup", async () => {
+  const tokenPath = billingTokenPath("token-a");
+  activeDb = new FakeFirestore();
+  activeDb.seed(rootPath, {activeCircleId: null});
+  activeDb.seed(billingAccountPath, {uid: "different-user", state: "ACTIVE"});
+  activeDb.seed(tokenPath, {accountHash});
+
+  await withoutErrorLog(() => assert.rejects(
+      cleanupUserData.run({uid}),
+      {message: "USER_DATA_CLEANUP_FAILED"},
+  ));
+
+  assert.deepEqual(activeDb.data(billingAccountPath), {
+    uid: "different-user",
+    state: "ACTIVE",
+  });
+  assert.equal(activeDb.data(tokenPath) !== undefined, true);
+  assert.equal(activeDb.data(rootPath) !== undefined, true);
+  assert.deepEqual(activeDb.recursiveDeletes, []);
+  assert.deepEqual(activeDb.operationLog, []);
+});
+
+test("account state inválido falha fechado", async () => {
+  activeDb = new FakeFirestore();
+  activeDb.seed(rootPath, {activeCircleId: null});
+  activeDb.seed(billingAccountPath, {uid, state: "UNKNOWN"});
+
+  await withoutErrorLog(() => assert.rejects(
+      cleanupUserData.run({uid}),
+      {message: "USER_DATA_CLEANUP_FAILED"},
+  ));
+
+  assert.deepEqual(activeDb.data(billingAccountPath), {uid, state: "UNKNOWN"});
+  assert.equal(activeDb.data(rootPath) !== undefined, true);
+  assert.deepEqual(activeDb.recursiveDeletes, []);
+  assert.deepEqual(activeDb.operationLog, []);
+});
+
+test("token indexes sem account inicial convergem sem resíduos", async () => {
+  activeDb = new FakeFirestore();
+  activeDb.seed(rootPath, {activeCircleId: null});
+  activeDb.seed(billingTokenPath("token-a"), {accountHash});
+  activeDb.seed(billingTokenPath("token-b"), {accountHash});
+
+  await cleanupUserData.run({uid});
+
+  assert.equal(activeDb.data(billingAccountPath), undefined);
+  assert.equal(activeDb.data(billingTokenPath("token-a")), undefined);
+  assert.equal(activeDb.data(billingTokenPath("token-b")), undefined);
+  assert.equal(activeDb.data(rootPath), undefined);
+});
+
+test("token surgindo antes do finalizer mantém barrier até retry", async () => {
+  const lateTokenPath = billingTokenPath("late-token");
+  activeDb = new FakeFirestore();
+  activeDb.seed(rootPath, {activeCircleId: null});
+  activeDb.seed(billingAccountPath, {uid, state: "ACTIVE"});
+  activeDb.beforeTransactions[2] = () => {
+    activeDb.seed(lateTokenPath, {accountHash});
+  };
+
+  await withoutErrorLog(() => assert.rejects(
+      cleanupUserData.run({uid}),
+      {message: "USER_DATA_CLEANUP_FAILED"},
+  ));
+
+  assert.equal(activeDb.data(rootPath), undefined);
+  assert.equal(activeDb.data(lateTokenPath) !== undefined, true);
+  assert.equal(activeDb.data(billingAccountPath).state, "DELETING");
+
+  await cleanupUserData.run({uid});
+  assert.equal(activeDb.data(lateTokenPath), undefined);
+  assert.equal(activeDb.data(billingAccountPath), undefined);
+});
+
+test("account removido durante finalização converge idempotentemente", async () => {
+  activeDb = new FakeFirestore();
+  activeDb.seed(rootPath, {activeCircleId: null});
+  activeDb.seed(billingAccountPath, {uid, state: "ACTIVE"});
+  activeDb.beforeTransactions[2] = () => {
+    activeDb.store.delete(billingAccountPath);
+  };
+
+  await cleanupUserData.run({uid});
+
+  assert.equal(activeDb.data(rootPath), undefined);
+  assert.equal(activeDb.data(billingAccountPath), undefined);
+});
+
 test("membro comum sai atomicamente e Circle permanece", async () => {
   activeDb = new FakeFirestore();
   seedNormalMemberCircle(activeDb);
@@ -834,7 +1066,7 @@ test("admin unico remove Circle inteiro antes do usuario", async () => {
   seedAdminCircle(activeDb, false);
   const markerPath = `circle_deletions/${circleId}`;
   activeDb.afterTransactionCommit = (number) => {
-    if (number !== 1) return;
+    if (number !== 2) return;
     assert.equal(
         activeDb.data(markerPath).state,
         "AUTH_DELETE_ORPHAN_CLEANUP",
@@ -990,7 +1222,7 @@ test("root recriado após claim não é apagado", async () => {
   const markerPath = `circle_deletions/${circleId}`;
   let recreated = false;
   activeDb.afterTransactionCommit = (number) => {
-    if (number !== 1) return;
+    if (number !== 2) return;
     assert.equal(activeDb.data(`circles/${circleId}`), undefined);
     assert.equal(
         activeDb.data(markerPath).state,
@@ -1027,7 +1259,7 @@ test("root recriado antes do claim impede cleanup residual", async () => {
   activeDb.seed(rootPath, {activeCircleId: circleId});
   activeDb.seed(`circles/${circleId}/members/${uid}`, memberData("member"));
   const newCircle = circleData();
-  activeDb.beforeTransactions[1] = () => {
+  activeDb.beforeTransactions[2] = () => {
     activeDb.seed(`circles/${circleId}`, newCircle);
     activeDb.seed(
         `circles/${circleId}/members/${adminUid}`,
@@ -1040,7 +1272,7 @@ test("root recriado antes do claim impede cleanup residual", async () => {
       {message: "USER_DATA_CLEANUP_FAILED"},
   ));
 
-  assert.equal(activeDb.transactionCount, 1);
+  assert.equal(activeDb.transactionCount, 2);
   assert.deepEqual(activeDb.data(`circles/${circleId}`), newCircle);
   assert.deepEqual(activeDb.data(rootPath), {activeCircleId: circleId});
   assert.deepEqual(
@@ -1049,7 +1281,7 @@ test("root recriado antes do claim impede cleanup residual", async () => {
   );
   assert.deepEqual(activeDb.recursiveDeletes, []);
   assert.equal(activeDb.data(`circle_deletions/${circleId}`), undefined);
-  assert.deepEqual(activeDb.operationLog, []);
+  assert.deepEqual(activeDb.operationLog, [`set:${billingAccountPath}`]);
 });
 
 test("retry de root ausente preserva tombstone valido", async () => {
@@ -1125,7 +1357,7 @@ test("tombstone inconsistente falha fechado sem sobrescrita", async () => {
       activeCircleId: circleId,
     });
     assert.deepEqual(activeDb.recursiveDeletes, []);
-    assert.deepEqual(activeDb.operationLog, []);
+    assert.deepEqual(activeDb.operationLog, [`set:${billingAccountPath}`]);
   }
 });
 

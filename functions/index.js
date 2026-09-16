@@ -1,5 +1,6 @@
 const functions = require("firebase-functions/v1");
 const admin = require("firebase-admin");
+const {createHash} = require("node:crypto");
 const {Timestamp} = require("firebase-admin/firestore");
 
 const CIRCLE_SCHEMA_VERSION = 2;
@@ -11,9 +12,119 @@ const SERVER_DELETING = "SERVER_DELETING";
 const CIRCLE_DELETION_COLLECTION = "circle_deletions";
 const AUTH_DELETE_ORPHAN_VERSION = 1;
 const AUTH_DELETE_ORPHAN_STATE = "AUTH_DELETE_ORPHAN_CLEANUP";
+const BILLING_ACCOUNT_COLLECTION = "billing_google_accounts";
+const BILLING_TOKEN_COLLECTION = "billing_google_tokens";
+const BILLING_ACCOUNT_ACTIVE = "ACTIVE";
+const BILLING_ACCOUNT_DELETING = "DELETING";
+const BILLING_TOKEN_DELETE_PAGE_SIZE = 100;
 
 // Inicializa o Admin SDK
 admin.initializeApp();
+
+/**
+ * Gera o identificador server-only da conta de billing.
+ * @param {string} value Valor a resumir.
+ * @return {string} SHA-256 hexadecimal lowercase.
+ */
+function sha256(value) {
+  return createHash("sha256").update(value, "utf8").digest("hex");
+}
+
+/**
+ * Valida um account index antes de qualquer mutacao destrutiva.
+ * @param {Object|undefined} data Dados persistidos.
+ * @param {string} uid UID esperado.
+ * @return {Object} Dados validados.
+ */
+function validateBillingAccount(data, uid) {
+  if (!data || typeof data !== "object" || Array.isArray(data) ||
+      data.uid !== uid ||
+      (data.state !== BILLING_ACCOUNT_ACTIVE &&
+        data.state !== BILLING_ACCOUNT_DELETING)) {
+    throw new Error("INVALID_BILLING_ACCOUNT_STATE");
+  }
+  return data;
+}
+
+/**
+ * Fecha novas admissoes de billing antes da limpeza global.
+ * @param {Object} db Firestore Admin.
+ * @param {string} uid UID excluido.
+ * @return {Promise<Object>} Referencias e hash derivados server-side.
+ */
+async function ensureBillingDeletionBarrier(db, uid) {
+  const accountHash = sha256(uid);
+  const accountRef = db.collection(BILLING_ACCOUNT_COLLECTION).doc(accountHash);
+  await db.runTransaction(async (transaction) => {
+    const snapshot = await transaction.get(accountRef);
+    if (!snapshot.exists) {
+      transaction.set(accountRef, {uid, state: BILLING_ACCOUNT_DELETING});
+      return;
+    }
+    const account = validateBillingAccount(snapshot.data(), uid);
+    if (account.state === BILLING_ACCOUNT_ACTIVE) {
+      transaction.update(accountRef, {state: BILLING_ACCOUNT_DELETING});
+    }
+  });
+  return {accountHash, accountRef};
+}
+
+/**
+ * Remove indices globais de tokens em paginas limitadas.
+ * @param {Object} db Firestore Admin.
+ * @param {string} accountHash Hash server-only da conta.
+ * @return {Promise<void>} Conclusao da limpeza.
+ */
+async function cleanupBillingTokenIndexes(db, accountHash) {
+  const tokens = db.collection(BILLING_TOKEN_COLLECTION);
+  for (;;) {
+    const snapshot = await tokens
+        .where("accountHash", "==", accountHash)
+        .limit(BILLING_TOKEN_DELETE_PAGE_SIZE)
+        .get();
+    if (!snapshot || !Array.isArray(snapshot.docs)) {
+      throw new Error("INVALID_BILLING_TOKEN_QUERY");
+    }
+    if (snapshot.docs.length === 0) return;
+    for (const tokenSnapshot of snapshot.docs) {
+      const data = tokenSnapshot.data();
+      if (!data || typeof data !== "object" || Array.isArray(data) ||
+          data.accountHash !== accountHash) {
+        throw new Error("INVALID_BILLING_TOKEN_INDEX");
+      }
+    }
+    await deleteRefs(db, snapshot.docs.map((entry) => entry.ref));
+  }
+}
+
+/**
+ * Remove o account index somente depois de provar a limpeza integral.
+ * @param {Object} db Firestore Admin.
+ * @param {string} uid UID excluido.
+ * @param {Object} billingCleanup Estado derivado pelo barrier.
+ * @return {Promise<void>} Conclusao da finalizacao.
+ */
+async function finalizeBillingDeletionBarrier(db, uid, billingCleanup) {
+  const userRef = db.collection("users").doc(uid);
+  const tokenQuery = db.collection(BILLING_TOKEN_COLLECTION)
+      .where("accountHash", "==", billingCleanup.accountHash)
+      .limit(1);
+  await db.runTransaction(async (transaction) => {
+    const [accountSnapshot, userSnapshot, tokenSnapshot] = await Promise.all([
+      transaction.get(billingCleanup.accountRef),
+      transaction.get(userRef),
+      transaction.get(tokenQuery),
+    ]);
+    if (!accountSnapshot.exists) return;
+    const account = validateBillingAccount(accountSnapshot.data(), uid);
+    if (account.state !== BILLING_ACCOUNT_DELETING || userSnapshot.exists ||
+        !tokenSnapshot || !Array.isArray(tokenSnapshot.docs) ||
+        tokenSnapshot.docs.length !== 0) {
+      throw new Error("BILLING_CLEANUP_INCOMPLETE");
+    }
+    transaction.delete(billingCleanup.accountRef);
+  });
+}
 
 /**
  * Retorna se um valor pode ser usado como ID de documento conhecido.
@@ -490,11 +601,14 @@ exports.cleanupUserData = functions
       const userRef = db.collection("users").doc(user.uid);
 
       try {
+        const billingCleanup = await ensureBillingDeletionBarrier(db, user.uid);
+        await cleanupBillingTokenIndexes(db, billingCleanup.accountHash);
         const userSnapshot = await userRef.get();
         if (userSnapshot.exists) {
           await cleanupExternalCircleData(db, user.uid, userSnapshot);
         }
         await db.recursiveDelete(userRef);
+        await finalizeBillingDeletionBarrier(db, user.uid, billingCleanup);
       } catch (_) {
         console.error("[cleanupUserData] Falha na limpeza pós-exclusão.");
         throw new Error("USER_DATA_CLEANUP_FAILED");
