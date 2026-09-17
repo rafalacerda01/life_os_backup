@@ -196,18 +196,36 @@ class _EditProfileScreenState extends ConsumerState<EditProfileScreen> {
           .read(authNotifierProvider.notifier)
           .updateProfile(newName: newName, newPhotoUrl: _selectedAvatar);
 
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text("Perfil atualizado com sucesso!")),
-        );
-        Navigator.pop(context);
-      }
-    } catch (e) {
-      if (mounted) {
+      if (!mounted) return;
+
+      final failureMessage = ref
+          .read(authNotifierProvider)
+          .maybeWhen<String?>(
+            authenticated: (_) => null,
+            error: (message) => message,
+            orElse: () =>
+                'Não foi possível atualizar o perfil. Tente novamente.',
+          );
+      if (failureMessage != null) {
         ScaffoldMessenger.of(
           context,
-        ).showSnackBar(SnackBar(content: Text("Erro ao atualizar: $e")));
+        ).showSnackBar(SnackBar(content: Text(failureMessage)));
+        return;
       }
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("Perfil atualizado com sucesso!")),
+      );
+      Navigator.pop(context);
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Não foi possível atualizar o perfil. Tente novamente.',
+          ),
+        ),
+      );
     } finally {
       if (mounted) {
         setState(() => _isLoading = false);
