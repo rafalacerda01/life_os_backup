@@ -22,6 +22,7 @@ class _ProfileAuthNotifier extends AuthNotifier {
   final AuthState result;
   final Object? error;
   int updateCalls = 0;
+  final photoUrls = <String?>[];
 
   @override
   AuthState build() => AuthState.authenticated(_user);
@@ -29,6 +30,7 @@ class _ProfileAuthNotifier extends AuthNotifier {
   @override
   Future<void> updateProfile({String? newName, String? newPhotoUrl}) async {
     updateCalls += 1;
+    photoUrls.add(newPhotoUrl);
     if (error != null) throw error!;
     state = result;
   }
@@ -74,6 +76,37 @@ Future<void> _pumpEditProfile(
 }
 
 void main() {
+  testWidgets('galeria não é oferecida e avatares continuam disponíveis', (
+    tester,
+  ) async {
+    final notifier = _ProfileAuthNotifier(
+      result: AuthState.authenticated(_user),
+    );
+    final observer = _NavigatorObserver();
+    await _pumpEditProfile(tester, notifier, observer);
+
+    await tester.tap(find.byIcon(Icons.camera_alt));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Escolher da Galeria'), findsNothing);
+    expect(find.text('Usar Avatar Predefinido'), findsOneWidget);
+
+    await tester.tap(find.text('Usar Avatar Predefinido'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('MALE'), findsOneWidget);
+    expect(find.text('FEMALE'), findsOneWidget);
+    expect(find.text('CYBER'), findsOneWidget);
+    expect(find.text('NEURAL'), findsOneWidget);
+
+    await tester.tap(find.text('MALE'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Salvar Alterações'));
+    await tester.pumpAndSettle();
+
+    expect(notifier.photoUrls, <String?>['avatar_male']);
+  });
+
   testWidgets('falha mantém a tela aberta e mostra mensagem amigável', (
     tester,
   ) async {

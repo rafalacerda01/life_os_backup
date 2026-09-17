@@ -1,7 +1,6 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:image_picker/image_picker.dart';
 import 'package:life_os/features/auth/presentation/providers/auth_provider.dart';
 
 class EditProfileScreen extends ConsumerStatefulWidget {
@@ -44,16 +43,6 @@ class _EditProfileScreenState extends ConsumerState<EditProfileScreen> {
     super.dispose();
   }
 
-  Future<void> _pickImageFromGallery() async {
-    final picker = ImagePicker();
-    final pickedFile = await picker.pickImage(source: ImageSource.gallery);
-    if (pickedFile != null) {
-      setState(() {
-        _selectedAvatar = pickedFile.path;
-      });
-    }
-  }
-
   void _showAvatarPickerSheet() {
     showModalBottomSheet(
       context: context,
@@ -87,21 +76,6 @@ class _EditProfileScreenState extends ConsumerState<EditProfileScreen> {
               onTap: () {
                 Navigator.pop(sheetContext);
                 _showPredefinedAvatarsDialog();
-              },
-            ),
-            ListTile(
-              tileColor: Colors.transparent, // Corrige o alerta do ListTile
-              leading: const Icon(
-                Icons.photo_library,
-                color: Colors.purpleAccent,
-              ),
-              title: const Text(
-                "Escolher da Galeria",
-                style: TextStyle(color: Colors.white),
-              ),
-              onTap: () {
-                Navigator.pop(sheetContext);
-                _pickImageFromGallery();
               },
             ),
           ],

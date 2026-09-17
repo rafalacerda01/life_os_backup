@@ -133,6 +133,7 @@ class FakeUserDocumentReference extends Fake
   Map<String, dynamic>? value;
   int getCalls = 0;
   int setCalls = 0;
+  int updateCalls = 0;
   int setFailuresRemaining = 0;
   bool persistBeforeSetFailure = false;
 
@@ -157,6 +158,15 @@ class FakeUserDocumentReference extends Fake
       );
     }
     value = Map.of(data);
+  }
+
+  @override
+  Future<void> update(Map<Object, Object?> data) async {
+    updateCalls += 1;
+    value = {
+      ...?value,
+      for (final entry in data.entries) entry.key.toString(): entry.value,
+    };
   }
 }
 
@@ -216,6 +226,22 @@ const _ambiguousError = AccountRemoteException(
   message: 'Falha segura.',
   isAmbiguous: true,
 );
+
+Map<String, dynamic> _profileData({String? photoUrl}) => {
+  'email': 'user@example.invalid',
+  'displayName': 'Nome original',
+  'isPremium': false,
+  'photoUrl': photoUrl,
+  'xp': 0,
+  'level': 1,
+  'streak': 0,
+  'habitsCount': 0,
+  'tasksCount': 0,
+  'goalsCount': 0,
+  'subjectsCount': 0,
+  'medicationsCount': 0,
+  'transactionsCount': 0,
+};
 
 void main() {
   late FakeFirebaseAuth auth;
@@ -598,6 +624,67 @@ void main() {
       expect(
         failure?.message,
         isNot(contains('technical-current-user-marker')),
+      );
+    });
+  });
+
+  group('normalização da foto de perfil', () {
+    Future<FakeUserDocumentReference> updatePhoto(String? photoUrl) async {
+      final document = firestore.users.document('user-a')
+        ..value = _profileData(
+          photoUrl: 'https://example.test/existing-profile.jpg',
+        );
+
+      final result = await repository.updateProfile(
+        'Nome atualizado',
+        newPhotoUrl: photoUrl,
+      );
+
+      var succeeded = false;
+      result.when((_) => succeeded = true, (_) {});
+      expect(succeeded, isTrue);
+      expect(document.updateCalls, 1);
+      return document;
+    }
+
+    for (final localReference in <String>[
+      '/data/user/0/com.rafalacerda.lifeos/cache/profile.jpg',
+      'file:///data/user/0/com.rafalacerda.lifeos/cache/profile.jpg',
+      r'C:\algum\caminho\foto.jpg',
+    ]) {
+      test(
+        'referência local é persistida como null: $localReference',
+        () async {
+          final document = await updatePhoto(localReference);
+
+          expect(document.value?['photoUrl'], isNull);
+        },
+      );
+    }
+
+    test('avatar predefinido continua permitido', () async {
+      final document = await updatePhoto('avatar_neural');
+
+      expect(document.value?['photoUrl'], 'avatar_neural');
+    });
+
+    test('URL HTTPS continua permitida', () async {
+      final document = await updatePhoto(
+        'https://images.example.test/profile.jpg',
+      );
+
+      expect(
+        document.value?['photoUrl'],
+        'https://images.example.test/profile.jpg',
+      );
+    });
+
+    test('null preserva a foto existente sem solicitar alteração', () async {
+      final document = await updatePhoto(null);
+
+      expect(
+        document.value?['photoUrl'],
+        'https://example.test/existing-profile.jpg',
       );
     });
   });

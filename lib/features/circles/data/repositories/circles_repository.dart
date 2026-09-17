@@ -30,6 +30,12 @@ class CirclesRepository {
   static const int _maxChallengeTargetValue = 1000000;
   static const int _maxMemberNameLength = 50;
   static const int _maxPhotoUrlLength = 2048;
+  static const _predefinedAvatars = {
+    'avatar_male',
+    'avatar_female',
+    'avatar_cyber',
+    'avatar_neural',
+  };
 
   final FirebaseFirestore _firestore;
   final FirebaseAuth _auth;
@@ -54,9 +60,15 @@ class CirclesRepository {
   String? _normalizePhotoUrl(Object? value, String? fallbackValue) {
     final selected = value is String ? value.trim() : fallbackValue?.trim();
     if (selected == null || selected.isEmpty) return null;
-    return selected.length <= _maxPhotoUrlLength
+    final normalized = selected.length <= _maxPhotoUrlLength
         ? selected
         : selected.substring(0, _maxPhotoUrlLength);
+    if (_predefinedAvatars.contains(normalized)) return normalized;
+
+    final uri = Uri.tryParse(normalized);
+    if (uri == null || uri.host.isEmpty) return null;
+    final scheme = uri.scheme.toLowerCase();
+    return scheme == 'http' || scheme == 'https' ? normalized : null;
   }
 
   DateTime? _readTimestamp(Object? value) {
@@ -262,7 +274,7 @@ class CirclesRepository {
         CircleMemberEntity(
           userId: memberDoc.id,
           displayName: displayName,
-          photoUrl: photoUrl as String?,
+          photoUrl: _normalizePhotoUrl(photoUrl, null),
           role: role,
           joinedAt: joinedAt,
         ),

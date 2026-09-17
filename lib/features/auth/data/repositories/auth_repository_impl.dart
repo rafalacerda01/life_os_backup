@@ -10,6 +10,13 @@ import 'package:google_sign_in/google_sign_in.dart';
 import '../../../../core/security/input_sanitizer.dart';
 
 class AuthRepositoryImpl implements AuthRepository {
+  static const _predefinedAvatars = {
+    'avatar_male',
+    'avatar_female',
+    'avatar_cyber',
+    'avatar_neural',
+  };
+
   final fb.FirebaseAuth _firebaseAuth;
   final FirebaseFirestore _firestore;
   final AccountRemoteDataSource _accountRemoteDataSource;
@@ -19,6 +26,16 @@ class AuthRepositoryImpl implements AuthRepository {
     this._firestore,
     this._accountRemoteDataSource,
   );
+
+  String? _normalizePhotoReference(String value) {
+    final normalized = value.trim();
+    if (_predefinedAvatars.contains(normalized)) return normalized;
+
+    final uri = Uri.tryParse(normalized);
+    if (uri == null || uri.host.isEmpty) return null;
+    final scheme = uri.scheme.toLowerCase();
+    return scheme == 'http' || scheme == 'https' ? normalized : null;
+  }
 
   @override
   Future<Result<void, Failure>> deleteAccount({
@@ -212,7 +229,7 @@ class AuthRepositoryImpl implements AuthRepository {
       final Map<String, dynamic> updateData = {'displayName': cleanName};
 
       if (newPhotoUrl != null) {
-        updateData['photoUrl'] = newPhotoUrl;
+        updateData['photoUrl'] = _normalizePhotoReference(newPhotoUrl);
       }
 
       await _firestore.collection('users').doc(user.uid).update(updateData);
