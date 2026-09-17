@@ -218,8 +218,8 @@ class AuthRepositoryImpl implements AuthRepository {
       await _firestore.collection('users').doc(user.uid).update(updateData);
 
       return _getUserFromFirestore(user.uid);
-    } catch (e) {
-      return Error(ServerFailure(e.toString()));
+    } catch (_) {
+      return Error(ServerFailure.unexpected());
     }
   }
 
@@ -229,8 +229,8 @@ class AuthRepositoryImpl implements AuthRepository {
       await _firebaseAuth.signOut();
 
       return const Success(null);
-    } catch (e) {
-      return Error(ServerFailure(e.toString()));
+    } catch (_) {
+      return Error(ServerFailure.unexpected());
     }
   }
 
@@ -244,8 +244,8 @@ class AuthRepositoryImpl implements AuthRepository {
       }
 
       return _getOrProvisionUser(currentUser);
-    } catch (e) {
-      return Error(ServerFailure(e.toString()));
+    } catch (_) {
+      return Error(ServerFailure.unexpected());
     }
   }
 

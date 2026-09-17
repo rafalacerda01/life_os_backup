@@ -19,13 +19,17 @@ class FakeFirebaseAuth extends Fake implements FirebaseAuth {
   Object? signUpError;
   Object? passwordResetError;
   Object? signOutError;
+  Object? currentUserError;
   int signOutCalls = 0;
   int signInCalls = 0;
   int signUpCalls = 0;
   int passwordResetCalls = 0;
 
   @override
-  User? get currentUser => user;
+  User? get currentUser {
+    if (currentUserError != null) throw currentUserError!;
+    return user;
+  }
 
   @override
   Future<void> signOut() async {
@@ -75,8 +79,16 @@ class FakeFirebaseUser extends Fake implements User {
   @override
   final String? photoURL;
   Object? reloadError;
+  Object? updateDisplayNameError;
   int reloadCalls = 0;
+  int updateDisplayNameCalls = 0;
   int deleteCalls = 0;
+
+  @override
+  Future<void> updateDisplayName(String? displayName) async {
+    updateDisplayNameCalls += 1;
+    if (updateDisplayNameError != null) throw updateDisplayNameError!;
+  }
 
   @override
   Future<void> reload() async {
@@ -544,6 +556,49 @@ void main() {
       expect(failure, isA<ServerFailure>());
       expect(failure?.code, 'UNEXPECTED_ERROR');
       expect(failure?.message, isNot(contains('technical-reset-marker')));
+    });
+  });
+
+  group('sanitização de erros residuais', () {
+    test('signOut não expõe exceção técnica', () async {
+      auth.signOutError = StateError('technical-signout-marker');
+
+      final result = await repository.signOut();
+
+      Failure? failure;
+      result.when((_) {}, (value) => failure = value);
+      expect(failure, isA<ServerFailure>());
+      expect(failure?.code, 'UNEXPECTED_ERROR');
+      expect(failure?.message, isNot(contains('technical-signout-marker')));
+      expect(auth.signOutCalls, 1);
+    });
+
+    test('updateProfile não expõe exceção técnica', () async {
+      user.updateDisplayNameError = StateError('technical-profile-marker');
+
+      final result = await repository.updateProfile('Nome atualizado');
+
+      Failure? failure;
+      result.when((_) {}, (value) => failure = value);
+      expect(failure, isA<ServerFailure>());
+      expect(failure?.code, 'UNEXPECTED_ERROR');
+      expect(failure?.message, isNot(contains('technical-profile-marker')));
+      expect(user.updateDisplayNameCalls, 1);
+    });
+
+    test('getCurrentUser não expõe exceção técnica', () async {
+      auth.currentUserError = StateError('technical-current-user-marker');
+
+      final result = await repository.getCurrentUser();
+
+      Failure? failure;
+      result.when((_) {}, (value) => failure = value);
+      expect(failure, isA<ServerFailure>());
+      expect(failure?.code, 'UNEXPECTED_ERROR');
+      expect(
+        failure?.message,
+        isNot(contains('technical-current-user-marker')),
+      );
     });
   });
 
