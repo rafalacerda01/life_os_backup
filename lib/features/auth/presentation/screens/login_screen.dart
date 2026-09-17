@@ -194,7 +194,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                       if (val == null || val.isEmpty)
                         return "O e-mail é obrigatório";
                       if (!RegExp(
-                        r'^[\w-\.]+@([\w-]+\.)+[\w-]{2,4}$',
+                        r'^[^@\s]+@[^@\s]+\.[^@\s]+$',
                       ).hasMatch(val)) {
                         return "Insira um e-mail válido";
                       }

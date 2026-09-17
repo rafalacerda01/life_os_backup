@@ -81,7 +81,7 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
                     decoration: _buildInputDecoration("E-mail", Icons.email_outlined),
                     validator: (val) {
                       if (val == null || val.isEmpty) return "O e-mail é obrigatório";
-                      if (!RegExp(r'^[\w-\.]+@([\w-]+\.)+[\w-]{2,4}$').hasMatch(val)) return "E-mail inválido";
+                      if (!RegExp(r'^[^@\s]+@[^@\s]+\.[^@\s]+$').hasMatch(val)) return "E-mail inválido";
                       return null;
                     },
                   ),
