@@ -263,7 +263,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                               final email = _emailController.text
                                   .trim()
                                   .toLowerCase();
-                              final password = _passwordController.text.trim();
+                              final password = _passwordController.text;
 
                               ref
                                   .read(authNotifierProvider.notifier)

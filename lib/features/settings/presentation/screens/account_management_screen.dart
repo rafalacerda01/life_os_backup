@@ -328,7 +328,7 @@ class _DeleteAccountDialogState extends State<_DeleteAccountDialog> {
   }
 
   void _confirm() {
-    final password = _passwordController.text.trim();
+    final password = _passwordController.text;
     if (widget.usesPasswordProvider && password.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(

@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -11,6 +13,29 @@ class _ErrorAuthNotifier extends AuthNotifier {
 }
 
 void main() {
+  test('diálogo preserva senha opaca e rejeita somente string vazia', () {
+    final source = File(
+      'lib/features/settings/presentation/screens/account_management_screen.dart',
+    ).readAsStringSync();
+    final confirmStart = source.indexOf('void _confirm()');
+    final confirmEnd = source.indexOf('@override', confirmStart);
+
+    expect(confirmStart, greaterThanOrEqualTo(0));
+    expect(confirmEnd, greaterThan(confirmStart));
+
+    final confirmSource = source.substring(confirmStart, confirmEnd);
+    expect(
+      confirmSource,
+      contains('final password = _passwordController.text;'),
+    );
+    expect(confirmSource, isNot(contains('_passwordController.text.trim()')));
+    expect(confirmSource, contains('password.isEmpty'));
+    expect(
+      confirmSource,
+      contains('password: widget.usesPasswordProvider ? password : null'),
+    );
+  });
+
   testWidgets('erro de conta não expõe mensagem técnica do Auth', (
     tester,
   ) async {
