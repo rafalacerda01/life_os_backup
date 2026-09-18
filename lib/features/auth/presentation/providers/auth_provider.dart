@@ -32,6 +32,7 @@ import 'package:life_os/features/dashboard/presentation/providers/dashboard_prov
 import 'package:life_os/features/auth/data/repositories/auth_repository_impl.dart';
 import 'package:life_os/features/auth/data/remote/account_remote_data_source.dart';
 import 'package:life_os/features/auth/data/local/auth_cleanup_barrier.dart';
+import 'package:life_os/features/auth/data/services/google_sign_in_initializer.dart';
 import 'package:life_os/features/auth/domain/repositories/auth_repository.dart';
 import 'package:life_os/features/auth/presentation/providers/auth_state.dart';
 import 'package:life_os/core/storage/secure_storage_service.dart';
@@ -543,10 +544,7 @@ class AuthNotifier extends Notifier<AuthState> {
         }
       } else if (providerIds.contains('google.com')) {
         final googleSignIn = GoogleSignIn.instance;
-        await googleSignIn.initialize(
-          serverClientId:
-              '278760083864-nfp6h9r9gjaq4tvtcerif8h2d08c6afi.apps.googleusercontent.com',
-        );
+        await googleSignInInitialization;
 
         final googleUser = await googleSignIn.authenticate();
         final googleAuth = googleUser.authentication;

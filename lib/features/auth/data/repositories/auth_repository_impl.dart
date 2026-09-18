@@ -6,6 +6,7 @@ import '../../domain/entities/user_entity.dart';
 import '../../domain/repositories/auth_repository.dart';
 import '../models/user_model.dart';
 import '../remote/account_remote_data_source.dart';
+import '../services/google_sign_in_initializer.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import '../../../../core/security/input_sanitizer.dart';
 
@@ -166,10 +167,7 @@ class AuthRepositoryImpl implements AuthRepository {
     try {
       final googleSignIn = GoogleSignIn.instance;
 
-      await googleSignIn.initialize(
-        serverClientId:
-            '278760083864-nfp6h9r9gjaq4tvtcerif8h2d08c6afi.apps.googleusercontent.com',
-      );
+      await googleSignInInitialization;
 
       final googleUser = await googleSignIn.authenticate();
 
