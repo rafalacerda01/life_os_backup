@@ -1,7 +1,7 @@
-import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:life_os/core/theme/app_colors.dart';
+import 'package:life_os/features/auth/presentation/providers/auth_provider.dart';
 import 'package:life_os/features/circles/data/repositories/circles_repository.dart';
 import 'package:life_os/features/circles/domain/entities/challenge_entity.dart';
 import 'package:life_os/features/circles/domain/entities/circle_entity.dart';
@@ -36,7 +36,8 @@ class _CirclesScreenState extends ConsumerState<CirclesScreen> {
   Widget build(BuildContext context) {
     final state = ref.watch(circlesProvider);
     final circle = state.joinedCircle;
-    final currentUserId = FirebaseAuth.instance.currentUser?.uid ?? '';
+    final currentUserId =
+        ref.watch(firebaseAuthProvider).currentUser?.uid ?? '';
 
     return Scaffold(
       backgroundColor: AppColors.scaffoldBackground,
@@ -280,6 +281,9 @@ class _CirclesScreenState extends ConsumerState<CirclesScreen> {
     final initial = member.displayName.isEmpty
         ? '?'
         : member.displayName[0].toUpperCase();
+    final photoUrl = member.photoUrl;
+    final isSymbolicAvatar = photoUrl?.startsWith('avatar_') ?? false;
+    final remotePhotoUrl = _remotePhotoUrl(photoUrl);
 
     return Container(
       margin: const EdgeInsets.only(bottom: 10),
@@ -295,10 +299,16 @@ class _CirclesScreenState extends ConsumerState<CirclesScreen> {
           CircleAvatar(
             radius: 18,
             backgroundColor: AppColors.secondary,
-            backgroundImage: member.photoUrl != null
-                ? NetworkImage(member.photoUrl!)
+            backgroundImage: remotePhotoUrl != null
+                ? NetworkImage(remotePhotoUrl)
                 : null,
-            child: member.photoUrl == null
+            child: isSymbolicAvatar
+                ? Icon(
+                    photoUrl == 'avatar_female' ? Icons.face_3 : Icons.face,
+                    color: AppColors.textMain,
+                    size: 20,
+                  )
+                : remotePhotoUrl == null
                 ? Text(
                     initial,
                     style: const TextStyle(
@@ -326,5 +336,13 @@ class _CirclesScreenState extends ConsumerState<CirclesScreen> {
         ],
       ),
     );
+  }
+
+  String? _remotePhotoUrl(String? value) {
+    if (value == null) return null;
+    final uri = Uri.tryParse(value);
+    if (uri == null || uri.host.isEmpty) return null;
+    final scheme = uri.scheme.toLowerCase();
+    return scheme == 'http' || scheme == 'https' ? value : null;
   }
 }
