@@ -5,6 +5,7 @@ import 'dart:async';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:google_sign_in/google_sign_in.dart';
 import 'package:http/testing.dart';
 import 'package:life_os/core/errors/failure.dart';
 import 'package:life_os/features/auth/data/remote/account_remote_data_source.dart';
@@ -404,6 +405,76 @@ void main() {
   });
 
   group('feedback sanitizado de autenticação', () {
+    group('Google Sign-In estruturado', () {
+      test('cancelamento retorna mensagem neutra', () {
+        final failure = googleSignInPluginFailure(
+          const GoogleSignInException(
+            code: GoogleSignInExceptionCode.canceled,
+            description: 'technical-google-canceled-marker',
+            details: 'technical-google-details-marker',
+          ),
+        );
+
+        expect(failure.message, 'Entrada com Google cancelada.');
+        expect(failure.code, 'GOOGLE_SIGN_IN_CANCELED');
+        expect(failure.message, isNot(contains('technical-google')));
+      });
+
+      for (final code in <GoogleSignInExceptionCode>[
+        GoogleSignInExceptionCode.clientConfigurationError,
+        GoogleSignInExceptionCode.providerConfigurationError,
+      ]) {
+        test('$code retorna falha genérica sanitizada', () {
+          final failure = googleSignInPluginFailure(
+            GoogleSignInException(
+              code: code,
+              description: 'technical-google-configuration-marker',
+              details: 'technical-google-details-marker',
+            ),
+          );
+
+          expect(
+            failure.message,
+            'Não foi possível entrar com o Google. Tente novamente.',
+          );
+          expect(failure.code, 'GOOGLE_SIGN_IN_FAILED');
+          expect(failure.message, isNot(contains('technical-google')));
+        });
+      }
+
+      test('UI indisponível retorna mensagem amigável sanitizada', () {
+        final failure = googleSignInPluginFailure(
+          const GoogleSignInException(
+            code: GoogleSignInExceptionCode.uiUnavailable,
+            description: 'technical-google-ui-marker',
+          ),
+        );
+
+        expect(
+          failure.message,
+          'Não foi possível abrir o acesso com o Google. Tente novamente.',
+        );
+        expect(failure.code, 'GOOGLE_SIGN_IN_UI_UNAVAILABLE');
+        expect(failure.message, isNot(contains('technical-google')));
+      });
+
+      test('código não mapeado usa fallback sanitizado', () {
+        final failure = googleSignInPluginFailure(
+          const GoogleSignInException(
+            code: GoogleSignInExceptionCode.unknownError,
+            description: 'technical-google-fallback-marker',
+          ),
+        );
+
+        expect(
+          failure.message,
+          'Não foi possível entrar com o Google. Tente novamente.',
+        );
+        expect(failure.code, 'GOOGLE_SIGN_IN_FAILED');
+        expect(failure.message, isNot(contains('technical-google')));
+      });
+    });
+
     for (final code in <String>[
       'invalid-credential',
       'wrong-password',

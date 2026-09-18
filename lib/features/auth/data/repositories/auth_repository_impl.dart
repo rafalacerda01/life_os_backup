@@ -1,5 +1,6 @@
 import 'package:firebase_auth/firebase_auth.dart' as fb;
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:flutter/foundation.dart';
 import 'package:multiple_result/multiple_result.dart';
 import '../../../../core/errors/failure.dart';
 import '../../domain/entities/user_entity.dart';
@@ -9,6 +10,27 @@ import '../remote/account_remote_data_source.dart';
 import '../services/google_sign_in_initializer.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import '../../../../core/security/input_sanitizer.dart';
+
+@visibleForTesting
+Failure googleSignInPluginFailure(GoogleSignInException exception) {
+  switch (exception.code) {
+    case GoogleSignInExceptionCode.canceled:
+      return const AuthFailure(
+        'Entrada com Google cancelada.',
+        code: 'GOOGLE_SIGN_IN_CANCELED',
+      );
+    case GoogleSignInExceptionCode.uiUnavailable:
+      return const AuthFailure(
+        'Não foi possível abrir o acesso com o Google. Tente novamente.',
+        code: 'GOOGLE_SIGN_IN_UI_UNAVAILABLE',
+      );
+    default:
+      return const AuthFailure(
+        'Não foi possível entrar com o Google. Tente novamente.',
+        code: 'GOOGLE_SIGN_IN_FAILED',
+      );
+  }
+}
 
 class AuthRepositoryImpl implements AuthRepository {
   static const _predefinedAvatars = {
@@ -188,22 +210,11 @@ class AuthRepositoryImpl implements AuthRepository {
       }
 
       return _getOrProvisionUser(fbUser);
+    } on GoogleSignInException catch (e) {
+      return Error(googleSignInPluginFailure(e));
     } on fb.FirebaseAuthException catch (e) {
       return Error(_googleSignInFailure(e.code));
-    } catch (e) {
-      final errorStr = e.toString();
-
-      if (errorStr.contains('No credentials available') ||
-          errorStr.contains('sign_in_failed')) {
-        return const Error(
-          AuthFailure(
-            'Nenhuma conta Google foi encontrada neste aparelho. '
-            'Adicione uma conta nas configurações do seu celular '
-            'para continuar.',
-          ),
-        );
-      }
-
+    } catch (_) {
       return Error(_googleSignInFailure('unknown'));
     }
   }
