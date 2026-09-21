@@ -18,6 +18,7 @@ void main() {
     expect(
       authRedirectFor(
         authState: const AuthUnauthenticated(),
+        hasFirebaseUser: false,
         location: '/privacy-policy',
       ),
       isNull,
@@ -28,6 +29,7 @@ void main() {
     expect(
       authRedirectFor(
         authState: const AuthAuthenticated(_user),
+        hasFirebaseUser: true,
         location: '/privacy-policy',
       ),
       isNull,
@@ -38,6 +40,7 @@ void main() {
     expect(
       authRedirectFor(
         authState: const AuthUnauthenticated(),
+        hasFirebaseUser: false,
         location: '/home',
       ),
       '/login',
@@ -48,9 +51,54 @@ void main() {
     expect(
       authRedirectFor(
         authState: const AuthAuthenticated(_user),
+        hasFirebaseUser: true,
         location: '/login',
       ),
       '/home',
+    );
+  });
+
+  test('usuário autenticado permanece em rota protegida', () {
+    expect(
+      authRedirectFor(
+        authState: const AuthAuthenticated(_user),
+        hasFirebaseUser: true,
+        location: '/home',
+      ),
+      isNull,
+    );
+  });
+
+  test('erro sem sessão Firebase sai da rota protegida para o splash', () {
+    expect(
+      authRedirectFor(
+        authState: const AuthError('falha de isolamento'),
+        hasFirebaseUser: false,
+        location: '/home',
+      ),
+      '/splash',
+    );
+  });
+
+  test('erro com sessão Firebase preserva rota protegida', () {
+    expect(
+      authRedirectFor(
+        authState: const AuthError('falha recuperável'),
+        hasFirebaseUser: true,
+        location: '/home',
+      ),
+      isNull,
+    );
+  });
+
+  test('erro sem sessão Firebase preserva rota pública', () {
+    expect(
+      authRedirectFor(
+        authState: const AuthError('falha de isolamento'),
+        hasFirebaseUser: false,
+        location: '/privacy-policy',
+      ),
+      isNull,
     );
   });
 }

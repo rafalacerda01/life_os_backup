@@ -38,6 +38,7 @@ class AuthRefreshListenable extends ChangeNotifier {
 
 String? authRedirectFor({
   required AuthState authState,
+  required bool hasFirebaseUser,
   required String location,
 }) {
   final isAuthEntryRoute =
@@ -51,6 +52,9 @@ String? authRedirectFor({
     authenticated: (_) => isAuthEntryRoute ? '/home' : null,
     unauthenticated: () =>
         !isAuthEntryRoute && !isPublicRoute ? '/login' : null,
+    error: (_) => !hasFirebaseUser && !isAuthEntryRoute && !isPublicRoute
+        ? '/splash'
+        : null,
     orElse: () => null,
   );
 }
@@ -66,6 +70,7 @@ final routerProvider = Provider<GoRouter>((ref) {
       final authState = ref.read(authNotifierProvider);
       return authRedirectFor(
         authState: authState,
+        hasFirebaseUser: ref.read(firebaseAuthProvider).currentUser != null,
         location: state.matchedLocation,
       );
     },

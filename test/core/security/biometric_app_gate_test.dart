@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -37,6 +38,17 @@ class _StaticAuthNotifier extends AuthNotifier {
   }
 }
 
+class _FirebaseUser extends Fake implements User {}
+
+class _FirebaseAuth extends Fake implements FirebaseAuth {
+  _FirebaseAuth({required this.hasUser});
+
+  final bool hasUser;
+
+  @override
+  User? get currentUser => hasUser ? _FirebaseUser() : null;
+}
+
 class _FakeBiometricService extends BiometricService {
   final List<bool> results = [];
   Completer<bool>? pending;
@@ -54,10 +66,16 @@ Widget _app({
   required AuthState authState,
   required _FakeBiometricService service,
   BiometricPreferencesLoader? preferencesLoader,
+  bool? hasFirebaseUser,
 }) {
   return ProviderScope(
     overrides: [
       authNotifierProvider.overrideWith(() => _StaticAuthNotifier(authState)),
+      firebaseAuthProvider.overrideWithValue(
+        _FirebaseAuth(
+          hasUser: hasFirebaseUser ?? authState is AuthAuthenticated,
+        ),
+      ),
       biometricServiceProvider.overrideWithValue(service),
       if (preferencesLoader != null)
         biometricPreferencesLoaderProvider.overrideWithValue(preferencesLoader),
@@ -93,6 +111,43 @@ void main() {
     final service = _FakeBiometricService();
     await tester.pumpWidget(
       _app(authState: AuthState.unauthenticated(), service: service),
+    );
+    await _pumpAsync(tester);
+
+    expect(find.text('Sensitive router content'), findsOneWidget);
+    expect(service.calls, 0);
+  });
+
+  testWidgets('AuthError sem sessão Firebase mantém conteúdo privado opaco', (
+    tester,
+  ) async {
+    final service = _FakeBiometricService();
+    await tester.pumpWidget(
+      _app(
+        authState: AuthState.error('technical-isolation-marker'),
+        hasFirebaseUser: false,
+        service: service,
+      ),
+    );
+    await _pumpAsync(tester);
+
+    expect(find.text('Protegendo sua sessão...'), findsOneWidget);
+    expect(find.text('Sensitive router content'), findsNothing);
+    expect(find.text('Encerrar sessão'), findsOneWidget);
+    expect(find.textContaining('technical-isolation-marker'), findsNothing);
+    expect(service.calls, 0);
+  });
+
+  testWidgets('AuthError com sessão Firebase preserva conteúdo autenticado', (
+    tester,
+  ) async {
+    final service = _FakeBiometricService();
+    await tester.pumpWidget(
+      _app(
+        authState: AuthState.error('recoverable-operation-error'),
+        hasFirebaseUser: true,
+        service: service,
+      ),
     );
     await _pumpAsync(tester);
 

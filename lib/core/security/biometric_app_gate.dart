@@ -126,6 +126,15 @@ class _BiometricAppGateState extends ConsumerState<BiometricAppGate>
         _lastBiometricStatus != BiometricLockStatus.locked;
     _lastBiometricStatus = biometricState.status;
 
+    if (authState is AuthError &&
+        ref.read(firebaseAuthProvider).currentUser == null) {
+      return _BiometricLockScreen(
+        loading: true,
+        signOutInProgress: _signOutInProgress,
+        onSignOut: _signOut,
+      );
+    }
+
     if (authState is AuthAuthenticated) {
       if (_authenticatedUid != null &&
           _authenticatedUid != authState.user.uid &&
