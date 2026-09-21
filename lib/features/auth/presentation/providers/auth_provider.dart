@@ -33,6 +33,7 @@ import 'package:life_os/features/auth/data/repositories/auth_repository_impl.dar
 import 'package:life_os/features/auth/data/remote/account_remote_data_source.dart';
 import 'package:life_os/features/auth/data/local/auth_cleanup_barrier.dart';
 import 'package:life_os/features/auth/data/services/google_sign_in_initializer.dart';
+import 'package:life_os/features/auth/domain/entities/user_entity.dart';
 import 'package:life_os/features/auth/domain/repositories/auth_repository.dart';
 import 'package:life_os/features/auth/presentation/providers/auth_state.dart';
 import 'package:life_os/core/storage/secure_storage_service.dart';
@@ -98,6 +99,7 @@ class AuthNotifier extends Notifier<AuthState> {
   Future<void>? _durableCleanupRecoveryInFlight;
   Future<void>? _hydrationInFlight;
   String? _hydrationUid;
+  bool _authResultReconciliationInProgress = false;
   int _sessionGeneration = 0;
 
   @override
@@ -306,20 +308,129 @@ class AuthNotifier extends Notifier<AuthState> {
     await result.when(
       (user) async {
         if (_disposed || _accountDeletionInProgress) return;
-        final firebaseUser = ref.read(firebaseAuthProvider).currentUser;
-        if (firebaseUser == null) {
-          await _finishLocalSignOut();
-          return;
-        }
-        if (!await _prepareAuthenticatedSession(firebaseUser)) return;
-        state = AuthState.authenticated(user);
-        _scheduleHydration(firebaseUser.uid);
+        await _publishAuthenticatedResult(user);
       },
       (failure) async {
         if (_disposed || _accountDeletionInProgress) return;
-        await _finishLocalSignOut();
+        await _handleAuthenticationFailure(
+          failure.message,
+          finishLocalSignOutWhenNoUser: true,
+        );
       },
     );
+  }
+
+  Future<bool> _publishAuthenticatedResult(
+    UserEntity user, {
+    bool allowReconciliation = true,
+    bool sessionAlreadyPrepared = false,
+  }) async {
+    if (_disposed || _accountDeletionInProgress) return false;
+
+    final expectedUid = user.uid;
+    final firebaseUser = ref.read(firebaseAuthProvider).currentUser;
+    if (expectedUid.trim().isEmpty ||
+        firebaseUser == null ||
+        firebaseUser.uid != expectedUid) {
+      if (allowReconciliation) {
+        await _reconcileCurrentFirebaseSession();
+      } else {
+        _setInvalidAuthSessionState();
+      }
+      return false;
+    }
+
+    if (!sessionAlreadyPrepared &&
+        !await _prepareAuthenticatedSession(firebaseUser)) {
+      final currentUid = ref.read(firebaseAuthProvider).currentUser?.uid;
+      if (allowReconciliation &&
+          currentUid != null &&
+          currentUid != expectedUid) {
+        await _reconcileCurrentFirebaseSession();
+      }
+      return false;
+    }
+
+    if (_disposed || _accountDeletionInProgress) return false;
+    if (ref.read(firebaseAuthProvider).currentUser?.uid != expectedUid) {
+      if (allowReconciliation) {
+        await _reconcileCurrentFirebaseSession();
+      } else {
+        _setInvalidAuthSessionState();
+      }
+      return false;
+    }
+
+    state = AuthState.authenticated(user);
+    _scheduleHydration(expectedUid);
+    return true;
+  }
+
+  Future<void> _reconcileCurrentFirebaseSession() async {
+    if (_disposed ||
+        _accountDeletionInProgress ||
+        _authResultReconciliationInProgress) {
+      return;
+    }
+
+    _authResultReconciliationInProgress = true;
+    state = AuthState.loading();
+    try {
+      final firebaseUser = ref.read(firebaseAuthProvider).currentUser;
+      final expectedUid = firebaseUser?.uid ?? '';
+      if (firebaseUser == null || expectedUid.trim().isEmpty) {
+        await _finishLocalSignOut();
+        return;
+      }
+
+      if (!await _prepareAuthenticatedSession(firebaseUser)) return;
+      if (_disposed || _accountDeletionInProgress) return;
+      if (ref.read(firebaseAuthProvider).currentUser?.uid != expectedUid) {
+        _setInvalidAuthSessionState();
+        return;
+      }
+
+      final result = await _repository.getCurrentUser();
+      await result.when(
+        (user) => _publishAuthenticatedResult(
+          user,
+          allowReconciliation: false,
+          sessionAlreadyPrepared: true,
+        ),
+        (failure) async {
+          if (!_disposed && !_accountDeletionInProgress) {
+            state = AuthState.error(failure.message);
+          }
+        },
+      );
+    } finally {
+      _authResultReconciliationInProgress = false;
+    }
+  }
+
+  void _setInvalidAuthSessionState() {
+    if (_disposed || _accountDeletionInProgress) return;
+    state = AuthState.error(
+      'Sua sessão não é válida. Entre novamente e tente de novo.',
+    );
+  }
+
+  Future<void> _handleAuthenticationFailure(
+    String message, {
+    bool finishLocalSignOutWhenNoUser = false,
+  }) async {
+    if (_disposed || _accountDeletionInProgress) return;
+    if (ref.read(firebaseAuthProvider).currentUser != null) {
+      await _reconcileCurrentFirebaseSession();
+      return;
+    }
+
+    if (finishLocalSignOutWhenNoUser) {
+      await _finishLocalSignOut();
+      return;
+    }
+
+    state = AuthState.error(message);
   }
 
   Future<void> login(String email, String password) async {
@@ -332,17 +443,12 @@ class AuthNotifier extends Notifier<AuthState> {
     );
     await result.when(
       (user) async {
-        final firebaseUser = ref.read(firebaseAuthProvider).currentUser;
-        if (firebaseUser == null ||
-            !await _prepareAuthenticatedSession(firebaseUser)) {
-          return;
+        if (await _publishAuthenticatedResult(user)) {
+          unawaited(analytics.logLogin(method: AnalyticsAuthMethod.email));
         }
-        state = AuthState.authenticated(user);
-        _scheduleHydration(firebaseUser.uid);
-        unawaited(analytics.logLogin(method: AnalyticsAuthMethod.email));
       },
       (failure) async {
-        state = AuthState.error(failure.message);
+        await _handleAuthenticationFailure(failure.message);
       },
     );
   }
@@ -358,17 +464,12 @@ class AuthNotifier extends Notifier<AuthState> {
     );
     await result.when(
       (user) async {
-        final firebaseUser = ref.read(firebaseAuthProvider).currentUser;
-        if (firebaseUser == null ||
-            !await _prepareAuthenticatedSession(firebaseUser)) {
-          return;
+        if (await _publishAuthenticatedResult(user)) {
+          unawaited(analytics.logSignUp(method: AnalyticsAuthMethod.email));
         }
-        state = AuthState.authenticated(user);
-        _scheduleHydration(firebaseUser.uid);
-        unawaited(analytics.logSignUp(method: AnalyticsAuthMethod.email));
       },
       (failure) async {
-        state = AuthState.error(failure.message);
+        await _handleAuthenticationFailure(failure.message);
       },
     );
   }
@@ -380,17 +481,12 @@ class AuthNotifier extends Notifier<AuthState> {
     final result = await _repository.signInWithGoogle();
     await result.when(
       (user) async {
-        final firebaseUser = ref.read(firebaseAuthProvider).currentUser;
-        if (firebaseUser == null ||
-            !await _prepareAuthenticatedSession(firebaseUser)) {
-          return;
+        if (await _publishAuthenticatedResult(user)) {
+          unawaited(analytics.logLogin(method: AnalyticsAuthMethod.google));
         }
-        state = AuthState.authenticated(user);
-        _scheduleHydration(firebaseUser.uid);
-        unawaited(analytics.logLogin(method: AnalyticsAuthMethod.google));
       },
       (failure) async {
-        state = AuthState.error(failure.message);
+        await _handleAuthenticationFailure(failure.message);
       },
     );
   }

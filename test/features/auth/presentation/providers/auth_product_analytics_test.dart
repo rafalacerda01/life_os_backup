@@ -30,15 +30,33 @@ const _user = UserEntity(
   streak: 0,
 );
 
+const _userB = UserEntity(
+  uid: 'user-b',
+  email: 'user-b@example.invalid',
+  displayName: 'User B',
+  isPremium: false,
+  xp: 0,
+  level: 1,
+  streak: 0,
+);
+
 class _FirebaseUser extends Fake implements User {
+  _FirebaseUser(this.entity, {this.onGetIdToken});
+
+  final UserEntity entity;
+  final Future<void> Function()? onGetIdToken;
+
   @override
-  String get uid => _user.uid;
+  String get uid => entity.uid;
 
   @override
   List<UserInfo> get providerData => const <UserInfo>[];
 
   @override
-  Future<String?> getIdToken([bool forceRefresh = false]) async => 'token';
+  Future<String?> getIdToken([bool forceRefresh = false]) async {
+    await onGetIdToken?.call();
+    return 'token';
+  }
 }
 
 class _FirebaseAuth extends Fake implements FirebaseAuth {
@@ -62,13 +80,32 @@ class _AuthRepository extends Fake implements AuthRepository {
   bool failLogin = false;
   bool failRegistration = false;
   bool failGoogle = false;
+  UserEntity operationResult = _user;
+  _FirebaseUser? operationFirebaseUser;
+  Completer<Result<UserEntity, Failure>>? pendingCurrentUserResult;
+  Completer<Result<UserEntity, Failure>>? pendingLoginResult;
+  Completer<Result<UserEntity, Failure>>? pendingRegistrationResult;
+  Completer<Result<UserEntity, Failure>>? pendingGoogleResult;
+  final List<Result<UserEntity, Failure>> currentUserResults = [];
   Result<void, Failure> passwordResetResult = const Success(null);
   int passwordResetCalls = 0;
 
   @override
   Future<Result<UserEntity, Failure>> getCurrentUser() {
+    final pendingResult = pendingCurrentUserResult;
+    if (pendingResult != null) {
+      pendingCurrentUserResult = null;
+      return pendingResult.future;
+    }
+    if (currentUserResults.isNotEmpty) {
+      return Future.value(currentUserResults.removeAt(0));
+    }
     if (restoreSession) return Future.value(const Success(_user));
     return Completer<Result<UserEntity, Failure>>().future;
+  }
+
+  void _setOperationFirebaseUser() {
+    auth.user = operationFirebaseUser ?? _FirebaseUser(operationResult);
   }
 
   @override
@@ -76,9 +113,14 @@ class _AuthRepository extends Fake implements AuthRepository {
     String email,
     String password,
   ) async {
+    final pendingResult = pendingLoginResult;
+    if (pendingResult != null) {
+      pendingLoginResult = null;
+      return pendingResult.future;
+    }
     if (failLogin) return const Error(AuthFailure('login failed'));
-    auth.user = _FirebaseUser();
-    return const Success(_user);
+    _setOperationFirebaseUser();
+    return Success(operationResult);
   }
 
   @override
@@ -87,18 +129,28 @@ class _AuthRepository extends Fake implements AuthRepository {
     String password,
     String name,
   ) async {
+    final pendingResult = pendingRegistrationResult;
+    if (pendingResult != null) {
+      pendingRegistrationResult = null;
+      return pendingResult.future;
+    }
     if (failRegistration) {
       return const Error(AuthFailure('registration failed'));
     }
-    auth.user = _FirebaseUser();
-    return const Success(_user);
+    _setOperationFirebaseUser();
+    return Success(operationResult);
   }
 
   @override
   Future<Result<UserEntity, Failure>> signInWithGoogle() async {
+    final pendingResult = pendingGoogleResult;
+    if (pendingResult != null) {
+      pendingGoogleResult = null;
+      return pendingResult.future;
+    }
     if (failGoogle) return const Error(AuthFailure('google failed'));
-    auth.user = _FirebaseUser();
-    return const Success(_user);
+    _setOperationFirebaseUser();
+    return Success(operationResult);
   }
 
   @override
@@ -128,8 +180,16 @@ class _CleanupBarrier extends Fake implements AuthCleanupBarrier {
 }
 
 class _SyncManager extends Fake implements SyncManager {
+  _SyncManager(this.auth);
+
+  final _FirebaseAuth auth;
+  final List<String?> processedUserIds = [];
+
   @override
-  Future<bool> processPendingItems() async => false;
+  Future<bool> processPendingItems() async {
+    processedUserIds.add(auth.currentUser?.uid);
+    return false;
+  }
 }
 
 class _ActionCoordinator extends Fake
@@ -148,13 +208,14 @@ class _Harness {
     required this.auth,
     required this.repository,
     required this.analytics,
+    required this.syncManager,
   }) : container = ProviderContainer(
          overrides: [
            firebaseAuthProvider.overrideWithValue(auth),
            authRepositoryProvider.overrideWithValue(repository),
            secureStorageProvider.overrideWithValue(_SecureStorage()),
            authCleanupBarrierProvider.overrideWithValue(_CleanupBarrier()),
-           syncManagerProvider.overrideWithValue(_SyncManager()),
+           syncManagerProvider.overrideWithValue(syncManager),
            cycleReminderActionCoordinatorProvider.overrideWithValue(
              _ActionCoordinator(),
            ),
@@ -170,6 +231,7 @@ class _Harness {
   final _FirebaseAuth auth;
   final _AuthRepository repository;
   final RecordingAnalyticsPlatform analytics;
+  final _SyncManager syncManager;
   final ProviderContainer container;
 
   AuthNotifier get notifier => container.read(authNotifierProvider.notifier);
@@ -183,12 +245,14 @@ class _Harness {
 
 _Harness _harness({bool restoreSession = false}) {
   final auth = _FirebaseAuth();
-  if (restoreSession) auth.user = _FirebaseUser();
+  if (restoreSession) auth.user = _FirebaseUser(_user);
   final analytics = RecordingAnalyticsPlatform();
+  final syncManager = _SyncManager(auth);
   final harness = _Harness(
     auth: auth,
     repository: _AuthRepository(auth, restoreSession: restoreSession),
     analytics: analytics,
+    syncManager: syncManager,
   );
   addTearDown(harness.dispose);
   return harness;
@@ -226,6 +290,213 @@ void main() {
     expect(harness.analytics.events, <RecordedAnalyticsEvent>[
       const RecordedAnalyticsEvent('sign_up', {'method': 'email'}),
     ]);
+  });
+
+  group('binding entre resultado Auth e sessão Firebase', () {
+    test('checkCurrentUser nunca publica A quando Firebase já é B', () async {
+      final harness = _harness();
+      harness.auth.user = _FirebaseUser(_userB);
+      harness.repository.currentUserResults.addAll(const [
+        Success(_user),
+        Success(_userB),
+      ]);
+
+      harness.container.read(authNotifierProvider);
+      await pumpEventQueue(times: 20);
+
+      final state = harness.state;
+      expect(state, isA<AuthAuthenticated>());
+      expect((state as AuthAuthenticated).user.uid, 'user-b');
+      expect(harness.syncManager.processedUserIds, <String?>['user-b']);
+    });
+
+    test('login antigo de A reconcilia B sem hidratar como A', () async {
+      final harness = _harness();
+      final notifier = harness.notifier;
+      harness.repository.operationResult = _user;
+      harness.repository.operationFirebaseUser = _FirebaseUser(_userB);
+      harness.repository.currentUserResults.add(const Success(_userB));
+
+      await notifier.login('user@example.invalid', 'password');
+      await pumpEventQueue();
+
+      final state = harness.state;
+      expect(state, isA<AuthAuthenticated>());
+      expect((state as AuthAuthenticated).user.uid, 'user-b');
+      expect(harness.syncManager.processedUserIds, <String?>['user-b']);
+      expect(harness.analytics.events, isEmpty);
+    });
+
+    test('cadastro antigo de A reconcilia B sem publicar A', () async {
+      final harness = _harness();
+      final notifier = harness.notifier;
+      harness.repository.operationResult = _user;
+      harness.repository.operationFirebaseUser = _FirebaseUser(_userB);
+      harness.repository.currentUserResults.add(const Success(_userB));
+
+      await notifier.register('user@example.invalid', 'password', 'User');
+      await pumpEventQueue();
+
+      final state = harness.state;
+      expect(state, isA<AuthAuthenticated>());
+      expect((state as AuthAuthenticated).user.uid, 'user-b');
+      expect(harness.syncManager.processedUserIds, <String?>['user-b']);
+      expect(harness.analytics.events, isEmpty);
+    });
+
+    test('Google Sign-In antigo de A reconcilia B sem publicar A', () async {
+      final harness = _harness();
+      final notifier = harness.notifier;
+      harness.repository.operationResult = _user;
+      harness.repository.operationFirebaseUser = _FirebaseUser(_userB);
+      harness.repository.currentUserResults.add(const Success(_userB));
+
+      await notifier.signInWithGoogle();
+      await pumpEventQueue();
+
+      final state = harness.state;
+      expect(state, isA<AuthAuthenticated>());
+      expect((state as AuthAuthenticated).user.uid, 'user-b');
+      expect(harness.syncManager.processedUserIds, <String?>['user-b']);
+      expect(harness.analytics.events, isEmpty);
+    });
+
+    test('sessão estável publica e hidrata o mesmo UID A', () async {
+      final harness = _harness();
+
+      await harness.notifier.login('user@example.invalid', 'password');
+      await pumpEventQueue();
+
+      final state = harness.state;
+      expect(state, isA<AuthAuthenticated>());
+      expect((state as AuthAuthenticated).user.uid, 'user-a');
+      expect(harness.syncManager.processedUserIds, <String?>['user-a']);
+    });
+
+    test(
+      'troca para B durante preparação impede publicação antiga de A',
+      () async {
+        final harness = _harness();
+        final notifier = harness.notifier;
+        harness.repository.operationResult = _user;
+        harness.repository.operationFirebaseUser = _FirebaseUser(
+          _user,
+          onGetIdToken: () async {
+            harness.auth.user = _FirebaseUser(_userB);
+          },
+        );
+        harness.repository.currentUserResults.add(const Success(_userB));
+
+        await notifier.login('user@example.invalid', 'password');
+        await pumpEventQueue();
+
+        final state = harness.state;
+        expect(state, isA<AuthAuthenticated>());
+        expect((state as AuthAuthenticated).user.uid, 'user-b');
+        expect(harness.syncManager.processedUserIds, <String?>['user-b']);
+        expect(harness.analytics.events, isEmpty);
+      },
+    );
+
+    test('falha antiga de checkCurrentUser reconcilia sessão B', () async {
+      final harness = _harness();
+      final staleResult = Completer<Result<UserEntity, Failure>>();
+      harness.repository.pendingCurrentUserResult = staleResult;
+
+      harness.container.read(authNotifierProvider);
+      harness.auth.user = _FirebaseUser(_userB);
+      harness.repository.currentUserResults.add(const Success(_userB));
+      staleResult.complete(const Error(AuthFailure('falha antiga de A')));
+      await pumpEventQueue(times: 20);
+
+      final state = harness.state;
+      expect(state, isA<AuthAuthenticated>());
+      expect((state as AuthAuthenticated).user.uid, 'user-b');
+      expect(harness.syncManager.processedUserIds, <String?>['user-b']);
+    });
+
+    test('falha antiga de login reconcilia sessão B', () async {
+      final harness = _harness();
+      final notifier = harness.notifier;
+      final staleResult = Completer<Result<UserEntity, Failure>>();
+      harness.repository.pendingLoginResult = staleResult;
+
+      final login = notifier.login('user@example.invalid', 'bad-password');
+      harness.auth.user = _FirebaseUser(_userB);
+      harness.repository.currentUserResults.add(const Success(_userB));
+      staleResult.complete(const Error(AuthFailure('falha antiga de A')));
+
+      await login;
+      await pumpEventQueue();
+
+      final state = harness.state;
+      expect(state, isA<AuthAuthenticated>());
+      expect((state as AuthAuthenticated).user.uid, 'user-b');
+      expect(harness.syncManager.processedUserIds, <String?>['user-b']);
+      expect(harness.analytics.events, isEmpty);
+    });
+
+    test('falha antiga de cadastro reconcilia sessão B', () async {
+      final harness = _harness();
+      final notifier = harness.notifier;
+      final staleResult = Completer<Result<UserEntity, Failure>>();
+      harness.repository.pendingRegistrationResult = staleResult;
+
+      final registration = notifier.register(
+        'user@example.invalid',
+        'bad-password',
+        'User',
+      );
+      harness.auth.user = _FirebaseUser(_userB);
+      harness.repository.currentUserResults.add(const Success(_userB));
+      staleResult.complete(const Error(AuthFailure('falha antiga de A')));
+
+      await registration;
+      await pumpEventQueue();
+
+      final state = harness.state;
+      expect(state, isA<AuthAuthenticated>());
+      expect((state as AuthAuthenticated).user.uid, 'user-b');
+      expect(harness.syncManager.processedUserIds, <String?>['user-b']);
+      expect(harness.analytics.events, isEmpty);
+    });
+
+    test('falha antiga de Google Sign-In reconcilia sessão B', () async {
+      final harness = _harness();
+      final notifier = harness.notifier;
+      final staleResult = Completer<Result<UserEntity, Failure>>();
+      harness.repository.pendingGoogleResult = staleResult;
+
+      final googleLogin = notifier.signInWithGoogle();
+      harness.auth.user = _FirebaseUser(_userB);
+      harness.repository.currentUserResults.add(const Success(_userB));
+      staleResult.complete(const Error(AuthFailure('falha antiga de A')));
+
+      await googleLogin;
+      await pumpEventQueue();
+
+      final state = harness.state;
+      expect(state, isA<AuthAuthenticated>());
+      expect((state as AuthAuthenticated).user.uid, 'user-b');
+      expect(harness.syncManager.processedUserIds, <String?>['user-b']);
+      expect(harness.analytics.events, isEmpty);
+    });
+
+    test(
+      'falha de checkCurrentUser sem sessão mantém fluxo fail-closed',
+      () async {
+        final harness = _harness();
+        harness.repository.currentUserResults.add(
+          const Error(AuthFailure('sessão ausente')),
+        );
+
+        harness.container.read(authNotifierProvider);
+        await pumpEventQueue(times: 20);
+
+        expect(harness.state, isA<AuthError>());
+        expect(harness.syncManager.processedUserIds, isEmpty);
+      },
+    );
   });
 
   test('restored session records no login event', () async {
