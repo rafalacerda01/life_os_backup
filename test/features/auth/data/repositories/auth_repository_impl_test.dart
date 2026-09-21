@@ -4,6 +4,7 @@ import 'dart:async';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:http/testing.dart';
@@ -11,6 +12,8 @@ import 'package:life_os/core/errors/failure.dart';
 import 'package:life_os/features/auth/data/remote/account_remote_data_source.dart';
 import 'package:life_os/features/auth/data/repositories/auth_repository_impl.dart';
 import 'package:life_os/features/auth/domain/entities/user_entity.dart';
+import 'package:life_os/features/auth/presentation/providers/auth_provider.dart';
+import 'package:life_os/features/auth/presentation/providers/auth_state.dart';
 
 class FakeFirebaseAuth extends Fake implements FirebaseAuth {
   User? user;
@@ -81,6 +84,7 @@ class FakeFirebaseUser extends Fake implements User {
   final String? photoURL;
   Object? reloadError;
   Object? updateDisplayNameError;
+  Future<void> Function()? onUpdateDisplayName;
   int reloadCalls = 0;
   int updateDisplayNameCalls = 0;
   int deleteCalls = 0;
@@ -89,6 +93,7 @@ class FakeFirebaseUser extends Fake implements User {
   Future<void> updateDisplayName(String? displayName) async {
     updateDisplayNameCalls += 1;
     if (updateDisplayNameError != null) throw updateDisplayNameError!;
+    await onUpdateDisplayName?.call();
   }
 
   @override
@@ -219,6 +224,15 @@ class FakeAccountRemoteDataSource extends AccountRemoteDataSource {
     if (error != null) throw error!;
     return const AccountDeletionResponse(circleDeleted: false);
   }
+}
+
+class _ProfileUpdateAuthNotifier extends AuthNotifier {
+  _ProfileUpdateAuthNotifier(this.initialUser);
+
+  final UserEntity initialUser;
+
+  @override
+  AuthState build() => AuthState.authenticated(initialUser);
 }
 
 const _ambiguousError = AccountRemoteException(
@@ -673,7 +687,10 @@ void main() {
     test('updateProfile não expõe exceção técnica', () async {
       user.updateDisplayNameError = StateError('technical-profile-marker');
 
-      final result = await repository.updateProfile('Nome atualizado');
+      final result = await repository.updateProfile(
+        'Nome atualizado',
+        expectedUid: 'user-a',
+      );
 
       Failure? failure;
       result.when((_) {}, (value) => failure = value);
@@ -699,6 +716,112 @@ void main() {
     });
   });
 
+  group('vínculo de sessão no updateProfile', () {
+    test('sessão esperada atualiza somente o próprio perfil', () async {
+      final document = firestore.users.document('user-a')
+        ..value = _profileData();
+
+      final result = await repository.updateProfile(
+        'Nome atualizado',
+        expectedUid: 'user-a',
+      );
+
+      UserEntity? updatedUser;
+      result.when((value) => updatedUser = value, (_) {});
+      expect(updatedUser?.uid, 'user-a');
+      expect(updatedUser?.displayName, 'Nome atualizado');
+      expect(user.updateDisplayNameCalls, 1);
+      expect(document.updateCalls, 1);
+    });
+
+    test('sessão divergente falha antes de qualquer alteração', () async {
+      final userAProfile = firestore.users.document('user-a')
+        ..value = _profileData();
+      final userBProfile = firestore.users.document('user-b')
+        ..value = _profileData();
+      final userB = FakeFirebaseUser('user-b');
+      auth.user = userB;
+
+      final result = await repository.updateProfile(
+        'Nome indevido',
+        expectedUid: 'user-a',
+      );
+
+      Failure? failure;
+      result.when((_) {}, (value) => failure = value);
+      expect(failure, isA<AuthFailure>());
+      expect(failure?.code, 'UNAUTHENTICATED');
+      expect(userB.updateDisplayNameCalls, 0);
+      expect(user.updateDisplayNameCalls, 0);
+      expect(userAProfile.updateCalls, 0);
+      expect(userBProfile.updateCalls, 0);
+      expect(userAProfile.value?['displayName'], 'Nome original');
+      expect(userBProfile.value?['displayName'], 'Nome original');
+    });
+
+    test('usuário Firebase ausente falha sem escrever', () async {
+      final document = firestore.users.document('user-a')
+        ..value = _profileData();
+      auth.user = null;
+
+      final result = await repository.updateProfile(
+        'Nome indevido',
+        expectedUid: 'user-a',
+      );
+
+      Failure? failure;
+      result.when((_) {}, (value) => failure = value);
+      expect(failure, isA<AuthFailure>());
+      expect(failure?.code, 'UNAUTHENTICATED');
+      expect(user.updateDisplayNameCalls, 0);
+      expect(document.updateCalls, 0);
+      expect(document.value?['displayName'], 'Nome original');
+    });
+
+    test(
+      'notifier não publica sucesso de A após sessão mudar para B',
+      () async {
+        final document = firestore.users.document('user-a')
+          ..value = _profileData();
+        final userB = FakeFirebaseUser('user-b');
+        user.onUpdateDisplayName = () async {
+          auth.user = userB;
+        };
+        const sessionUserA = UserEntity(
+          uid: 'user-a',
+          email: 'user@example.invalid',
+          displayName: 'Nome original',
+          isPremium: false,
+          xp: 0,
+          level: 1,
+          streak: 0,
+        );
+        final container = ProviderContainer(
+          overrides: [
+            firebaseAuthProvider.overrideWithValue(auth),
+            authRepositoryProvider.overrideWithValue(repository),
+            authNotifierProvider.overrideWith(
+              () => _ProfileUpdateAuthNotifier(sessionUserA),
+            ),
+          ],
+        );
+        addTearDown(container.dispose);
+
+        await container
+            .read(authNotifierProvider.notifier)
+            .updateProfile(newName: 'Nome atualizado');
+
+        final finalState = container.read(authNotifierProvider);
+        expect(finalState, isA<AuthError>());
+        expect(finalState, isNot(isA<AuthAuthenticated>()));
+        expect(auth.currentUser?.uid, 'user-b');
+        expect(user.updateDisplayNameCalls, 1);
+        expect(document.updateCalls, 1);
+        expect(document.value?['displayName'], 'Nome atualizado');
+      },
+    );
+  });
+
   group('normalização da foto de perfil', () {
     Future<FakeUserDocumentReference> updatePhoto(String? photoUrl) async {
       final document = firestore.users.document('user-a')
@@ -708,6 +831,7 @@ void main() {
 
       final result = await repository.updateProfile(
         'Nome atualizado',
+        expectedUid: 'user-a',
         newPhotoUrl: photoUrl,
       );
 

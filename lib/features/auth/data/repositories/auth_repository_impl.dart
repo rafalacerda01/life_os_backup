@@ -222,13 +222,22 @@ class AuthRepositoryImpl implements AuthRepository {
   @override
   Future<Result<UserEntity, Failure>> updateProfile(
     String newName, {
+    required String expectedUid,
     String? newPhotoUrl,
   }) async {
     try {
+      final normalizedExpectedUid = expectedUid.trim();
       final user = _firebaseAuth.currentUser;
 
-      if (user == null) {
-        return const Error(AuthFailure('Usuário não logado'));
+      if (normalizedExpectedUid.isEmpty ||
+          user == null ||
+          user.uid != normalizedExpectedUid) {
+        return const Error(
+          AuthFailure(
+            'Sua sessão não é válida. Entre novamente e tente de novo.',
+            code: 'UNAUTHENTICATED',
+          ),
+        );
       }
 
       final cleanName = InputSanitizer.sanitize(newName);
@@ -241,9 +250,12 @@ class AuthRepositoryImpl implements AuthRepository {
         updateData['photoUrl'] = _normalizePhotoReference(newPhotoUrl);
       }
 
-      await _firestore.collection('users').doc(user.uid).update(updateData);
+      await _firestore
+          .collection('users')
+          .doc(normalizedExpectedUid)
+          .update(updateData);
 
-      return _getUserFromFirestore(user.uid);
+      return _getUserFromFirestore(normalizedExpectedUid);
     } catch (_) {
       return Error(ServerFailure.unexpected());
     }

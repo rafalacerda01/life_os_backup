@@ -402,12 +402,22 @@ class AuthNotifier extends Notifier<AuthState> {
   Future<void> updateProfile({String? newName, String? newPhotoUrl}) async {
     await state.maybeWhen(
       authenticated: (user) async {
+        final expectedUid = user.uid.trim();
         final result = await _repository.updateProfile(
           newName ?? user.displayName ?? '',
+          expectedUid: expectedUid,
           newPhotoUrl: newPhotoUrl,
         );
 
+        if (_disposed) return;
         result.when((updatedUser) {
+          if (updatedUser.uid != expectedUid ||
+              ref.read(firebaseAuthProvider).currentUser?.uid != expectedUid) {
+            state = AuthState.error(
+              'Sua sessão não é válida. Entre novamente e tente de novo.',
+            );
+            return;
+          }
           state = AuthState.authenticated(updatedUser);
         }, (failure) => state = AuthState.error(failure.message));
       },

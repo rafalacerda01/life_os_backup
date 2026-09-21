@@ -24,6 +24,7 @@ abstract class AuthRepository {
 
   Future<Result<UserEntity, Failure>> updateProfile(
     String newName, {
+    required String expectedUid,
     String? newPhotoUrl,
   });
 
