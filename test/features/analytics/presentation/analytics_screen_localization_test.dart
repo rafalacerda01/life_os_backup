@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:go_router/go_router.dart';
 import 'package:intl/intl.dart';
 import 'package:life_os/features/analytics/domain/entities/analytics_entity.dart';
 import 'package:life_os/features/analytics/presentation/analytics_provider.dart';
@@ -27,6 +28,47 @@ class _PremiumTestNotifier extends PremiumNotifier {
 }
 
 void main() {
+  testWidgets('Analytics CTA navigates to typed weekly V2 intent', (
+    tester,
+  ) async {
+    final router = GoRouter(
+      initialLocation: '/analytics',
+      routes: [
+        GoRoute(path: '/analytics', builder: (_, _) => const AnalyticsScreen()),
+        GoRoute(
+          path: '/ai-companion',
+          builder: (_, state) => Scaffold(
+            body: Text('intent=${state.uri.queryParameters['intent']}'),
+          ),
+        ),
+      ],
+    );
+    addTearDown(router.dispose);
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          analyticsProvider.overrideWithValue(
+            const AnalyticsEntity(
+              productivityIndex: 0,
+              healthIndex: 0,
+              financeIndex: 0,
+              habitConsistency: 0,
+              weeklyEvolution: [],
+            ),
+          ),
+          premiumProvider.overrideWith(_PremiumTestNotifier.new),
+        ],
+        child: MaterialApp.router(routerConfig: router),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final action = find.text('Analisar meus dados com a IA');
+    await tester.ensureVisible(action);
+    await tester.tap(action);
+    await tester.pumpAndSettle();
+    expect(find.text('intent=weekly_overview'), findsOneWidget);
+  });
+
   testWidgets('Analytics uses decimal commas without rescaling percentages', (
     tester,
   ) async {

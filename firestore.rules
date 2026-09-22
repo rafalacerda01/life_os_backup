@@ -788,7 +788,7 @@ service cloud.firestore {
         ])
         && data.accepted is bool
         && data.userId == userId
-        && data.consentVersion == '1.0'
+        && data.consentVersion in ['1.0', '2.0']
         && data.acceptedAt is timestamp
         && (data.revokedAt == null || data.revokedAt is timestamp)
         && data.updatedAt is timestamp
@@ -806,13 +806,13 @@ service cloud.firestore {
     function validPrivacyUpdate(userId) {
       return validPrivacySchema(request.resource.data, userId)
         && request.resource.data.userId == resource.data.userId
-        && request.resource.data.consentVersion == resource.data.consentVersion
         && request.resource.data.source == resource.data.source
         && request.resource.data.updatedAt == request.time
         && (
           (
             resource.data.accepted == true
             && request.resource.data.accepted == false
+            && request.resource.data.consentVersion == resource.data.consentVersion
             && request.resource.data.acceptedAt == resource.data.acceptedAt
             && request.resource.data.revokedAt == request.time
           )
@@ -821,6 +821,22 @@ service cloud.firestore {
             resource.data.accepted == false
             && resource.data.revokedAt is timestamp
             && request.resource.data.accepted == true
+            && (
+              request.resource.data.consentVersion == resource.data.consentVersion
+              || (
+                resource.data.consentVersion == '1.0'
+                && request.resource.data.consentVersion == '2.0'
+              )
+            )
+            && request.resource.data.acceptedAt == request.time
+            && request.resource.data.revokedAt == null
+          )
+          ||
+          (
+            resource.data.accepted == true
+            && resource.data.consentVersion == '1.0'
+            && request.resource.data.accepted == true
+            && request.resource.data.consentVersion == '2.0'
             && request.resource.data.acceptedAt == request.time
             && request.resource.data.revokedAt == null
           )

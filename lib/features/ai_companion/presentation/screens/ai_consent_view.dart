@@ -43,10 +43,19 @@ class AiConsentView extends ConsumerWidget {
               ),
               const SizedBox(height: 24),
               const Text(
-                "Para gerar respostas personalizadas, o Companion IA pode analisar os dados que você já registrou no Life OS, incluindo humor, hidratação, nomes de medicamentos registrados, resumo financeiro e, quando disponível, informações do ciclo menstrual.",
+                'Para gerar as análises que você solicitar, o Companion IA pode usar resumos dos dados que você registra no Life OS — como tarefas, hábitos, estudos, metas, Focus, check-ins, finanças e bem-estar. Apenas os dados necessários para cada análise são enviados. A geração requer conexão com a internet.',
                 style: TextStyle(
                   color: Colors.white70,
                   fontSize: 14,
+                  height: 1.5,
+                ),
+              ),
+              const SizedBox(height: 16),
+              const Text(
+                'Nesta versão são enviados agregados, não títulos de tarefas ou metas, nomes de hábitos ou disciplinas, descrições de transações, IDs, e-mail ou nomes de medicamentos.',
+                style: TextStyle(
+                  color: Colors.white54,
+                  fontSize: 12,
                   height: 1.5,
                 ),
               ),
@@ -66,7 +75,7 @@ class AiConsentView extends ConsumerWidget {
                     SizedBox(width: 12),
                     Expanded(
                       child: Text(
-                        "O uso desses dados pela IA é opcional. Você pode revogar seu consentimento a qualquer momento nas opções do Companion. Após a revogação, novas solicitações com seus dados não serão autorizadas até que você aceite novamente.",
+                        'O uso da IA é opcional e nenhuma análise é feita sem uma ação sua. Você pode revogar o consentimento a qualquer momento nas opções do Companion; novas análises só serão autorizadas após novo aceite.',
                         style: TextStyle(
                           color: Colors.amberAccent,
                           fontSize: 12,
@@ -87,9 +96,14 @@ class AiConsentView extends ConsumerWidget {
                       borderRadius: BorderRadius.circular(16),
                     ),
                   ),
-                  onPressed: () {
-                    // Grava o aceite do usuário e muda o estado global!
-                    ref.read(aiConsentProvider.notifier).acceptConsent();
+                  onPressed: () async {
+                    try {
+                      await ref
+                          .read(aiConsentProvider.notifier)
+                          .acceptConsent();
+                    } catch (_) {
+                      // O notifier já publica AsyncError e a tela oferece nova tentativa.
+                    }
                   },
                   child: const Text(
                     "Permitir acesso aos meus dados",

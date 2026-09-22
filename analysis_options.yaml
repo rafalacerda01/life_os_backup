@@ -1,6 +1,8 @@
 include: package:flutter_lints/flutter.yaml
 
 analyzer:
+  exclude:
+    - tools/firestore_rules/node_modules/**
   errors:
     # Ignora avisos de depreciação e lints de estilo que não quebram o código
     deprecated_member_use: ignore

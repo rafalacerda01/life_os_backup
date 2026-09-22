@@ -12,7 +12,7 @@ typedef AiConsentCacheRemove = Future<bool> Function(String key);
 
 class AiConsentNotifier extends AsyncNotifier<bool> {
   static const String _storageKeyPrefix = 'ai_consent_accepted_';
-  static const String _consentVersion = '1.0';
+  static const String _consentVersion = '2.0';
   static const String _source = 'life_os_app';
 
   final AiConsentUserIdProvider _userIdProvider;
@@ -59,7 +59,8 @@ class AiConsentNotifier extends AsyncNotifier<bool> {
       if (snapshot.exists) {
         final data = snapshot.data();
 
-        if (data?['accepted'] == true) {
+        if (data?['accepted'] == true &&
+            data?['consentVersion'] == _consentVersion) {
           await _writeLocalCache(key);
 
           return true;
@@ -104,7 +105,8 @@ class AiConsentNotifier extends AsyncNotifier<bool> {
       // de permitir que qualquer dado seja enviado para a IA.
       //
       if (snapshot.exists) {
-        if (snapshot.data()?['accepted'] == true) {
+        if (snapshot.data()?['accepted'] == true &&
+            snapshot.data()?['consentVersion'] == _consentVersion) {
           await _writeLocalCache(key);
           state = const AsyncData(true);
           return;
@@ -113,9 +115,11 @@ class AiConsentNotifier extends AsyncNotifier<bool> {
         final now = FieldValue.serverTimestamp();
         await consentDocument.update({
           'accepted': true,
+          'consentVersion': _consentVersion,
           'acceptedAt': now,
           'revokedAt': null,
           'updatedAt': now,
+          'source': _source,
         });
       } else {
         final now = FieldValue.serverTimestamp();

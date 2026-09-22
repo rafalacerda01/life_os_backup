@@ -1,11 +1,9 @@
-import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 import 'package:intl/intl.dart';
 import 'package:life_os/features/analytics/presentation/analytics_provider.dart';
 import 'package:life_os/features/premium/presentation/premium_provider.dart';
-import 'package:life_os/features/ai_companion/presentation/providers/ai_companion_provider.dart';
-import 'package:life_os/features/ai_companion/presentation/ai_companion_screen.dart';
 import 'package:life_os/features/premium/domain/services/feature_gate.dart';
 
 class AnalyticsScreen extends ConsumerWidget {
@@ -184,48 +182,8 @@ class AnalyticsScreen extends ConsumerWidget {
               SizedBox(
                 width: double.infinity,
                 child: ElevatedButton.icon(
-                  onPressed: () async {
-                    final expectedUserId =
-                        FirebaseAuth.instance.currentUser?.uid;
-                    if (expectedUserId == null || expectedUserId.isEmpty) {
-                      return;
-                    }
-
-                    final admittedAnalyticsData = ref.read(analyticsProvider);
-                    final analyticsContext = {
-                      "productivityIndex":
-                          admittedAnalyticsData.productivityIndex,
-                      "healthIndex": admittedAnalyticsData.healthIndex,
-                      "financeIndex": admittedAnalyticsData.financeIndex,
-                      "habitConsistency":
-                          admittedAnalyticsData.habitConsistency,
-                      "weeklyEvolution": admittedAnalyticsData.weeklyEvolution
-                          .map(
-                            (e) => {
-                              "dayName": e.dayName,
-                              "scorePercentage": e.scorePercentage,
-                            },
-                          )
-                          .toList(),
-                    };
-
-                    await ref
-                        .read(aiCompanionProvider.notifier)
-                        .sendMessage(
-                          "Faça uma análise detalhada da minha performance semanal com base nestes dados atuais do sistema.",
-                          analyticsContext,
-                          expectedUserId: expectedUserId,
-                        );
-
-                    if (context.mounted) {
-                      Navigator.push(
-                        context,
-                        MaterialPageRoute(
-                          builder: (context) => const AICompanionScreen(),
-                        ),
-                      );
-                    }
-                  },
+                  onPressed: () =>
+                      context.go('/ai-companion?intent=weekly_overview'),
                   style: ElevatedButton.styleFrom(
                     backgroundColor: const Color(0xFF5D0EFF),
                     foregroundColor: Colors.white,

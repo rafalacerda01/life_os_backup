@@ -5,6 +5,7 @@ import 'package:firebase_app_check/firebase_app_check.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:http/http.dart' as http;
 import 'package:life_os/core/utils/app_logger.dart';
+import 'package:life_os/features/ai_companion/data/models/ai_insight.dart';
 import 'package:life_os/features/health/data/models/health_model.dart';
 
 // ============================================================================
@@ -277,6 +278,7 @@ class AICompanionRepository {
   final AIIdTokenProvider _idTokenProvider;
   final AIAppCheckTokenProvider _appCheckTokenProvider;
   final AICurrentUserIdProvider _currentUserIdProvider;
+  final Duration v2Timeout;
 
   static const Duration _networkTimeout = Duration(seconds: 15);
 
@@ -285,12 +287,94 @@ class AICompanionRepository {
     AIIdTokenProvider? idTokenProvider,
     AIAppCheckTokenProvider? appCheckTokenProvider,
     AICurrentUserIdProvider? currentUserIdProvider,
+    this.v2Timeout = _networkTimeout,
   }) : client = client ?? http.Client(),
        _idTokenProvider = idTokenProvider ?? _getFirebaseIdToken,
        _appCheckTokenProvider =
            appCheckTokenProvider ?? _getFirebaseAppCheckToken,
        _currentUserIdProvider =
            currentUserIdProvider ?? _getFirebaseCurrentUserId;
+
+  Future<AIInsight> requestInsight(
+    AIInsightIntent intent,
+    Map<String, Object?> trustedContext, {
+    required String expectedUserId,
+  }) async {
+    try {
+      _ensureExpectedSession(expectedUserId);
+      final token = await _idTokenProvider();
+      _ensureExpectedSession(expectedUserId);
+      if (token == null || token.isEmpty) {
+        throw const AIAuthenticationException();
+      }
+
+      final appCheckToken = await _getRequiredAppCheckToken();
+      _ensureExpectedSession(expectedUserId);
+      final url = Uri.parse('https://life-os-backend-gray.vercel.app/api/chat');
+      _ensureExpectedSession(expectedUserId);
+      final response = await client
+          .post(
+            url,
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': 'Bearer $token',
+              'X-Firebase-AppCheck': appCheckToken,
+            },
+            body: jsonEncode({
+              'version': 2,
+              'intent': intent.wireValue,
+              'context': trustedContext,
+            }),
+          )
+          .timeout(v2Timeout);
+
+      _ensureExpectedSession(expectedUserId);
+      if (response.statusCode == 200) {
+        AIInsight? insight;
+        try {
+          insight = AIInsight.fromResponse(jsonDecode(response.body), intent);
+        } catch (_) {
+          throw const AIServiceException();
+        }
+        if (insight == null) throw const AIServiceException();
+        _ensureExpectedSession(expectedUserId);
+        return insight;
+      }
+
+      switch (response.statusCode) {
+        case 400:
+          throw const AIBadRequestException();
+        case 401:
+          final code = _responseCode(response.body);
+          if (code == 'APP_CHECK_REQUIRED' || code == 'APP_CHECK_INVALID') {
+            throw const AIAppCheckException();
+          }
+          throw const AIAuthenticationException();
+        case 402:
+          throw const AIPremiumRequiredException();
+        case 403:
+          throw const AIAuthenticationException();
+        case 451:
+          throw const AIConsentRequiredException();
+        case 429:
+          throw const AIRateLimitException();
+        default:
+          throw const AIServiceException();
+      }
+    } on AICompanionException {
+      _ensureExpectedSession(expectedUserId);
+      rethrow;
+    } on TimeoutException {
+      _ensureExpectedSession(expectedUserId);
+      throw const AITimeoutException();
+    } on http.ClientException {
+      _ensureExpectedSession(expectedUserId);
+      throw const AINetworkException();
+    } catch (_) {
+      _ensureExpectedSession(expectedUserId);
+      throw const AIServiceException();
+    }
+  }
 
   // ==========================================================================
   // CONTEXTO DO SISTEMA

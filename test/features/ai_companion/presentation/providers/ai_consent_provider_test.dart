@@ -1,5 +1,7 @@
 // ignore_for_file: must_be_immutable, subtype_of_sealed_class
 
+import 'dart:async';
+
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -85,7 +87,7 @@ const _cacheKey = 'ai_consent_accepted_$_userId';
 Map<String, dynamic> acceptedDocument({Timestamp? acceptedAt}) => {
   'accepted': true,
   'userId': _userId,
-  'consentVersion': '1.0',
+  'consentVersion': '2.0',
   'acceptedAt': acceptedAt ?? Timestamp.fromMillisecondsSinceEpoch(100),
   'revokedAt': null,
   'updatedAt': Timestamp.fromMillisecondsSinceEpoch(100),
@@ -131,7 +133,7 @@ void main() {
     expect(document.lastSet, {
       'accepted': true,
       'userId': _userId,
-      'consentVersion': '1.0',
+      'consentVersion': '2.0',
       'acceptedAt': isA<FieldValue>(),
       'revokedAt': null,
       'updatedAt': isA<FieldValue>(),
@@ -176,9 +178,11 @@ void main() {
 
     expect(document.lastUpdate, {
       'accepted': true,
+      'consentVersion': '2.0',
       'acceptedAt': isA<FieldValue>(),
       'revokedAt': null,
       'updatedAt': isA<FieldValue>(),
+      'source': 'life_os_app',
     });
     expect(document.stored?['acceptedAt'], isNot(previousAcceptedAt));
     expect(document.stored?['revokedAt'], isNull);
@@ -197,6 +201,50 @@ void main() {
     expect(document.lastUpdate, isNull);
     expect(container.read(aiConsentProvider).value, isTrue);
     expect(cache.values[_cacheKey], isTrue);
+  });
+
+  test('documento 1.0 não concede V2 e aceite explícito migra', () async {
+    final document = _FakeConsentDocument({
+      ...acceptedDocument(),
+      'consentVersion': '1.0',
+    });
+    final cache = _FakeCache()..values[_cacheKey] = true;
+    final container = _createContainer(document, cache);
+    addTearDown(container.dispose);
+
+    expect(await container.read(aiConsentProvider.future), isFalse);
+    expect(cache.values.containsKey(_cacheKey), isFalse);
+    await container.read(aiConsentProvider.notifier).acceptConsent();
+    expect(document.lastUpdate?['consentVersion'], '2.0');
+    expect(document.lastUpdate?['acceptedAt'], isA<FieldValue>());
+    expect(document.stored?['consentVersion'], '2.0');
+    expect(container.read(aiConsentProvider).value, isTrue);
+  });
+
+  test('versão ausente não concede consentimento V2', () async {
+    final legacy = acceptedDocument()..remove('consentVersion');
+    final document = _FakeConsentDocument(legacy);
+    final cache = _FakeCache()..values[_cacheKey] = true;
+    final container = _createContainer(document, cache);
+    addTearDown(container.dispose);
+
+    expect(await container.read(aiConsentProvider.future), isFalse);
+    expect(cache.values.containsKey(_cacheKey), isFalse);
+  });
+
+  test('falha Firestore não aceita cache local como consentimento', () async {
+    final document = _FakeConsentDocument(acceptedDocument())..failGet = true;
+    final cache = _FakeCache()..values[_cacheKey] = true;
+    final container = _createContainer(document, cache);
+    addTearDown(container.dispose);
+
+    final failed = Completer<void>();
+    final subscription = container.listen(aiConsentProvider, (_, next) {
+      if (next.hasError && !failed.isCompleted) failed.complete();
+    });
+    addTearDown(subscription.close);
+    await failed.future;
+    expect(container.read(aiConsentProvider).hasError, isTrue);
   });
 
   test('revogação já concluída não envia update false para false', () async {

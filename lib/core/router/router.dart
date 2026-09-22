@@ -11,6 +11,7 @@ import 'package:life_os/features/auth/presentation/providers/auth_state.dart';
 import 'package:life_os/features/onboarding/presentation/splash_screen.dart';
 import 'package:life_os/features/onboarding/presentation/onboarding_screen.dart';
 import 'package:life_os/features/ai_companion/presentation/ai_companion_screen.dart';
+import 'package:life_os/features/ai_companion/data/models/ai_insight.dart';
 import 'package:life_os/features/goals/presentation/goals_screen.dart';
 import 'package:life_os/features/settings/presentation/settings_screen.dart';
 import 'package:life_os/features/home/presentation/screens/home_screen.dart';
@@ -124,7 +125,11 @@ final routerProvider = Provider<GoRouter>((ref) {
           ),
           GoRoute(
             path: '/ai-companion',
-            builder: (context, state) => const AICompanionScreen(),
+            builder: (context, state) => AICompanionScreen(
+              initialIntent: AIInsightIntent.fromWireValue(
+                state.uri.queryParameters['intent'],
+              ),
+            ),
           ),
           GoRoute(
             path: '/goals',
