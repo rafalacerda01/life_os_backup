@@ -46,7 +46,7 @@ class BillingRemoteDataSource {
     'life-os-backend-gray.vercel.app',
     '/api/billing/google/verify',
   );
-  static const Duration defaultTimeout = Duration(seconds: 15);
+  static const Duration defaultTimeout = Duration(seconds: 45);
   static const _knownSubscriptionStates = {
     'SUBSCRIPTION_STATE_UNSPECIFIED',
     'SUBSCRIPTION_STATE_PENDING',
@@ -146,7 +146,7 @@ class BillingRemoteDataSource {
 
     _requireCurrentUser(uid);
     if (response.statusCode < 200 || response.statusCode >= 300) {
-      throw _backendException(response.statusCode);
+      throw _backendException(response.statusCode, response.body);
     }
     return _parseResponse(response.body, response.statusCode);
   }
@@ -254,7 +254,7 @@ class BillingRemoteDataSource {
     }
   }
 
-  static BillingRemoteException _backendException(int statusCode) {
+  static BillingRemoteException _backendException(int statusCode, String body) {
     if (statusCode == 401) {
       return BillingRemoteException(
         code: 'UNAUTHENTICATED',
@@ -277,12 +277,31 @@ class BillingRemoteDataSource {
         isRetryable: true,
       );
     }
+    if (statusCode >= 500 && _isAcknowledgementFailure(body)) {
+      return BillingRemoteException(
+        code: 'BILLING_ACKNOWLEDGEMENT_FAILED',
+        message:
+            'A assinatura foi validada, mas o reconhecimento ainda precisa ser confirmado. Tente novamente.',
+        statusCode: statusCode,
+        isRetryable: true,
+      );
+    }
     return BillingRemoteException(
       code: 'BILLING_VERIFY_FAILED',
       message: 'Não foi possível validar a compra agora. Tente novamente.',
       statusCode: statusCode,
       isRetryable: statusCode >= 500,
     );
+  }
+
+  static bool _isAcknowledgementFailure(String body) {
+    try {
+      final decoded = jsonDecode(body);
+      return decoded is Map<String, dynamic> &&
+          decoded['code'] == 'BILLING_ACKNOWLEDGEMENT_FAILED';
+    } on FormatException {
+      return false;
+    }
   }
 
   static const _appCheckMessage =

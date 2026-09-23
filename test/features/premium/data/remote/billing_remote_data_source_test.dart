@@ -39,6 +39,73 @@ void main() {
     'expiresAt': expiresAt,
   });
 
+  test('default timeout allows acknowledgement reconciliation', () {
+    expect(BillingRemoteDataSource.defaultTimeout, const Duration(seconds: 45));
+  });
+
+  test(
+    'HTTP 502 preserves only the known acknowledgement failure code',
+    () async {
+      const privateValue = 'private-secret-purchase-token';
+      final dataSource = source(
+        MockClient(
+          (_) async => http.Response(
+            jsonEncode({
+              'code': 'BILLING_ACKNOWLEDGEMENT_FAILED',
+              'error': privateValue,
+            }),
+            502,
+          ),
+        ),
+      );
+
+      try {
+        await dataSource.verifyPurchase(
+          expectedUid: uid,
+          purchaseToken: purchaseToken,
+        );
+        fail('Expected acknowledgement failure');
+      } on BillingRemoteException catch (error) {
+        expect(error.code, 'BILLING_ACKNOWLEDGEMENT_FAILED');
+        expect(error.statusCode, 502);
+        expect(error.isRetryable, isTrue);
+        expect(
+          error.message,
+          'A assinatura foi validada, mas o reconhecimento ainda precisa ser confirmado. Tente novamente.',
+        );
+        expect('${error.message}$error', isNot(contains(privateValue)));
+        expect('${error.message}$error', isNot(contains('error do backend')));
+      }
+    },
+  );
+
+  test('unknown 5xx code remains generic and sanitized', () async {
+    final dataSource = source(
+      MockClient(
+        (_) async => http.Response(
+          jsonEncode({
+            'code': 'PRIVATE_UNKNOWN_CODE',
+            'error': 'private-value',
+          }),
+          502,
+        ),
+      ),
+    );
+
+    try {
+      await dataSource.verifyPurchase(
+        expectedUid: uid,
+        purchaseToken: purchaseToken,
+      );
+      fail('Expected generic verification failure');
+    } on BillingRemoteException catch (error) {
+      expect(error.code, 'BILLING_VERIFY_FAILED');
+      expect(error.statusCode, 502);
+      expect('${error.message}$error', isNot(contains('private-value')));
+      expect('${error.message}$error', isNot(contains('PRIVATE_UNKNOWN_CODE')));
+    }
+  });
+
   test('sends only purchaseToken to the fixed authorized endpoint', () async {
     late http.Request request;
     final dataSource = source(

@@ -471,6 +471,97 @@ void main() {
       expect(fixture.billing.completeCalls, 1);
     });
 
+    test('purchase recovers one acknowledgement failure', () async {
+      final fixture = _fixture();
+      fixture.remote.outcomes.addAll([
+        _ackFailure,
+        _premiumResponse(PremiumTier.monthly),
+      ]);
+      final purchase = fixture.repository.purchasePlan(PremiumTier.monthly);
+      await fixture.billing.buyStarted.future;
+      fixture.billing.emit([_purchase(uid, PlayPurchaseState.purchased)]);
+
+      expect(await purchase, isTrue);
+      expect(fixture.remote.calls, 2);
+      expect(fixture.billing.completeCalls, 1);
+    });
+
+    test(
+      'second acknowledgement failure ends purchase without third try',
+      () async {
+        final fixture = _fixture();
+        fixture.remote.outcomes.addAll([_ackFailure, _ackFailure]);
+        final purchase = fixture.repository.purchasePlan(PremiumTier.monthly);
+        await fixture.billing.buyStarted.future;
+        fixture.billing.emit([_purchase(uid, PlayPurchaseState.purchased)]);
+
+        await expectLater(
+          purchase,
+          throwsA(
+            isA<PremiumPurchaseException>().having(
+              (error) => error.code,
+              'code',
+              'BILLING_ACKNOWLEDGEMENT_FAILED',
+            ),
+          ),
+        );
+        expect(fixture.remote.calls, 2);
+        expect(fixture.billing.completeCalls, 0);
+      },
+    );
+
+    test('generic verification failure is never retried', () async {
+      final fixture = _fixture();
+      fixture.remote.outcomes.add(
+        const BillingRemoteException(
+          code: 'BILLING_VERIFY_FAILED',
+          message: 'Não foi possível validar a compra agora.',
+          statusCode: 502,
+          isRetryable: true,
+        ),
+      );
+      final purchase = fixture.repository.purchasePlan(PremiumTier.monthly);
+      await fixture.billing.buyStarted.future;
+      fixture.billing.emit([_purchase(uid, PlayPurchaseState.purchased)]);
+
+      await expectLater(
+        purchase,
+        throwsA(
+          isA<PremiumPurchaseException>().having(
+            (error) => error.code,
+            'code',
+            'BILLING_VERIFY_FAILED',
+          ),
+        ),
+      );
+      expect(fixture.remote.calls, 1);
+      expect(fixture.billing.completeCalls, 0);
+    });
+
+    test('session change before acknowledgement retry fails closed', () async {
+      final fixture = _fixture();
+      fixture.remote.outcomes.add(_ackFailure);
+      fixture.remote.onCall = (calls) {
+        if (calls == 1) fixture.currentUid = otherUid;
+      };
+      final purchase = fixture.repository.purchasePlan(PremiumTier.monthly);
+      await fixture.billing.buyStarted.future;
+      fixture.billing.emit([_purchase(uid, PlayPurchaseState.purchased)]);
+
+      await expectLater(
+        purchase,
+        throwsA(
+          isA<PremiumPurchaseException>().having(
+            (error) => error.code,
+            'code',
+            'UNAUTHENTICATED',
+          ),
+        ),
+      );
+      expect(fixture.remote.calls, 1);
+      expect(fixture.billing.completeCalls, 0);
+    });
+
     test('purchase error is sanitized and never calls backend', () async {
       final fixture = _fixture();
       final purchase = fixture.repository.purchasePlan(PremiumTier.monthly);
@@ -584,6 +675,21 @@ void main() {
       expect(fixture.billing.completeCalls, 1);
     });
 
+    test('restore recovers one acknowledgement failure', () async {
+      final fixture = _fixture();
+      fixture.billing.pastPurchases = [
+        _purchase(uid, PlayPurchaseState.restored),
+      ];
+      fixture.remote.outcomes.addAll([
+        _ackFailure,
+        _premiumResponse(PremiumTier.monthly),
+      ]);
+
+      expect(await fixture.repository.restorePurchases(), isTrue);
+      expect(fixture.remote.calls, 2);
+      expect(fixture.billing.completeCalls, 1);
+    });
+
     test('backend free returns false and backend error is sanitized', () async {
       final freeFixture = _fixture();
       freeFixture.billing.pastPurchases = [
@@ -655,6 +761,13 @@ BillingVerificationResponse _premiumResponse(PremiumTier tier) =>
       subscriptionState: 'SUBSCRIPTION_STATE_ACTIVE',
       expiresAt: DateTime.utc(2099),
     );
+
+const _ackFailure = BillingRemoteException(
+  code: 'BILLING_ACKNOWLEDGEMENT_FAILED',
+  message: 'O reconhecimento ainda precisa ser confirmado.',
+  statusCode: 502,
+  isRetryable: true,
+);
 
 _Fixture _fixture({String? currentUid = 'user-a'}) => _Fixture(currentUid);
 
@@ -744,6 +857,8 @@ class _FakeRemote extends BillingRemoteDataSource {
   final started = Completer<void>();
   Completer<BillingVerificationResponse>? pending;
   BillingRemoteException? error;
+  final outcomes = <Object>[];
+  void Function(int calls)? onCall;
   BillingVerificationResponse response = _premiumResponse(PremiumTier.monthly);
 
   @override
@@ -754,6 +869,12 @@ class _FakeRemote extends BillingRemoteDataSource {
     calls++;
     tokens.add(purchaseToken);
     if (!started.isCompleted) started.complete();
+    onCall?.call(calls);
+    if (outcomes.isNotEmpty) {
+      final outcome = outcomes.removeAt(0);
+      if (outcome is BillingRemoteException) throw outcome;
+      return outcome as BillingVerificationResponse;
+    }
     final failure = error;
     if (failure != null) throw failure;
     return pending?.future ?? response;

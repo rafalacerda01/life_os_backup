@@ -221,9 +221,9 @@ class GooglePlayPremiumRepository implements IPremiumRepository {
       for (final purchase in purchases) {
         _requireSameUser(uid);
         if (!_isVerifiable(purchase, accountId)) continue;
-        final verified = await _remoteDataSource.verifyPurchase(
-          expectedUid: uid,
-          purchaseToken: purchase.purchaseToken,
+        final verified = await _verifyWithAckRecovery(
+          uid,
+          purchase.purchaseToken,
         );
         _requireSameUser(uid);
         if (!verified.isPremium) continue;
@@ -301,9 +301,9 @@ class GooglePlayPremiumRepository implements IPremiumRepository {
       }
       try {
         _requireSameUser(uid);
-        final verified = await _remoteDataSource.verifyPurchase(
-          expectedUid: uid,
-          purchaseToken: purchase.purchaseToken,
+        final verified = await _verifyWithAckRecovery(
+          uid,
+          purchase.purchaseToken,
         );
         _requireSameUser(uid);
         if (verified.isPremium) await _completeBestEffort(purchase);
@@ -342,6 +342,25 @@ class GooglePlayPremiumRepository implements IPremiumRepository {
         purchase.obfuscatedAccountId == accountId &&
         (purchase.state == PlayPurchaseState.purchased ||
             purchase.state == PlayPurchaseState.restored);
+  }
+
+  Future<BillingVerificationResponse> _verifyWithAckRecovery(
+    String uid,
+    String purchaseToken,
+  ) async {
+    try {
+      return await _remoteDataSource.verifyPurchase(
+        expectedUid: uid,
+        purchaseToken: purchaseToken,
+      );
+    } on BillingRemoteException catch (error) {
+      if (error.code != 'BILLING_ACKNOWLEDGEMENT_FAILED') rethrow;
+      _requireSameUser(uid);
+      return _remoteDataSource.verifyPurchase(
+        expectedUid: uid,
+        purchaseToken: purchaseToken,
+      );
+    }
   }
 
   Future<void> _completeBestEffort(PlayStorePurchase purchase) async {
