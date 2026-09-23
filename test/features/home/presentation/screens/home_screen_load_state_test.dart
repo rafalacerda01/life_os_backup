@@ -14,6 +14,11 @@ import 'package:life_os/features/health/data/models/health_model.dart';
 import 'package:life_os/features/health/presentation/providers/health_provider.dart';
 import 'package:life_os/features/home/presentation/providers/home_provider.dart';
 import 'package:life_os/features/home/presentation/screens/home_screen.dart';
+import 'package:life_os/features/dashboard/domain/entities/models/insight_model.dart';
+import 'package:life_os/features/home/presentation/providers/insight_provider.dart';
+import 'package:life_os/features/notifications/domain/providers/notification_engine.dart';
+import 'package:life_os/features/premium/domain/entities/premium_status_entity.dart';
+import 'package:life_os/features/premium/presentation/premium_provider.dart';
 import 'package:life_os/features/study/data/models/study_model.dart';
 import 'package:life_os/features/study/domain/entities/study_subject_entity.dart';
 import 'package:life_os/features/study/presentation/providers/study_provider.dart';
@@ -21,19 +26,51 @@ import 'package:life_os/features/tasks/data/models/task_model.dart';
 import 'package:life_os/features/tasks/presentation/providers/tasks_provider.dart';
 
 class _StaticAuthNotifier extends AuthNotifier {
+  _StaticAuthNotifier(this.isPremium);
+
+  final bool isPremium;
+
   @override
   AuthState build() => AuthState.authenticated(
-    const UserEntity(
+    UserEntity(
       uid: 'user-a',
       email: 'user@example.test',
       displayName: 'Usuário',
-      isPremium: false,
+      isPremium: isPremium,
       xp: 0,
       level: 1,
       streak: 0,
     ),
   );
 }
+
+class _StaticPremiumNotifier extends PremiumNotifier {
+  _StaticPremiumNotifier(this.isPremium);
+
+  final bool isPremium;
+
+  @override
+  PremiumStatusEntity build() => isPremium
+      ? PremiumStatusEntity(
+          isPremium: true,
+          tier: PremiumTier.monthly,
+          expirationDate: DateTime.now().add(const Duration(days: 30)),
+          activatedFeatures: const ['Companion IA'],
+        )
+      : const PremiumStatusEntity(
+          isPremium: false,
+          tier: PremiumTier.free,
+          activatedFeatures: ['Recursos essenciais'],
+        );
+}
+
+const _insight = InsightModel(
+  id: 'home-premium-source-insight',
+  title: 'Resumo',
+  message: 'Continue acompanhando sua rotina.',
+  category: InsightCategory.balance,
+  priority: InsightPriority.low,
+);
 
 class _SourceBuildCounts {
   int finance = 0;
@@ -76,10 +113,17 @@ HomeStateData _homeState(HomeLoadState loadState) => HomeStateData(
   loadState: loadState,
 );
 
-Widget _homeApp(HomeLoadState loadState) => ProviderScope(
+Widget _homeApp(
+  HomeLoadState loadState, {
+  bool authPremium = false,
+  bool providerPremium = false,
+}) => ProviderScope(
   overrides: [
     homeStateProvider.overrideWithValue(_homeState(loadState)),
-    authNotifierProvider.overrideWith(_StaticAuthNotifier.new),
+    authNotifierProvider.overrideWith(() => _StaticAuthNotifier(authPremium)),
+    premiumProvider.overrideWith(() => _StaticPremiumNotifier(providerPremium)),
+    unreadNotificationsCountProvider.overrideWith((ref) => 0),
+    currentInsightProvider.overrideWithValue(_insight),
   ],
   child: const MaterialApp(home: Scaffold(body: HomeScreen())),
 );
@@ -125,7 +169,8 @@ void main() {
         homeStateProvider.overrideWithValue(
           _homeState(HomeLoadState.unavailable),
         ),
-        authNotifierProvider.overrideWith(_StaticAuthNotifier.new),
+        authNotifierProvider.overrideWith(() => _StaticAuthNotifier(false)),
+        premiumProvider.overrideWith(() => _StaticPremiumNotifier(false)),
         financeStreamProvider.overrideWith((ref) {
           counts.finance++;
           return const Stream<List<local_db.Transaction>>.empty();
@@ -189,6 +234,24 @@ void main() {
     expect(initialCounts, everyElement(1));
     expect(counts.values, everyElement(2));
     expect(find.text('Tentar novamente'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('Home uses Premium provider when Auth says Free', (tester) async {
+    await tester.pumpWidget(
+      _homeApp(HomeLoadState.ready, providerPremium: true),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('PREMIUM'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('Home ignores stale Premium flag in Auth', (tester) async {
+    await tester.pumpWidget(_homeApp(HomeLoadState.ready, authPremium: true));
+    await tester.pumpAndSettle();
+
+    expect(find.text('PREMIUM'), findsNothing);
     expect(tester.takeException(), isNull);
   });
 }

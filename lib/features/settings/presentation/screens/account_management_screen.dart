@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:life_os/features/auth/domain/entities/user_entity.dart';
 import 'package:life_os/features/auth/presentation/providers/auth_provider.dart';
+import 'package:life_os/features/premium/presentation/premium_provider.dart';
 import 'package:life_os/features/settings/presentation/screens/edit_profile_screen.dart';
 
 class AccountManagementScreen extends ConsumerWidget {
@@ -29,7 +30,10 @@ class AccountManagementScreen extends ConsumerWidget {
         authenticated: (user) => ListView(
           padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
           children: [
-            _buildProfileCard(user),
+            _buildProfileCard(
+              user,
+              isPremium: ref.watch(premiumProvider).isPremium,
+            ),
             const SizedBox(height: 32),
             _buildSectionHeader('GERAL'),
             _buildSettingsTile(
@@ -134,7 +138,7 @@ class AccountManagementScreen extends ConsumerWidget {
     );
   }
 
-  Widget _buildProfileCard(UserEntity user) {
+  Widget _buildProfileCard(UserEntity user, {required bool isPremium}) {
     final photoUrl = user.photoUrl;
     final hasPhoto = photoUrl != null && photoUrl.isNotEmpty;
 
@@ -207,17 +211,17 @@ class AccountManagementScreen extends ConsumerWidget {
                     vertical: 4,
                   ),
                   decoration: BoxDecoration(
-                    color: user.isPremium
+                    color: isPremium
                         ? Colors.greenAccent.withOpacity(0.1)
                         : Colors.amberAccent.withOpacity(0.1),
                     borderRadius: BorderRadius.circular(8),
                   ),
                   child: Text(
-                    user.isPremium ? 'PREMIUM' : 'GRATUITO',
+                    isPremium ? 'PREMIUM' : 'GRATUITO',
                     style: TextStyle(
                       fontSize: 10,
                       fontWeight: FontWeight.bold,
-                      color: user.isPremium
+                      color: isPremium
                           ? Colors.greenAccent
                           : Colors.amberAccent,
                     ),

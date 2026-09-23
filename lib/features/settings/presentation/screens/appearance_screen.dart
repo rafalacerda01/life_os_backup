@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:life_os/features/auth/presentation/providers/auth_provider.dart';
+import 'package:life_os/features/premium/presentation/premium_provider.dart';
 import 'package:life_os/features/premium/presentation/premium_screen.dart'; // Import corrigido para navegação direta
 
 class AppearanceScreen extends ConsumerWidget {
@@ -8,11 +8,7 @@ class AppearanceScreen extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final authState = ref.watch(authNotifierProvider);
-    final bool isPremium = authState.maybeWhen(
-      authenticated: (user) => user.isPremium,
-      orElse: () => false,
-    );
+    final isPremium = ref.watch(premiumProvider).isPremium;
 
     return Scaffold(
       backgroundColor: const Color(0xFF070B14),

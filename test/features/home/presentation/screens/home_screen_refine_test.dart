@@ -11,6 +11,8 @@ import 'package:life_os/features/home/presentation/providers/home_provider.dart'
 import 'package:life_os/features/home/presentation/providers/insight_provider.dart';
 import 'package:life_os/features/home/presentation/screens/home_screen.dart';
 import 'package:life_os/features/notifications/domain/providers/notification_engine.dart';
+import 'package:life_os/features/premium/domain/entities/premium_status_entity.dart';
+import 'package:life_os/features/premium/presentation/premium_provider.dart';
 
 class _StaticAuthNotifier extends AuthNotifier {
   final String displayName;
@@ -28,6 +30,16 @@ class _StaticAuthNotifier extends AuthNotifier {
       level: 1,
       streak: 0,
     ),
+  );
+}
+
+class _StaticPremiumNotifier extends PremiumNotifier {
+  @override
+  PremiumStatusEntity build() => PremiumStatusEntity(
+    isPremium: true,
+    tier: PremiumTier.monthly,
+    expirationDate: DateTime.now().add(const Duration(days: 30)),
+    activatedFeatures: const ['Companion IA'],
   );
 }
 
@@ -72,6 +84,7 @@ Widget _homeApp({
       ),
     ),
     authNotifierProvider.overrideWith(() => _StaticAuthNotifier(displayName)),
+    premiumProvider.overrideWith(_StaticPremiumNotifier.new),
     unreadNotificationsCountProvider.overrideWith((ref) => 0),
     currentInsightProvider.overrideWithValue(_insight),
   ],

@@ -295,6 +295,9 @@ void main() {
           authNotifierProvider.overrideWith(
             () => _StaticAuthNotifier(_premiumUser),
           ),
+          premiumProvider.overrideWith(
+            () => _StaticPremiumNotifier(_premiumStatus),
+          ),
         ],
         child: const MaterialApp(home: AppearanceScreen()),
       ),

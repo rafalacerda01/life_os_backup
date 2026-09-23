@@ -13,6 +13,7 @@ import 'package:life_os/features/habits/presentation/providers/habits_provider.d
 import 'package:life_os/features/health/presentation/providers/health_provider.dart';
 import 'package:life_os/features/home/presentation/providers/insight_provider.dart';
 import 'package:life_os/features/notifications/domain/providers/notification_engine.dart';
+import 'package:life_os/features/premium/presentation/premium_provider.dart';
 import 'package:life_os/features/study/presentation/providers/study_provider.dart';
 import 'package:life_os/features/tasks/presentation/providers/tasks_provider.dart';
 
@@ -53,10 +54,9 @@ class HomeScreen extends ConsumerWidget {
     final now = DateTime.now();
     final formattedDate = DateFormat("dd/MM/yyyy - EEEE", "pt_BR").format(now);
 
-    final isPremium = authState.maybeWhen(
-      authenticated: (user) => user.isPremium,
-      orElse: () => false,
-    );
+    final isPremium = homeState.isLoading || homeState.isUnavailable
+        ? false
+        : ref.watch(premiumProvider).isPremium;
 
     final userName = authState.maybeWhen(
       authenticated: (user) => _firstName(user.displayName),
