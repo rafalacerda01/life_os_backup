@@ -54,22 +54,51 @@ final subscriptionManagementLauncherProvider = Provider<Future<bool> Function()>
 
 class PremiumNotifier extends Notifier<PremiumStatusEntity> {
   StreamSubscription? _subscription;
+  Timer? _expiryTimer;
+
+  static const _free = PremiumStatusEntity(
+    isPremium: false,
+    tier: PremiumTier.free,
+    activatedFeatures: ['Recursos essenciais'],
+  );
 
   @override
   PremiumStatusEntity build() {
-    ref.onDispose(() => _subscription?.cancel());
+    ref.onDispose(() {
+      _expiryTimer?.cancel();
+      _subscription?.cancel();
+    });
 
     final repository = ref.watch(premiumRepositoryProvider);
 
-    _subscription = repository.watchPremiumStatus().listen((status) {
-      state = status;
-    });
+    _subscription = repository.watchPremiumStatus().listen(_applyStatus);
 
-    return const PremiumStatusEntity(
-      isPremium: false,
-      tier: PremiumTier.free,
-      activatedFeatures: ['Recursos essenciais'],
-    );
+    return _free;
+  }
+
+  void _applyStatus(PremiumStatusEntity status) {
+    _expiryTimer?.cancel();
+    _expiryTimer = null;
+
+    final expiry = status.expirationDate;
+    if (!status.isPremium || expiry == null) {
+      state = _free;
+      return;
+    }
+
+    final remaining = expiry.difference(DateTime.now());
+    if (remaining <= Duration.zero) {
+      state = _free;
+      return;
+    }
+
+    state = status;
+    _expiryTimer = Timer(remaining, () {
+      if (!ref.mounted || !state.isPremium || state.expirationDate != expiry) {
+        return;
+      }
+      state = _free;
+    });
   }
 
   Future<bool> restorePurchase() {
