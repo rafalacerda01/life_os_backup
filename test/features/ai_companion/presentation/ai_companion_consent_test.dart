@@ -30,8 +30,7 @@ class _FreePremiumTestNotifier extends PremiumNotifier {
 
 class _AiCompanionTestNotifier extends AICompanionNotifier {
   @override
-  AICompanionState build() =>
-      AICompanionState(messages: const [], isLoading: false);
+  AICompanionState build() => AICompanionState(isLoading: false);
 }
 
 class _RecordingInsightNotifier extends _AiCompanionTestNotifier {
