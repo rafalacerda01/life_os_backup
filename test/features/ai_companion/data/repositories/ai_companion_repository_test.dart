@@ -24,7 +24,7 @@ AICompanionRepository _repository({
     idTokenProvider: idTokenProvider ?? () async => _idToken,
     appCheckTokenProvider: appCheckTokenProvider ?? () async => _appCheckToken,
     currentUserIdProvider: currentUserIdProvider ?? () => _userA,
-    v2Timeout: v2Timeout ?? const Duration(seconds: 15),
+    v2Timeout: v2Timeout ?? const Duration(seconds: 25),
   );
 }
 
@@ -234,6 +234,14 @@ void main() {
         ),
       ),
     );
+  });
+
+  test('V2 default timeout allows backend response margin', () {
+    final repository = AICompanionRepository(
+      client: MockClient((_) async => http.Response('', 200)),
+    );
+    addTearDown(repository.client.close);
+    expect(repository.v2Timeout, const Duration(seconds: 25));
   });
 
   test('V2 timeout is bounded and sanitized', () async {

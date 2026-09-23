@@ -99,7 +99,7 @@ class AICompanionRepository {
   final AICurrentUserIdProvider _currentUserIdProvider;
   final Duration v2Timeout;
 
-  static const Duration _networkTimeout = Duration(seconds: 15);
+  static const Duration _networkTimeout = Duration(seconds: 25);
 
   AICompanionRepository({
     http.Client? client,
