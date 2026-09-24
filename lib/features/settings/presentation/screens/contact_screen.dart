@@ -14,7 +14,7 @@ class ContactScreen extends ConsumerStatefulWidget {
 }
 
 class _ContactScreenState extends ConsumerState<ContactScreen> {
-  static const String _supportEmail = "suporte@lifeos.app";
+  static const String _supportEmail = "suportelifeos318@gmail.com";
 
   @override
   void initState() {
