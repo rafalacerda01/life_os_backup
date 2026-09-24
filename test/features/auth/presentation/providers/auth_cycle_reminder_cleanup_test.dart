@@ -225,8 +225,15 @@ class _SecureStorage extends Fake implements FlutterSecureStorage {
 }
 
 class _SyncManager extends Fake implements SyncManager {
+  bool shouldDrain = true;
+  int calls = 0;
+  Future<bool> Function()? onProcess;
+
   @override
-  Future<bool> processPendingItems() async => false;
+  Future<bool> processPendingItems() {
+    calls += 1;
+    return onProcess?.call() ?? Future.value(shouldDrain);
+  }
 }
 
 class _SessionCoordinator extends Fake
@@ -353,6 +360,7 @@ class _Harness {
     required this.notificationCleanup,
     required this.coordinator,
     required this.barrierStorage,
+    required this.syncManager,
     required this.container,
   });
 
@@ -368,6 +376,7 @@ class _Harness {
   final _ScriptedNotificationCleanup notificationCleanup;
   final _SessionCoordinator coordinator;
   final _MemoryBarrierStorage barrierStorage;
+  final _SyncManager syncManager;
   final ProviderContainer container;
 
   AuthNotifier get notifier => container.read(authNotifierProvider.notifier);
@@ -444,6 +453,7 @@ class _Harness {
       failuresRemaining: notificationCleanupFailures,
     );
     final durableStorage = barrierStorage ?? _MemoryBarrierStorage();
+    final syncManager = _SyncManager();
     final coordinator = _SessionCoordinator(authority, epoch);
     final cleanup = CycleReminderSessionCleanup(
       mutationGate,
@@ -464,7 +474,7 @@ class _Harness {
         authRepositoryProvider.overrideWithValue(repository),
         secureStorageProvider.overrideWithValue(_SecureStorage()),
         databaseProvider.overrideWithValue(database),
-        syncManagerProvider.overrideWithValue(_SyncManager()),
+        syncManagerProvider.overrideWithValue(syncManager),
         cycleReminderSessionAuthorityProvider.overrideWithValue(authority),
         cycleReminderOperationEpochProvider.overrideWithValue(epoch),
         cycleReminderMutationGateProvider.overrideWithValue(mutationGate),
@@ -510,6 +520,7 @@ class _Harness {
       notificationCleanup: notificationCleanup,
       coordinator: coordinator,
       barrierStorage: durableStorage,
+      syncManager: syncManager,
       container: container,
     );
   }
@@ -559,6 +570,147 @@ class _SessionPremiumRepository implements IPremiumRepository {
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+
+  Future<void> seedPendingLocalChange(AppDatabase db) async {
+    await db
+        .into(db.taskTable)
+        .insert(
+          TaskTableCompanion.insert(
+            id: 'pending-task',
+            title: 'Pending task',
+            priority: 'normal',
+            date: DateTime(2026, 9, 24),
+          ),
+        );
+    await db.insertSyncItem(
+      ownerUid: _userA.uid,
+      collection: 'tasks',
+      docId: 'pending-task',
+      operationType: 'create',
+      payloadJson: '{"title":"Pending task"}',
+    );
+  }
+
+  test('logout com fila pendente preserva sessão, dados e operação', () async {
+    final harness = await _Harness.create(<int>[0]);
+    addTearDown(harness.dispose);
+    await seedPendingLocalChange(harness.database);
+    harness.syncManager.shouldDrain = false;
+
+    await harness.notifier.logout();
+
+    expect(harness.state, isA<AuthError>());
+    expect(
+      (harness.state as AuthError).message,
+      contains('alterações pendentes'),
+    );
+    expect(harness.auth.currentUser?.uid, _userA.uid);
+    expect(harness.repository.signOutCalls, 0);
+    expect(harness.auth.signOutCalls, 0);
+    expect(
+      await harness.database.select(harness.database.taskTable).get(),
+      hasLength(1),
+    );
+    final queue = await harness.database
+        .select(harness.database.syncQueueTable)
+        .get();
+    expect(queue, hasLength(1));
+    expect(queue.single.ownerUid, _userA.uid);
+    expect(queue.single.status, SyncQueuePersistenceStatus.pending);
+    expect(harness.lifecycle.cancellationCalls, 0);
+    expect(harness.firestore.clearPersistenceCalls, 0);
+    expect(await harness.readPendingCleanup(), isNull);
+
+    harness.syncManager.shouldDrain = true;
+    await harness.notifier.logout();
+    expect(harness.state, isA<AuthUnauthenticated>());
+    expect(harness.repository.signOutCalls, 1);
+  });
+
+  test('logout drena antes do cleanup destrutivo', () async {
+    final events = <String>[];
+    final harness = await _Harness.create(<int>[0], lifecycleEvents: events);
+    addTearDown(harness.dispose);
+    await seedPendingLocalChange(harness.database);
+    events.clear();
+    harness.syncManager.onProcess = () async {
+      events.add('drain');
+      expect(harness.auth.currentUser?.uid, _userA.uid);
+      expect(
+        await harness.database.select(harness.database.taskTable).get(),
+        hasLength(1),
+      );
+      final queue = await harness.database
+          .select(harness.database.syncQueueTable)
+          .get();
+      expect(queue.single.status, SyncQueuePersistenceStatus.pending);
+      await harness.database.markSyncItemAsSucceeded(
+        queue.single.id,
+        _userA.uid,
+      );
+      return true;
+    };
+
+    await harness.notifier.logout();
+
+    expect(harness.state, isA<AuthUnauthenticated>());
+    expect(events.first, 'drain');
+    expect(events, contains('cleanup:${_userA.uid}'));
+    expect(harness.repository.signOutCalls, 1);
+    expect(
+      await harness.database.select(harness.database.taskTable).get(),
+      isEmpty,
+    );
+    expect(
+      await harness.database.select(harness.database.syncQueueTable).get(),
+      isEmpty,
+    );
+  });
+
+  test('UID divergente não drena nem limpa dados de outro usuário', () async {
+    final harness = await _Harness.create(<int>[0]);
+    addTearDown(harness.dispose);
+    await seedPendingLocalChange(harness.database);
+    final callsBefore = harness.syncManager.calls;
+    harness.auth.user = _FirebaseUser(_userB.uid);
+
+    await harness.notifier.logout();
+
+    expect(harness.state, isA<AuthError>());
+    expect(harness.syncManager.calls, callsBefore);
+    expect(harness.repository.signOutCalls, 0);
+    expect(
+      await harness.database.select(harness.database.taskTable).get(),
+      hasLength(1),
+    );
+    expect(
+      await harness.database.select(harness.database.syncQueueTable).get(),
+      hasLength(1),
+    );
+  });
+
+  test('troca de UID durante drain impede cleanup e sign-out', () async {
+    final harness = await _Harness.create(<int>[0]);
+    addTearDown(harness.dispose);
+    await seedPendingLocalChange(harness.database);
+    harness.syncManager.onProcess = () async {
+      harness.auth.user = _FirebaseUser(_userB.uid);
+      return true;
+    };
+
+    await harness.notifier.logout();
+
+    expect(harness.state, isA<AuthError>());
+    expect(harness.repository.signOutCalls, 0);
+    expect(
+      await harness.database.select(harness.database.taskTable).get(),
+      hasLength(1),
+    );
+    expect(
+      await harness.database.select(harness.database.syncQueueTable).get(),
+      hasLength(1),
+    );
+  });
 
   test(
     'logout disposes Billing A before preparing a fresh Billing B',

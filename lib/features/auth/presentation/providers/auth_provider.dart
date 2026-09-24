@@ -523,29 +523,63 @@ class AuthNotifier extends Notifier<AuthState> {
 
   Future<void> logout() async {
     state = AuthState.loading();
+    final firebaseAuth = ref.read(firebaseAuthProvider);
     final logoutUserId =
-        _activeLocalSessionUid ??
-        ref.read(firebaseAuthProvider).currentUser?.uid;
+        _activeLocalSessionUid ?? firebaseAuth.currentUser?.uid;
     _explicitSignOutInProgress = true;
     PendingAuthCleanup? logoutMarker;
 
     try {
-      logoutMarker = await _clearLocalData(
-        targetUserId: logoutUserId,
-        intent: AuthCleanupIntent.logout,
-      );
-    } catch (_) {
-      _localCleanupRequired = true;
-      if (!_disposed) {
-        state = AuthState.error(
-          'Não foi possível isolar os dados locais. Tente novamente.',
-        );
+      if (logoutUserId == null ||
+          logoutUserId.trim().isEmpty ||
+          firebaseAuth.currentUser?.uid != logoutUserId) {
+        if (!_disposed) {
+          state = AuthState.error('Sua sessão mudou. Tente novamente.');
+        }
+        return;
       }
-      _explicitSignOutInProgress = false;
-      return;
-    }
 
-    try {
+      bool queueDrained;
+      try {
+        queueDrained = await ref
+            .read(syncManagerProvider)
+            .processPendingItems();
+      } catch (_) {
+        queueDrained = false;
+      }
+
+      if (firebaseAuth.currentUser?.uid != logoutUserId) {
+        if (!_disposed) {
+          state = AuthState.error('Sua sessão mudou. Tente novamente.');
+        }
+        return;
+      }
+
+      if (!queueDrained) {
+        if (!_disposed) {
+          state = AuthState.error(
+            'Há alterações pendentes que ainda não foram sincronizadas. '
+            'Verifique sua conexão e tente sair novamente.',
+          );
+        }
+        return;
+      }
+
+      try {
+        logoutMarker = await _clearLocalData(
+          targetUserId: logoutUserId,
+          intent: AuthCleanupIntent.logout,
+        );
+      } catch (_) {
+        _localCleanupRequired = true;
+        if (!_disposed) {
+          state = AuthState.error(
+            'Não foi possível isolar os dados locais. Tente novamente.',
+          );
+        }
+        return;
+      }
+
       final result = await _repository.signOut();
 
       await result.when(
@@ -553,18 +587,16 @@ class AuthNotifier extends Notifier<AuthState> {
           try {
             // Fecha a pequena janela entre a limpeza prévia e o sign-out.
             await _runCriticalLocalDataClear(null);
-            if (logoutUserId != null) {
-              if (ref.read(firebaseAuthProvider).currentUser?.uid ==
-                  logoutUserId) {
-                throw StateError('AUTH_SIGN_OUT_NOT_CONFIRMED');
-              }
-              final expectedMarker = logoutMarker;
-              if (expectedMarker == null ||
-                  !await ref
-                      .read(authCleanupBarrierProvider)
-                      .clearIfCurrent(expectedMarker)) {
-                throw StateError('AUTH_CLEANUP_BARRIER_CHANGED');
-              }
+            if (ref.read(firebaseAuthProvider).currentUser?.uid ==
+                logoutUserId) {
+              throw StateError('AUTH_SIGN_OUT_NOT_CONFIRMED');
+            }
+            final expectedMarker = logoutMarker;
+            if (expectedMarker == null ||
+                !await ref
+                    .read(authCleanupBarrierProvider)
+                    .clearIfCurrent(expectedMarker)) {
+              throw StateError('AUTH_CLEANUP_BARRIER_CHANGED');
             }
             _localCleanupRequired = false;
             _activeLocalSessionUid = null;
