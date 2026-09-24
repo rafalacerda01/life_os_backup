@@ -8,15 +8,27 @@ import 'package:life_os/core/database/app_database.dart';
 import 'package:life_os/core/utils/app_logger.dart';
 
 class CheckInRepository {
+  static const _defaultRemoteWriteTimeout = Duration(seconds: 10);
+
   final AppDatabase _db;
   final FirebaseFirestore _firestore;
   final FirebaseAuth _auth;
+  final Duration _remoteWriteTimeout;
+  Future<void> _uploadTail = Future<void>.value();
+
+  bool _isCurrentUser(String uid) =>
+      uid.trim().isNotEmpty && _auth.currentUser?.uid == uid;
 
   // ===========================================================================
   // INJEÇÃO DE DEPENDÊNCIA
   // ===========================================================================
 
-  CheckInRepository(this._db, this._firestore, this._auth);
+  CheckInRepository(
+    this._db,
+    this._firestore,
+    this._auth, {
+    Duration? remoteWriteTimeout,
+  }) : _remoteWriteTimeout = remoteWriteTimeout ?? _defaultRemoteWriteTimeout;
 
   // ===========================================================================
   // 1. LEITURA
@@ -40,7 +52,7 @@ class CheckInRepository {
   }) async {
     final user = _auth.currentUser;
 
-    if (user == null) {
+    if (user == null || user.uid.trim().isEmpty) {
       AppLogger.w('Tentativa de salvar check-in sem usuário autenticado.');
       return;
     }
@@ -74,15 +86,9 @@ class CheckInRepository {
       // Tenta sincronizar em background.
       // -----------------------------------------------------------------------
 
-      unawaited(
-        _syncWithFirebase(
-          userId: user.uid,
-          checkInId: todayId,
-          energy: energy,
-          focus: focus,
-          motivation: motivation,
-        ),
-      );
+      if (_isCurrentUser(user.uid)) {
+        unawaited(_syncWithFirebase(userId: user.uid, checkInId: todayId));
+      }
     } catch (error, stackTrace) {
       AppLogger.e('Erro ao salvar check-in localmente', error, stackTrace);
 
@@ -99,55 +105,73 @@ class CheckInRepository {
   Future<void> syncCheckinsFromFirebaseToLocal() async {
     final user = _auth.currentUser;
 
-    if (user == null) {
+    if (user == null || user.uid.trim().isEmpty) {
       AppLogger.w('SYNC Check-ins ignorado: usuário não autenticado.');
       return;
     }
+    final expectedUid = user.uid;
 
     try {
       AppLogger.i('SYNC Check-ins: iniciando download do Firebase...');
 
       final snapshot = await _firestore
           .collection('users')
-          .doc(user.uid)
+          .doc(expectedUid)
           .collection('checkins')
           .get();
 
-      for (final doc in snapshot.docs) {
-        final data = doc.data();
+      if (!_isCurrentUser(expectedUid)) return;
+      await _db.transaction(() async {
+        for (final doc in snapshot.docs) {
+          if (!_isCurrentUser(expectedUid)) {
+            throw StateError('CHECKIN_SESSION_CHANGED');
+          }
+          final local = await (_db.select(
+            _db.checkInTable,
+          )..where((table) => table.id.equals(doc.id))).getSingleOrNull();
+          if (!_isCurrentUser(expectedUid)) {
+            throw StateError('CHECKIN_SESSION_CHANGED');
+          }
+          if (local != null && !local.isSynced) continue;
 
-        final energy = (data['energy'] as num?)?.toDouble() ?? 0.0;
+          final data = doc.data();
 
-        final focus = (data['focus'] as num?)?.toDouble() ?? 0.0;
+          final energy = (data['energy'] as num?)?.toDouble() ?? 0.0;
 
-        final motivation = (data['motivation'] as num?)?.toDouble() ?? 0.0;
+          final focus = (data['focus'] as num?)?.toDouble() ?? 0.0;
 
-        final updatedAt = data['updatedAt'];
+          final motivation = (data['motivation'] as num?)?.toDouble() ?? 0.0;
 
-        final createdAt = updatedAt is Timestamp
-            ? updatedAt.toDate()
-            : DateTime.now();
+          final updatedAt = data['updatedAt'];
 
-        await _db
-            .into(_db.checkInTable)
-            .insertOnConflictUpdate(
-              CheckInTableCompanion(
-                id: Value(doc.id),
-                energy: Value(energy),
-                focus: Value(focus),
-                motivation: Value(motivation),
-                createdAt: Value(createdAt),
-                isSynced: const Value(true),
-              ),
-            );
-      }
+          final createdAt = updatedAt is Timestamp
+              ? updatedAt.toDate()
+              : DateTime.now();
+
+          await _db
+              .into(_db.checkInTable)
+              .insertOnConflictUpdate(
+                CheckInTableCompanion(
+                  id: Value(doc.id),
+                  energy: Value(energy),
+                  focus: Value(focus),
+                  motivation: Value(motivation),
+                  createdAt: Value(createdAt),
+                  isSynced: const Value(true),
+                ),
+              );
+          if (!_isCurrentUser(expectedUid)) {
+            throw StateError('CHECKIN_SESSION_CHANGED');
+          }
+        }
+      });
 
       AppLogger.i(
         'SYNC Check-ins: download concluído. '
         '${snapshot.docs.length} registros processados.',
       );
-    } catch (error, stackTrace) {
-      AppLogger.e('SYNC Check-ins: erro durante download', error, stackTrace);
+    } catch (_) {
+      AppLogger.w('SYNC Check-ins: download não concluído.');
     }
   }
 
@@ -157,41 +181,71 @@ class CheckInRepository {
   // Drift -> Firebase
   // ===========================================================================
 
-  Future<void> _syncWithFirebase({
+  Future<bool> _syncWithFirebase({
     required String userId,
     required String checkInId,
-    required double energy,
-    required double focus,
-    required double motivation,
+  }) {
+    final result = _uploadTail.then(
+      (_) => _uploadCurrentCheckIn(userId: userId, checkInId: checkInId),
+    );
+    _uploadTail = result.then<void>(
+      (_) {},
+      onError: (Object _, StackTrace _) {},
+    );
+    return result;
+  }
+
+  Future<bool> _uploadCurrentCheckIn({
+    required String userId,
+    required String checkInId,
   }) async {
     try {
+      if (!_isCurrentUser(userId)) return false;
+      final checkIn = await (_db.select(
+        _db.checkInTable,
+      )..where((table) => table.id.equals(checkInId))).getSingleOrNull();
+      if (!_isCurrentUser(userId) || checkIn == null) return false;
+      if (checkIn.isSynced) return true;
+
       await _firestore
           .collection('users')
           .doc(userId)
           .collection('checkins')
           .doc(checkInId)
           .set({
-            'energy': energy,
-            'focus': focus,
-            'motivation': motivation,
+            'energy': checkIn.energy,
+            'focus': checkIn.focus,
+            'motivation': checkIn.motivation,
             'updatedAt': FieldValue.serverTimestamp(),
-          }, SetOptions(merge: true));
+          }, SetOptions(merge: true))
+          .timeout(_remoteWriteTimeout);
 
-      // Só marca como sincronizado depois da confirmação
-      // do Firebase.
-      await _db.markCheckInAsSynced(checkInId);
+      if (!_isCurrentUser(userId)) return false;
+      final marked = await _db.transaction(() async {
+        if (!_isCurrentUser(userId)) return 0;
+        final count =
+            await (_db.update(_db.checkInTable)..where(
+                  (table) =>
+                      table.id.equals(checkInId) &
+                      table.createdAt.equals(checkIn.createdAt) &
+                      table.energy.equals(checkIn.energy) &
+                      table.focus.equals(checkIn.focus) &
+                      table.motivation.equals(checkIn.motivation) &
+                      table.isSynced.equals(false),
+                ))
+                .write(const CheckInTableCompanion(isSynced: Value(true)));
+        if (!_isCurrentUser(userId)) {
+          throw StateError('CHECKIN_SESSION_CHANGED');
+        }
+        return count;
+      });
 
-      AppLogger.i('Check-in sincronizado com sucesso: $checkInId');
-    } catch (error, stackTrace) {
-      // Não marca como sincronizado.
-      //
-      // O registro continua no Drift com isSynced = false
-      // e poderá ser enviado posteriormente.
-      AppLogger.e(
-        'Erro ao sincronizar check-in.',
-        error,
-        stackTrace,
-      );
+      if (marked != 1 || !_isCurrentUser(userId)) return false;
+      AppLogger.i('Check-in sincronizado com sucesso.');
+      return true;
+    } catch (_) {
+      AppLogger.w('Check-in permanece pendente de sincronização.');
+      return false;
     }
   }
 
@@ -201,39 +255,47 @@ class CheckInRepository {
   // Envia registros que ficaram offline.
   // ===========================================================================
 
-  Future<void> syncPendingCheckIns() async {
+  Future<bool> syncPendingCheckIns() async {
     final user = _auth.currentUser;
 
-    if (user == null) {
+    if (user == null || user.uid.trim().isEmpty) {
       AppLogger.w('SYNC pendentes ignorado: usuário não autenticado.');
-      return;
+      return false;
     }
+    final expectedUid = user.uid;
 
     try {
-      final pendingList = await _db.getPendingCheckIns();
+      final pendingList = (await _db.getPendingCheckIns()).cast<CheckInEntry>();
+      if (!_isCurrentUser(expectedUid)) return false;
 
       if (pendingList.isEmpty) {
         AppLogger.i('SYNC Check-ins: nenhum registro pendente.');
-        return;
+        return true;
       }
 
       AppLogger.i(
         'SYNC Check-ins: ${pendingList.length} registro(s) pendente(s).',
       );
 
+      var allDelivered = true;
       for (final checkIn in pendingList) {
-        await _syncWithFirebase(
-          userId: user.uid,
+        if (!_isCurrentUser(expectedUid)) return false;
+        if (!await _syncWithFirebase(
+          userId: expectedUid,
           checkInId: checkIn.id,
-          energy: checkIn.energy,
-          focus: checkIn.focus,
-          motivation: checkIn.motivation,
-        );
+        )) {
+          allDelivered = false;
+        }
       }
 
-      AppLogger.i('SYNC Check-ins: processamento dos pendentes concluído.');
-    } catch (error, stackTrace) {
-      AppLogger.e('Erro ao processar check-ins pendentes', error, stackTrace);
+      if (!_isCurrentUser(expectedUid)) return false;
+      final stillPending = await _db.getPendingCheckIns();
+      return allDelivered &&
+          stillPending.isEmpty &&
+          _isCurrentUser(expectedUid);
+    } catch (_) {
+      AppLogger.w('SYNC Check-ins: pendências não concluídas.');
+      return false;
     }
   }
 }

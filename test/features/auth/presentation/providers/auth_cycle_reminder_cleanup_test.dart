@@ -16,6 +16,10 @@ import 'package:life_os/features/auth/domain/entities/user_entity.dart';
 import 'package:life_os/features/auth/domain/repositories/auth_repository.dart';
 import 'package:life_os/features/auth/presentation/providers/auth_provider.dart';
 import 'package:life_os/features/auth/presentation/providers/auth_state.dart';
+import 'package:life_os/features/checkin/data/repositories/checkin_repository.dart';
+import 'package:life_os/features/checkin/presentation/providers/check_in_provider.dart';
+import 'package:life_os/features/finance/data/repositories/finance_repository.dart';
+import 'package:life_os/features/finance/presentation/providers/finance_provider.dart';
 import 'package:life_os/features/health/presentation/cycle/cycle_reminder_preferences.dart';
 import 'package:life_os/features/health/services/cycle_reminder_action_coordinator.dart';
 import 'package:life_os/features/health/services/cycle_reminder_mutation_gate.dart';
@@ -236,6 +240,39 @@ class _SyncManager extends Fake implements SyncManager {
   }
 }
 
+class _CheckInRepository extends Fake implements CheckInRepository {
+  bool shouldDrain = true;
+  int drainCalls = 0;
+  int pullCalls = 0;
+  Future<bool> Function()? onDrain;
+  Future<void> Function()? onPull;
+
+  @override
+  Future<bool> syncPendingCheckIns() {
+    drainCalls += 1;
+    return onDrain?.call() ?? Future.value(shouldDrain);
+  }
+
+  @override
+  Future<void> syncCheckinsFromFirebaseToLocal() {
+    pullCalls += 1;
+    return onPull?.call() ?? Future.value();
+  }
+}
+
+class _FinanceRepository extends Fake implements FinanceRepository {
+  _FinanceRepository(this.events);
+
+  final List<String> events;
+  final pulled = Completer<void>();
+
+  @override
+  Future<void> syncTransactionsFromFirestore() async {
+    events.add('finance-pull');
+    if (!pulled.isCompleted) pulled.complete();
+  }
+}
+
 class _SessionCoordinator extends Fake
     implements CycleReminderActionSessionCoordinator {
   _SessionCoordinator(this.authority, this.epoch);
@@ -417,6 +454,8 @@ class _Harness {
     _ScriptedFirestore? firestore,
     Future<void> Function(String userId, AppDatabase database)?
     onGetCurrentUser,
+    CheckInRepository? checkInRepository,
+    FinanceRepository? financeRepository,
     List<String>? lifecycleEvents,
     IPremiumRepository Function(String? uid)? createPremiumRepository,
   }) async {
@@ -475,6 +514,11 @@ class _Harness {
         secureStorageProvider.overrideWithValue(_SecureStorage()),
         databaseProvider.overrideWithValue(database),
         syncManagerProvider.overrideWithValue(syncManager),
+        checkInRepositoryProvider.overrideWithValue(
+          checkInRepository ?? _CheckInRepository(),
+        ),
+        if (financeRepository != null)
+          financeRepositoryProvider.overrideWithValue(financeRepository),
         cycleReminderSessionAuthorityProvider.overrideWithValue(authority),
         cycleReminderOperationEpochProvider.overrideWithValue(epoch),
         cycleReminderMutationGateProvider.overrideWithValue(mutationGate),
@@ -590,6 +634,148 @@ void main() {
       payloadJson: '{"title":"Pending task"}',
     );
   }
+
+  Future<void> seedPendingCheckIn(AppDatabase db) async {
+    await db.insertCheckIn(
+      CheckInTableCompanion.insert(
+        id: '2026-09-24',
+        energy: 4,
+        focus: 3,
+        motivation: 2,
+        createdAt: DateTime.utc(2026, 9, 24, 10),
+      ),
+    );
+  }
+
+  test('logout bloqueia cleanup quando Check-in permanece pendente', () async {
+    final checkIns = _CheckInRepository();
+    final harness = await _Harness.create(<int>[
+      0,
+    ], checkInRepository: checkIns);
+    addTearDown(harness.dispose);
+    await seedPendingCheckIn(harness.database);
+    checkIns.shouldDrain = false;
+
+    await harness.notifier.logout();
+
+    expect(harness.state, isA<AuthError>());
+    expect(
+      (harness.state as AuthError).message,
+      contains('alterações pendentes'),
+    );
+    expect(harness.auth.currentUser?.uid, _userA.uid);
+    expect(harness.repository.signOutCalls, 0);
+    expect(harness.auth.signOutCalls, 0);
+    expect(harness.firestore.clearPersistenceCalls, 0);
+    expect(harness.lifecycle.cancellationCalls, 0);
+    final local = await harness.database
+        .select(harness.database.checkInTable)
+        .getSingle();
+    expect(local.energy, 4);
+    expect(local.isSynced, isFalse);
+    expect(await harness.readPendingCleanup(), isNull);
+  });
+
+  test('logout limpa somente depois do replay de Check-ins', () async {
+    final events = <String>[];
+    final checkIns = _CheckInRepository();
+    final harness = await _Harness.create(
+      <int>[0],
+      checkInRepository: checkIns,
+      lifecycleEvents: events,
+    );
+    addTearDown(harness.dispose);
+    await seedPendingCheckIn(harness.database);
+    events.clear();
+    checkIns.onDrain = () async {
+      events.add('checkin-drain');
+      final local = await harness.database
+          .select(harness.database.checkInTable)
+          .getSingle();
+      expect(local.isSynced, isFalse);
+      await harness.database.markCheckInAsSynced(local.id);
+      return true;
+    };
+
+    await harness.notifier.logout();
+
+    expect(harness.state, isA<AuthUnauthenticated>());
+    expect(events.first, 'checkin-drain');
+    expect(events, contains('cleanup:${_userA.uid}'));
+    expect(harness.repository.signOutCalls, 1);
+    expect(
+      await harness.database.select(harness.database.checkInTable).get(),
+      isEmpty,
+    );
+  });
+
+  test('troca de UID durante replay Check-in impede cleanup', () async {
+    final checkIns = _CheckInRepository();
+    final harness = await _Harness.create(<int>[
+      0,
+    ], checkInRepository: checkIns);
+    addTearDown(harness.dispose);
+    await seedPendingCheckIn(harness.database);
+    checkIns.onDrain = () async {
+      harness.auth.user = _FirebaseUser(_userB.uid);
+      return true;
+    };
+
+    await harness.notifier.logout();
+
+    expect(harness.state, isA<AuthError>());
+    expect(harness.repository.signOutCalls, 0);
+    expect(harness.lifecycle.cancellationCalls, 0);
+    expect(
+      (await harness.database.select(harness.database.checkInTable).getSingle())
+          .isSynced,
+      isFalse,
+    );
+  });
+
+  test('hidratação drena Check-ins antes de aplicar snapshot', () async {
+    final events = <String>[];
+    final checkIns = _CheckInRepository()
+      ..onDrain = (() async {
+        events.add('checkin-drain');
+        return true;
+      })
+      ..onPull = (() async => events.add('checkin-pull'));
+    final finance = _FinanceRepository(events);
+    final harness = await _Harness.create(
+      <int>[0],
+      checkInRepository: checkIns,
+      financeRepository: finance,
+    );
+    addTearDown(harness.dispose);
+
+    await finance.pulled.future;
+    expect(events, ['checkin-drain', 'checkin-pull', 'finance-pull']);
+    expect(checkIns.pullCalls, 1);
+  });
+
+  test(
+    'falha do replay Check-in pula pull próprio sem bloquear Finance',
+    () async {
+      final events = <String>[];
+      final checkIns = _CheckInRepository()
+        ..onDrain = (() async {
+          events.add('checkin-drain');
+          return false;
+        });
+      final finance = _FinanceRepository(events);
+      final harness = await _Harness.create(
+        <int>[0],
+        checkInRepository: checkIns,
+        financeRepository: finance,
+      );
+      addTearDown(harness.dispose);
+
+      await finance.pulled.future;
+      expect(checkIns.pullCalls, 0);
+      expect(events, ['checkin-drain', 'finance-pull']);
+    },
+  );
 
   test('logout com fila pendente preserva sessão, dados e operação', () async {
     final harness = await _Harness.create(<int>[0]);

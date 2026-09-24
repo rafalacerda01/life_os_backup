@@ -17,7 +17,9 @@ void main() {
     mockCheckInRepository = MockCheckInRepository();
 
     // Stub do background sync chamado automaticamente no build() do controller
-    when(mockCheckInRepository.syncPendingCheckIns()).thenAnswer((_) async {});
+    when(
+      mockCheckInRepository.syncPendingCheckIns(),
+    ).thenAnswer((_) async => true);
 
     container = ProviderContainer(
       overrides: [

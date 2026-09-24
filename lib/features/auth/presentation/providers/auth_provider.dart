@@ -159,15 +159,36 @@ class AuthNotifier extends Notifier<AuthState> {
 
       if (!queueDrained || !_isCurrentSession(uid, generation)) return;
 
+      var checkInsDrained = false;
+      try {
+        checkInsDrained = await ref
+            .read(checkInRepositoryProvider)
+            .syncPendingCheckIns();
+      } catch (_) {
+        // Um módulo offline indisponível não bloqueia os demais pulls.
+      }
+      if (!_isCurrentSession(uid, generation)) return;
+      if (checkInsDrained) {
+        try {
+          await ref
+              .read(checkInRepositoryProvider)
+              .syncCheckinsFromFirebaseToLocal();
+        } catch (_) {
+          // Falha de Check-ins não interrompe a hidratação dos demais módulos.
+        }
+        if (!_isCurrentSession(uid, generation)) return;
+      }
+
       final pulls = <Future<void> Function()>[
-        ref.read(financeRepositoryProvider).syncTransactionsFromFirestore,
-        ref.read(tasksRepositoryProvider).syncTasksFromFirebaseToLocal,
-        ref.read(habitsRepositoryProvider).syncHabitsFromFirebaseToLocal,
-        ref.read(goalRepositoryProvider).syncGoalsFromFirebaseToLocal,
-        ref.read(checkInRepositoryProvider).syncCheckinsFromFirebaseToLocal,
-        ref.read(healthRepositoryProvider).syncHealthFromFirebase,
-        ref.read(studyRepositoryProvider).syncStudyFromFirebaseToLocal,
-        ref.read(focusRepositoryProvider).syncFocusFromFirebaseToLocal,
+        () =>
+            ref.read(financeRepositoryProvider).syncTransactionsFromFirestore(),
+        () => ref.read(tasksRepositoryProvider).syncTasksFromFirebaseToLocal(),
+        () =>
+            ref.read(habitsRepositoryProvider).syncHabitsFromFirebaseToLocal(),
+        () => ref.read(goalRepositoryProvider).syncGoalsFromFirebaseToLocal(),
+        () => ref.read(healthRepositoryProvider).syncHealthFromFirebase(),
+        () => ref.read(studyRepositoryProvider).syncStudyFromFirebaseToLocal(),
+        () => ref.read(focusRepositoryProvider).syncFocusFromFirebaseToLocal(),
       ];
 
       for (final pull in pulls) {
@@ -556,6 +577,32 @@ class AuthNotifier extends Notifier<AuthState> {
       }
 
       if (!queueDrained) {
+        if (!_disposed) {
+          state = AuthState.error(
+            'Há alterações pendentes que ainda não foram sincronizadas. '
+            'Verifique sua conexão e tente sair novamente.',
+          );
+        }
+        return;
+      }
+
+      bool checkInsDrained;
+      try {
+        checkInsDrained = await ref
+            .read(checkInRepositoryProvider)
+            .syncPendingCheckIns();
+      } catch (_) {
+        checkInsDrained = false;
+      }
+
+      if (firebaseAuth.currentUser?.uid != logoutUserId) {
+        if (!_disposed) {
+          state = AuthState.error('Sua sessão mudou. Tente novamente.');
+        }
+        return;
+      }
+
+      if (!checkInsDrained) {
         if (!_disposed) {
           state = AuthState.error(
             'Há alterações pendentes que ainda não foram sincronizadas. '

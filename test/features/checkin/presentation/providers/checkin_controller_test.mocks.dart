@@ -66,11 +66,11 @@ class MockCheckInRepository extends _i1.Mock implements _i2.CheckInRepository {
           as _i3.Future<void>);
 
   @override
-  _i3.Future<void> syncPendingCheckIns() =>
+  _i3.Future<bool> syncPendingCheckIns() =>
       (super.noSuchMethod(
             Invocation.method(#syncPendingCheckIns, []),
-            returnValue: _i3.Future<void>.value(),
-            returnValueForMissingStub: _i3.Future<void>.value(),
+            returnValue: _i3.Future<bool>.value(false),
+            returnValueForMissingStub: _i3.Future<bool>.value(false),
           )
-          as _i3.Future<void>);
+          as _i3.Future<bool>);
 }
