@@ -177,11 +177,25 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
       // OPERAÇÕES FIRESTORE NORMAIS
       // Updates competitivos de Task/Habit são tratados acima pelo backend.
       // ----------------------------------------------------------------------
+      if (collection == 'focus_logs' &&
+          operationType == 'create' &&
+          !_uuidV4Pattern.hasMatch(docId)) {
+        return const SyncOperationResult.invalidPayload(
+          message: 'Documento de foco inválido.',
+        );
+      }
+
       final documentRef = _firestore
           .collection('users')
           .doc(uid)
           .collection(collection)
           .doc(docId);
+
+      if (collection == 'focus_logs' && operationType == 'create') {
+        final data = _decodePayload(item.payloadJson);
+        await documentRef.set(_prepareFocusLogCreatePayload(data));
+        return const SyncOperationResult.success();
+      }
 
       if (collection == 'study_info' &&
           (operationType == 'create' || operationType == 'update')) {
@@ -300,6 +314,45 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
       throw const FormatException('Fila de revisão inválida.');
     }
     return {'reviewQueue': reviewQueue};
+  }
+
+  Map<String, dynamic> _prepareFocusLogCreatePayload(
+    Map<String, dynamic> data,
+  ) {
+    if (!_hasExactFields(data, const {
+      'targetId',
+      'targetType',
+      'durationSeconds',
+      'timestamp',
+    })) {
+      throw const FormatException('Payload de foco inválido.');
+    }
+
+    final targetId = data['targetId'];
+    final targetType = data['targetType'];
+    final durationSeconds = data['durationSeconds'];
+    final timestamp = data['timestamp'];
+    final parsedTimestamp = timestamp is String
+        ? DateTime.tryParse(timestamp)
+        : null;
+    if (targetId is! String ||
+        targetId.trim().isEmpty ||
+        targetId.length > 128 ||
+        (targetType != 'TASK' && targetType != 'SUBJECT') ||
+        durationSeconds is! int ||
+        durationSeconds <= 0 ||
+        parsedTimestamp == null ||
+        !parsedTimestamp.isUtc ||
+        !timestamp.endsWith('Z')) {
+      throw const FormatException('Payload de foco inválido.');
+    }
+
+    return {
+      'targetId': targetId,
+      'targetType': targetType,
+      'durationSeconds': durationSeconds,
+      'timestamp': Timestamp.fromDate(parsedTimestamp),
+    };
   }
 
   Map<String, dynamic> _prepareReviewQueueCreatePayload(

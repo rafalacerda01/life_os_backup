@@ -17,10 +17,12 @@ class _RecordingHealthDocumentReference extends Fake
   Map<Object, Object?>? lastUpdateData;
   SetOptions? lastOptions;
   FirebaseException? setError;
+  int setCalls = 0;
   int updateCalls = 0;
 
   @override
   Future<void> set(Map<String, dynamic> data, [SetOptions? options]) async {
+    setCalls += 1;
     final error = setError;
 
     if (error != null) {
@@ -49,11 +51,13 @@ class _RecordingHealthDocumentReference extends Fake
 class _RecordingHealthCollectionReference extends Fake
     implements CollectionReference<Map<String, dynamic>> {
   final _RecordingHealthDocumentReference documentReference;
+  String? lastDocumentId;
 
   _RecordingHealthCollectionReference(this.documentReference);
 
   @override
   DocumentReference<Map<String, dynamic>> doc([String? path]) {
+    lastDocumentId = path;
     return documentReference;
   }
 }
@@ -69,7 +73,8 @@ class _RecordingUserDocumentReference extends Fake
     if (path != 'health_info' &&
         path != 'goals' &&
         path != 'study_info' &&
-        path != 'review_queue') {
+        path != 'review_queue' &&
+        path != 'focus_logs') {
       throw UnsupportedError('Unexpected collection: $path');
     }
 
@@ -80,11 +85,13 @@ class _RecordingUserDocumentReference extends Fake
 class _RecordingUsersCollectionReference extends Fake
     implements CollectionReference<Map<String, dynamic>> {
   final _RecordingUserDocumentReference userDocumentReference;
+  String? lastUserId;
 
   _RecordingUsersCollectionReference(this.userDocumentReference);
 
   @override
   DocumentReference<Map<String, dynamic>> doc([String? path]) {
+    lastUserId = path;
     return userDocumentReference;
   }
 }
@@ -465,6 +472,8 @@ SyncQueueTableData createStudyProgressResetItem({
 
 void main() {
   late _RecordingHealthDocumentReference healthDoc;
+  late _RecordingHealthCollectionReference healthCollection;
+  late _RecordingUsersCollectionReference usersCollection;
   late FirestoreSyncRemoteDataSource remote;
 
   FirestoreSyncRemoteDataSource serverDataSource({
@@ -491,13 +500,119 @@ void main() {
 
   setUp(() {
     healthDoc = _RecordingHealthDocumentReference();
-    final healthCollection = _RecordingHealthCollectionReference(healthDoc);
+    healthCollection = _RecordingHealthCollectionReference(healthDoc);
     final userDoc = _RecordingUserDocumentReference(healthCollection);
-    final usersCollection = _RecordingUsersCollectionReference(userDoc);
+    usersCollection = _RecordingUsersCollectionReference(userDoc);
     final firestore = _RecordingFirestore(usersCollection);
 
     remote = FirestoreSyncRemoteDataSource(firestore, _FakeFirebaseAuth());
   });
+
+  SyncQueueTableData focusItem({
+    Map<String, dynamic>? payload,
+    String docId = '7d287d4e-190f-42ab-90a8-a93696f8c462',
+  }) => createStudyItem(
+    collection: 'focus_logs',
+    docId: docId,
+    operationType: 'create',
+    payload:
+        payload ??
+        {
+          'targetId': 'task-1',
+          'targetType': 'TASK',
+          'durationSeconds': 1200,
+          'timestamp': '2026-09-24T10:00:00.000Z',
+        },
+  );
+
+  test('Focus create usa UID esperado e converte timestamp', () async {
+    final result = await remote.process('user-a', focusItem());
+
+    expect(result.isSuccess, isTrue);
+    expect(usersCollection.lastUserId, 'user-a');
+    expect(
+      healthCollection.lastDocumentId,
+      '7d287d4e-190f-42ab-90a8-a93696f8c462',
+    );
+    expect(healthDoc.setCalls, 1);
+    expect(healthDoc.lastData?.keys.toSet(), {
+      'targetId',
+      'targetType',
+      'durationSeconds',
+      'timestamp',
+    });
+    expect(healthDoc.lastData?['timestamp'], isA<Timestamp>());
+    expect(
+      (healthDoc.lastData?['timestamp'] as Timestamp).toDate().toUtc(),
+      DateTime.utc(2026, 9, 24, 10),
+    );
+  });
+
+  test('Focus rejeita payloads inválidos sem write', () async {
+    final invalid = <Map<String, dynamic>>[
+      {
+        'targetId': '',
+        'targetType': 'TASK',
+        'durationSeconds': 1,
+        'timestamp': '2026-09-24T10:00:00.000Z',
+      },
+      {
+        'targetId': 'task-1',
+        'targetType': 'OTHER',
+        'durationSeconds': 1,
+        'timestamp': '2026-09-24T10:00:00.000Z',
+      },
+      {
+        'targetId': 'task-1',
+        'targetType': 'TASK',
+        'durationSeconds': 0,
+        'timestamp': '2026-09-24T10:00:00.000Z',
+      },
+      {
+        'targetId': 'task-1',
+        'targetType': 'TASK',
+        'durationSeconds': 1,
+        'timestamp': 'invalid',
+      },
+      {
+        'targetId': 'task-1',
+        'targetType': 'TASK',
+        'durationSeconds': 1,
+        'timestamp': '2026-09-24T10:00:00.000Z',
+        'uid': 'user-b',
+      },
+    ];
+
+    for (final payload in invalid) {
+      final result = await remote.process(
+        'user-a',
+        focusItem(payload: payload),
+      );
+      expect(result.code, 'INVALID_PAYLOAD');
+    }
+    final badDoc = await remote.process('user-a', focusItem(docId: 'bad/id'));
+    expect(badDoc.code, 'INVALID_PAYLOAD');
+    expect(healthDoc.setCalls, 0);
+  });
+
+  test(
+    'Focus Firestore transitório é retryable e permissão é terminal',
+    () async {
+      healthDoc.setError = FirebaseException(
+        plugin: 'cloud_firestore',
+        code: 'unavailable',
+      );
+      expect((await remote.process('user-a', focusItem())).shouldRetry, isTrue);
+
+      healthDoc.setError = FirebaseException(
+        plugin: 'cloud_firestore',
+        code: 'permission-denied',
+      );
+      final denied = await remote.process('user-a', focusItem());
+      expect(denied.isPermanentFailure, isTrue);
+      expect(denied.code, 'PERMISSION_DENIED');
+    },
+  );
 
   test('health_info update usa set com merge:true', () async {
     final item = createHealthItem(

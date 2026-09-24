@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:drift/drift.dart';
@@ -6,14 +7,16 @@ import 'package:uuid/uuid.dart';
 
 import 'package:life_os/core/utils/app_logger.dart';
 import 'package:life_os/core/database/app_database.dart';
+import 'package:life_os/core/services/sync_manager.dart';
 
 class FocusRepository {
   final AppDatabase _db;
   final FirebaseFirestore _firestore;
   final FirebaseAuth _auth;
+  final SyncManager _syncManager;
   final _uuid = const Uuid();
 
-  FocusRepository(this._db, this._firestore, this._auth);
+  FocusRepository(this._db, this._firestore, this._auth, this._syncManager);
 
   // ===========================================================================
   // 1. ESCRITA (OFFLINE-FIRST)
@@ -25,12 +28,10 @@ class FocusRepository {
     int durationSeconds,
   ) async {
     final now = DateTime.now();
-    // Como não sabemos se sua tabela local tem coluna de ID string,
-    // deixamos o Drift gerenciar o ID local e usamos UUID para o Firebase
     final firebaseDocId = _uuid.v4();
+    final ownerUid = _auth.currentUser?.uid;
 
-    try {
-      // 1. Salva Localmente
+    Future<void> insertLocal() async {
       await _db
           .into(_db.focusLogs)
           .insert(
@@ -41,21 +42,29 @@ class FocusRepository {
               timestamp: now.millisecondsSinceEpoch,
             ),
           );
+    }
 
-      // 2. Envia para o Firebase em Background
-      if (_auth.currentUser != null) {
-        unawaited(
-          _saveFocusSessionToFirestore(
-            firebaseDocId,
-            targetId,
-            targetType,
-            durationSeconds,
-            now,
-          ),
+    try {
+      if (ownerUid == null) {
+        await insertLocal();
+      } else {
+        await _db.transactionWithSync(
+          localOperation: insertLocal,
+          ownerUid: ownerUid,
+          collection: 'focus_logs',
+          docId: firebaseDocId,
+          operationType: 'create',
+          payloadJson: jsonEncode({
+            'targetId': targetId,
+            'targetType': targetType,
+            'durationSeconds': durationSeconds,
+            'timestamp': now.toUtc().toIso8601String(),
+          }),
         );
+        _schedulePendingFocusSync();
       }
-    } catch (e, stack) {
-      AppLogger.e('Erro ao salvar log de foco localmente', e, stack);
+    } catch (_) {
+      AppLogger.w('Não foi possível salvar o log de foco localmente.');
       rethrow;
     }
   }
@@ -113,31 +122,12 @@ class FocusRepository {
     }
   }
 
-  // ===========================================================================
-  // 3. SINCRONIZAÇÃO EM BACKGROUND (SYNC-UP)
-  // ===========================================================================
-
-  Future<void> _saveFocusSessionToFirestore(
-    String docId,
-    String targetId,
-    String targetType,
-    int durationSeconds,
-    DateTime timestamp,
-  ) async {
-    try {
-      await _firestore
-          .collection('users')
-          .doc(_auth.currentUser!.uid)
-          .collection('focus_logs')
-          .doc(docId)
-          .set({
-            'targetId': targetId,
-            'targetType': targetType,
-            'durationSeconds': durationSeconds,
-            'timestamp': Timestamp.fromDate(timestamp),
-          }, SetOptions(merge: true));
-    } catch (e, stack) {
-      AppLogger.e('Sync Error: Salvar log de foco no Firebase', e, stack);
-    }
+  void _schedulePendingFocusSync() {
+    unawaited(
+      _syncManager.processPendingItems().catchError((Object _, StackTrace _) {
+        AppLogger.w('Não foi possível enviar logs de foco pendentes agora.');
+        return false;
+      }),
+    );
   }
 }

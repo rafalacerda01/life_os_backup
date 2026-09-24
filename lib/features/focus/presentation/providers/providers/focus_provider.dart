@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter/foundation.dart';
 import 'package:life_os/core/utils/app_logger.dart';
 import 'package:life_os/core/database/database_provider.dart';
+import 'package:life_os/core/services/sync_manager_provider.dart';
 import 'package:life_os/features/focus/data/remote/focus_remote_data_source.dart';
 import 'package:life_os/features/focus/data/repositories/focus_repository.dart';
 import 'package:life_os/features/tasks/presentation/providers/tasks_provider.dart';
@@ -26,6 +27,7 @@ final focusRepositoryProvider = Provider((ref) {
     ref.watch(databaseProvider),
     FirebaseFirestore.instance,
     FirebaseAuth.instance,
+    ref.watch(syncManagerProvider),
   );
 });
 
