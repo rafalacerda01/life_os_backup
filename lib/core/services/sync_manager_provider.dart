@@ -13,9 +13,11 @@ final syncManagerProvider = Provider<SyncManager>((ref) {
 
   final auth = ref.watch(firebaseAuthProvider);
 
-  return SyncManager(
+  final manager = SyncManager(
     queueStore: AppDatabaseSyncQueueStore(database),
     remoteDataSource: FirestoreSyncRemoteDataSource(firestore, auth),
     currentUserId: () => auth.currentUser?.uid,
   );
+  ref.onDispose(manager.dispose);
+  return manager;
 });

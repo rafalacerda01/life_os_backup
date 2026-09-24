@@ -183,6 +183,7 @@ void main() {
 
       expect(store.markedAsSynced, isEmpty);
       expect(remote.processedItems.length, 1);
+      manager.dispose();
     });
 
     test('não processa a fila sem usuário autenticado', () async {
@@ -433,5 +434,168 @@ void main() {
         });
       },
     );
+
+    testWidgets('retry automático conclui item após cinco segundos', (
+      tester,
+    ) async {
+      final store = FakeSyncQueueStore([createSyncItem()]);
+      var calls = 0;
+      final remote = FakeSyncRemoteDataSource((uid, item) async {
+        calls++;
+        return calls == 1
+            ? const SyncOperationResult.retryable(code: 'UNAVAILABLE')
+            : const SyncOperationResult.success();
+      });
+      final manager = SyncManager(
+        queueStore: store,
+        remoteDataSource: remote,
+        currentUserId: () => 'user-123',
+      );
+
+      expect(await manager.processPendingItems(), isFalse);
+      expect(calls, 1);
+      expect(store.markedAsSynced, isEmpty);
+      expect(store.retried, [1]);
+
+      await tester.pump(const Duration(seconds: 4));
+      expect(calls, 1);
+      await tester.pump(const Duration(seconds: 1));
+      await tester.pump();
+      expect(calls, 2);
+      expect(store.markedAsSynced, [1]);
+      manager.dispose();
+    });
+
+    testWidgets('backoff cresce até cinco minutos', (tester) async {
+      final store = FakeSyncQueueStore([createSyncItem()]);
+      final remote = FakeSyncRemoteDataSource(
+        (uid, item) async =>
+            const SyncOperationResult.retryable(code: 'UNAVAILABLE'),
+      );
+      final manager = SyncManager(
+        queueStore: store,
+        remoteDataSource: remote,
+        currentUserId: () => 'user-123',
+      );
+
+      await manager.processPendingItems();
+      for (final (index, delay) in [
+        const Duration(seconds: 5),
+        const Duration(seconds: 15),
+        const Duration(seconds: 30),
+        const Duration(minutes: 1),
+        const Duration(minutes: 5),
+      ].indexed) {
+        await tester.pump(delay - const Duration(seconds: 1));
+        expect(remote.processedItems.length, index + 1);
+        await tester.pump(const Duration(seconds: 1));
+        await tester.pump();
+        expect(remote.processedItems.length, index + 2);
+      }
+      expect(store.retried, hasLength(6));
+      manager.dispose();
+    });
+
+    testWidgets('sucesso reseta o backoff para nova operação', (tester) async {
+      final store = FakeSyncQueueStore([createSyncItem()]);
+      var calls = 0;
+      final remote = FakeSyncRemoteDataSource((uid, item) async {
+        calls++;
+        return calls.isOdd
+            ? const SyncOperationResult.retryable(code: 'UNAVAILABLE')
+            : const SyncOperationResult.success();
+      });
+      final manager = SyncManager(
+        queueStore: store,
+        remoteDataSource: remote,
+        currentUserId: () => 'user-123',
+      );
+
+      await manager.processPendingItems();
+      await tester.pump(const Duration(seconds: 5));
+      await tester.pump();
+      expect(store.markedAsSynced, [1]);
+
+      store.items.add(createSyncItem(id: 2, docId: 'habit-2'));
+      await manager.processPendingItems();
+      expect(calls, 3);
+      await tester.pump(const Duration(seconds: 4));
+      expect(calls, 3);
+      await tester.pump(const Duration(seconds: 1));
+      await tester.pump();
+      expect(calls, 4);
+      expect(store.markedAsSynced, [1, 2]);
+      manager.dispose();
+    });
+
+    testWidgets('troca de sessão não executa retry do UID antigo', (
+      tester,
+    ) async {
+      var currentUid = 'user-123';
+      final store = FakeSyncQueueStore([createSyncItem()]);
+      final remote = FakeSyncRemoteDataSource(
+        (uid, item) async =>
+            const SyncOperationResult.retryable(code: 'UNAVAILABLE'),
+      );
+      final manager = SyncManager(
+        queueStore: store,
+        remoteDataSource: remote,
+        currentUserId: () => currentUid,
+      );
+
+      await manager.processPendingItems();
+      currentUid = 'user-b';
+      await tester.pump(const Duration(seconds: 10));
+      await tester.pump();
+      expect(remote.processedItems, hasLength(1));
+      expect(store.markedAsSynced, isEmpty);
+      manager.dispose();
+    });
+
+    testWidgets('dispose cancela retry pendente', (tester) async {
+      final store = FakeSyncQueueStore([createSyncItem()]);
+      final remote = FakeSyncRemoteDataSource(
+        (uid, item) async =>
+            const SyncOperationResult.retryable(code: 'UNAVAILABLE'),
+      );
+      final manager = SyncManager(
+        queueStore: store,
+        remoteDataSource: remote,
+        currentUserId: () => 'user-123',
+      );
+
+      await manager.processPendingItems();
+      manager.dispose();
+      await tester.pump(const Duration(seconds: 10));
+      expect(remote.processedItems, hasLength(1));
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('trigger manual substitui timer sem terceira chamada', (
+      tester,
+    ) async {
+      final store = FakeSyncQueueStore([createSyncItem()]);
+      var calls = 0;
+      final remote = FakeSyncRemoteDataSource((uid, item) async {
+        calls++;
+        return calls == 1
+            ? const SyncOperationResult.retryable(code: 'UNAVAILABLE')
+            : const SyncOperationResult.success();
+      });
+      final manager = SyncManager(
+        queueStore: store,
+        remoteDataSource: remote,
+        currentUserId: () => 'user-123',
+      );
+
+      await manager.processPendingItems();
+      await tester.pump(const Duration(seconds: 2));
+      expect(await manager.processPendingItems(), isTrue);
+      expect(calls, 2);
+      await tester.pump(const Duration(seconds: 10));
+      expect(calls, 2);
+      expect(store.markedAsSynced, [1]);
+      manager.dispose();
+    });
   });
 }

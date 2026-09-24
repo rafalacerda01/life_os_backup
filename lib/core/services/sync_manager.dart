@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:life_os/core/database/app_database.dart';
 import 'package:life_os/core/utils/app_logger.dart';
 
@@ -6,12 +8,24 @@ import 'sync_queue_store.dart';
 import 'sync_remote_data_source.dart';
 
 class SyncManager {
+  static const _retryDelays = [
+    Duration(seconds: 5),
+    Duration(seconds: 15),
+    Duration(seconds: 30),
+    Duration(minutes: 1),
+    Duration(minutes: 5),
+  ];
+
   final SyncQueueStore _queueStore;
   final SyncRemoteDataSource _remoteDataSource;
   final String? Function() _currentUserId;
 
   Future<bool>? _processingFuture;
   bool _processAgain = false;
+  Timer? _retryTimer;
+  String? _retryUid;
+  int _retryAttempt = 0;
+  bool _disposed = false;
 
   SyncManager({
     required this._queueStore,
@@ -20,12 +34,24 @@ class SyncManager {
   });
 
   Future<bool> processPendingItems() {
+    if (_disposed) return Future.value(false);
+
+    final currentUid = _currentUserId()?.trim();
+    if (currentUid == null ||
+        currentUid.isEmpty ||
+        (_retryUid != null && _retryUid != currentUid)) {
+      _resetRetry();
+    }
+
     final running = _processingFuture;
 
     if (running != null) {
       _processAgain = true;
       return running;
     }
+
+    _retryTimer?.cancel();
+    _retryTimer = null;
 
     late final Future<bool> operation;
     operation = _processPendingItems().whenComplete(() {
@@ -41,6 +67,7 @@ class SyncManager {
     final initialUid = _currentUserId()?.trim();
 
     if (initialUid == null || initialUid.isEmpty) {
+      _resetRetry();
       return false;
     }
 
@@ -54,6 +81,7 @@ class SyncManager {
           final ownerUid = item.ownerUid?.trim();
 
           if (currentUid == null || currentUid != initialUid) {
+            _resetRetry();
             return false;
           }
 
@@ -72,6 +100,7 @@ class SyncManager {
           }
 
           if (_currentUserId()?.trim() != ownerUid) {
+            _resetRetry();
             return false;
           }
 
@@ -88,6 +117,7 @@ class SyncManager {
                 ownerUid,
                 code,
               );
+              _scheduleRetry(ownerUid);
               return false;
 
             case SyncOperationStatus.quotaExceeded:
@@ -107,6 +137,43 @@ class SyncManager {
       _processAgain = false;
     }
 
-    return _currentUserId()?.trim() == initialUid;
+    final sameUser = _currentUserId()?.trim() == initialUid;
+    _resetRetry();
+    return sameUser;
+  }
+
+  void _scheduleRetry(String uid) {
+    if (_disposed || _currentUserId()?.trim() != uid) {
+      _resetRetry();
+      return;
+    }
+    if (_retryUid != uid) {
+      _retryAttempt = 0;
+      _retryUid = uid;
+    }
+    _retryTimer?.cancel();
+    final delay = _retryDelays[_retryAttempt];
+    if (_retryAttempt < _retryDelays.length - 1) _retryAttempt++;
+    _retryTimer = Timer(delay, () {
+      _retryTimer = null;
+      if (_disposed || _currentUserId()?.trim() != uid) {
+        _resetRetry();
+        return;
+      }
+      unawaited(processPendingItems());
+    });
+  }
+
+  void _resetRetry() {
+    _retryTimer?.cancel();
+    _retryTimer = null;
+    _retryUid = null;
+    _retryAttempt = 0;
+  }
+
+  void dispose() {
+    if (_disposed) return;
+    _disposed = true;
+    _resetRetry();
   }
 }
