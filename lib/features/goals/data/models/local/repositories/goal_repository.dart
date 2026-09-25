@@ -9,6 +9,10 @@ import 'package:life_os/core/database/app_database.dart';
 import 'package:life_os/core/security/input_sanitizer.dart';
 import 'package:life_os/features/goals/domain/entities/goal_entity.dart';
 
+class _GoalSessionChanged implements Exception {
+  const _GoalSessionChanged();
+}
+
 class GoalRepository {
   final AppDatabase _db;
   final FirebaseFirestore _firestore;
@@ -225,54 +229,70 @@ class GoalRepository {
   // ===========================================================================
 
   Future<void> syncGoalsFromFirebaseToLocal() async {
-    final user = _auth.currentUser;
-    if (user == null) return;
-
-    final expectedUid = user.uid;
+    final expectedUid = _auth.currentUser?.uid.trim();
+    if (expectedUid == null || expectedUid.isEmpty) return;
 
     try {
       AppLogger.i("SYNC Metas: Iniciando...");
       final pullStartedAt = DateTime.now().millisecondsSinceEpoch;
+      final pendingAtPullStart =
+          await (_db.select(_db.syncQueueTable)..where(
+                (item) =>
+                    item.ownerUid.equals(expectedUid) &
+                    item.collection.equals('goals') &
+                    item.status.equals(SyncQueuePersistenceStatus.pending),
+              ))
+              .get();
+      if (_auth.currentUser?.uid != expectedUid) return;
+      final pendingOperationIds = pendingAtPullStart
+          .map((item) => item.id)
+          .toList();
       final snapshot = await _firestore
           .collection('users')
           .doc(expectedUid)
           .collection('goals')
-          .get();
+          .get(const GetOptions(source: Source.server));
+      if (_auth.currentUser?.uid != expectedUid) return;
+      final remoteDocIds = snapshot.docs.map((doc) => doc.id).toSet();
 
-      for (final doc in snapshot.docs) {
-        if (_auth.currentUser?.uid != expectedUid) return;
-        final data = doc.data();
-        final createdAt = _parseFirestoreDate(data['createdAt']);
-        if (createdAt == null) {
-          AppLogger.w('SYNC Metas: data de criação inválida ignorada.');
-          continue;
+      await _db.transaction(() async {
+        void requireCurrentUser() {
+          if (_auth.currentUser?.uid != expectedUid) {
+            throw const _GoalSessionChanged();
+          }
         }
-        final lastReset = _parseFirestoreDate(data['lastReset']) ?? createdAt;
 
-        final sessionValid = await _db.transaction(() async {
-          if (_auth.currentUser?.uid != expectedUid) return false;
+        requireCurrentUser();
+        final authoritativeItems =
+            await (_db.select(_db.syncQueueTable)..where(
+                  (item) =>
+                      item.ownerUid.equals(expectedUid) &
+                      item.collection.equals('goals') &
+                      (item.status.equals(SyncQueuePersistenceStatus.pending) |
+                          (item.status.equals(
+                                SyncQueuePersistenceStatus.succeeded,
+                              ) &
+                              (item.createdAt.isBiggerOrEqualValue(
+                                    pullStartedAt,
+                                  ) |
+                                  item.id.isIn(pendingOperationIds)))),
+                ))
+                .get();
+        final protectedDocIds = authoritativeItems
+            .map((item) => item.docId)
+            .toSet();
+        requireCurrentUser();
 
-          final locallyAuthoritative =
-              await (_db.select(_db.syncQueueTable)..where(
-                    (item) =>
-                        item.ownerUid.equals(expectedUid) &
-                        item.collection.equals('goals') &
-                        item.docId.equals(doc.id) &
-                        (item.status.equals(
-                              SyncQueuePersistenceStatus.pending,
-                            ) |
-                            (item.status.equals(
-                                  SyncQueuePersistenceStatus.succeeded,
-                                ) &
-                                item.createdAt.isBiggerOrEqualValue(
-                                  pullStartedAt,
-                                ))),
-                  ))
-                  .get();
-
-          if (_auth.currentUser?.uid != expectedUid) return false;
-          if (locallyAuthoritative.isNotEmpty) return true;
-
+        for (final doc in snapshot.docs) {
+          requireCurrentUser();
+          if (protectedDocIds.contains(doc.id)) continue;
+          final data = doc.data();
+          final createdAt = _parseFirestoreDate(data['createdAt']);
+          if (createdAt == null) {
+            AppLogger.w('SYNC Metas: data de criação inválida ignorada.');
+            continue;
+          }
+          final lastReset = _parseFirestoreDate(data['lastReset']) ?? createdAt;
           await _db
               .into(_db.goals)
               .insertOnConflictUpdate(
@@ -286,12 +306,30 @@ class GoalRepository {
                   lastReset: Value(lastReset.millisecondsSinceEpoch),
                 ),
               );
-          return _auth.currentUser?.uid == expectedUid;
-        });
+          requireCurrentUser();
+        }
 
-        if (!sessionValid) return;
-      }
+        final localGoals = await _db.select(_db.goals).get();
+        requireCurrentUser();
+        for (final goal in localGoals) {
+          requireCurrentUser();
+          final id = goal.id.trim();
+          if (id.isEmpty ||
+              id == 'pending' ||
+              id == 'synced' ||
+              remoteDocIds.contains(goal.id) ||
+              protectedDocIds.contains(goal.id)) {
+            continue;
+          }
+          await (_db.delete(
+            _db.goals,
+          )..where((t) => t.id.equals(goal.id))).go();
+          requireCurrentUser();
+        }
+      });
       AppLogger.i("SYNC Metas: Concluído.");
+    } on _GoalSessionChanged {
+      return;
     } catch (e, stack) {
       AppLogger.e("SYNC Metas: ERRO CRÍTICO", e, stack);
     }

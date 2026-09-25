@@ -51,6 +51,10 @@ final tasksStreamProvider = StreamProvider<List<TaskModel>>((ref) {
 // REPOSITORY
 // ============================================================================
 
+class _TaskSessionChanged implements Exception {
+  const _TaskSessionChanged();
+}
+
 class TasksRepository {
   final AppDatabase _db;
   final FirebaseFirestore _firestore;
@@ -83,51 +87,63 @@ class TasksRepository {
   // ==========================================================================
 
   Future<void> syncTasksFromFirebaseToLocal() async {
-    final user = _auth.currentUser;
-
-    if (user == null) {
-      return;
-    }
-
-    final expectedUid = user.uid;
+    final expectedUid = _auth.currentUser?.uid.trim();
+    if (expectedUid == null || expectedUid.isEmpty) return;
 
     try {
       final pullStartedAt = DateTime.now().millisecondsSinceEpoch;
+      final pendingAtPullStart =
+          await (_db.select(_db.syncQueueTable)..where(
+                (item) =>
+                    item.ownerUid.equals(expectedUid) &
+                    item.collection.equals('tasks') &
+                    item.status.equals(SyncQueuePersistenceStatus.pending),
+              ))
+              .get();
+      if (_auth.currentUser?.uid != expectedUid) return;
+      final pendingOperationIds = pendingAtPullStart
+          .map((item) => item.id)
+          .toList();
       final snapshot = await _firestore
           .collection('users')
           .doc(expectedUid)
           .collection('tasks')
-          .get();
+          .get(const GetOptions(source: Source.server));
+      if (_auth.currentUser?.uid != expectedUid) return;
+      final remoteDocIds = snapshot.docs.map((doc) => doc.id).toSet();
 
-      for (final doc in snapshot.docs) {
-        if (_auth.currentUser?.uid != expectedUid) return;
-        final data = doc.data();
-
-        final sessionValid = await _db.transaction(() async {
-          if (_auth.currentUser?.uid != expectedUid) return false;
-          // Serialize the local-authority check and remote write with mutations.
-          final locallyAuthoritative =
-              await (_db.select(_db.syncQueueTable)..where(
-                    (item) =>
-                        item.ownerUid.equals(expectedUid) &
-                        item.collection.equals('tasks') &
-                        item.docId.equals(doc.id) &
-                        (item.status.equals(
-                              SyncQueuePersistenceStatus.pending,
-                            ) |
-                            (item.status.equals(
-                                  SyncQueuePersistenceStatus.succeeded,
-                                ) &
-                                item.createdAt.isBiggerOrEqualValue(
-                                  pullStartedAt,
-                                ))),
-                  ))
-                  .get();
-          if (_auth.currentUser?.uid != expectedUid) return false;
-          if (locallyAuthoritative.isNotEmpty) {
-            return true;
+      await _db.transaction(() async {
+        void requireCurrentUser() {
+          if (_auth.currentUser?.uid != expectedUid) {
+            throw const _TaskSessionChanged();
           }
+        }
 
+        requireCurrentUser();
+        final authoritativeItems =
+            await (_db.select(_db.syncQueueTable)..where(
+                  (item) =>
+                      item.ownerUid.equals(expectedUid) &
+                      item.collection.equals('tasks') &
+                      (item.status.equals(SyncQueuePersistenceStatus.pending) |
+                          (item.status.equals(
+                                SyncQueuePersistenceStatus.succeeded,
+                              ) &
+                              (item.createdAt.isBiggerOrEqualValue(
+                                    pullStartedAt,
+                                  ) |
+                                  item.id.isIn(pendingOperationIds)))),
+                ))
+                .get();
+        final protectedDocIds = authoritativeItems
+            .map((item) => item.docId)
+            .toSet();
+        requireCurrentUser();
+
+        for (final doc in snapshot.docs) {
+          requireCurrentUser();
+          if (protectedDocIds.contains(doc.id)) continue;
+          final data = doc.data();
           await _db
               .into(_db.taskTable)
               .insertOnConflictUpdate(
@@ -141,10 +157,29 @@ class TasksRepository {
                       : DateTime.now(),
                 ),
               );
-          return true;
-        });
-        if (!sessionValid) return;
-      }
+          requireCurrentUser();
+        }
+
+        final localTasks = await _db.select(_db.taskTable).get();
+        requireCurrentUser();
+        for (final task in localTasks) {
+          requireCurrentUser();
+          final id = task.id.trim();
+          if (id.isEmpty ||
+              id == 'pending' ||
+              id == 'synced' ||
+              remoteDocIds.contains(task.id) ||
+              protectedDocIds.contains(task.id)) {
+            continue;
+          }
+          await (_db.delete(
+            _db.taskTable,
+          )..where((t) => t.id.equals(task.id))).go();
+          requireCurrentUser();
+        }
+      });
+    } on _TaskSessionChanged {
+      return;
     } catch (e, stack) {
       AppLogger.e('Erro ao sincronizar tarefas', e, stack);
     }

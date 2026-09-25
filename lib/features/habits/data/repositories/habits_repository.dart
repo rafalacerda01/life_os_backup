@@ -8,6 +8,10 @@ import 'package:life_os/core/utils/app_logger.dart';
 import 'package:life_os/features/habits/data/models/habit_model.dart';
 import 'package:uuid/uuid.dart';
 
+class _HabitSessionChanged implements Exception {
+  const _HabitSessionChanged();
+}
+
 class HabitsRepository {
   final AppDatabase _db;
   final FirebaseFirestore _firestore;
@@ -193,53 +197,71 @@ class HabitsRepository {
   // ===========================================================================
 
   Future<void> syncHabitsFromFirebaseToLocal() async {
-    final user = _auth.currentUser;
-    if (user == null) return;
-
-    final expectedUid = user.uid;
+    final expectedUid = _auth.currentUser?.uid.trim();
+    if (expectedUid == null || expectedUid.isEmpty) return;
 
     try {
       AppLogger.i('SYNC Hábitos: Iniciando...');
       final pullStartedAt = DateTime.now().millisecondsSinceEpoch;
+      final pendingAtPullStart =
+          await (_db.select(_db.syncQueueTable)..where(
+                (item) =>
+                    item.ownerUid.equals(expectedUid) &
+                    (item.collection.equals('habits') |
+                        (item.collection.equals('batch') &
+                            item.operationType.equals('batch_delete'))) &
+                    item.status.equals(SyncQueuePersistenceStatus.pending),
+              ))
+              .get();
+      if (_auth.currentUser?.uid != expectedUid) return;
+      final pendingOperationIds = pendingAtPullStart
+          .map((item) => item.id)
+          .toList();
       final snapshot = await _firestore
           .collection('users')
           .doc(expectedUid)
           .collection('habits')
-          .get();
+          .get(const GetOptions(source: Source.server));
+      if (_auth.currentUser?.uid != expectedUid) return;
+      final remoteDocIds = snapshot.docs.map((doc) => doc.id).toSet();
 
-      for (final doc in snapshot.docs) {
-        if (_auth.currentUser?.uid != expectedUid) return;
-        final data = doc.data();
+      await _db.transaction(() async {
+        void requireCurrentUser() {
+          if (_auth.currentUser?.uid != expectedUid) {
+            throw const _HabitSessionChanged();
+          }
+        }
 
-        final rawDates = data['completedDates'] as List<dynamic>? ?? [];
-        final dates = rawDates.map((e) => e.toString()).toList();
+        requireCurrentUser();
+        final authoritativeItems =
+            await (_db.select(_db.syncQueueTable)..where(
+                  (item) =>
+                      item.ownerUid.equals(expectedUid) &
+                      (item.collection.equals('habits') |
+                          (item.collection.equals('batch') &
+                              item.operationType.equals('batch_delete'))) &
+                      (item.status.equals(SyncQueuePersistenceStatus.pending) |
+                          (item.status.equals(
+                                SyncQueuePersistenceStatus.succeeded,
+                              ) &
+                              (item.createdAt.isBiggerOrEqualValue(
+                                    pullStartedAt,
+                                  ) |
+                                  item.id.isIn(pendingOperationIds)))),
+                ))
+                .get();
+        // deleteHabit stores the affected habit ID as the batch docId.
+        final protectedDocIds = authoritativeItems
+            .map((item) => item.docId)
+            .toSet();
+        requireCurrentUser();
 
-        final sessionValid = await _db.transaction(() async {
-          if (_auth.currentUser?.uid != expectedUid) return false;
-
-          final locallyAuthoritative =
-              await (_db.select(_db.syncQueueTable)..where(
-                    (item) =>
-                        item.ownerUid.equals(expectedUid) &
-                        item.docId.equals(doc.id) &
-                        (item.collection.equals('habits') |
-                            (item.collection.equals('batch') &
-                                item.operationType.equals('batch_delete'))) &
-                        (item.status.equals(
-                              SyncQueuePersistenceStatus.pending,
-                            ) |
-                            (item.status.equals(
-                                  SyncQueuePersistenceStatus.succeeded,
-                                ) &
-                                item.createdAt.isBiggerOrEqualValue(
-                                  pullStartedAt,
-                                ))),
-                  ))
-                  .get();
-
-          if (_auth.currentUser?.uid != expectedUid) return false;
-          if (locallyAuthoritative.isNotEmpty) return true;
-
+        for (final doc in snapshot.docs) {
+          requireCurrentUser();
+          if (protectedDocIds.contains(doc.id)) continue;
+          final data = doc.data();
+          final rawDates = data['completedDates'] as List<dynamic>? ?? [];
+          final dates = rawDates.map((e) => e.toString()).toList();
           await _db
               .into(_db.habits)
               .insertOnConflictUpdate(
@@ -249,12 +271,30 @@ class HabitsRepository {
                   completedDates: jsonEncode(dates),
                 ),
               );
-          return _auth.currentUser?.uid == expectedUid;
-        });
+          requireCurrentUser();
+        }
 
-        if (!sessionValid) return;
-      }
+        final localHabits = await _db.select(_db.habits).get();
+        requireCurrentUser();
+        for (final habit in localHabits) {
+          requireCurrentUser();
+          final id = habit.id.trim();
+          if (id.isEmpty ||
+              id == 'pending' ||
+              id == 'synced' ||
+              remoteDocIds.contains(habit.id) ||
+              protectedDocIds.contains(habit.id)) {
+            continue;
+          }
+          await (_db.delete(
+            _db.habits,
+          )..where((t) => t.id.equals(habit.id))).go();
+          requireCurrentUser();
+        }
+      });
       AppLogger.i('SYNC Hábitos: Concluído com sucesso.');
+    } on _HabitSessionChanged {
+      return;
     } catch (error, stackTrace) {
       AppLogger.e('SYNC Hábitos: ERRO CRÍTICO', error, stackTrace);
     }

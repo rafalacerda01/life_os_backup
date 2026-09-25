@@ -906,28 +906,126 @@ class HealthRepository {
   Future syncHealthFromFirebase() async {
     final userId = _getUserId();
 
-    if (userId == null) {
+    if (userId == null || userId.trim().isEmpty) {
       AppLogger.w('SYNC Saúde ignorado: usuário não autenticado.');
       return;
     }
 
     try {
       AppLogger.i('SYNC Saúde: Iniciando...');
-
+      final pullStartedAt = DateTime.now().millisecondsSinceEpoch;
+      final pendingAtPullStart =
+          await (_db.select(_db.syncQueueTable)..where(
+                (item) =>
+                    item.ownerUid.equals(userId) &
+                    item.collection.equals('medications') &
+                    item.status.equals(SyncQueuePersistenceStatus.pending),
+              ))
+              .get();
+      _requireCurrentUser(userId);
+      final pendingOperationIds = pendingAtPullStart
+          .map((item) => item.id)
+          .toList();
       final medsSnapshot = await _firestore
           .collection('users')
           .doc(userId)
           .collection('medications')
-          .get();
+          .get(const GetOptions(source: Source.server));
+      _requireCurrentUser(userId);
+      final remoteMedicationIds = medsSnapshot.docs
+          .map((doc) => doc.id)
+          .toSet();
+      final remindersToSchedule =
+          <({String id, String name, DateTime startDate})>[];
+      final remindersToCancel = <String>[];
 
-      for (final doc in medsSnapshot.docs) {
+      await _db.transaction(() async {
+        _requireCurrentUser(userId);
+        final authoritativeItems =
+            await (_db.select(_db.syncQueueTable)..where(
+                  (item) =>
+                      item.ownerUid.equals(userId) &
+                      item.collection.equals('medications') &
+                      (item.status.equals(SyncQueuePersistenceStatus.pending) |
+                          (item.status.equals(
+                                SyncQueuePersistenceStatus.succeeded,
+                              ) &
+                              (item.createdAt.isBiggerOrEqualValue(
+                                    pullStartedAt,
+                                  ) |
+                                  item.id.isIn(pendingOperationIds)))),
+                ))
+                .get();
+        final protectedMedicationIds = authoritativeItems
+            .map((item) => item.docId)
+            .toSet();
+        _requireCurrentUser(userId);
+
+        for (final doc in medsSnapshot.docs) {
+          _requireCurrentUser(userId);
+          if (protectedMedicationIds.contains(doc.id)) continue;
+          final reminder = await _syncMedicationDocument(
+            doc: doc,
+            expectedUid: userId,
+          );
+          if (reminder != null) remindersToSchedule.add(reminder);
+        }
+
+        final localMedications = await _db.select(_db.medications).get();
+        _requireCurrentUser(userId);
+        for (final medication in localMedications) {
+          _requireCurrentUser(userId);
+          final id = medication.firestoreId.trim();
+          if (id.isEmpty ||
+              id == 'pending' ||
+              id == 'synced' ||
+              remoteMedicationIds.contains(medication.firestoreId) ||
+              protectedMedicationIds.contains(medication.firestoreId)) {
+            continue;
+          }
+          await (_db.delete(
+            _db.medications,
+          )..where((table) => table.id.equals(medication.id))).go();
+          _requireCurrentUser(userId);
+          remindersToCancel.add(id);
+        }
+      });
+
+      for (final id in remindersToCancel) {
+        if (!_isCurrentUser(userId)) return;
         try {
-          await _syncMedicationDocument(doc: doc);
-        } catch (e, stack) {
-          AppLogger.e('Erro ao sincronizar medicamento.', e, stack);
+          await _notifService.cancelNotification(
+            notificationIdForMedication(id),
+          );
+        } catch (_) {
+          AppLogger.w(
+            'Lembrete de medicamento removido não pôde ser cancelado.',
+          );
         }
       }
 
+      for (final reminder in remindersToSchedule) {
+        if (!_isCurrentUser(userId)) return;
+        try {
+          final scheduled = await _notifService.scheduleMedicationNotification(
+            id: notificationIdForMedication(reminder.id),
+            title: 'Hora do medicamento 💊',
+            body: 'Está na hora de tomar: ${reminder.name}',
+            scheduledDate: reminder.startDate,
+            repeatDaily: true,
+            preferenceKey: NotificationPreferenceKeys.medicationReminders,
+          );
+          if (!scheduled) {
+            AppLogger.w(
+              'Medicamento sincronizado sem lembrete local agendado.',
+            );
+          }
+        } catch (_) {
+          AppLogger.w('Medicamento sincronizado sem lembrete local agendado.');
+        }
+      }
+
+      _requireCurrentUser(userId);
       final healthSnapshot = await _firestore
           .collection('users')
           .doc(userId)
@@ -935,6 +1033,7 @@ class HealthRepository {
           .get();
 
       for (final doc in healthSnapshot.docs) {
+        if (!_isCurrentUser(userId)) return;
         try {
           await _syncHealthDocument(doc: doc);
         } catch (e, stack) {
@@ -948,34 +1047,32 @@ class HealthRepository {
       }
 
       AppLogger.i('SYNC Saúde: Concluído.');
+    } on _HealthSessionChanged {
+      return;
     } catch (e, stack) {
       AppLogger.e('SYNC Saúde: ERRO CRÍTICO.', e, stack);
     }
   }
 
-  Future _syncMedicationDocument({
+  Future<({String id, String name, DateTime startDate})?>
+  _syncMedicationDocument({
     required QueryDocumentSnapshot<Map<String, dynamic>> doc,
+    required String expectedUid,
   }) async {
     final data = doc.data();
 
     final name = InputSanitizer.sanitize(data['name']?.toString() ?? '').trim();
 
     if (name.isEmpty) {
-      AppLogger.w(
-        'Medicamento ${doc.id} ignorado: '
-        'nome inválido.',
-      );
-      return;
+      AppLogger.w('Medicamento remoto ignorado: nome inválido.');
+      return null;
     }
 
     final startDate = _timestampToDate(data['startDate']);
 
     if (startDate == null) {
-      AppLogger.w(
-        'Medicamento ${doc.id} ignorado: '
-        'data de início inválida.',
-      );
-      return;
+      AppLogger.w('Medicamento remoto ignorado: data de início inválida.');
+      return null;
     }
 
     int? durationDays;
@@ -995,9 +1092,10 @@ class HealthRepository {
     final existing = await (_db.select(
       _db.medications,
     )..where((table) => table.firestoreId.equals(doc.id))).getSingleOrNull();
+    _requireCurrentUser(expectedUid);
 
     if (existing != null) {
-      return;
+      return null;
     }
 
     await _db
@@ -1011,23 +1109,8 @@ class HealthRepository {
             endDate: Value(endDate),
           ),
         );
-
-    try {
-      final scheduled = await _notifService.scheduleMedicationNotification(
-        id: notificationIdForMedication(doc.id),
-        title: 'Hora do medicamento 💊',
-        body: 'Está na hora de tomar: $name',
-        scheduledDate: startDate,
-        repeatDaily: true,
-        preferenceKey: NotificationPreferenceKeys.medicationReminders,
-      );
-
-      if (!scheduled) {
-        AppLogger.w('Medicamento sincronizado sem lembrete local agendado.');
-      }
-    } catch (_) {
-      AppLogger.w('Medicamento sincronizado sem lembrete local agendado.');
-    }
+    _requireCurrentUser(expectedUid);
+    return (id: doc.id, name: name, startDate: startDate);
   }
 
   Future _syncHealthDocument({

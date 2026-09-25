@@ -36,8 +36,10 @@ class _Document extends Fake
 }
 
 class _Snapshot extends Fake implements QuerySnapshot<Map<String, dynamic>> {
+  _Snapshot(this.docs);
+
   @override
-  List<QueryDocumentSnapshot<Map<String, dynamic>>> get docs => [_Document()];
+  final List<QueryDocumentSnapshot<Map<String, dynamic>>> docs;
 }
 
 // Mutable fetch hook controls session changes and in-flight mutations in tests.
@@ -45,6 +47,8 @@ class _Snapshot extends Fake implements QuerySnapshot<Map<String, dynamic>> {
 class _Collection extends Fake
     implements CollectionReference<Map<String, dynamic>> {
   Future<void> Function()? beforeGet;
+  List<QueryDocumentSnapshot<Map<String, dynamic>>> remoteDocs = [_Document()];
+  bool failGet = false;
   @override
   DocumentReference<Map<String, dynamic>> doc([String? path]) {
     expect(path, 'user-a');
@@ -53,8 +57,12 @@ class _Collection extends Fake
 
   @override
   Future<QuerySnapshot<Map<String, dynamic>>> get([GetOptions? options]) async {
+    expect(options?.source, Source.server);
     await beforeGet?.call();
-    return _Snapshot();
+    if (failGet) {
+      throw FirebaseException(plugin: 'cloud_firestore', code: 'unavailable');
+    }
+    return _Snapshot(remoteDocs);
   }
 }
 
@@ -171,6 +179,132 @@ void main() {
     await seed();
     await repository.syncTasksFromFirebaseToLocal();
     expect((await db.select(db.taskTable).getSingle()).isCompleted, isTrue);
+  });
+
+  test('remote absence removes unprotected local task', () async {
+    await seed();
+    firestore.tasks.remoteDocs = [];
+
+    await repository.syncTasksFromFirebaseToLocal();
+
+    expect(await db.select(db.taskTable).get(), isEmpty);
+  });
+
+  test('rejected create absent remotely removes optimistic task', () async {
+    await seed();
+    firestore.tasks.remoteDocs = [];
+    final id = await enqueue('create');
+    await db.markSyncItemRejected(id, 'user-a', 'QUOTA_EXCEEDED');
+
+    await repository.syncTasksFromFirebaseToLocal();
+
+    expect(await db.select(db.taskTable).get(), isEmpty);
+  });
+
+  test('pending create absent remotely remains local', () async {
+    await seed();
+    firestore.tasks.remoteDocs = [];
+    await enqueue('create');
+
+    await repository.syncTasksFromFirebaseToLocal();
+
+    expect(await db.select(db.taskTable).get(), hasLength(1));
+  });
+
+  test('old succeeded create absent remotely is pruned', () async {
+    await seed();
+    firestore.tasks.remoteDocs = [];
+    final id = await enqueue(
+      'create',
+      createdAt: DateTime.utc(2026, 1, 1).millisecondsSinceEpoch,
+    );
+    await db.markSyncItemAsSucceeded(id, 'user-a');
+
+    await repository.syncTasksFromFirebaseToLocal();
+
+    expect(await db.select(db.taskTable).get(), isEmpty);
+  });
+
+  test('preexisting pending succeeds during GET and protects task', () async {
+    await seed();
+    firestore.tasks.remoteDocs = [];
+    final id = await enqueue(
+      'create',
+      createdAt: DateTime.utc(2026, 1, 1).millisecondsSinceEpoch,
+    );
+    firestore.tasks.beforeGet = () async {
+      await db.markSyncItemAsSucceeded(id, 'user-a');
+    };
+
+    await repository.syncTasksFromFirebaseToLocal();
+
+    expect(await db.select(db.taskTable).get(), hasLength(1));
+  });
+
+  test(
+    'preexisting pending rejected during GET does not protect task',
+    () async {
+      await seed();
+      firestore.tasks.remoteDocs = [];
+      final oldSucceeded = await enqueue(
+        'update',
+        createdAt: DateTime.utc(2025, 1, 1).millisecondsSinceEpoch,
+      );
+      await db.markSyncItemAsSucceeded(oldSucceeded, 'user-a');
+      final pending = await enqueue(
+        'create',
+        createdAt: DateTime.utc(2026, 1, 1).millisecondsSinceEpoch,
+      );
+      firestore.tasks.beforeGet = () async {
+        await db.markSyncItemRejected(pending, 'user-a', 'QUOTA_EXCEEDED');
+      };
+
+      await repository.syncTasksFromFirebaseToLocal();
+
+      expect(await db.select(db.taskTable).get(), isEmpty);
+    },
+  );
+
+  test('succeeded create during GET protects absent remote task', () async {
+    final started = Completer<void>();
+    final release = Completer<void>();
+    firestore.tasks.remoteDocs = [];
+    firestore.tasks.beforeGet = () {
+      started.complete();
+      return release.future;
+    };
+
+    final pull = repository.syncTasksFromFirebaseToLocal();
+    await started.future;
+    await seed();
+    final id = await enqueue('create');
+    await db.markSyncItemAsSucceeded(id, 'user-a');
+    release.complete();
+    await pull;
+
+    expect(await db.select(db.taskTable).get(), hasLength(1));
+  });
+
+  test('failed server fetch preserves local task', () async {
+    await seed();
+    firestore.tasks.remoteDocs = [];
+    firestore.tasks.failGet = true;
+
+    await repository.syncTasksFromFirebaseToLocal();
+
+    expect(await db.select(db.taskTable).get(), hasLength(1));
+  });
+
+  test('UID change during absent snapshot does not prune task', () async {
+    await seed();
+    firestore.tasks.remoteDocs = [];
+    firestore.tasks.beforeGet = () async {
+      auth.currentUser = _User('user-b');
+    };
+
+    await repository.syncTasksFromFirebaseToLocal();
+
+    expect(await db.select(db.taskTable).get(), hasLength(1));
   });
 
   for (final status in ['rejected', 'succeeded']) {

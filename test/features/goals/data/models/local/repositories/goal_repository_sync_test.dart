@@ -36,20 +36,18 @@ class _Document extends Fake
 }
 
 class _Snapshot extends Fake implements QuerySnapshot<Map<String, dynamic>> {
-  final Map<String, dynamic> values;
-
-  _Snapshot(this.values);
+  _Snapshot(this.docs);
 
   @override
-  List<QueryDocumentSnapshot<Map<String, dynamic>>> get docs => [
-    _Document(values),
-  ];
+  final List<QueryDocumentSnapshot<Map<String, dynamic>>> docs;
 }
 
 // ignore: must_be_immutable
 class _Collection extends Fake
     implements CollectionReference<Map<String, dynamic>> {
   Future<void> Function()? beforeGet;
+  bool remotePresent = true;
+  bool failGet = false;
   Map<String, dynamic> values = {
     'title': 'Remote',
     'period': 'DIÁRIA',
@@ -67,8 +65,12 @@ class _Collection extends Fake
 
   @override
   Future<QuerySnapshot<Map<String, dynamic>>> get([GetOptions? options]) async {
+    expect(options?.source, Source.server);
     await beforeGet?.call();
-    return _Snapshot(values);
+    if (failGet) {
+      throw FirebaseException(plugin: 'cloud_firestore', code: 'unavailable');
+    }
+    return _Snapshot(remotePresent ? [_Document(values)] : []);
   }
 }
 
@@ -462,6 +464,127 @@ void main() {
     await repository.syncGoalsFromFirebaseToLocal();
 
     expect((await db.select(db.goals).getSingle()).currentValue, 8);
+  });
+
+  test('remote absence removes unprotected local goal', () async {
+    await seed();
+    firestore.goals.remotePresent = false;
+
+    await repository.syncGoalsFromFirebaseToLocal();
+
+    expect(await db.select(db.goals).get(), isEmpty);
+  });
+
+  test('rejected create absent remotely removes optimistic goal', () async {
+    await seed();
+    firestore.goals.remotePresent = false;
+    final id = await enqueue('create');
+    await db.markSyncItemRejected(id, 'user-a', 'QUOTA_EXCEEDED');
+
+    await repository.syncGoalsFromFirebaseToLocal();
+
+    expect(await db.select(db.goals).get(), isEmpty);
+  });
+
+  test('pending create absent remotely preserves local goal', () async {
+    await seed();
+    firestore.goals.remotePresent = false;
+    await enqueue('create');
+
+    await repository.syncGoalsFromFirebaseToLocal();
+
+    expect(await db.select(db.goals).get(), hasLength(1));
+  });
+
+  test('old succeeded create absent remotely permits prune', () async {
+    await seed();
+    firestore.goals.remotePresent = false;
+    final id = await enqueue(
+      'create',
+      createdAt: DateTime.utc(2026, 1, 1).millisecondsSinceEpoch,
+    );
+    await db.markSyncItemAsSucceeded(id, 'user-a');
+
+    await repository.syncGoalsFromFirebaseToLocal();
+
+    expect(await db.select(db.goals).get(), isEmpty);
+  });
+
+  test('preexisting pending succeeds during GET and protects goal', () async {
+    await seed();
+    firestore.goals.remotePresent = false;
+    final id = await enqueue(
+      'create',
+      createdAt: DateTime.utc(2026, 1, 1).millisecondsSinceEpoch,
+    );
+    firestore.goals.beforeGet = () async {
+      await db.markSyncItemAsSucceeded(id, 'user-a');
+    };
+
+    await repository.syncGoalsFromFirebaseToLocal();
+
+    expect(await db.select(db.goals).get(), hasLength(1));
+  });
+
+  test(
+    'preexisting pending rejected during GET does not protect goal',
+    () async {
+      await seed();
+      firestore.goals.remotePresent = false;
+      final id = await enqueue(
+        'create',
+        createdAt: DateTime.utc(2026, 1, 1).millisecondsSinceEpoch,
+      );
+      firestore.goals.beforeGet = () async {
+        await db.markSyncItemRejected(id, 'user-a', 'QUOTA_EXCEEDED');
+      };
+
+      await repository.syncGoalsFromFirebaseToLocal();
+
+      expect(await db.select(db.goals).get(), isEmpty);
+    },
+  );
+
+  test('succeeded create during GET protects absent remote goal', () async {
+    final started = Completer<void>();
+    final release = Completer<void>();
+    firestore.goals.remotePresent = false;
+    firestore.goals.beforeGet = () {
+      started.complete();
+      return release.future;
+    };
+
+    final pull = repository.syncGoalsFromFirebaseToLocal();
+    await started.future;
+    await seed();
+    final id = await enqueue('create');
+    await db.markSyncItemAsSucceeded(id, 'user-a');
+    release.complete();
+    await pull;
+
+    expect(await db.select(db.goals).get(), hasLength(1));
+  });
+
+  test('failed server fetch preserves local goal', () async {
+    await seed();
+    firestore.goals.remotePresent = false;
+    firestore.goals.failGet = true;
+
+    await repository.syncGoalsFromFirebaseToLocal();
+
+    expect(await db.select(db.goals).get(), hasLength(1));
+  });
+
+  test('UID change during absent snapshot does not prune goal', () async {
+    await seed();
+    firestore.goals.remotePresent = false;
+    firestore.goals.beforeGet = () async {
+      auth.currentUser = _User('user-b');
+    };
+
+    await repository.syncGoalsFromFirebaseToLocal();
+
+    expect(await db.select(db.goals).get(), hasLength(1));
   });
 
   test('succeeded created during GET protects local state', () async {

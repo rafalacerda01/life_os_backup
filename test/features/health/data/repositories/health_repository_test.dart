@@ -66,6 +66,8 @@ class _RecordingCollectionReference extends Fake
   final DocumentReference<Map<String, dynamic>>? documentReference;
   final QuerySnapshot<Map<String, dynamic>>? snapshot;
   final String name;
+  Future<void> Function()? beforeGet;
+  bool failGet = false;
 
   _RecordingCollectionReference({
     required this.name,
@@ -75,6 +77,13 @@ class _RecordingCollectionReference extends Fake
 
   @override
   Future<QuerySnapshot<Map<String, dynamic>>> get([Object? options]) async {
+    if (name == 'medications') {
+      expect((options as GetOptions).source, Source.server);
+    }
+    await beforeGet?.call();
+    if (failGet) {
+      throw FirebaseException(plugin: 'cloud_firestore', code: 'unavailable');
+    }
     if (snapshot == null) {
       throw UnsupportedError('Unexpected get on collection $name');
     }
@@ -184,6 +193,7 @@ class _RecordingNotificationService extends NotificationService {
   int exactPermissionRequests = 0;
   int scheduleCalls = 0;
   final List<int> cancelledIds = [];
+  final Set<int> failCancelIds = {};
   String? lastPermissionPreferenceKey;
 
   @override
@@ -226,6 +236,9 @@ class _RecordingNotificationService extends NotificationService {
   @override
   Future<void> cancelNotification(int id) async {
     cancelledIds.add(id);
+    if (failCancelIds.contains(id)) {
+      throw StateError('technical-cancel-marker');
+    }
   }
 }
 
@@ -242,6 +255,7 @@ void main() {
   late FakeFirebaseAuth auth;
   late FakeFirebaseUser user;
   late _RecordingFirestore firestore;
+  late _RecordingCollectionReference medicationCollection;
   late FakeSyncManager syncManager;
   late _RecordingNotificationService notificationService;
   late HealthRepository repository;
@@ -256,6 +270,7 @@ void main() {
       name: 'medications',
       snapshot: _RecordingQuerySnapshot(medicationDocuments),
     );
+    medicationCollection = medications;
     final healthInfo = _RecordingCollectionReference(
       name: 'health_info',
       snapshot: _RecordingQuerySnapshot(healthDocuments),
@@ -295,6 +310,7 @@ void main() {
         const <QueryDocumentSnapshot<Map<String, dynamic>>>[],
       ),
     );
+    medicationCollection = emptyMedications;
     final emptyHealthInfo = _RecordingCollectionReference(
       name: 'health_info',
       snapshot: _RecordingQuerySnapshot(
@@ -351,6 +367,28 @@ void main() {
           ),
         );
   }
+
+  Future<void> seedMedication(String firestoreId) async {
+    await db
+        .into(db.medications)
+        .insert(
+          MedicationsCompanion.insert(
+            firestoreId: firestoreId,
+            name: 'Local',
+            startDate: DateTime(2026, 8, 25, 21),
+          ),
+        );
+  }
+
+  Future<int> enqueueMedication(String firestoreId, {int? createdAt}) =>
+      db.insertSyncItem(
+        ownerUid: 'user-123',
+        collection: 'medications',
+        docId: firestoreId,
+        operationType: 'create',
+        payloadJson: '{}',
+        createdAt: createdAt,
+      );
 
   test('updateMood salva localmente e enfileira o payload correto', () async {
     await repository.updateMood('Radiante');
@@ -1305,5 +1343,154 @@ void main() {
     expect(medication.startDate, DateTime(2026, 8, 25, 21));
     expect(notificationService.scheduleCalls, 1);
     expect(notificationService.exactPermissionRequests, 0);
+  });
+
+  test('medicamento remoto ausente é removido e lembrete cancelado', () async {
+    await seedMedication('med-1');
+
+    await repository.syncHealthFromFirebase();
+
+    expect(await db.select(db.medications).get(), isEmpty);
+    expect(notificationService.cancelledIds, [
+      notificationIdForMedication('med-1'),
+    ]);
+  });
+
+  test('create rejeitado e ausente remove medicamento e lembrete', () async {
+    await seedMedication('med-1');
+    final id = await enqueueMedication('med-1');
+    await db.markSyncItemRejected(id, 'user-123', 'QUOTA_EXCEEDED');
+
+    await repository.syncHealthFromFirebase();
+
+    expect(await db.select(db.medications).get(), isEmpty);
+    expect(notificationService.cancelledIds, [
+      notificationIdForMedication('med-1'),
+    ]);
+  });
+
+  test('create pendente preserva medicamento e lembrete', () async {
+    await seedMedication('med-1');
+    await enqueueMedication('med-1');
+
+    await repository.syncHealthFromFirebase();
+
+    expect(await db.select(db.medications).get(), hasLength(1));
+    expect(notificationService.cancelledIds, isEmpty);
+  });
+
+  test('sucesso criado durante GET protege medicamento ausente', () async {
+    final started = Completer<void>();
+    final release = Completer<void>();
+    medicationCollection.beforeGet = () {
+      started.complete();
+      return release.future;
+    };
+
+    final pull = repository.syncHealthFromFirebase();
+    await started.future;
+    await seedMedication('med-1');
+    final id = await enqueueMedication('med-1');
+    await db.markSyncItemAsSucceeded(id, 'user-123');
+    release.complete();
+    await pull;
+
+    expect(await db.select(db.medications).get(), hasLength(1));
+    expect(notificationService.cancelledIds, isEmpty);
+  });
+
+  test('sucesso antigo não protege medicamento remoto ausente', () async {
+    await seedMedication('med-1');
+    final id = await enqueueMedication(
+      'med-1',
+      createdAt: DateTime.utc(2026, 1, 1).millisecondsSinceEpoch,
+    );
+    await db.markSyncItemAsSucceeded(id, 'user-123');
+
+    await repository.syncHealthFromFirebase();
+
+    expect(await db.select(db.medications).get(), isEmpty);
+  });
+
+  test('pending antigo sucede durante GET e protege medicamento', () async {
+    await seedMedication('med-1');
+    final id = await enqueueMedication(
+      'med-1',
+      createdAt: DateTime.utc(2026, 1, 1).millisecondsSinceEpoch,
+    );
+    medicationCollection.beforeGet = () async {
+      await db.markSyncItemAsSucceeded(id, 'user-123');
+    };
+
+    await repository.syncHealthFromFirebase();
+
+    expect(await db.select(db.medications).get(), hasLength(1));
+    expect(notificationService.cancelledIds, isEmpty);
+  });
+
+  test(
+    'pending antigo rejeitado durante GET não protege medicamento',
+    () async {
+      await seedMedication('med-1');
+      final id = await enqueueMedication(
+        'med-1',
+        createdAt: DateTime.utc(2026, 1, 1).millisecondsSinceEpoch,
+      );
+      medicationCollection.beforeGet = () async {
+        await db.markSyncItemRejected(id, 'user-123', 'QUOTA_EXCEEDED');
+      };
+
+      await repository.syncHealthFromFirebase();
+
+      expect(await db.select(db.medications).get(), isEmpty);
+      expect(notificationService.cancelledIds, [
+        notificationIdForMedication('med-1'),
+      ]);
+    },
+  );
+
+  test('identidade local não remota não é podada', () async {
+    await seedMedication('pending');
+
+    await repository.syncHealthFromFirebase();
+
+    expect(await db.select(db.medications).get(), hasLength(1));
+    expect(notificationService.cancelledIds, isEmpty);
+  });
+
+  test('falha no cancelamento não interrompe outros medicamentos', () async {
+    await seedMedication('med-1');
+    await seedMedication('med-2');
+    notificationService.failCancelIds.add(notificationIdForMedication('med-1'));
+
+    await repository.syncHealthFromFirebase();
+
+    expect(await db.select(db.medications).get(), isEmpty);
+    expect(notificationService.cancelledIds, [
+      notificationIdForMedication('med-1'),
+      notificationIdForMedication('med-2'),
+    ]);
+  });
+
+  test('troca de UID durante fetch não remove medicamento', () async {
+    await seedMedication('med-1');
+    medicationCollection.beforeGet = () async {
+      auth.user = FakeFirebaseUser('user-b');
+    };
+
+    await repository.syncHealthFromFirebase();
+
+    expect(await db.select(db.medications).get(), hasLength(1));
+    expect(notificationService.cancelledIds, isEmpty);
+  });
+
+  test('falha no fetch server não remove medicamento', () async {
+    await seedMedication('med-1');
+    medicationCollection.failGet = true;
+
+    await repository.syncHealthFromFirebase();
+
+    expect(await db.select(db.medications).get(), hasLength(1));
+    expect(notificationService.cancelledIds, isEmpty);
   });
 }

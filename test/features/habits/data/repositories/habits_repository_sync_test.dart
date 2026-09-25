@@ -37,21 +37,18 @@ class _Document extends Fake
 }
 
 class _Snapshot extends Fake implements QuerySnapshot<Map<String, dynamic>> {
-  final String documentId;
-  final Map<String, dynamic> values;
-
-  _Snapshot(this.documentId, this.values);
+  _Snapshot(this.docs);
 
   @override
-  List<QueryDocumentSnapshot<Map<String, dynamic>>> get docs => [
-    _Document(documentId, values),
-  ];
+  final List<QueryDocumentSnapshot<Map<String, dynamic>>> docs;
 }
 
 // ignore: must_be_immutable
 class _Collection extends Fake
     implements CollectionReference<Map<String, dynamic>> {
   Future<void> Function()? beforeGet;
+  bool remotePresent = true;
+  bool failGet = false;
   String documentId = 'habit-1';
   Map<String, dynamic> values = {
     'title': 'Remote',
@@ -66,8 +63,12 @@ class _Collection extends Fake
 
   @override
   Future<QuerySnapshot<Map<String, dynamic>>> get([GetOptions? options]) async {
+    expect(options?.source, Source.server);
     await beforeGet?.call();
-    return _Snapshot(documentId, values);
+    if (failGet) {
+      throw FirebaseException(plugin: 'cloud_firestore', code: 'unavailable');
+    }
+    return _Snapshot(remotePresent ? [_Document(documentId, values)] : []);
   }
 }
 
@@ -156,6 +157,180 @@ void main() {
     await repository.syncHabitsFromFirebaseToLocal();
 
     expect(await localDates(), ['2026-09-06']);
+  });
+
+  test('remote absence removes unprotected local habit', () async {
+    await seed();
+    firestore.habits.remotePresent = false;
+
+    await repository.syncHabitsFromFirebaseToLocal();
+
+    expect(await db.select(db.habits).get(), isEmpty);
+  });
+
+  test('rejected create absent remotely removes optimistic habit', () async {
+    await seed();
+    firestore.habits.remotePresent = false;
+    final id = await enqueue(operationType: 'create');
+    await db.markSyncItemRejected(id, 'user-a', 'QUOTA_EXCEEDED');
+
+    await repository.syncHabitsFromFirebaseToLocal();
+
+    expect(await db.select(db.habits).get(), isEmpty);
+  });
+
+  test('pending create absent remotely preserves local habit', () async {
+    await seed();
+    firestore.habits.remotePresent = false;
+    await enqueue(operationType: 'create');
+
+    await repository.syncHabitsFromFirebaseToLocal();
+
+    expect(await db.select(db.habits).get(), hasLength(1));
+  });
+
+  test('pending batch_delete protects affected habit from prune', () async {
+    await seed();
+    firestore.habits.remotePresent = false;
+    await enqueue(collection: 'batch', operationType: 'batch_delete');
+
+    await repository.syncHabitsFromFirebaseToLocal();
+
+    expect(await db.select(db.habits).get(), hasLength(1));
+  });
+
+  test('old succeeded create absent remotely permits prune', () async {
+    await seed();
+    firestore.habits.remotePresent = false;
+    final id = await enqueue(
+      operationType: 'create',
+      createdAt: DateTime.utc(2026, 1, 1).millisecondsSinceEpoch,
+    );
+    await db.markSyncItemAsSucceeded(id, 'user-a');
+
+    await repository.syncHabitsFromFirebaseToLocal();
+
+    expect(await db.select(db.habits).get(), isEmpty);
+  });
+
+  test('preexisting pending succeeds during GET and protects habit', () async {
+    await seed();
+    firestore.habits.remotePresent = false;
+    final id = await enqueue(
+      operationType: 'create',
+      createdAt: DateTime.utc(2026, 1, 1).millisecondsSinceEpoch,
+    );
+    firestore.habits.beforeGet = () async {
+      await db.markSyncItemAsSucceeded(id, 'user-a');
+    };
+
+    await repository.syncHabitsFromFirebaseToLocal();
+
+    expect(await db.select(db.habits).get(), hasLength(1));
+  });
+
+  test(
+    'preexisting pending rejected during GET does not protect habit',
+    () async {
+      await seed();
+      firestore.habits.remotePresent = false;
+      final id = await enqueue(
+        operationType: 'create',
+        createdAt: DateTime.utc(2026, 1, 1).millisecondsSinceEpoch,
+      );
+      firestore.habits.beforeGet = () async {
+        await db.markSyncItemRejected(id, 'user-a', 'QUOTA_EXCEEDED');
+      };
+
+      await repository.syncHabitsFromFirebaseToLocal();
+
+      expect(await db.select(db.habits).get(), isEmpty);
+    },
+  );
+
+  test(
+    'preexisting batch_delete succeeds during GET and protects habit',
+    () async {
+      await seed();
+      firestore.habits.remotePresent = false;
+      final id = await enqueue(
+        collection: 'batch',
+        operationType: 'batch_delete',
+        createdAt: DateTime.utc(2026, 1, 1).millisecondsSinceEpoch,
+      );
+      firestore.habits.beforeGet = () async {
+        await db.markSyncItemAsSucceeded(id, 'user-a');
+      };
+
+      await repository.syncHabitsFromFirebaseToLocal();
+
+      expect(await db.select(db.habits).get(), hasLength(1));
+    },
+  );
+
+  test('succeeded create during GET protects absent remote habit', () async {
+    final started = Completer<void>();
+    final release = Completer<void>();
+    firestore.habits.remotePresent = false;
+    firestore.habits.beforeGet = () {
+      started.complete();
+      return release.future;
+    };
+
+    final pull = repository.syncHabitsFromFirebaseToLocal();
+    await started.future;
+    await seed();
+    final id = await enqueue(operationType: 'create');
+    await db.markSyncItemAsSucceeded(id, 'user-a');
+    release.complete();
+    await pull;
+
+    expect(await db.select(db.habits).get(), hasLength(1));
+  });
+
+  test('succeeded batch_delete during GET protects affected habit', () async {
+    final started = Completer<void>();
+    final release = Completer<void>();
+    firestore.habits.remotePresent = false;
+    firestore.habits.beforeGet = () {
+      started.complete();
+      return release.future;
+    };
+
+    final pull = repository.syncHabitsFromFirebaseToLocal();
+    await started.future;
+    await seed();
+    final id = await enqueue(
+      collection: 'batch',
+      operationType: 'batch_delete',
+    );
+    await db.markSyncItemAsSucceeded(id, 'user-a');
+    release.complete();
+    await pull;
+
+    expect(await db.select(db.habits).get(), hasLength(1));
+  });
+
+  test('failed server fetch does not prune habit', () async {
+    await seed();
+    firestore.habits.remotePresent = false;
+    firestore.habits.failGet = true;
+
+    await repository.syncHabitsFromFirebaseToLocal();
+
+    expect(await db.select(db.habits).get(), hasLength(1));
+  });
+
+  test('UID change during absent snapshot does not prune habit', () async {
+    await seed();
+    firestore.habits.remotePresent = false;
+    firestore.habits.beforeGet = () async {
+      auth.currentUser = _User('user-b');
+    };
+
+    await repository.syncHabitsFromFirebaseToLocal();
+
+    expect(await db.select(db.habits).get(), hasLength(1));
   });
 
   test('pending update protects local completedDates', () async {
