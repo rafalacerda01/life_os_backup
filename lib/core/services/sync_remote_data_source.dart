@@ -954,9 +954,16 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
       }
 
       if (response.statusCode == 404) {
+        final backendCode = _extractBackendCode(response.body);
+        if (_isMissingSyncResourceCode(backendCode)) {
+          return SyncOperationResult.invalidPayload(
+            message: _extractBackendMessage(response.body),
+          );
+        }
+
         return SyncOperationResult.retryable(
           message: _extractBackendMessage(response.body),
-          code: _extractBackendCode(response.body) ?? 'BACKEND_404',
+          code: backendCode ?? 'BACKEND_404',
         );
       }
 
@@ -1062,6 +1069,10 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
 
   bool _isAppCheckCode(String? code) {
     return code == 'APP_CHECK_REQUIRED' || code == 'APP_CHECK_INVALID';
+  }
+
+  bool _isMissingSyncResourceCode(String? code) {
+    return code == 'TASK_NOT_FOUND' || code == 'HABIT_NOT_FOUND';
   }
 
   bool _isQuotaExceededCode(String? code) {

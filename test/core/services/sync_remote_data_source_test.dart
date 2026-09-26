@@ -1390,6 +1390,73 @@ void main() {
     });
   });
 
+  for (final entry in <String, SyncQueueTableData>{
+    'TASK_NOT_FOUND': createTaskUpdateItem(),
+    'HABIT_NOT_FOUND': createHabitUpdateItem(),
+  }.entries) {
+    test('HTTP 404 ${entry.key} é falha permanente', () async {
+      final client = _RecordingHttpClient(
+        (_) async => _jsonResponse(
+          404,
+          jsonEncode({'code': entry.key, 'error': 'Recurso não encontrado.'}),
+        ),
+      );
+      final source = serverDataSource(
+        auth: _FakeFirebaseAuth(_FakeFirebaseUser('user-123')),
+        clientFactory: () => client,
+        idTokenProvider: (_, _) async => 'token',
+        appCheckTokenProvider: _validAppCheckToken,
+      );
+
+      final result = await source.process('user-123', entry.value);
+
+      expect(result.isPermanentFailure, isTrue);
+      expect(result.shouldRetry, isFalse);
+      expect(result.code, 'INVALID_PAYLOAD');
+      expect(client.wasClosed, isTrue);
+    });
+  }
+
+  for (final code in ['USER_NOT_FOUND', 'UNKNOWN_NOT_FOUND']) {
+    test('HTTP 404 $code permanece retryable', () async {
+      final client = _RecordingHttpClient(
+        (_) async => _jsonResponse(
+          404,
+          jsonEncode({'code': code, 'error': 'Recurso não encontrado.'}),
+        ),
+      );
+      final source = serverDataSource(
+        auth: _FakeFirebaseAuth(_FakeFirebaseUser('user-123')),
+        clientFactory: () => client,
+        idTokenProvider: (_, _) async => 'token',
+        appCheckTokenProvider: _validAppCheckToken,
+      );
+
+      final result = await source.process('user-123', createTaskUpdateItem());
+
+      expect(result.shouldRetry, isTrue);
+      expect(result.isPermanentFailure, isFalse);
+      expect(result.code, code);
+      expect(client.wasClosed, isTrue);
+    });
+  }
+
+  test('HTTP 404 sem código permanece retryable', () async {
+    final client = _RecordingHttpClient((_) async => _jsonResponse(404));
+    final source = serverDataSource(
+      auth: _FakeFirebaseAuth(_FakeFirebaseUser('user-123')),
+      clientFactory: () => client,
+      idTokenProvider: (_, _) async => 'token',
+      appCheckTokenProvider: _validAppCheckToken,
+    );
+
+    final result = await source.process('user-123', createTaskUpdateItem());
+
+    expect(result.shouldRetry, isTrue);
+    expect(result.code, 'BACKEND_404');
+    expect(client.wasClosed, isTrue);
+  });
+
   test('Task update preserva false no payload HTTP', () async {
     late Map<String, dynamic> payload;
     final client = _RecordingHttpClient((request) async {

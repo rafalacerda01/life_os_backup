@@ -331,6 +331,33 @@ void main() {
       ]);
     });
 
+    test('invalidPayload rejeita item e continua a FIFO', () async {
+      final store = FakeSyncQueueStore([
+        createSyncItem(id: 1),
+        createSyncItem(id: 2, docId: 'habit-2'),
+      ]);
+      final remote = FakeSyncRemoteDataSource(
+        (uid, item) async => item.id == 1
+            ? const SyncOperationResult.invalidPayload()
+            : const SyncOperationResult.success(),
+      );
+      final manager = SyncManager(
+        queueStore: store,
+        remoteDataSource: remote,
+        currentUserId: () => 'user-123',
+      );
+
+      expect(await manager.processPendingItems(), isTrue);
+      expect(store.rejected, [1]);
+      expect(store.markedAsSynced, [2]);
+      expect(store.retried, isEmpty);
+      expect(remote.processedItems, [
+        'user-123:habits:habit-1:create',
+        'user-123:habits:habit-2:create',
+      ]);
+      manager.dispose();
+    });
+
     test('não executa duas sincronizações concorrentes', () async {
       final item = createSyncItem();
 
