@@ -317,6 +317,15 @@ class FocusNotifier extends Notifier<FocusState> {
           await ref
               .read(tasksRepositoryProvider)
               .toggleTaskStatus(targetIdStr, false);
+          unawaited(
+            ref.read(syncManagerProvider).processPendingItems().catchError((
+              Object _,
+              StackTrace _,
+            ) {
+              AppLogger.w('Não foi possível enviar a tarefa do Focus agora.');
+              return false;
+            }),
+          );
         }
         // 3. Atualiza Matéria/Estudo se for do tipo SUBJECT
         else if (targetType == FocusTargetType.subject) {

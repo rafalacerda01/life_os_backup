@@ -2,6 +2,8 @@ import 'dart:async';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:life_os/core/services/sync_manager.dart';
+import 'package:life_os/core/services/sync_manager_provider.dart';
 import 'package:life_os/features/focus/data/remote/focus_remote_data_source.dart';
 import 'package:life_os/features/focus/data/repositories/focus_repository.dart';
 import 'package:life_os/features/focus/presentation/providers/providers/focus_provider.dart';
@@ -50,12 +52,28 @@ class _FakeTasksRepository implements TasksRepository {
   int toggleCalls = 0;
   String? lastTaskId;
   bool? lastCurrentStatus;
+  Future<void> Function()? toggleOperation;
 
   @override
   Future<void> toggleTaskStatus(String taskId, bool currentStatus) async {
     toggleCalls++;
     lastTaskId = taskId;
     lastCurrentStatus = currentStatus;
+    await toggleOperation?.call();
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+class _RecordingSyncManager implements SyncManager {
+  int processCalls = 0;
+  Future<bool> Function()? processOperation;
+
+  @override
+  Future<bool> processPendingItems() {
+    processCalls++;
+    return processOperation?.call() ?? Future.value(true);
   }
 
   @override
@@ -205,6 +223,7 @@ void main() {
   late _FakeTasksRepository tasksRepository;
   late _FakeStudyRepository studyRepository;
   late _FakeFocusRemoteDataSource remoteDataSource;
+  late _RecordingSyncManager syncManager;
   late RecordingAnalyticsPlatform analytics;
   late ProviderContainer container;
   late _ControlledPeriodicTimer timer;
@@ -214,11 +233,13 @@ void main() {
     tasksRepository = _FakeTasksRepository();
     studyRepository = _FakeStudyRepository();
     remoteDataSource = _FakeFocusRemoteDataSource();
+    syncManager = _RecordingSyncManager();
     analytics = RecordingAnalyticsPlatform();
 
     container = ProviderContainer(
       overrides: [
         focusRepositoryProvider.overrideWithValue(focusRepository),
+        syncManagerProvider.overrideWithValue(syncManager),
         tasksRepositoryProvider.overrideWithValue(tasksRepository),
         studyRepositoryProvider.overrideWithValue(studyRepository),
         focusRemoteDataSourceProvider.overrideWithValue(remoteDataSource),
@@ -352,6 +373,77 @@ void main() {
     ]);
   });
 
+  for (final firstSyncPending in [true, false]) {
+    test(
+      'TASK dispatches after enqueue while first sync is '
+      '${firstSyncPending ? "pending" : "completed"} without delaying BREAK',
+      () async {
+        final events = <String>[];
+        final upload = Completer<bool>();
+        final toggleStarted = Completer<void>();
+        final releaseToggle = Completer<void>();
+        syncManager.processOperation = () {
+          events.add('dispatch');
+          if (!firstSyncPending && syncManager.processCalls == 1) {
+            return Future.value(true);
+          }
+          return upload.future;
+        };
+        focusRepository.saveOperation = () async {
+          events.add('save');
+          unawaited(syncManager.processPendingItems());
+        };
+        tasksRepository.toggleOperation = () async {
+          toggleStarted.complete();
+          await releaseToggle.future;
+          events.add('task-enqueued');
+        };
+        final notifier = container.read(focusProvider.notifier);
+        configureTarget(notifier, FocusTargetType.task);
+        await startAndFlush(notifier);
+
+        finishCurrentTimer(60);
+        await toggleStarted.future;
+        expect(syncManager.processCalls, 1);
+        expect(events, ['save', 'dispatch']);
+
+        releaseToggle.complete();
+        await pumpEventQueue();
+
+        expect(events, ['save', 'dispatch', 'task-enqueued', 'dispatch']);
+        expect(syncManager.processCalls, 2);
+        expect(focusRepository.saveCalls, 1);
+        expect(tasksRepository.toggleCalls, 1);
+        expect(upload.isCompleted, isFalse);
+        expect(container.read(focusProvider).isBreak, isTrue);
+
+        upload.complete(true);
+        await pumpEventQueue();
+        expect(syncManager.processCalls, 2);
+      },
+    );
+  }
+
+  test(
+    'TASK sync dispatch failure does not prevent local completion',
+    () async {
+      syncManager.processOperation = () =>
+          Future<bool>.error(StateError('technical-dispatch-marker'));
+      final notifier = container.read(focusProvider.notifier);
+      configureTarget(notifier, FocusTargetType.task);
+      await startAndFlush(notifier);
+
+      finishCurrentTimer(60);
+      await pumpEventQueue();
+
+      expect(syncManager.processCalls, 1);
+      expect(focusRepository.saveCalls, 1);
+      expect(tasksRepository.toggleCalls, 1);
+      expect(container.read(focusProvider).isBreak, isTrue);
+      expect(container.read(focusProvider).isRunning, isFalse);
+    },
+  );
+
   test('skipped timer ticks reconcile elapsed time and finish once', () async {
     final notifier = container.read(focusProvider.notifier);
     configureTarget(notifier, FocusTargetType.task);
@@ -396,6 +488,7 @@ void main() {
     expect(studyRepository.lastSubjectId, 'subject-1');
     expect(studyRepository.lastElapsedSeconds, 60);
     expect(tasksRepository.toggleCalls, 0);
+    expect(syncManager.processCalls, 0);
     expect(container.read(focusProvider).isBreak, isTrue);
     expect(analytics.events, <RecordedAnalyticsEvent>[
       const RecordedAnalyticsEvent('focus_completed', {'duration_minutes': 1}),
@@ -662,6 +755,7 @@ void main() {
     expect(remoteDataSource.cancelCalls, 0);
     expect(analytics.events, isEmpty);
     expect(focusRepository.saveCalls, 0);
+    expect(syncManager.processCalls, 0);
     expect(container.read(focusProvider).isBreak, isFalse);
   });
 
