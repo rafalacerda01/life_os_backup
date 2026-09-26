@@ -1,6 +1,8 @@
 import 'package:life_os/core/database/app_database.dart';
 
 abstract interface class SyncQueueStore {
+  Future<int> cleanupTerminalSyncItems(String ownerUid, int olderThanEpochMs);
+
   Future<List<SyncQueueTableData>> getPendingSyncItems(String ownerUid);
 
   Future<int> markSyncItemAsSucceeded(int id, String ownerUid);
@@ -18,6 +20,11 @@ class AppDatabaseSyncQueueStore implements SyncQueueStore {
   final AppDatabase _db;
 
   const AppDatabaseSyncQueueStore(this._db);
+
+  @override
+  Future<int> cleanupTerminalSyncItems(String ownerUid, int olderThanEpochMs) {
+    return _db.cleanupTerminalSyncItems(ownerUid, olderThanEpochMs);
+  }
 
   @override
   Future<List<SyncQueueTableData>> getPendingSyncItems(String ownerUid) async {

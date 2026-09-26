@@ -136,6 +136,12 @@ class _RecordingFirestore extends Fake implements FirebaseFirestore {
 
 class _NoopQueueStore implements SyncQueueStore {
   @override
+  Future<int> cleanupTerminalSyncItems(
+    String ownerUid,
+    int olderThanEpochMs,
+  ) async => 0;
+
+  @override
   Future<List<SyncQueueTableData>> getPendingSyncItems(String ownerUid) async =>
       const [];
 

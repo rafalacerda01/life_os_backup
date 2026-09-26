@@ -349,12 +349,21 @@ class AppDatabase extends _$AppDatabase {
     return (delete(syncQueueTable)..where((table) => table.id.equals(id))).go();
   }
 
-  /// Remove todas as operações já sincronizadas.
-  ///
-  /// Mantém operações pendentes intactas.
-  Future<int> cleanupSyncedSyncItems() {
+  /// Remove somente terminais antigos do owner, preservando mutações recentes.
+  Future<int> cleanupTerminalSyncItems(String ownerUid, int olderThanEpochMs) {
+    final cleanOwnerUid = ownerUid.trim();
+    if (cleanOwnerUid.isEmpty) return Future.value(0);
+
     return (delete(syncQueueTable)..where(
-          (table) => table.status.equals(SyncQueuePersistenceStatus.succeeded),
+          (table) =>
+              table.ownerUid.equals(cleanOwnerUid) &
+              table.status.isIn([
+                SyncQueuePersistenceStatus.succeeded,
+                SyncQueuePersistenceStatus.rejected,
+              ]) &
+              (table.lastAttemptAt.isSmallerThanValue(olderThanEpochMs) |
+                  (table.lastAttemptAt.isNull() &
+                      table.createdAt.isSmallerThanValue(olderThanEpochMs))),
         ))
         .go();
   }

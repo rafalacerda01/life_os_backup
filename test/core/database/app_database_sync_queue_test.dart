@@ -1,6 +1,8 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:drift/drift.dart' show Value;
 import 'package:drift/native.dart';
 import 'package:life_os/core/database/app_database.dart';
+import 'package:life_os/core/services/sync_queue_store.dart';
 import 'dart:convert';
 
 void main() {
@@ -13,6 +15,92 @@ void main() {
   tearDown(() async {
     await db.closeDatabase();
   });
+
+  final cutoff = DateTime.utc(2026, 9, 19).millisecondsSinceEpoch;
+  final old = cutoff - 1;
+  final recent = cutoff + 1;
+  for (final (name, status, owner, created, attempted, removed)
+      in <(String, String, String, int, int?, bool)>[
+        ('old succeeded', 'succeeded', 'user-a', old, old, true),
+        ('old rejected', 'rejected', 'user-a', old, old, true),
+        ('old pending', 'pending', 'user-a', old, old, false),
+        ('recent succeeded', 'succeeded', 'user-a', recent, recent, false),
+        ('recent rejected', 'rejected', 'user-a', recent, recent, false),
+        ('other owner succeeded', 'succeeded', 'user-b', old, old, false),
+        ('other owner rejected', 'rejected', 'user-b', old, old, false),
+        (
+          'recent attempt overrides old creation',
+          'succeeded',
+          'user-a',
+          old,
+          recent,
+          false,
+        ),
+        (
+          'old attempt overrides recent creation',
+          'rejected',
+          'user-a',
+          recent,
+          old,
+          true,
+        ),
+        ('legacy old succeeded', 'succeeded', 'user-a', old, null, true),
+        ('legacy old rejected', 'rejected', 'user-a', old, null, true),
+        ('legacy recent terminal', 'succeeded', 'user-a', recent, null, false),
+        ('cutoff boundary remains', 'succeeded', 'user-a', old, cutoff, false),
+      ]) {
+    test('terminal retention: $name', () async {
+      final id = await db
+          .into(db.syncQueueTable)
+          .insert(
+            SyncQueueTableCompanion.insert(
+              ownerUid: Value(owner),
+              collection: 'tasks',
+              docId: 'task-1',
+              operationType: 'update',
+              payloadJson: '{}',
+              createdAt: created,
+              status: Value(status),
+              lastAttemptAt: Value(attempted),
+            ),
+          );
+      final before = await db.getSyncItemById(id);
+
+      final count = await AppDatabaseSyncQueueStore(
+        db,
+      ).cleanupTerminalSyncItems(' user-a ', cutoff);
+
+      expect(count, removed ? 1 : 0);
+      expect(await db.getSyncItemById(id), removed ? isNull : equals(before));
+    });
+  }
+
+  test(
+    'terminal retention rejects empty owner without deleting rows',
+    () async {
+      final id = await db
+          .into(db.syncQueueTable)
+          .insert(
+            SyncQueueTableCompanion.insert(
+              ownerUid: const Value('user-a'),
+              collection: 'tasks',
+              docId: 'task-1',
+              operationType: 'update',
+              payloadJson: '{}',
+              createdAt: old,
+              status: const Value(SyncQueuePersistenceStatus.rejected),
+            ),
+          );
+
+      expect(
+        await AppDatabaseSyncQueueStore(
+          db,
+        ).cleanupTerminalSyncItems('   ', cutoff),
+        0,
+      );
+      expect(await db.getSyncItemById(id), isNotNull);
+    },
+  );
 
   test(
     'transactionWithSync salva dado local e operação na fila atomicamente',

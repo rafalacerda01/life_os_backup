@@ -14,11 +14,28 @@ class FakeSyncQueueStore implements SyncQueueStore {
   final List<int> markedAsSynced = [];
   final List<int> rejected = [];
   final List<int> retried = [];
+  final List<(String, int)> cleanupRequests = [];
+  final List<String> events = [];
+  bool cleanupFails = false;
+  Future<void> Function()? cleanupOperation;
 
   FakeSyncQueueStore(this.items);
 
   @override
+  Future<int> cleanupTerminalSyncItems(
+    String ownerUid,
+    int olderThanEpochMs,
+  ) async {
+    cleanupRequests.add((ownerUid, olderThanEpochMs));
+    events.add('cleanup:$ownerUid');
+    await cleanupOperation?.call();
+    if (cleanupFails) throw StateError('technical-cleanup-marker');
+    return 0;
+  }
+
+  @override
   Future<List<SyncQueueTableData>> getPendingSyncItems(String ownerUid) async {
+    events.add('read:$ownerUid');
     return List.unmodifiable(
       items.where(
         (item) =>
@@ -142,6 +159,92 @@ class FakeHealthMergeRemoteDataSource implements SyncRemoteDataSource {
 
 void main() {
   group('SyncManager', () {
+    test(
+      'cleans terminals once for current UID with seven-day cutoff before FIFO',
+      () async {
+        final store = FakeSyncQueueStore([]);
+        final remote = FakeSyncRemoteDataSource(
+          (_, _) async => const SyncOperationResult.success(),
+        );
+        final manager = SyncManager(
+          queueStore: store,
+          remoteDataSource: remote,
+          currentUserId: () => ' user-a ',
+        );
+        addTearDown(manager.dispose);
+        final before = DateTime.now()
+            .subtract(const Duration(days: 7))
+            .millisecondsSinceEpoch;
+
+        expect(await manager.processPendingItems(), isTrue);
+
+        final after = DateTime.now()
+            .subtract(const Duration(days: 7))
+            .millisecondsSinceEpoch;
+        expect(store.cleanupRequests, hasLength(1));
+        expect(store.cleanupRequests.single.$1, 'user-a');
+        expect(
+          store.cleanupRequests.single.$2,
+          inInclusiveRange(before, after),
+        );
+        expect(store.events, ['cleanup:user-a', 'read:user-a']);
+      },
+    );
+
+    test('cleanup failure does not block success or drain', () async {
+      final store = FakeSyncQueueStore([createSyncItem()])..cleanupFails = true;
+      final remote = FakeSyncRemoteDataSource(
+        (_, _) async => const SyncOperationResult.success(),
+      );
+      final manager = SyncManager(
+        queueStore: store,
+        remoteDataSource: remote,
+        currentUserId: () => 'user-123',
+      );
+      addTearDown(manager.dispose);
+
+      expect(await manager.processPendingItems(), isTrue);
+      expect(store.markedAsSynced, [1]);
+      expect(store.retried, isEmpty);
+      expect(store.cleanupRequests, hasLength(1));
+      expect(store.events, ['cleanup:user-123', 'read:user-123']);
+      expect(remote.processedItems, hasLength(1));
+    });
+
+    test(
+      'UID change during cleanup does not clean or process new session',
+      () async {
+        var currentUid = 'user-a';
+        final started = Completer<void>();
+        final release = Completer<void>();
+        final store = FakeSyncQueueStore([createSyncItem(ownerUid: 'user-a')]);
+        store.cleanupOperation = () async {
+          started.complete();
+          await release.future;
+        };
+        final remote = FakeSyncRemoteDataSource(
+          (_, _) async => const SyncOperationResult.success(),
+        );
+        final manager = SyncManager(
+          queueStore: store,
+          remoteDataSource: remote,
+          currentUserId: () => currentUid,
+        );
+        addTearDown(manager.dispose);
+
+        final processing = manager.processPendingItems();
+        await started.future;
+        currentUid = 'user-b';
+        release.complete();
+
+        expect(await processing, isFalse);
+        expect(store.cleanupRequests.map((request) => request.$1), ['user-a']);
+        expect(store.events, ['cleanup:user-a']);
+        expect(remote.processedItems, isEmpty);
+        expect(store.markedAsSynced, isEmpty);
+      },
+    );
+
     test('processa operação com sucesso e marca como sincronizada', () async {
       final item = createSyncItem();
 
@@ -183,6 +286,7 @@ void main() {
 
       expect(store.markedAsSynced, isEmpty);
       expect(remote.processedItems.length, 1);
+      expect(store.cleanupRequests.single.$1, 'user-123');
       manager.dispose();
     });
 
@@ -205,6 +309,7 @@ void main() {
 
       expect(remote.processedItems, isEmpty);
       expect(store.markedAsSynced, isEmpty);
+      expect(store.cleanupRequests, isEmpty);
     });
 
     test('não processa item pertencente a outro UID', () async {
@@ -224,6 +329,7 @@ void main() {
       expect(remote.processedItems, isEmpty);
       expect(store.markedAsSynced, isEmpty);
       expect(store.rejected, isEmpty);
+      expect(store.cleanupRequests.map((request) => request.$1), ['user-b']);
     });
 
     test('não processa item legado sem ownership', () async {

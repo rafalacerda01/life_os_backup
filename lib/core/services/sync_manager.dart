@@ -8,6 +8,8 @@ import 'sync_queue_store.dart';
 import 'sync_remote_data_source.dart';
 
 class SyncManager {
+  static const _terminalRetention = Duration(days: 7);
+
   static const _retryDelays = [
     Duration(seconds: 5),
     Duration(seconds: 15),
@@ -72,6 +74,20 @@ class SyncManager {
     }
 
     try {
+      try {
+        await _queueStore.cleanupTerminalSyncItems(
+          initialUid,
+          DateTime.now().subtract(_terminalRetention).millisecondsSinceEpoch,
+        );
+      } catch (_) {
+        AppLogger.w('Não foi possível concluir a manutenção da fila de sync.');
+      }
+
+      if (_currentUserId()?.trim() != initialUid) {
+        _resetRetry();
+        return false;
+      }
+
       do {
         _processAgain = false;
         final pendingItems = await _queueStore.getPendingSyncItems(initialUid);
