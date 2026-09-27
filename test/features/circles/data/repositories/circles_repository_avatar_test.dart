@@ -238,4 +238,54 @@ void main() {
     expect(await _createdMemberPhoto(url), url);
     expect(await _readMemberPhoto(url), url);
   });
+
+  test(
+    'anonymized challenge author preserves challenge and member progress',
+    () async {
+      final timestamp = Timestamp.fromDate(DateTime.utc(2026, 1, 1));
+      final firestore = _Firestore({
+        'circles/circle-1': {
+          'name': 'Circle',
+          'description': 'Shared circle',
+          'adminId': 'user-a',
+          'memberCount': 1,
+          'memberLimit': 3,
+          'schemaVersion': 2,
+        },
+        'circles/circle-1/members/user-a': {
+          'role': 'admin',
+          'displayNameSnapshot': 'User A',
+          'photoUrlSnapshot': null,
+          'joinedAt': timestamp,
+        },
+        'circles/circle-1/challenges/shared': {
+          'schemaVersion': 2,
+          'type': 'FOCUS_MINUTES',
+          'title': 'Shared challenge',
+          'targetValue': 100,
+          'startAt': timestamp,
+          'endAt': timestamp,
+          'createdBy': '',
+          'createdAt': timestamp,
+          'updatedAt': timestamp,
+        },
+        'circles/circle-1/challenges/shared/progress/user-a': {
+          'uid': 'user-a',
+          'value': 7,
+          'updatedAt': timestamp,
+          'lastEventAt': timestamp,
+        },
+      });
+      final repository = CirclesRepository(firestore, _Auth(), _Gateway());
+
+      final circle = await repository.getCircleStream('circle-1').first;
+
+      final challenge = circle!.challenges.single;
+      expect(challenge.createdBy, '');
+      expect(challenge.title, 'Shared challenge');
+      expect(challenge.targetValue, 100);
+      expect(challenge.progressFor('user-a')!.value, 7);
+      expect(circle.rankingFor(challenge).single.value, 7);
+    },
+  );
 }

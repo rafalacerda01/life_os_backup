@@ -2,12 +2,10 @@ const functions = require("firebase-functions/v1");
 const admin = require("firebase-admin");
 const {createHash} = require("node:crypto");
 const {Timestamp} = require("firebase-admin/firestore");
+const circleCleanup = require("./circle_cleanup");
 
 const CIRCLE_SCHEMA_VERSION = 2;
 const MAX_CIRCLE_MEMBERS = 30;
-const MAX_CIRCLE_CHALLENGES_TO_SCAN = 240;
-const PROCESSED_EVENT_DELETE_PAGE_SIZE = 200;
-const MAX_PROCESSED_EVENTS_PER_CHALLENGE = 20000;
 const SERVER_DELETING = "SERVER_DELETING";
 const CIRCLE_DELETION_COLLECTION = "circle_deletions";
 const AUTH_DELETE_ORPHAN_VERSION = 1;
@@ -219,22 +217,6 @@ function validateMembers(snapshot, adminId, requireAdmin) {
 }
 
 /**
- * Lista challenges raiz dentro do Circle ativo.
- * @param {Object} circleRef Referencia do Circle.
- * @return {Promise<Array<Object>>} Referencias limitadas de challenges.
- */
-async function listChallengeRefs(circleRef) {
-  const snapshot = await circleRef
-      .collection("challenges")
-      .limit(MAX_CIRCLE_CHALLENGES_TO_SCAN + 1)
-      .get();
-  if (snapshot.docs.length > MAX_CIRCLE_CHALLENGES_TO_SCAN) {
-    throw new Error("CIRCLE_CHALLENGE_LIMIT_EXCEEDED");
-  }
-  return snapshot.docs.map((entry) => entry.ref);
-}
-
-/**
  * Executa deletes em um batch pequeno.
  * @param {Object} db Firestore Admin.
  * @param {Array<Object>} refs Referencias a apagar.
@@ -245,45 +227,6 @@ async function deleteRefs(db, refs) {
   const batch = db.batch();
   for (const ref of refs) batch.delete(ref);
   await batch.commit();
-}
-
-/**
- * Remove dados privados de um membro em um challenge.
- * @param {Object} db Firestore Admin.
- * @param {string} uid UID excluido.
- * @param {Object} challengeRef Referencia do challenge.
- * @return {Promise<void>} Conclusao da limpeza.
- */
-async function cleanupChallenge(db, uid, challengeRef) {
-  await deleteRefs(db, [challengeRef.collection("progress").doc(uid)]);
-
-  const processedEvents = challengeRef.collection("processed_events");
-  let deletedEvents = 0;
-  for (;;) {
-    const snapshot = await processedEvents
-        .where("uid", "==", uid)
-        .limit(PROCESSED_EVENT_DELETE_PAGE_SIZE)
-        .get();
-    if (snapshot.docs.length === 0) return;
-    deletedEvents += snapshot.docs.length;
-    if (deletedEvents > MAX_PROCESSED_EVENTS_PER_CHALLENGE) {
-      throw new Error("PROCESSED_EVENT_LIMIT_EXCEEDED");
-    }
-    await deleteRefs(db, snapshot.docs.map((entry) => entry.ref));
-  }
-}
-
-/**
- * Remove os dados do UID em todos os challenges validados.
- * @param {Object} db Firestore Admin.
- * @param {string} uid UID excluido.
- * @param {Array<Object>} challengeRefs Referencias a processar.
- * @return {Promise<void>} Conclusao da limpeza.
- */
-async function cleanupChallenges(db, uid, challengeRefs) {
-  for (const challengeRef of challengeRefs) {
-    await cleanupChallenge(db, uid, challengeRef);
-  }
 }
 
 /**
@@ -552,18 +495,8 @@ async function cleanupMissingCircleRoot(db, uid, circleId) {
  * @return {Promise<void>} Conclusao da limpeza externa.
  */
 async function cleanupNormalMember(db, uid, circleId) {
-  const circleRef = await resolveMemberState(db, uid, circleId, false);
-  const beforeRefs = await listChallengeRefs(circleRef);
+  await resolveMemberState(db, uid, circleId, false);
   await resolveMemberState(db, uid, circleId, true);
-  const afterRefs = await listChallengeRefs(circleRef);
-  const refsByPath = new Map();
-  for (const ref of [...beforeRefs, ...afterRefs]) {
-    refsByPath.set(ref.path, ref);
-  }
-  if (refsByPath.size > MAX_CIRCLE_CHALLENGES_TO_SCAN) {
-    throw new Error("CIRCLE_CHALLENGE_LIMIT_EXCEEDED");
-  }
-  await cleanupChallenges(db, uid, [...refsByPath.values()]);
 }
 
 /**
@@ -601,14 +534,25 @@ exports.cleanupUserData = functions
       const userRef = db.collection("users").doc(user.uid);
 
       try {
+        const guard = await circleCleanup.beginGuard(db, user.uid);
         const billingCleanup = await ensureBillingDeletionBarrier(db, user.uid);
         await cleanupBillingTokenIndexes(db, billingCleanup.accountHash);
+        await circleCleanup.cleanupPendingMarkers(db, user.uid, guard);
         const userSnapshot = await userRef.get();
         if (userSnapshot.exists) {
           await cleanupExternalCircleData(db, user.uid, userSnapshot);
         }
+        await circleCleanup.cleanupOwned(db, user.uid, guard, true);
+        await circleCleanup.cleanupMemberships(db, user.uid, guard);
+        await circleCleanup.cleanupHistory(db, user.uid, guard);
+        await circleCleanup.verifyReferences(db, user.uid);
+        await db.runTransaction(async (transaction) => {
+          await circleCleanup.requireGuard(transaction, db, user.uid, guard);
+          await circleCleanup.assertEmpty(transaction, db, user.uid);
+        });
         await db.recursiveDelete(userRef);
         await finalizeBillingDeletionBarrier(db, user.uid, billingCleanup);
+        await circleCleanup.completeGuard(db, user.uid, guard);
       } catch (_) {
         console.error("[cleanupUserData] Falha na limpeza pós-exclusão.");
         throw new Error("USER_DATA_CLEANUP_FAILED");

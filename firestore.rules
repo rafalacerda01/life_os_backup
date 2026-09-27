@@ -16,6 +16,16 @@ service cloud.firestore {
       return /databases/$(database)/documents/circles/$(circleId);
     }
 
+    function accountCircleAdmissionBlocked(userId) {
+      let guardPath = /databases/$(database)/documents/account_deletion_guards/$(userId);
+      return exists(guardPath)
+        && (
+          get(guardPath).data.state != 'COMPLETE'
+          || !(get(guardPath).data.retainUntil is timestamp)
+          || request.time <= get(guardPath).data.retainUntil
+        );
+    }
+
     function circleDeletionPath(circleId) {
       return /databases/$(database)/documents/circle_deletions/$(circleId);
     }
@@ -95,7 +105,8 @@ service cloud.firestore {
     }
 
     function userActivatesCircle(userId, circleId) {
-      return hasNoActiveCircle(userId)
+      return !accountCircleAdmissionBlocked(userId)
+        && hasNoActiveCircle(userId)
         && changesOnlyActiveCircle(userId)
         && getAfter(userPath(userId)).data.activeCircleId == circleId;
     }
@@ -112,6 +123,7 @@ service cloud.firestore {
         && (
           (
             request.resource.data.activeCircleId is string
+            && !accountCircleAdmissionBlocked(userId)
             && (
               !resource.data.keys().hasAny(['activeCircleId'])
               || resource.data.activeCircleId == null
@@ -178,6 +190,7 @@ service cloud.firestore {
 
     function validCircleCreate(circleId) {
       return !exists(circleDeletionPath(circleId))
+        && !exists(/databases/$(database)/documents/circle_cleanup_guards/$(circleId))
         && request.resource.data.keys().hasOnly([
           'name',
           'description',

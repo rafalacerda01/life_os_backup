@@ -1,8 +1,9 @@
 const {readFileSync} = require('node:fs');
+const assert = require('node:assert/strict');
 const {resolve} = require('node:path');
 const {before, after, beforeEach, test} = require('node:test');
 const {initializeTestEnvironment, assertSucceeds, assertFails} = require('@firebase/rules-unit-testing');
-const {doc, setDoc, getDoc, updateDoc, writeBatch, serverTimestamp, Timestamp, increment} = require('firebase/firestore');
+const {doc, setDoc, getDoc, updateDoc, deleteDoc, writeBatch, serverTimestamp, Timestamp, increment} = require('firebase/firestore');
 
 // Never fall back to a production Firestore instance.
 const emulatorAvailable = Boolean(process.env.FIRESTORE_EMULATOR_HOST);
@@ -177,6 +178,103 @@ rulesTest('Unauthenticated creation denied; admin profile remains private', asyn
   await seedCircle(30, 1);
   await assertFails(getDoc(doc(dbFor('joiner'), 'users/admin')));
   await assertFails(setDoc(doc(env.unauthenticatedContext().firestore(), 'circles/other'), circle(30)));
+});
+
+const deletionGuard = (overrides = {}) => ({version: 1, state: 'IN_PROGRESS',
+  deletionId: '11111111-1111-4111-8111-111111111111',
+  startedAt: Timestamp.fromMillis(Date.now() - 1000), retainUntil: null, ...overrides});
+async function seedGuard(uid, data = deletionGuard()) {
+  await env.withSecurityRulesDisabled(context =>
+    setDoc(doc(context.firestore(), 'account_deletion_guards', uid), data));
+}
+
+rulesTest('Account deletion guard denies atomic Circle creation without changing profile', async () => {
+  await seedUser('admin');
+  await seedGuard('admin');
+  await assertFails(create(3));
+  assert.equal((await getDoc(doc(dbFor('admin'), 'users/admin'))).data().activeCircleId, null);
+});
+
+rulesTest('Account deletion guard denies join and membership recreation', async () => {
+  await seedCircle(3, 1);
+  await assertSucceeds(join());
+  await assertSucceeds(leave('joiner'));
+  await seedGuard('joiner');
+  await assertFails(join());
+  await assertFails(setDoc(doc(dbFor('joiner'), 'circles/circle/members/joiner'), member()));
+  assert.equal((await getDoc(doc(dbFor('admin'), 'circles/circle'))).data().memberCount, 1);
+});
+
+rulesTest('Account deletion guard independently denies activeCircleId activation', async () => {
+  await seedCircle(3, 1);
+  await seedGuard('joiner');
+  // The full atomic join would otherwise satisfy activation's getAfter checks.
+  await assertFails(join());
+  await assertFails(updateDoc(doc(dbFor('joiner'), 'users/joiner'), {activeCircleId: 'circle'}));
+  assert.equal((await getDoc(doc(dbFor('joiner'), 'users/joiner'))).data().activeCircleId, null);
+});
+
+rulesTest('Account deletion guard preserves structurally valid leave and clear', async () => {
+  await seedCircle(3, 2);
+  await seedGuard('m1');
+  await assertSucceeds(leave());
+  assert.equal((await getDoc(doc(dbFor('m1'), 'users/m1'))).data().activeCircleId, null);
+  assert.equal((await getDoc(doc(dbFor('admin'), 'circles/circle'))).data().memberCount, 1);
+});
+
+rulesTest('Clients cannot read create modify or remove account and runtime deletion guards', async () => {
+  await seedUser('admin');
+  await seedGuard('admin');
+  for (const uid of ['admin', 'other']) {
+    const db = dbFor(uid);
+    for (const key of ['account_deletion_guards/admin', 'users/admin/runtime/account_delete_barrier']) {
+      await assertFails(getDoc(doc(db, key)));
+      await assertFails(setDoc(doc(db, key), deletionGuard()));
+      await assertFails(updateDoc(doc(db, key), {state: 'COMPLETE'}));
+      await assertFails(deleteDoc(doc(db, key)));
+    }
+  }
+});
+
+rulesTest('Completed guard still blocks an unexpired authenticated session after user-tree deletion', async () => {
+  await seedGuard('admin', deletionGuard({state: 'COMPLETE',
+    retainUntil: Timestamp.fromMillis(Date.now() + 65 * 60 * 1000)}));
+  // Simulate a still-valid ID token trying to recreate the removed user profile.
+  await seedUser('admin');
+  await assertFails(create(3));
+});
+
+rulesTest('Expired completed guard permits a newly provisioned session', async () => {
+  await seedUser('admin');
+  await seedGuard('admin', deletionGuard({state: 'COMPLETE',
+    retainUntil: Timestamp.fromMillis(1)}));
+  await assertSucceeds(create(3));
+});
+
+rulesTest('Malformed account guard fails closed without preventing valid leave', async () => {
+  await seedCircle(3, 2);
+  await seedGuard('joiner', {});
+  await assertFails(join());
+  await seedGuard('m1', {});
+  await assertSucceeds(leave());
+});
+
+rulesTest('Another UID guard does not prevent normal create or join', async () => {
+  await seedUser('admin');
+  await seedUser('joiner');
+  await seedGuard('other');
+  await assertSucceeds(create(3));
+  await assertSucceeds(join());
+});
+
+rulesTest('UID-free cleanup closure prevents recreation of a recursively deleted Circle', async () => {
+  await seedUser('admin');
+  await env.withSecurityRulesDisabled(context =>
+    setDoc(doc(context.firestore(), 'circle_cleanup_guards/circle'),
+      {version: 1, state: 'SERVER_DELETING', createdAt: Timestamp.now()}));
+  await assertFails(create(3));
+  await assertFails(getDoc(doc(dbFor('admin'), 'circle_cleanup_guards/circle')));
+  await assertFails(deleteDoc(doc(dbFor('admin'), 'circle_cleanup_guards/circle')));
 });
 
 rulesTest('Current entitlement is rechecked after downgrade and renewal', async () => {

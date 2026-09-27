@@ -28,6 +28,7 @@ require.cache[adminPath].exports = originalAdmin;
 
 const uid = "sensitive-uid";
 const rootPath = `users/${uid}`;
+const guardPath = `account_deletion_guards/${uid}`;
 const accountHash = createHash("sha256").update(uid, "utf8").digest("hex");
 const billingAccountPath = `billing_google_accounts/${accountHash}`;
 const billingTokenPath = (id) => `billing_google_tokens/${id}`;
@@ -95,6 +96,10 @@ class FakeQuery {
     return new FakeQuery(this.collectionRef, this.filters, value);
   }
 
+  orderBy() { return this; }
+
+  startAfter(snapshot) { this.cursor = snapshot.ref.path; return this; }
+
   /** @return {Promise<FakeQuerySnapshot>} Resultado da query. */
   get() {
     return Promise.resolve(this.collectionRef.db.querySnapshot(this));
@@ -138,6 +143,8 @@ class FakeCollectionReference {
   limit(value) {
     return new FakeQuery(this, [], value);
   }
+
+  orderBy() { return new FakeQuery(this); }
 }
 
 /** Snapshot fake de documento. */
@@ -148,6 +155,7 @@ class FakeDocumentSnapshot {
    */
   constructor(ref, data) {
     this.ref = ref;
+    this.id = ref.path.split('/').at(-1);
     this.exists = data !== undefined;
     this._data = data;
   }
@@ -280,6 +288,12 @@ class FakeFirestore {
     return new FakeCollectionReference(this, name);
   }
 
+  collectionGroup(name) {
+    const ref = new FakeCollectionReference(this, name);
+    ref.group = name;
+    return ref;
+  }
+
   /** @return {FakeBatch} Novo batch. */
   batch() {
     return new FakeBatch(this);
@@ -322,9 +336,14 @@ class FakeFirestore {
     let docs = [];
 
     for (const [documentPath, data] of [...this.store.entries()].sort()) {
-      if (!documentPath.startsWith(prefix)) continue;
-      const suffix = documentPath.slice(prefix.length);
-      if (!suffix || suffix.includes("/")) continue;
+      if (collectionRef.group) {
+        if (documentPath.split('/').at(-2) !== collectionRef.group) continue;
+      } else {
+        if (!documentPath.startsWith(prefix)) continue;
+        const suffix = documentPath.slice(prefix.length);
+        if (!suffix || suffix.includes('/')) continue;
+      }
+      if (ref.cursor && documentPath <= ref.cursor) continue;
       const snapshot = new FakeDocumentSnapshot(
           new FakeDocumentReference(this, documentPath),
           data,
@@ -389,16 +408,27 @@ class FakeFirestore {
    * @return {Promise<*>} Resultado do callback.
    */
   async runTransaction(callback) {
+    const previous = this.transactionTail || Promise.resolve();
+    let release;
+    this.transactionTail = new Promise((resolve) => { release = resolve; });
+    await previous;
+    try {
     this.transactionCount += 1;
     const beforeTransaction = this.beforeTransactions[this.transactionCount];
     if (beforeTransaction) await beforeTransaction();
     const transaction = new FakeTransaction(this);
     const result = await callback(transaction);
+    if (this.failHistoryOnce && transaction.writes.some((write) =>
+      /\/(processed_events|progress|ranking)\//.test(write.ref.path))) {
+      this.failHistoryOnce = false;
+      throw new Error('private cleanup failure');
+    }
     this.applyWrites(transaction.writes);
     if (this.afterTransactionCommit) {
       await this.afterTransactionCommit(this.transactionCount);
     }
     return result;
+    } finally { release(); }
   }
 }
 
@@ -477,6 +507,21 @@ function memberData(role) {
   return {role};
 }
 
+function progressData(value = 1) {
+  return {uid, value, updatedAt: Timestamp.fromMillis(100), lastEventAt: Timestamp.fromMillis(100)};
+}
+
+function focusEvent(id) {
+  return {uid, source: 'VERIFIED_FOCUS', sessionId: id, challengeType: 'FOCUS_MINUTES',
+    contributionValue: 1, sessionStartedAt: Timestamp.fromMillis(0),
+    sessionCompletedAt: Timestamp.fromMillis(100), processedAt: Timestamp.fromMillis(100), schemaVersion: 1};
+}
+
+function assertOnlyCompletedGuard() {
+  assert.deepEqual([...activeDb.store.keys()], [guardPath]);
+  assert.equal(activeDb.data(guardPath).state, 'COMPLETE');
+}
+
 /**
  * Prepara um Circle em que o usuario excluido e membro comum.
  * @param {FakeFirestore} db Banco fake.
@@ -547,7 +592,7 @@ test("recursiveDelete resolve e o handler resolve", async () => {
   await cleanupUserData.run({uid});
 
   assert.deepEqual(activeDb.calls, [rootPath]);
-  assert.equal(activeDb.documents.size, 0);
+  assertOnlyCompletedGuard();
 });
 
 test("recursiveDelete rejeita e propaga erro sanitizado", async () => {
@@ -620,7 +665,7 @@ test("retry completa limpeza iniciada parcialmente", async () => {
   await cleanupUserData.run({uid});
 
   assert.equal(activeDb.calls.length, 2);
-  assert.equal(activeDb.documents.size, 0);
+  assertOnlyCompletedGuard();
 });
 
 test("root ausente ainda executa recursiveDelete", async () => {
@@ -630,7 +675,7 @@ test("root ausente ainda executa recursiveDelete", async () => {
   await cleanupUserData.run({uid});
 
   assert.deepEqual(activeDb.calls, [rootPath]);
-  assert.equal(activeDb.documents.size, 0);
+  assertOnlyCompletedGuard();
 });
 
 test("árvore totalmente ausente termina normalmente", async () => {
@@ -639,7 +684,7 @@ test("árvore totalmente ausente termina normalmente", async () => {
   await cleanupUserData.run({uid});
 
   assert.deepEqual(activeDb.calls, [rootPath]);
-  assert.equal(activeDb.documents.size, 0);
+  assertOnlyCompletedGuard();
 });
 
 test("duas execuções concorrentes permanecem idempotentes", async () => {
@@ -655,7 +700,7 @@ test("duas execuções concorrentes permanecem idempotentes", async () => {
   ]);
 
   assert.deepEqual(activeDb.calls, [rootPath, rootPath]);
-  assert.equal(activeDb.documents.size, 0);
+  assertOnlyCompletedGuard();
 });
 
 test("activeCircleId null preserva cleanup simples", async () => {
@@ -666,7 +711,7 @@ test("activeCircleId null preserva cleanup simples", async () => {
   await cleanupUserData.run({uid});
 
   assert.deepEqual(activeDb.recursiveDeletes, [rootPath]);
-  assert.equal(activeDb.store.size, 0);
+  assertOnlyCompletedGuard();
 });
 
 test("usuário sem billing usa barrier transitória e não deixa índices", async () => {
@@ -678,9 +723,11 @@ test("usuário sem billing usa barrier transitória e não deixa índices", asyn
   assert.equal(activeDb.data(billingAccountPath), undefined);
   assert.equal(activeDb.data(rootPath), undefined);
   assert.deepEqual(activeDb.operationLog, [
+    `set:${guardPath}`,
     `set:${billingAccountPath}`,
     `recursive:${rootPath}`,
     `delete:${billingAccountPath}`,
+    `update:${guardPath}`,
   ]);
 });
 
@@ -791,7 +838,7 @@ test("falha na finalização deixa orphan DELETING recuperável", async () => {
   activeDb = new FakeFirestore();
   activeDb.seed(rootPath, {activeCircleId: null});
   activeDb.seed(billingAccountPath, {uid, state: "ACTIVE"});
-  activeDb.beforeTransactions[2] = () => {
+  activeDb.beforeTransactions[4] = () => {
     throw new Error("private finalizer failure");
   };
 
@@ -827,7 +874,7 @@ test("account UID divergente falha fechado antes de cleanup", async () => {
   assert.equal(activeDb.data(tokenPath) !== undefined, true);
   assert.equal(activeDb.data(rootPath) !== undefined, true);
   assert.deepEqual(activeDb.recursiveDeletes, []);
-  assert.deepEqual(activeDb.operationLog, []);
+  assert.deepEqual(activeDb.operationLog, [`set:${guardPath}`]);
 });
 
 test("account state inválido falha fechado", async () => {
@@ -843,7 +890,7 @@ test("account state inválido falha fechado", async () => {
   assert.deepEqual(activeDb.data(billingAccountPath), {uid, state: "UNKNOWN"});
   assert.equal(activeDb.data(rootPath) !== undefined, true);
   assert.deepEqual(activeDb.recursiveDeletes, []);
-  assert.deepEqual(activeDb.operationLog, []);
+  assert.deepEqual(activeDb.operationLog, [`set:${guardPath}`]);
 });
 
 test("token indexes sem account inicial convergem sem resíduos", async () => {
@@ -865,7 +912,7 @@ test("token surgindo antes do finalizer mantém barrier até retry", async () =>
   activeDb = new FakeFirestore();
   activeDb.seed(rootPath, {activeCircleId: null});
   activeDb.seed(billingAccountPath, {uid, state: "ACTIVE"});
-  activeDb.beforeTransactions[2] = () => {
+  activeDb.beforeTransactions[4] = () => {
     activeDb.seed(lateTokenPath, {accountHash});
   };
 
@@ -887,7 +934,7 @@ test("account removido durante finalização converge idempotentemente", async (
   activeDb = new FakeFirestore();
   activeDb.seed(rootPath, {activeCircleId: null});
   activeDb.seed(billingAccountPath, {uid, state: "ACTIVE"});
-  activeDb.beforeTransactions[2] = () => {
+  activeDb.beforeTransactions[4] = () => {
     activeDb.store.delete(billingAccountPath);
   };
 
@@ -1017,8 +1064,8 @@ test("cleanup preserva dados de outros UIDs nos challenges", async () => {
   activeDb = new FakeFirestore();
   seedNormalMemberCircle(activeDb);
   activeDb.seed(challengePath, {title: "fixture"});
-  activeDb.seed(`${challengePath}/progress/${uid}`, {value: 1});
-  activeDb.seed(`${challengePath}/processed_events/event-a`, {uid});
+  activeDb.seed(`${challengePath}/progress/${uid}`, progressData());
+  activeDb.seed(`${challengePath}/processed_events/event-a`, focusEvent('event-a'));
   activeDb.seed(`${challengePath}/processed_events/event-b`, {
     uid: remainingUid,
   });
@@ -1041,8 +1088,8 @@ test("retry de membro não decrementa memberCount novamente", async () => {
   activeDb = new FakeFirestore();
   seedNormalMemberCircle(activeDb);
   activeDb.seed(challengePath, {title: "fixture"});
-  activeDb.seed(`${challengePath}/progress/${uid}`, {value: 1});
-  activeDb.failBatchAt = 1;
+  activeDb.seed(`${challengePath}/progress/${uid}`, progressData());
+  activeDb.failHistoryOnce = true;
 
   await withoutErrorLog(() => assert.rejects(
       cleanupUserData.run({uid}),
@@ -1066,7 +1113,7 @@ test("admin unico remove Circle inteiro antes do usuario", async () => {
   seedAdminCircle(activeDb, false);
   const markerPath = `circle_deletions/${circleId}`;
   activeDb.afterTransactionCommit = (number) => {
-    if (number !== 2) return;
+    if (number !== 3) return;
     assert.equal(
         activeDb.data(markerPath).state,
         "AUTH_DELETE_ORPHAN_CLEANUP",
@@ -1222,7 +1269,7 @@ test("root recriado após claim não é apagado", async () => {
   const markerPath = `circle_deletions/${circleId}`;
   let recreated = false;
   activeDb.afterTransactionCommit = (number) => {
-    if (number !== 2) return;
+    if (number !== 3) return;
     assert.equal(activeDb.data(`circles/${circleId}`), undefined);
     assert.equal(
         activeDb.data(markerPath).state,
@@ -1259,7 +1306,7 @@ test("root recriado antes do claim impede cleanup residual", async () => {
   activeDb.seed(rootPath, {activeCircleId: circleId});
   activeDb.seed(`circles/${circleId}/members/${uid}`, memberData("member"));
   const newCircle = circleData();
-  activeDb.beforeTransactions[2] = () => {
+  activeDb.beforeTransactions[3] = () => {
     activeDb.seed(`circles/${circleId}`, newCircle);
     activeDb.seed(
         `circles/${circleId}/members/${adminUid}`,
@@ -1272,7 +1319,7 @@ test("root recriado antes do claim impede cleanup residual", async () => {
       {message: "USER_DATA_CLEANUP_FAILED"},
   ));
 
-  assert.equal(activeDb.transactionCount, 2);
+  assert.equal(activeDb.transactionCount, 3);
   assert.deepEqual(activeDb.data(`circles/${circleId}`), newCircle);
   assert.deepEqual(activeDb.data(rootPath), {activeCircleId: circleId});
   assert.deepEqual(
@@ -1281,7 +1328,7 @@ test("root recriado antes do claim impede cleanup residual", async () => {
   );
   assert.deepEqual(activeDb.recursiveDeletes, []);
   assert.equal(activeDb.data(`circle_deletions/${circleId}`), undefined);
-  assert.deepEqual(activeDb.operationLog, [`set:${billingAccountPath}`]);
+  assert.deepEqual(activeDb.operationLog, [`set:${guardPath}`, `set:${billingAccountPath}`]);
 });
 
 test("retry de root ausente preserva tombstone valido", async () => {
@@ -1357,7 +1404,7 @@ test("tombstone inconsistente falha fechado sem sobrescrita", async () => {
       activeCircleId: circleId,
     });
     assert.deepEqual(activeDb.recursiveDeletes, []);
-    assert.deepEqual(activeDb.operationLog, [`set:${billingAccountPath}`]);
+    assert.deepEqual(activeDb.operationLog, [`set:${guardPath}`, `set:${billingAccountPath}`]);
   }
 });
 
@@ -1403,4 +1450,140 @@ test("logs do cleanup externo permanecem sanitizados", async () => {
   assert.equal(serialized.includes(email), false);
   assert.equal(serialized.includes(rootPath), false);
   assert.equal(serialized.includes("private recursive delete failure"), false);
+});
+
+function seedGlobalHistory(db, oldCircle = "old-circle", owner = uid) {
+  const challenge = `circles/${oldCircle}/challenges/old-challenge`;
+  db.seed(`${challenge}/progress/${owner}`, {...progressData(), uid: owner});
+  db.seed(`${challenge}/processed_events/event-old`, {...focusEvent("event-old"), uid: owner});
+  db.seed(`circles/${oldCircle}/ranking/${owner}`, {uid: owner, name: "Member", totalXp: 2, photoUrl: null});
+  return challenge;
+}
+
+for (const root of [undefined, {}, {activeCircleId: null}]) {
+  test(`global cleanup discovers historical data without active Circle: ${JSON.stringify(root)}`, async () => {
+    activeDb = new FakeFirestore();
+    if (root !== undefined) activeDb.seed(rootPath, root);
+    const old = seedGlobalHistory(activeDb);
+    activeDb.seed(`${old}/progress/${remainingUid}`, {...progressData(), uid: remainingUid});
+    activeDb.seed("circles/old-circle/challenges/old-challenge", {createdBy: uid, name: "Shared"});
+    await cleanupUserData.run({uid});
+    assert.equal(activeDb.data(`${old}/progress/${uid}`), undefined);
+    assert.equal(activeDb.data(`${old}/processed_events/event-old`), undefined);
+    assert.equal(activeDb.data(`circles/old-circle/ranking/${uid}`), undefined);
+    assert.deepEqual(activeDb.data(`${old}/progress/${remainingUid}`), {...progressData(), uid: remainingUid});
+    assert.deepEqual(activeDb.data(old), {createdBy: "", name: "Shared"});
+    assert.equal(activeDb.data(rootPath), undefined);
+    assert.equal(activeDb.data(guardPath).state, "COMPLETE");
+    assert.ok(activeDb.operationLog.indexOf(`set:${guardPath}`) <
+      activeDb.operationLog.indexOf(`delete:${old}/progress/${uid}`));
+  });
+}
+
+test("global fallback cleans Circle A history and current membership B", async () => {
+  activeDb = new FakeFirestore();
+  seedNormalMemberCircle(activeDb);
+  const old = seedGlobalHistory(activeDb);
+  await cleanupUserData.run({uid});
+  assert.equal(activeDb.data(`${old}/progress/${uid}`), undefined);
+  assert.equal(activeDb.data(`circles/${circleId}/members/${uid}`), undefined);
+  assert.equal(activeDb.data(`circles/${circleId}`).memberCount, 1);
+  assert.deepEqual(activeDb.data(`circles/${circleId}/members/${adminUid}`), memberData("admin"));
+});
+
+test("global fallback handles more than 240 challenges and multiple pages of every history group", async () => {
+  activeDb = new FakeFirestore();
+  for (let index = 0; index < 417; index++) seedGlobalHistory(activeDb, `old-${index}`);
+  await cleanupUserData.run({uid});
+  assertOnlyCompletedGuard();
+});
+
+test("global fallback failure preserves the barrier and retries without deleting another owner", async () => {
+  activeDb = new FakeFirestore();
+  activeDb.seed(rootPath, {});
+  const old = seedGlobalHistory(activeDb);
+  activeDb.seed(`${old}/progress/${remainingUid}`, {...progressData(), uid: remainingUid});
+  activeDb.failHistoryOnce = true;
+  await withoutErrorLog(() => assert.rejects(cleanupUserData.run({uid}), {message: "USER_DATA_CLEANUP_FAILED"}));
+  const guard = activeDb.data(guardPath);
+  assert.equal(guard.state, "IN_PROGRESS");
+  assert.deepEqual(activeDb.data(rootPath), {});
+  assert.ok(activeDb.data(`${old}/progress/${uid}`));
+  await cleanupUserData.run({uid});
+  assert.equal(activeDb.data(guardPath).deletionId, guard.deletionId);
+  assert.equal(activeDb.data(guardPath).state, "COMPLETE");
+  assert.deepEqual(activeDb.data(`${old}/progress/${remainingUid}`), {...progressData(), uid: remainingUid});
+});
+
+for (const [label, key, data] of [
+  ["foreign ownership", `circles/old/challenges/c/progress/${remainingUid}`, progressData()],
+  ["malformed path", `users/old/progress/${uid}`, progressData()],
+  ["missing ownership field", `circles/old/challenges/c/progress/${uid}`, {value: 1}],
+]) {
+  test(`global fallback fails closed on ${label}`, async () => {
+    activeDb = new FakeFirestore();
+    activeDb.seed(rootPath, {});
+    activeDb.seed(key, data);
+    await withoutErrorLog(() => assert.rejects(cleanupUserData.run({uid}), {message: "USER_DATA_CLEANUP_FAILED"}));
+    assert.deepEqual(activeDb.data(key), data);
+    assert.deepEqual(activeDb.data(rootPath), {});
+    assert.equal(activeDb.data(guardPath).state, "IN_PROGRESS");
+  });
+}
+
+test("fallback finalizes pending Circle deletion UID references without retaining the UID list", async () => {
+  activeDb = new FakeFirestore();
+  activeDb.seed(rootPath, {});
+  activeDb.seed(`circle_deletions/${circleId}`, {version: 1, state: "SERVER_DELETING",
+    circleId, initiatedBy: adminUid, memberUids: [adminUid, uid], createdAt: Timestamp.now()});
+  activeDb.seed(`users/${adminUid}`, {activeCircleId: circleId});
+  await cleanupUserData.run({uid});
+  assert.equal(activeDb.data(`circle_deletions/${circleId}`), undefined);
+  assert.deepEqual(activeDb.data(`users/${adminUid}`), {activeCircleId: null});
+  assert.equal(activeDb.data(`circle_cleanup_guards/${circleId}`).state, "SERVER_DELETING");
+  assert.equal(JSON.stringify(activeDb.data(`circle_cleanup_guards/${circleId}`)).includes(uid), false);
+});
+
+test("historical owned Circle resumes partial recursive cleanup even after its root disappears", async () => {
+  activeDb = new FakeFirestore();
+  activeDb.seed(rootPath, {});
+  activeDb.seed(`circles/${circleId}`, circleData({adminId: uid}));
+  activeDb.seed(`circles/${circleId}/members/${uid}`, memberData("admin"));
+  activeDb.seed(`circles/${circleId}/members/${remainingUid}`, memberData("member"));
+  activeDb.seed(`users/${remainingUid}`, {activeCircleId: circleId});
+  const recursiveDelete = activeDb.recursiveDelete.bind(activeDb);
+  let failed = false;
+  activeDb.recursiveDelete = async ref => {
+    if (ref.path === `circles/${circleId}` && !failed) {
+      activeDb.store.delete(ref.path);
+      failed = true;
+      throw new Error("private partial recursive failure");
+    }
+    return recursiveDelete(ref);
+  };
+  await withoutErrorLog(() => assert.rejects(cleanupUserData.run({uid}), {message: "USER_DATA_CLEANUP_FAILED"}));
+  assert.equal(activeDb.data(`circle_deletions/${circleId}`).initiatedBy, uid);
+  assert.ok(activeDb.data(`circles/${circleId}/members/${remainingUid}`));
+  await cleanupUserData.run({uid});
+  assert.equal(activeDb.data(`circle_deletions/${circleId}`), undefined);
+  assert.equal(activeDb.data(`circles/${circleId}/members/${remainingUid}`), undefined);
+  assert.deepEqual(activeDb.data(`users/${remainingUid}`), {activeCircleId: null});
+  assert.equal(activeDb.data(guardPath).state, "COMPLETE");
+});
+
+test("fallback resumes pending Circle deletion before resolving the current administrator link", async () => {
+  activeDb = new FakeFirestore();
+  activeDb.seed(rootPath, {activeCircleId: circleId});
+  activeDb.seed(`circles/${circleId}`, circleData({adminId: uid, deletionState: "SERVER_DELETING"}));
+  activeDb.seed(`circles/${circleId}/members/${uid}`, memberData("admin"));
+  activeDb.seed(`circles/${circleId}/members/${remainingUid}`, memberData("member"));
+  activeDb.seed(`users/${remainingUid}`, {activeCircleId: circleId});
+  activeDb.seed(`circle_deletions/${circleId}`, {version: 1, state: "SERVER_DELETING",
+    circleId, initiatedBy: uid, memberUids: [uid, remainingUid], createdAt: Timestamp.now()});
+  await cleanupUserData.run({uid});
+  assert.equal(activeDb.data(rootPath), undefined);
+  assert.equal(activeDb.data(`circles/${circleId}`), undefined);
+  assert.equal(activeDb.data(`circle_deletions/${circleId}`), undefined);
+  assert.deepEqual(activeDb.data(`users/${remainingUid}`), {activeCircleId: null});
+  assert.equal(activeDb.data(guardPath).state, "COMPLETE");
 });

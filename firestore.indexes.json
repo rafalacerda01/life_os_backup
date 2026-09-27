@@ -56,6 +56,12 @@
         { "order": "DESCENDING", "queryScope": "COLLECTION" },
         { "order": "ASCENDING", "queryScope": "COLLECTION_GROUP" }
       ]
+    },
+    {
+      "collectionGroup": "account_deletion_guards",
+      "fieldPath": "retainUntil",
+      "ttl": true,
+      "indexes": []
     }
   ]
 }
