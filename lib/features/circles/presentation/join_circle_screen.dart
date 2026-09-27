@@ -23,7 +23,7 @@ class _JoinCircleScreenState extends ConsumerState<JoinCircleScreen> {
   }
 
   Future<void> _handleJoin() async {
-    final code = _codeController.text.trim();
+    final code = _codeController.text;
     if (code.isEmpty) return;
 
     setState(() {

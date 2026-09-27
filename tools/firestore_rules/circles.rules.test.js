@@ -297,3 +297,112 @@ rulesTest('Concurrent joins cannot exceed the final available slot', async () =>
   const snapshot = await getDoc(doc(dbFor('admin'), 'circles/circle'));
   if (snapshot.data().memberCount !== 30) throw Error('Capacity overflow');
 });
+
+function createAt(circleId) {
+  const db = dbFor('admin');
+  const batch = writeBatch(db);
+  batch.set(doc(db, 'circles', circleId), circle(3));
+  batch.set(doc(db, 'circles', circleId, 'members/admin'), member('admin'));
+  batch.update(doc(db, 'users/admin'), {activeCircleId: circleId});
+  return batch.commit();
+}
+
+for (const id of ['x'.repeat(129), ' leading', 'trailing ', '\tleading', 'trailing\n', '\u00a0leading', 'trailing\ufeff', '\u{1f600}'.repeat(65)]) {
+  rulesTest(`Incompatible Circle ID ${JSON.stringify(id)} cannot be created`, async () => {
+    await seedUser('admin');
+    await assertFails(createAt(id));
+  });
+}
+
+rulesTest('Circle ID boundary 128 still permits atomic creation', async () => {
+  await seedUser('admin');
+  await assertSucceeds(createAt('x'.repeat(128)));
+});
+
+rulesTest('Legacy oversized Circle denies atomic join and standalone activation', async () => {
+  const id = 'x'.repeat(129);
+  await seedUser('admin', {activeCircleId: id});
+  await seedUser('joiner');
+  await env.withSecurityRulesDisabled(async context => {
+    const db = context.firestore();
+    await setDoc(doc(db, 'circles', id), circle(3));
+    await setDoc(doc(db, 'circles', id, 'members/admin'), member('admin'));
+  });
+  const db = dbFor('joiner');
+  const batch = writeBatch(db);
+  batch.set(doc(db, 'circles', id, 'members/joiner'), member());
+  batch.update(doc(db, 'circles', id), {memberCount: increment(1), updatedAt: serverTimestamp()});
+  batch.update(doc(db, 'users/joiner'), {activeCircleId: id});
+  await assertFails(batch.commit());
+  // Pre-existing membership must not authorize standalone activation either.
+  await env.withSecurityRulesDisabled(context =>
+    setDoc(doc(context.firestore(), 'circles', id, 'members/joiner'), member()));
+  await assertFails(updateDoc(doc(db, 'users/joiner'), {activeCircleId: id}));
+  assert.equal((await getDoc(doc(db, 'users/joiner'))).data().activeCircleId, null);
+});
+
+rulesTest('Legacy oversized Circle still permits atomic leave and clear', async () => {
+  const id = 'x'.repeat(129);
+  await seedUser('admin', {activeCircleId: id});
+  await seedUser('joiner', {activeCircleId: id});
+  await env.withSecurityRulesDisabled(async context => {
+    const db = context.firestore();
+    await setDoc(doc(db, 'circles', id), circle(3, 2));
+    await setDoc(doc(db, 'circles', id, 'members/admin'), member('admin'));
+    await setDoc(doc(db, 'circles', id, 'members/joiner'), member());
+  });
+  const db = dbFor('joiner');
+  const batch = writeBatch(db);
+  batch.delete(doc(db, 'circles', id, 'members/joiner'));
+  batch.update(doc(db, 'circles', id), {memberCount: increment(-1), updatedAt: serverTimestamp()});
+  batch.update(doc(db, 'users/joiner'), {activeCircleId: null});
+  await assertSucceeds(batch.commit());
+  assert.equal((await getDoc(doc(db, 'users/joiner'))).data().activeCircleId, null);
+});
+
+const newChallenge = () => ({type: 'FOCUS_MINUTES', title: 'Challenge', targetValue: 10,
+  startAt: serverTimestamp(), endAt: Timestamp.fromMillis(Date.now() + 3600000),
+  createdBy: 'admin', createdAt: serverTimestamp(), updatedAt: serverTimestamp(), schemaVersion: 2});
+
+for (const id of ['x'.repeat(129), ' leading', 'trailing ', '\u00a0leading', 'trailing\ufeff', '\u{1f600}'.repeat(65)]) {
+  rulesTest(`Incompatible Challenge ID ${JSON.stringify(id)} cannot be created`, async () => {
+    await seedCircle(3, 1);
+    await assertFails(setDoc(doc(dbFor('admin'), 'circles/circle/challenges', id), newChallenge()));
+  });
+}
+
+rulesTest('Valid Challenge boundary 128 is allowed only for admin', async () => {
+  await seedCircle(3, 2);
+  await assertSucceeds(setDoc(doc(dbFor('admin'), 'circles/circle/challenges', 'x'.repeat(128)), newChallenge()));
+  await assertFails(setDoc(doc(dbFor('m1'), 'circles/circle/challenges/other'), {...newChallenge(), createdBy: 'm1'}));
+});
+
+rulesTest('Challenge creation in legacy oversized Circle is denied', async () => {
+  const id = 'x'.repeat(129);
+  await seedUser('admin', {activeCircleId: id});
+  await env.withSecurityRulesDisabled(async context => {
+    await setDoc(doc(context.firestore(), 'circles', id), circle(3));
+    await setDoc(doc(context.firestore(), 'circles', id, 'members/admin'), member('admin'));
+  });
+  await assertFails(setDoc(doc(dbFor('admin'), 'circles', id, 'challenges/valid'), newChallenge()));
+});
+
+rulesTest('ID guards preserve member progress read, deny writes and keep events private', async () => {
+  await seedCircle(3, 2);
+  const progress = 'circles/circle/challenges/valid/progress/m1';
+  const event = 'circles/circle/challenges/valid/processed_events/event';
+  await env.withSecurityRulesDisabled(async context => {
+    await setDoc(doc(context.firestore(), progress), {uid: 'm1', value: 1});
+    await setDoc(doc(context.firestore(), event), {uid: 'm1'});
+  });
+  await assertSucceeds(getDoc(doc(dbFor('m1'), progress)));
+  await assertFails(getDoc(doc(dbFor('joiner'), progress)));
+  for (const uid of ['admin', 'm1', 'joiner']) {
+    await assertFails(setDoc(doc(dbFor(uid), progress), {uid: 'm1', value: 2}));
+    await assertFails(updateDoc(doc(dbFor(uid), progress), {value: 2}));
+    await assertFails(deleteDoc(doc(dbFor(uid), progress)));
+    await assertFails(getDoc(doc(dbFor(uid), event)));
+    await assertFails(setDoc(doc(dbFor(uid), event), {uid: 'm1'}));
+    await assertFails(deleteDoc(doc(dbFor(uid), event)));
+  }
+});

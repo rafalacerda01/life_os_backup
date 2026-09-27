@@ -155,7 +155,9 @@ function documentId(ref) {
 function activeCircleIdFrom(userData) {
   const value = userData ? userData.activeCircleId : undefined;
   if (value === undefined || value === null) return null;
-  if (!isSafeDocumentId(value)) throw new Error("INVALID_ACCOUNT_STATE");
+  if (!circleCleanup.storedPathSegment(value) || value.trim() !== value) {
+    throw new Error("INVALID_ACCOUNT_STATE");
+  }
   return value;
 }
 

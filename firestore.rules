@@ -12,6 +12,17 @@ service cloud.firestore {
         && request.auth.uid == userId;
     }
 
+    function validCircleDocumentId(id) {
+      // Match JavaScript trim(), including Unicode whitespace at either edge.
+      let whitespace = '[\\s\\x{00a0}\\x{1680}\\x{2000}-\\x{200a}\\x{2028}\\x{2029}\\x{202f}\\x{205f}\\x{3000}\\x{feff}]';
+      return id is string
+        && id.size() > 0
+        && id.size() <= 128
+        && id.trim() == id
+        && id.replace('^' + whitespace + '+|' + whitespace + '+$', '') == id
+        && id.matches('[^/]+');
+    }
+
     function circlePath(circleId) {
       return /databases/$(database)/documents/circles/$(circleId);
     }
@@ -105,7 +116,8 @@ service cloud.firestore {
     }
 
     function userActivatesCircle(userId, circleId) {
-      return !accountCircleAdmissionBlocked(userId)
+      return validCircleDocumentId(circleId)
+        && !accountCircleAdmissionBlocked(userId)
         && hasNoActiveCircle(userId)
         && changesOnlyActiveCircle(userId)
         && getAfter(userPath(userId)).data.activeCircleId == circleId;
@@ -122,7 +134,7 @@ service cloud.firestore {
       return changesOnlyActiveCircle(userId)
         && (
           (
-            request.resource.data.activeCircleId is string
+            validCircleDocumentId(request.resource.data.activeCircleId)
             && !accountCircleAdmissionBlocked(userId)
             && (
               !resource.data.keys().hasAny(['activeCircleId'])
@@ -189,7 +201,8 @@ service cloud.firestore {
     }
 
     function validCircleCreate(circleId) {
-      return !exists(circleDeletionPath(circleId))
+      return validCircleDocumentId(circleId)
+        && !exists(circleDeletionPath(circleId))
         && !exists(/databases/$(database)/documents/circle_cleanup_guards/$(circleId))
         && request.resource.data.keys().hasOnly([
           'name',
@@ -360,8 +373,10 @@ service cloud.firestore {
         );
     }
 
-    function validChallengeCreate() {
-      return request.resource.data.keys().hasOnly([
+    function validChallengeCreate(circleId, challengeId) {
+      return validCircleDocumentId(circleId)
+        && validCircleDocumentId(challengeId)
+        && request.resource.data.keys().hasOnly([
           'type',
           'title',
           'targetValue',
@@ -1085,7 +1100,7 @@ service cloud.firestore {
           && !get(circlePath(circleId)).data.keys().hasAny([
             'deletionState'
           ])
-          && validChallengeCreate();
+          && validChallengeCreate(circleId, challengeId);
 
         allow update: if false;
 

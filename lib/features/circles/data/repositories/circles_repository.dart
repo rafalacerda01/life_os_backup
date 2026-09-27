@@ -508,7 +508,10 @@ class CirclesRepository {
     if (user == null) throw Exception('Usuário não autenticado');
 
     final cleanCircleId = circleId.trim();
-    if (cleanCircleId.isEmpty) {
+    if (cleanCircleId.isEmpty ||
+        circleId.length > 128 ||
+        cleanCircleId != circleId ||
+        circleId.contains('/')) {
       throw ArgumentError('Código do círculo inválido');
     }
 

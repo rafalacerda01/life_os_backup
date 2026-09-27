@@ -24,7 +24,9 @@ class _Gateway extends Fake implements CircleDeleteGateway {}
 
 class _Snapshot extends Fake implements DocumentSnapshot<Map<String, dynamic>> {
   _Snapshot(this.value);
-  final Map<String, dynamic> value;
+  final Map<String, dynamic>? value;
+  @override
+  bool get exists => value != null;
   @override
   Map<String, dynamic>? data() => value;
 }
@@ -78,14 +80,98 @@ class _Firestore extends Fake implements FirebaseFirestore {
   _Firestore(this.user);
   final Map<String, dynamic> user;
   final recordingBatch = _Batch();
+  int collectionCalls = 0;
   @override
-  CollectionReference<Map<String, dynamic>> collection(String path) =>
-      _Collection(this, path);
+  CollectionReference<Map<String, dynamic>> collection(String path) {
+    collectionCalls++;
+    return _Collection(this, path);
+  }
+
   @override
   WriteBatch batch() => recordingBatch;
+
+  @override
+  Future<T> runTransaction<T>(
+    TransactionHandler<T> transactionHandler, {
+    Duration timeout = const Duration(seconds: 30),
+    int maxAttempts = 5,
+  }) => transactionHandler(_Transaction(recordingBatch));
+}
+
+class _Transaction extends Fake implements Transaction {
+  _Transaction(this.batch);
+  final _Batch batch;
+
+  @override
+  Future<DocumentSnapshot<T>> get<T>(DocumentReference<T> reference) async {
+    final path = (reference as _Document).location;
+    return _Snapshot(
+          path.contains('/members/')
+              ? null
+              : {'schemaVersion': 2, 'memberCount': 1, 'memberLimit': 3},
+        )
+        as DocumentSnapshot<T>;
+  }
+
+  @override
+  Transaction set<T>(
+    DocumentReference<T> reference,
+    T data, [
+    SetOptions? options,
+  ]) {
+    batch.set(reference, data, options);
+    return this;
+  }
+
+  @override
+  Transaction update(DocumentReference reference, Map<String, dynamic> data) {
+    batch.update(reference, data);
+    return this;
+  }
 }
 
 void main() {
+  for (final code in ['', ' ', 'x' * 129, ' leading', 'trailing ', 'a/b']) {
+    test(
+      'joinCircleByCode rejects invalid code before Firestore: "$code"',
+      () async {
+        final store = _Firestore({'activeCircleId': null});
+        final repository = CirclesRepository(store, _Auth(), _Gateway());
+        await expectLater(
+          repository.joinCircleByCode(code),
+          throwsArgumentError,
+        );
+        expect(store.collectionCalls, 0);
+        expect(store.recordingBatch.writes, isEmpty);
+      },
+    );
+  }
+  for (final code in ['valid-circle', 'x' * 128]) {
+    test(
+      'joinCircleByCode preserves atomic join for valid code: "$code"',
+      () async {
+        final store = _Firestore({'activeCircleId': null});
+        final repository = CirclesRepository(store, _Auth(), _Gateway());
+        await repository.joinCircleByCode(code);
+        expect(
+          store.recordingBatch.writes.keys,
+          unorderedEquals([
+            'circles/$code/members/admin',
+            'circles/$code',
+            'users/admin',
+          ]),
+        );
+        expect(store.recordingBatch.writes['users/admin'], {
+          'activeCircleId': code,
+        });
+        expect(
+          (store.recordingBatch.writes['circles/$code'] as Map)['memberCount'],
+          2,
+        );
+      },
+    );
+  }
+
   Map<String, dynamic> premium() => {
     'isPremium': true,
     'premiumProvider': 'google_play',

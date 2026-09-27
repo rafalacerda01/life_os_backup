@@ -1409,7 +1409,7 @@ test("tombstone inconsistente falha fechado sem sobrescrita", async () => {
 });
 
 test("activeCircleId invalido falha fechado sem apagar usuario", async () => {
-  const invalidValues = ["", " bad ", "bad/id", "x".repeat(129)];
+  const invalidValues = ["", " bad ", "bad/id", "x".repeat(1501)];
   for (const activeCircleId of invalidValues) {
     activeDb = new FakeFirestore();
     activeDb.seed(rootPath, {activeCircleId});
@@ -1458,6 +1458,59 @@ function seedGlobalHistory(db, oldCircle = "old-circle", owner = uid) {
   db.seed(`${challenge}/processed_events/event-old`, {...focusEvent("event-old"), uid: owner});
   db.seed(`circles/${oldCircle}/ranking/${owner}`, {uid: owner, name: "Member", totalXp: 2, photoUrl: null});
   return challenge;
+}
+
+test("legacy oversized Circle and Challenge history remains cleanable in fallback", async () => {
+  activeDb = new FakeFirestore();
+  activeDb.seed(rootPath, {});
+  const id = "c".repeat(129);
+  const root = `circles/${id}/challenges/${"h".repeat(129)}`;
+  const original = {schemaVersion: 2, createdBy: uid, title: "Shared challenge"};
+  const foreign = {...progressData(7), uid: remainingUid};
+  activeDb.seed(root, original);
+  activeDb.seed(`${root}/progress/${uid}`, progressData());
+  activeDb.seed(`${root}/progress/${remainingUid}`, foreign);
+  activeDb.seed(`${root}/processed_events/event-old`, focusEvent("event-old"));
+  await cleanupUserData.run({uid});
+  assert.equal(activeDb.data(rootPath), undefined);
+  assert.equal(activeDb.data(`${root}/progress/${uid}`), undefined);
+  assert.equal(activeDb.data(`${root}/processed_events/event-old`), undefined);
+  assert.deepEqual(activeDb.data(`${root}/progress/${remainingUid}`), foreign);
+  assert.deepEqual(activeDb.data(root), {...original, createdBy: ""});
+});
+
+test("legacy oversized pending Circle marker finalizes in fallback", async () => {
+  activeDb = new FakeFirestore();
+  const id = "c".repeat(129);
+  activeDb.seed(rootPath, {});
+  activeDb.seed(`circles/${id}`, circleData({adminId: uid, memberCount: 1, deletionState: "SERVER_DELETING"}));
+  activeDb.seed(`circles/${id}/members/${uid}`, memberData("admin"));
+  activeDb.seed(`circle_deletions/${id}`, {version: 1, state: "SERVER_DELETING",
+    circleId: id, initiatedBy: uid, memberUids: [uid], createdAt: Timestamp.fromMillis(100)});
+  await cleanupUserData.run({uid});
+  assert.equal(activeDb.data(rootPath), undefined);
+  assert.equal(activeDb.data(`circles/${id}`), undefined);
+  assert.equal(activeDb.data(`circle_deletions/${id}`), undefined);
+});
+
+for (const soleAdmin of [false, true]) {
+  test(`legacy oversized active Circle supports fallback (sole admin: ${soleAdmin})`, async () => {
+    activeDb = new FakeFirestore();
+    const id = "c".repeat(129);
+    activeDb.seed(rootPath, {activeCircleId: id});
+    activeDb.seed(`circles/${id}`, circleData({adminId: soleAdmin ? uid : adminUid,
+      memberCount: soleAdmin ? 1 : 2}));
+    activeDb.seed(`circles/${id}/members/${uid}`, memberData(soleAdmin ? "admin" : "member"));
+    if (!soleAdmin) activeDb.seed(`circles/${id}/members/${adminUid}`, memberData("admin"));
+    await cleanupUserData.run({uid});
+    assert.equal(activeDb.data(rootPath), undefined);
+    assert.equal(activeDb.data(`circles/${id}/members/${uid}`), undefined);
+    if (soleAdmin) assert.equal(activeDb.data(`circles/${id}`), undefined);
+    else {
+      assert.equal(activeDb.data(`circles/${id}`).memberCount, 1);
+      assert.ok(activeDb.data(`circles/${id}/members/${adminUid}`));
+    }
+  });
 }
 
 for (const root of [undefined, {}, {activeCircleId: null}]) {
