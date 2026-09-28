@@ -298,24 +298,8 @@ service cloud.firestore {
     }
 
     function isAtomicLeave(circleId) {
-      return isSignedIn()
-        && resource.data.schemaVersion == 2
-        && !resource.data.keys().hasAny(['deletionState'])
-        && resource.data.adminId != request.auth.uid
-        && resource.data.memberCount is int
-        && resource.data.memberCount > 1
-        && isCircleMember(circleId)
-        && isUpdatingOnly([
-          'memberCount',
-          'updatedAt'
-        ])
-        && request.resource.data.memberCount ==
-            resource.data.memberCount - 1
-        && request.resource.data.updatedAt == request.time
-        && !existsAfter(
-          memberPath(circleId, request.auth.uid)
-        )
-        && userClearsCircle(request.auth.uid, circleId);
+      // Normal leave is server-owned so progress cleanup cannot be bypassed.
+      return false;
     }
 
     function isValidMemberCreate(circleId, userId) {
@@ -400,22 +384,10 @@ service cloud.firestore {
     function validMemberDelete(circleId, userId) {
       return isOwner(userId)
         && (
-          (
-            exists(circlePath(circleId))
-            && get(circlePath(circleId)).data.schemaVersion == 2
-            && get(circlePath(circleId)).data.adminId != userId
-            && get(circlePath(circleId)).data.memberCount > 1
-            && existsAfter(circlePath(circleId))
-            && getAfter(circlePath(circleId)).data.memberCount ==
-                get(circlePath(circleId)).data.memberCount - 1
-            && userClearsCircle(userId, circleId)
-          )
-          || (
             isCircleAdmin(circleId)
             && get(circlePath(circleId)).data.adminId == userId
             && !existsAfter(circlePath(circleId))
             && userClearsCircle(userId, circleId)
-          )
         );
     }
 
@@ -1155,7 +1127,11 @@ service cloud.firestore {
         allow delete: if false;
 
         match /progress/{userId} {
-          allow read: if isCircleMember(circleId);
+          allow get: if isCircleMember(circleId)
+            && exists(memberPath(circleId, userId));
+          // List requires orphan-free progress from backfill and atomic server leave.
+          // Block rollout until remaining candidates and readable conflicts are resolved.
+          allow list: if isCircleMember(circleId);
           allow create, update, delete: if false;
         }
 

@@ -63,6 +63,19 @@ function leave(uid = 'm1') {
   batch.update(doc(db, 'users', uid), {activeCircleId: null});
   return batch.commit();
 }
+async function serverLeave(uid = 'm1') {
+  // Simulate trusted Admin cleanup only for fixtures after denying the old client batch.
+  await env.withSecurityRulesDisabled(async context => {
+    const db = context.firestore();
+    const challenges = await getDocs(collection(db, 'circles/circle/challenges'));
+    const batch = writeBatch(db);
+    for (const challenge of challenges.docs) batch.delete(doc(db, 'circles/circle/challenges', challenge.id, 'progress', uid));
+    batch.delete(doc(db, 'circles/circle/members', uid));
+    batch.update(doc(db, 'circles/circle'), {memberCount: increment(-1), updatedAt: serverTimestamp()});
+    batch.update(doc(db, 'users', uid), {activeCircleId: null});
+    await batch.commit();
+  });
+}
 before(async () => {
   if (!emulatorAvailable) return;
   env = await initializeTestEnvironment({projectId: 'demo-life-os', firestore: {rules: readFileSync(resolve(__dirname, '../../firestore.rules'), 'utf8')}});
@@ -127,25 +140,27 @@ for (const limit of [3, 10, 30]) {
   });
 }
 for (const limit of [10, 30]) {
-  rulesTest(`Downgrade ${limit} with 8 members preserves members and allows leave`, async () => {
+  rulesTest(`Downgrade ${limit} preserves members and requires server leave`, async () => {
     await seedCircle(limit, 8, premium({premiumExpiresAt: Timestamp.fromMillis(1)}));
     await assertFails(join());
     const db = dbFor('admin');
     const before = await getDoc(doc(db, 'circles/circle'));
     if (before.data().memberCount !== 8) throw Error('Count changed on denied join');
     await assertSucceeds(getDoc(doc(db, 'circles/circle/members/m1')));
-    await assertSucceeds(leave());
+    await assertFails(leave());
+    await serverLeave();
     const after = await getDoc(doc(db, 'circles/circle'));
     if (after.data().memberCount !== 7 || after.data().memberLimit !== limit) throw Error('Leave altered capacity');
   });
 }
-rulesTest('Missing admin profile caps join at 3 and does not block leave', async () => {
+rulesTest('Missing admin profile caps join and requires trusted leave', async () => {
   await seedCircle(30, 3);
   await env.withSecurityRulesDisabled(async (context) => {
     const batch = writeBatch(context.firestore()); batch.delete(doc(context.firestore(), 'users/admin')); await batch.commit();
   });
   await assertFails(join());
-  await assertSucceeds(leave());
+  await assertFails(leave());
+  await serverLeave();
   await assertSucceeds(join());
 });
 rulesTest('Upgrade keeps stored Free limit at 3', async () => {
@@ -198,7 +213,8 @@ rulesTest('Account deletion guard denies atomic Circle creation without changing
 rulesTest('Account deletion guard denies join and membership recreation', async () => {
   await seedCircle(3, 1);
   await assertSucceeds(join());
-  await assertSucceeds(leave('joiner'));
+  await assertFails(leave('joiner'));
+  await serverLeave('joiner');
   await seedGuard('joiner');
   await assertFails(join());
   await assertFails(setDoc(doc(dbFor('joiner'), 'circles/circle/members/joiner'), member()));
@@ -214,10 +230,11 @@ rulesTest('Account deletion guard independently denies activeCircleId activation
   assert.equal((await getDoc(doc(dbFor('joiner'), 'users/joiner'))).data().activeCircleId, null);
 });
 
-rulesTest('Account deletion guard preserves structurally valid leave and clear', async () => {
+rulesTest('Account deletion guard cannot permit a client leave bypass; Admin cleanup remains possible', async () => {
   await seedCircle(3, 2);
   await seedGuard('m1');
-  await assertSucceeds(leave());
+  await assertFails(leave());
+  await serverLeave();
   assert.equal((await getDoc(doc(dbFor('m1'), 'users/m1'))).data().activeCircleId, null);
   assert.equal((await getDoc(doc(dbFor('admin'), 'circles/circle'))).data().memberCount, 1);
 });
@@ -251,12 +268,13 @@ rulesTest('Expired completed guard permits a newly provisioned session', async (
   await assertSucceeds(create(3));
 });
 
-rulesTest('Malformed account guard fails closed without preventing valid leave', async () => {
+rulesTest('Malformed account guard fails closed; client leave remains blocked', async () => {
   await seedCircle(3, 2);
   await seedGuard('joiner', {});
   await assertFails(join());
   await seedGuard('m1', {});
-  await assertSucceeds(leave());
+  await assertFails(leave());
+  await serverLeave();
 });
 
 rulesTest('Another UID guard does not prevent normal create or join', async () => {
@@ -283,7 +301,8 @@ rulesTest('Current entitlement is rechecked after downgrade and renewal', async 
   await seedUser('admin', {isPremium: false, activeCircleId: 'circle'});
   await seedUser('next');
   await assertFails(join('next'));
-  await assertSucceeds(leave());
+  await assertFails(leave());
+  await serverLeave();
   await seedUser('admin', {...premium(), activeCircleId: 'circle'});
   await assertSucceeds(join('next'));
 });
@@ -341,7 +360,7 @@ rulesTest('Legacy oversized Circle denies atomic join and standalone activation'
   assert.equal((await getDoc(doc(db, 'users/joiner'))).data().activeCircleId, null);
 });
 
-rulesTest('Legacy oversized Circle still permits atomic leave and clear', async () => {
+rulesTest('Legacy oversized Circle cannot bypass server leave using a client batch', async () => {
   const id = 'x'.repeat(129);
   await seedUser('admin', {activeCircleId: id});
   await seedUser('joiner', {activeCircleId: id});
@@ -356,8 +375,8 @@ rulesTest('Legacy oversized Circle still permits atomic leave and clear', async 
   batch.delete(doc(db, 'circles', id, 'members/joiner'));
   batch.update(doc(db, 'circles', id), {memberCount: increment(-1), updatedAt: serverTimestamp()});
   batch.update(doc(db, 'users/joiner'), {activeCircleId: null});
-  await assertSucceeds(batch.commit());
-  assert.equal((await getDoc(doc(db, 'users/joiner'))).data().activeCircleId, null);
+  await assertFails(batch.commit());
+  assert.equal((await getDoc(doc(db, 'users/joiner'))).data().activeCircleId, id);
 });
 
 const newChallenge = () => ({type: 'FOCUS_MINUTES', title: 'Challenge', targetValue: 10,
@@ -396,6 +415,7 @@ rulesTest('ID guards preserve member progress read, deny writes and keep events 
     await setDoc(doc(context.firestore(), event), {uid: 'm1'});
   });
   await assertSucceeds(getDoc(doc(dbFor('m1'), progress)));
+  await assertSucceeds(getDoc(doc(dbFor('admin'), progress)));
   await assertFails(getDoc(doc(dbFor('joiner'), progress)));
   for (const uid of ['admin', 'm1', 'joiner']) {
     await assertFails(setDoc(doc(dbFor(uid), progress), {uid: 'm1', value: 2}));
@@ -561,13 +581,47 @@ for (const [label, edit] of [
   });
 }
 
-rulesTest('Join and leave preserve existing Challenge metadata', async () => {
+rulesTest('Join and trusted leave preserve existing Challenge metadata; client leave is denied', async () => {
   await seedChallengeState(1);
   await assertSucceeds(join());
   const ref = doc(dbFor('admin'), 'circles/circle');
   assert.equal((await getDoc(ref)).data().challengeCount, 1);
   assert.equal((await getDoc(ref)).data().lastChallengeId, 'c-0');
-  await assertSucceeds(leave('joiner'));
+  await assertFails(leave('joiner'));
+  await serverLeave('joiner');
   assert.equal((await getDoc(ref)).data().challengeCount, 1);
   assert.equal((await getDoc(ref)).data().lastChallengeId, 'c-0');
+});
+
+rulesTest('Current members can list clean progress and get current-member progress', async () => {
+  await seedCircle(3, 2);
+  await env.withSecurityRulesDisabled(async context => {
+    const db = context.firestore();
+    await setDoc(doc(db, 'circles/circle/challenges/valid/progress/m1'), {value: 2});
+  });
+  const db = dbFor('admin');
+  await assertSucceeds(getDoc(doc(db, 'circles/circle/challenges/valid/progress/m1')));
+  const progress = await assertSucceeds(getDocs(collection(db, 'circles/circle/challenges/valid/progress')));
+  assert.deepEqual(progress.docs.map(snapshot => snapshot.id), ['m1']);
+  await assertFails(getDocs(collection(dbFor('joiner'), 'circles/circle/challenges/valid/progress')));
+  await assertFails(getDoc(doc(dbFor('joiner'), 'circles/circle/challenges/valid/progress/m1')));
+});
+
+rulesTest('Current members cannot get orphan progress directly by document ID', async () => {
+  await seedCircle(3, 2);
+  await env.withSecurityRulesDisabled(async context => {
+    await setDoc(doc(context.firestore(), 'circles/circle/challenges/valid/progress/former'), {value: 4});
+  });
+  const db = dbFor('admin');
+  await assertFails(getDoc(doc(db, 'circles/circle/challenges/valid/progress/former')));
+});
+
+rulesTest('Membership removal revokes progress read even while a legacy orphan remains', async () => {
+  await seedCircle(3, 2);
+  const path = 'circles/circle/challenges/valid/progress/m1';
+  await env.withSecurityRulesDisabled(context => setDoc(doc(context.firestore(), path), {value: 2}));
+  await assertSucceeds(getDoc(doc(dbFor('admin'), path)));
+  await env.withSecurityRulesDisabled(context => deleteDoc(doc(context.firestore(), 'circles/circle/members/m1')));
+  await assertFails(getDoc(doc(dbFor('admin'), path)));
+  await assertFails(getDoc(doc(dbFor('m1'), path)));
 });

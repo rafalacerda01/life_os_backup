@@ -1,5 +1,7 @@
 // ignore_for_file: subtype_of_sealed_class
 
+import 'dart:async';
+
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -86,13 +88,19 @@ class _Document extends Fake
   @override
   Future<DocumentSnapshot<Map<String, dynamic>>> get([
     GetOptions? options,
-  ]) async => _DocumentSnapshot(this, store.documents[location]);
+  ]) async {
+    store.reads.add(location);
+    return _DocumentSnapshot(this, store.documents[location]);
+  }
 
   @override
   Stream<DocumentSnapshot<Map<String, dynamic>>> snapshots({
     bool includeMetadataChanges = false,
     ListenSource source = ListenSource.defaultSource,
-  }) => Stream.value(_DocumentSnapshot(this, store.documents[location]));
+  }) {
+    store.listeners.add(location);
+    return Stream.value(_DocumentSnapshot(this, store.documents[location]));
+  }
 
   @override
   CollectionReference<Map<String, dynamic>> collection(String path) =>
@@ -112,6 +120,11 @@ class _Collection extends Fake
 
   @override
   Future<QuerySnapshot<Map<String, dynamic>>> get([GetOptions? options]) async {
+    store.reads.add(location);
+    return snapshot();
+  }
+
+  _QuerySnapshot snapshot() {
     final prefix = '$location/';
     final docs = store.documents.entries
         .where(
@@ -131,7 +144,17 @@ class _Collection extends Fake
   Stream<QuerySnapshot<Map<String, dynamic>>> snapshots({
     bool includeMetadataChanges = false,
     ListenSource source = ListenSource.defaultSource,
-  }) => const Stream.empty();
+  }) async* {
+    store.listeners.add(location);
+    if (store.emitCollections) {
+      final changes = store.collectionChanges.putIfAbsent(
+        location,
+        () => StreamController<QuerySnapshot<Map<String, dynamic>>>.broadcast(),
+      );
+      yield snapshot();
+      yield* changes.stream;
+    }
+  }
 }
 
 class _Batch extends Fake implements WriteBatch {
@@ -157,6 +180,21 @@ class _Firestore extends Fake implements FirebaseFirestore {
 
   final Map<String, Map<String, dynamic>> documents;
   final recordingBatch = _Batch();
+  final reads = <String>[];
+  final listeners = <String>[];
+  final collectionChanges =
+      <String, StreamController<QuerySnapshot<Map<String, dynamic>>>>{};
+  bool emitCollections = false;
+
+  void emitCollection(String location) {
+    collectionChanges[location]!.add(_Collection(this, location).snapshot());
+  }
+
+  Future<void> close() async {
+    for (final controller in collectionChanges.values) {
+      await controller.close();
+    }
+  }
 
   @override
   CollectionReference<Map<String, dynamic>> collection(String path) =>
@@ -278,6 +316,9 @@ void main() {
       });
       final repository = CirclesRepository(firestore, _Auth(), _Gateway());
 
+      firestore.emitCollections = true;
+      addTearDown(firestore.close);
+
       final circle = await repository.getCircleStream('circle-1').first;
 
       final challenge = circle!.challenges.single;
@@ -286,6 +327,122 @@ void main() {
       expect(challenge.targetValue, 100);
       expect(challenge.progressFor('user-a')!.value, 7);
       expect(circle.rankingFor(challenge).single.value, 7);
+      expect(
+        firestore.reads,
+        contains('circles/circle-1/challenges/shared/progress'),
+      );
+      expect(
+        firestore.listeners,
+        contains('circles/circle-1/challenges/shared/progress'),
+      );
+      expect(firestore.reads.any((path) => path.contains('/progress/')), false);
+      expect(
+        firestore.listeners.any((path) => path.contains('/progress/')),
+        false,
+      );
+    },
+  );
+
+  test(
+    'progress subscriptions scale with Challenges, not memberships',
+    () async {
+      const circlePath = 'circles/circle-1';
+      final timestamp = Timestamp.fromDate(DateTime.utc(2026, 1, 1));
+      final firestore = _Firestore({
+        circlePath: {
+          'name': 'Circle',
+          'description': 'Shared circle',
+          'adminId': 'user-a',
+          'memberCount': 4,
+          'memberLimit': 30,
+          'schemaVersion': 2,
+        },
+        for (final uid in ['user-a', 'user-b', 'user-c', 'user-d'])
+          '$circlePath/members/$uid': {
+            'role': uid == 'user-a' ? 'admin' : 'member',
+            'displayNameSnapshot': 'Member',
+            'photoUrlSnapshot': null,
+            'joinedAt': timestamp,
+          },
+        for (var i = 0; i < 3; i++)
+          '$circlePath/challenges/c-$i': {
+            'schemaVersion': 2,
+            'type': 'FOCUS_MINUTES',
+            'title': 'Challenge',
+            'targetValue': 100,
+            'startAt': timestamp,
+            'endAt': timestamp,
+            'createdBy': 'user-a',
+            'createdAt': timestamp,
+            'updatedAt': timestamp,
+          },
+        for (var i = 0; i < 3; i++)
+          for (final uid in ['user-a', 'user-b', 'user-c', 'user-d'])
+            '$circlePath/challenges/c-$i/progress/$uid': {
+              'value': 7,
+              'updatedAt': timestamp,
+            },
+      })..emitCollections = true;
+      final repository = CirclesRepository(firestore, _Auth(), _Gateway());
+      final initial = Completer<CircleEntity>();
+      final membershipChanged = Completer<CircleEntity>();
+      final subscription = repository.getCircleStream('circle-1').listen((
+        circle,
+      ) {
+        if (circle == null) return;
+        if (circle.members.length == 4 && !initial.isCompleted) {
+          initial.complete(circle);
+        }
+        if (circle.members.length == 5 && !membershipChanged.isCompleted) {
+          membershipChanged.complete(circle);
+        }
+      });
+      addTearDown(() async {
+        await subscription.cancel();
+        await firestore.close();
+      });
+      final expectedPaths = [
+        for (var i = 0; i < 3; i++) '$circlePath/challenges/c-$i/progress',
+      ];
+      void expectCollectionProgressOnly() {
+        expect(
+          firestore.listeners.where((path) => path.endsWith('/progress')),
+          unorderedEquals(expectedPaths),
+        );
+        expect(
+          firestore.reads.where((path) => path.endsWith('/progress')).toSet(),
+          unorderedEquals(expectedPaths),
+        );
+        expect(
+          firestore.listeners.any((path) => path.contains('/progress/')),
+          false,
+        );
+        expect(
+          firestore.reads.any((path) => path.contains('/progress/')),
+          false,
+        );
+      }
+
+      final first = await initial.future;
+      expect(first.challenges, hasLength(3));
+      expect(
+        first.challenges.every((challenge) => challenge.progress.length == 4),
+        true,
+      );
+      expectCollectionProgressOnly();
+
+      firestore.documents['$circlePath/members/user-e'] = {
+        'role': 'member',
+        'displayNameSnapshot': 'Member',
+        'photoUrlSnapshot': null,
+        'joinedAt': timestamp,
+      };
+      firestore.documents[circlePath]!['memberCount'] = 5;
+      firestore.emitCollection('$circlePath/members');
+      final updated = await membershipChanged.future;
+      expect(updated.memberCount, 5);
+      expect(updated.challenges, hasLength(3));
+      expectCollectionProgressOnly();
     },
   );
 }

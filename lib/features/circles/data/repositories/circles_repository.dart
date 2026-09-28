@@ -6,16 +6,20 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:life_os/core/utils/app_logger.dart';
 import 'package:life_os/features/premium/data/repositories/google_play_premium_repository.dart';
 import 'package:life_os/features/circles/data/remote/circle_delete_remote_data_source.dart';
+import 'package:life_os/features/circles/data/remote/circle_leave_remote_data_source.dart';
 import 'package:life_os/features/circles/domain/entities/challenge_entity.dart';
 import 'package:life_os/features/circles/domain/entities/circle_entity.dart';
 
 final circlesRepositoryProvider = Provider((ref) {
   final deleteRemote = CircleDeleteRemoteDataSource();
   ref.onDispose(deleteRemote.close);
+  final leaveRemote = CircleLeaveRemoteDataSource();
+  ref.onDispose(leaveRemote.close);
   return CirclesRepository(
     FirebaseFirestore.instance,
     FirebaseAuth.instance,
     deleteRemote,
+    leaveRemote: leaveRemote,
   );
 });
 
@@ -41,8 +45,14 @@ class CirclesRepository {
   final FirebaseFirestore _firestore;
   final FirebaseAuth _auth;
   final CircleDeleteGateway _deleteRemote;
+  final CircleLeaveGateway _leaveRemote;
 
-  CirclesRepository(this._firestore, this._auth, this._deleteRemote);
+  CirclesRepository(
+    this._firestore,
+    this._auth,
+    this._deleteRemote, {
+    CircleLeaveGateway? leaveRemote,
+  }) : _leaveRemote = leaveRemote ?? CircleLeaveRemoteDataSource();
 
   String _normalizeMemberName(Object? value, String? fallbackValue) {
     final normalized = value is String ? value.trim() : '';
@@ -93,6 +103,7 @@ class CirclesRepository {
     StreamSubscription? membersSubscription;
     StreamSubscription? challengesSubscription;
     final progressSubscriptions = <String, StreamSubscription>{};
+    var progressRevision = 0;
     var isReloading = false;
     var reloadPending = false;
 
@@ -125,6 +136,7 @@ class CirclesRepository {
     }
 
     Future<void> cancelNestedSubscriptions() async {
+      progressRevision++;
       await membersSubscription?.cancel();
       await challengesSubscription?.cancel();
       membersSubscription = null;
@@ -139,6 +151,7 @@ class CirclesRepository {
     Future<void> syncProgressSubscriptions(
       QuerySnapshot<Map<String, dynamic>> snapshot,
     ) async {
+      final revision = ++progressRevision;
       final challengeIds = snapshot.docs.map((doc) => doc.id).toSet();
       final removedIds = progressSubscriptions.keys
           .where((id) => !challengeIds.contains(id))
@@ -147,9 +160,12 @@ class CirclesRepository {
       for (final id in removedIds) {
         await progressSubscriptions.remove(id)?.cancel();
       }
+      if (revision != progressRevision || controller.isClosed) return;
 
       for (final challengeDoc in snapshot.docs) {
-        if (progressSubscriptions.containsKey(challengeDoc.id)) continue;
+        if (progressSubscriptions.containsKey(challengeDoc.id) ||
+            controller.isClosed)
+          continue;
 
         progressSubscriptions[challengeDoc.id] = challengeDoc.reference
             .collection('progress')
@@ -519,19 +535,7 @@ class CirclesRepository {
     final user = _auth.currentUser;
     if (user == null) throw Exception('Usuário não autenticado');
 
-    final batch = _firestore.batch();
-    final circleRef = _firestore.collection('circles').doc(circleId);
-
-    batch.delete(circleRef.collection('members').doc(user.uid));
-    batch.update(circleRef, {
-      'memberCount': FieldValue.increment(-1),
-      'updatedAt': FieldValue.serverTimestamp(),
-    });
-    batch.update(_firestore.collection('users').doc(user.uid), {
-      'activeCircleId': null,
-    });
-
-    await batch.commit();
+    await _leaveRemote.leaveCircle(circleId);
   }
 
   Future<void> joinCircleByCode(String circleId) async {
