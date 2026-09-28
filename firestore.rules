@@ -27,6 +27,14 @@ service cloud.firestore {
       return /databases/$(database)/documents/circles/$(circleId);
     }
 
+    function challengePath(circleId, challengeId) {
+      return /databases/$(database)/documents/circles/$(circleId)/challenges/$(challengeId);
+    }
+
+    function maxCircleChallenges() {
+      return 240;
+    }
+
     function accountCircleAdmissionBlocked(userId) {
       let guardPath = /databases/$(database)/documents/account_deletion_guards/$(userId);
       return exists(guardPath)
@@ -210,6 +218,8 @@ service cloud.firestore {
           'adminId',
           'memberCount',
           'memberLimit',
+          'challengeCount',
+          'lastChallengeId',
           'createdAt',
           'updatedAt',
           'schemaVersion'
@@ -220,6 +230,8 @@ service cloud.firestore {
           'adminId',
           'memberCount',
           'memberLimit',
+          'challengeCount',
+          'lastChallengeId',
           'createdAt',
           'updatedAt',
           'schemaVersion'
@@ -233,6 +245,9 @@ service cloud.firestore {
         && request.resource.data.adminId == request.auth.uid
         && request.resource.data.memberCount is int
         && request.resource.data.memberCount == 1
+        && request.resource.data.challengeCount is int
+        && request.resource.data.challengeCount == 0
+        && request.resource.data.lastChallengeId == null
         && request.resource.data.memberLimit is int
         && validAdminMemberLimit(
           request.auth.uid,
@@ -349,6 +364,37 @@ service cloud.firestore {
           memberPath(circleId, request.auth.uid)
         )
         && userClearsCircle(request.auth.uid, circleId);
+    }
+
+    function validChallengeCounterUpdate(circleId, before, after) {
+      let challengeId = after.get('lastChallengeId', null);
+      return validCircleDocumentId(circleId)
+        && isCircleAdmin(circleId)
+        && isCircleMember(circleId)
+        && before.schemaVersion == 2
+        && !before.keys().hasAny(['deletionState'])
+        && before.keys().hasAll(['challengeCount', 'lastChallengeId'])
+        && before.challengeCount is int
+        && before.challengeCount >= 0
+        && before.challengeCount < maxCircleChallenges()
+        && (before.lastChallengeId == null || validCircleDocumentId(before.lastChallengeId))
+        && after.diff(before).affectedKeys().hasOnly([
+          'challengeCount', 'lastChallengeId', 'updatedAt'
+        ])
+        && after.challengeCount is int
+        && after.challengeCount == before.challengeCount + 1
+        && after.challengeCount <= maxCircleChallenges()
+        && validCircleDocumentId(challengeId)
+        && after.updatedAt == request.time
+        && !exists(challengePath(circleId, challengeId))
+        && existsAfter(challengePath(circleId, challengeId));
+    }
+
+    function isAtomicChallengeCreate(circleId, challengeId) {
+      let before = get(circlePath(circleId)).data;
+      let after = getAfter(circlePath(circleId)).data;
+      return after.lastChallengeId == challengeId
+        && validChallengeCounterUpdate(circleId, before, after);
     }
 
     function validMemberDelete(circleId, userId) {
@@ -1073,7 +1119,8 @@ service cloud.firestore {
       allow update:
         if isAdminTimestampUpdate(circleId)
         || isAtomicJoin(circleId)
-        || isAtomicLeave(circleId);
+        || isAtomicLeave(circleId)
+        || validChallengeCounterUpdate(circleId, resource.data, request.resource.data);
 
       allow delete: if false;
 
@@ -1100,7 +1147,8 @@ service cloud.firestore {
           && !get(circlePath(circleId)).data.keys().hasAny([
             'deletionState'
           ])
-          && validChallengeCreate(circleId, challengeId);
+          && validChallengeCreate(circleId, challengeId)
+          && isAtomicChallengeCreate(circleId, challengeId);
 
         allow update: if false;
 

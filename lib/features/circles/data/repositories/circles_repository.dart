@@ -28,6 +28,7 @@ class CirclesRepository {
   static const int _maxCircleDescriptionLength = 500;
   static const int _maxChallengeTitleLength = 200;
   static const int _maxChallengeTargetValue = 1000000;
+  static const int _maxCircleChallenges = 240;
   static const int _maxMemberNameLength = 50;
   static const int _maxPhotoUrlLength = 2048;
   static const _predefinedAvatars = {
@@ -398,24 +399,52 @@ class CirclesRepository {
       throw ArgumentError('Data final do desafio inválida');
     }
 
-    final batch = _firestore.batch();
     final circleRef = _firestore.collection('circles').doc(circleId);
     final challengeRef = circleRef.collection('challenges').doc();
 
-    batch.set(challengeRef, {
-      'type': type.value,
-      'title': cleanTitle,
-      'targetValue': targetValue,
-      'startAt': FieldValue.serverTimestamp(),
-      'endAt': Timestamp.fromDate(endAt),
-      'createdBy': user.uid,
-      'createdAt': FieldValue.serverTimestamp(),
-      'updatedAt': FieldValue.serverTimestamp(),
-      'schemaVersion': _schemaVersion,
+    await _firestore.runTransaction((transaction) async {
+      final snapshot = await transaction.get(circleRef);
+      final data = snapshot.data();
+      if (!snapshot.exists ||
+          data == null ||
+          data['schemaVersion'] != _schemaVersion ||
+          data.containsKey('deletionState')) {
+        throw StateError('Círculo indisponível para criar desafios');
+      }
+      final count = data['challengeCount'];
+      final lastId = data['lastChallengeId'];
+      if (count is! int ||
+          count < 0 ||
+          count > _maxCircleChallenges ||
+          !data.containsKey('lastChallengeId') ||
+          (lastId != null &&
+              (lastId is! String ||
+                  lastId.isEmpty ||
+                  lastId.length > 128 ||
+                  lastId.trim() != lastId ||
+                  lastId.contains('/')))) {
+        throw StateError('Configuração de desafios do círculo inválida');
+      }
+      if (count >= _maxCircleChallenges) {
+        throw StateError('Este círculo atingiu o limite de 240 desafios');
+      }
+      transaction.set(challengeRef, {
+        'type': type.value,
+        'title': cleanTitle,
+        'targetValue': targetValue,
+        'startAt': FieldValue.serverTimestamp(),
+        'endAt': Timestamp.fromDate(endAt),
+        'createdBy': user.uid,
+        'createdAt': FieldValue.serverTimestamp(),
+        'updatedAt': FieldValue.serverTimestamp(),
+        'schemaVersion': _schemaVersion,
+      });
+      transaction.update(circleRef, {
+        'challengeCount': count + 1,
+        'lastChallengeId': challengeRef.id,
+        'updatedAt': FieldValue.serverTimestamp(),
+      });
     });
-
-    batch.update(circleRef, {'updatedAt': FieldValue.serverTimestamp()});
-    await batch.commit();
   }
 
   Future<String> createCircle(String name, String description) async {
@@ -460,6 +489,8 @@ class CirclesRepository {
       'adminId': user.uid,
       'memberCount': 1,
       'memberLimit': memberLimit,
+      'challengeCount': 0,
+      'lastChallengeId': null,
       'createdAt': FieldValue.serverTimestamp(),
       'updatedAt': FieldValue.serverTimestamp(),
       'schemaVersion': _schemaVersion,

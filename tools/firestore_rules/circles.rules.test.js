@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const {resolve} = require('node:path');
 const {before, after, beforeEach, test} = require('node:test');
 const {initializeTestEnvironment, assertSucceeds, assertFails} = require('@firebase/rules-unit-testing');
-const {doc, setDoc, getDoc, updateDoc, deleteDoc, writeBatch, serverTimestamp, Timestamp, increment} = require('firebase/firestore');
+const {doc, setDoc, getDoc, getDocs, collection, updateDoc, deleteDoc, writeBatch, runTransaction, serverTimestamp, Timestamp, increment} = require('firebase/firestore');
 
 // Never fall back to a production Firestore instance.
 const emulatorAvailable = Boolean(process.env.FIRESTORE_EMULATOR_HOST);
@@ -19,7 +19,7 @@ const premium = (overrides = {}) => ({
   ...overrides,
 });
 const member = (role = 'member') => ({role, displayNameSnapshot: 'Member', photoUrlSnapshot: null, joinedAt: serverTimestamp()});
-const circle = (limit, count = 1) => ({name: 'Circle', description: 'Test circle', adminId: 'admin', memberCount: count, memberLimit: limit, schemaVersion: 2, createdAt: serverTimestamp(), updatedAt: serverTimestamp()});
+const circle = (limit, count = 1) => ({name: 'Circle', description: 'Test circle', adminId: 'admin', memberCount: count, memberLimit: limit, challengeCount: 0, lastChallengeId: null, schemaVersion: 2, createdAt: serverTimestamp(), updatedAt: serverTimestamp()});
 const dbFor = uid => env.authenticatedContext(uid).firestore();
 async function seedUser(uid, data = {}) {
   await env.withSecurityRulesDisabled(async (context) => {
@@ -367,14 +367,14 @@ const newChallenge = () => ({type: 'FOCUS_MINUTES', title: 'Challenge', targetVa
 for (const id of ['x'.repeat(129), ' leading', 'trailing ', '\u00a0leading', 'trailing\ufeff', '\u{1f600}'.repeat(65)]) {
   rulesTest(`Incompatible Challenge ID ${JSON.stringify(id)} cannot be created`, async () => {
     await seedCircle(3, 1);
-    await assertFails(setDoc(doc(dbFor('admin'), 'circles/circle/challenges', id), newChallenge()));
+    await assertFails(createChallengeAt(id));
   });
 }
 
 rulesTest('Valid Challenge boundary 128 is allowed only for admin', async () => {
   await seedCircle(3, 2);
-  await assertSucceeds(setDoc(doc(dbFor('admin'), 'circles/circle/challenges', 'x'.repeat(128)), newChallenge()));
-  await assertFails(setDoc(doc(dbFor('m1'), 'circles/circle/challenges/other'), {...newChallenge(), createdBy: 'm1'}));
+  await assertSucceeds(createChallengeAt('x'.repeat(128)));
+  await assertFails(createChallengeAt('other', {uid: 'm1', count: 2}));
 });
 
 rulesTest('Challenge creation in legacy oversized Circle is denied', async () => {
@@ -384,7 +384,7 @@ rulesTest('Challenge creation in legacy oversized Circle is denied', async () =>
     await setDoc(doc(context.firestore(), 'circles', id), circle(3));
     await setDoc(doc(context.firestore(), 'circles', id, 'members/admin'), member('admin'));
   });
-  await assertFails(setDoc(doc(dbFor('admin'), 'circles', id, 'challenges/valid'), newChallenge()));
+  await assertFails(createChallengeAt('valid', {circleId: id}));
 });
 
 rulesTest('ID guards preserve member progress read, deny writes and keep events private', async () => {
@@ -405,4 +405,169 @@ rulesTest('ID guards preserve member progress read, deny writes and keep events 
     await assertFails(setDoc(doc(dbFor(uid), event), {uid: 'm1'}));
     await assertFails(deleteDoc(doc(dbFor(uid), event)));
   }
+});
+
+function createChallengeAt(id, {uid = 'admin', count = 1, lastId = id,
+  ids = [id], rootUpdates = {}, circleId = 'circle', challengeUpdates = {}} = {}) {
+  const db = dbFor(uid);
+  const batch = writeBatch(db);
+  batch.update(doc(db, 'circles', circleId), {challengeCount: count,
+    lastChallengeId: lastId, updatedAt: serverTimestamp(), ...rootUpdates});
+  for (const challengeId of ids) batch.set(doc(db, 'circles', circleId, 'challenges', challengeId),
+    {...newChallenge(), createdBy: uid, ...challengeUpdates});
+  return batch.commit();
+}
+
+async function seedChallengeState(count, fields = {}) {
+  await seedCircle(3, 2);
+  await env.withSecurityRulesDisabled(async context => {
+    const db = context.firestore();
+    const batch = writeBatch(db);
+    batch.update(doc(db, 'circles/circle'), {challengeCount: count,
+      lastChallengeId: count > 0 ? 'c-0' : null, ...fields});
+    if (Number.isInteger(count) && count > 0 && count <= 240) {
+      for (let i = 0; i < count; i++) batch.set(doc(db, 'circles/circle/challenges', `c-${i}`), newChallenge());
+    }
+    await batch.commit();
+  });
+}
+
+rulesTest('New Circle starts with zero Challenges and null last ID', async () => {
+  await seedUser('admin');
+  await assertSucceeds(create(3));
+  const root = (await getDoc(doc(dbFor('admin'), 'circles/circle'))).data();
+  assert.equal(root.challengeCount, 0);
+  assert.equal(root.lastChallengeId, null);
+});
+
+for (const [label, edit] of [
+  ['missing count', data => {delete data.challengeCount;}],
+  ['missing last ID', data => {delete data.lastChallengeId;}],
+  ['nonzero count', data => {data.challengeCount = 1;}],
+  ['non-null last ID', data => {data.lastChallengeId = 'other';}],
+]) {
+  rulesTest(`New Circle rejects ${label}`, async () => {
+    await seedUser('admin');
+    const db = dbFor('admin');
+    const batch = writeBatch(db);
+    const data = circle(3);
+    edit(data);
+    batch.set(doc(db, 'circles/circle'), data);
+    batch.set(doc(db, 'circles/circle/members/admin'), member('admin'));
+    batch.update(doc(db, 'users/admin'), {activeCircleId: 'circle'});
+    await assertFails(batch.commit());
+  });
+}
+
+rulesTest('Admin atomically creates first Challenge and increments 0 to 1', async () => {
+  await seedChallengeState(0);
+  await assertSucceeds(createChallengeAt('first'));
+  const db = dbFor('admin');
+  const root = (await getDoc(doc(db, 'circles/circle'))).data();
+  assert.equal(root.challengeCount, 1);
+  assert.equal(root.lastChallengeId, 'first');
+  await assertSucceeds(getDoc(doc(db, 'circles/circle/challenges/first')));
+});
+
+rulesTest('Challenge creation without root update is denied', async () => {
+  await seedChallengeState(0);
+  await assertFails(setDoc(doc(dbFor('admin'), 'circles/circle/challenges/first'), newChallenge()));
+});
+
+for (const [label, options] of [
+  ['root update without Challenge', {ids: []}],
+  ['jump count 0 to 2', {count: 2}],
+  ['wrong lastChallengeId', {lastId: 'other'}],
+  ['two Challenges for one increment', {ids: ['first', 'second']}],
+  ['extra root field', {rootUpdates: {name: 'Changed'}}],
+  ['non-admin outsider', {uid: 'joiner'}],
+  ['non-admin member', {uid: 'm1'}],
+  ['invalid Challenge fields', {challengeUpdates: {targetValue: 0}}],
+]) {
+  rulesTest(`Atomic Challenge rejects ${label}`, async () => {
+    await seedChallengeState(0);
+    await assertFails(createChallengeAt('first', options));
+    const db = dbFor('admin');
+    assert.equal((await getDoc(doc(db, 'circles/circle'))).data().challengeCount, 0);
+    assert.equal((await getDocs(collection(db, 'circles/circle/challenges'))).size, 0);
+  });
+}
+
+rulesTest('Existing Challenge cannot justify an increment or be updated/deleted', async () => {
+  await seedChallengeState(1);
+  const db = dbFor('admin');
+  await assertFails(createChallengeAt('c-0', {count: 2, ids: []}));
+  await assertFails(createChallengeAt('c-0', {count: 2}));
+  await assertFails(updateDoc(doc(db, 'circles/circle/challenges/c-0'), {title: 'Updated'}));
+  await assertFails(deleteDoc(doc(db, 'circles/circle/challenges/c-0')));
+});
+
+rulesTest('Counter cannot decrement or be modified by ordinary root update', async () => {
+  await seedChallengeState(1);
+  const ref = doc(dbFor('admin'), 'circles/circle');
+  for (const fields of [{challengeCount: 0}, {lastChallengeId: 'other'},
+    {challengeCount: 2, lastChallengeId: 'other', updatedAt: serverTimestamp()}]) {
+    await assertFails(updateDoc(ref, fields));
+  }
+  await assertFails(createChallengeAt('new', {count: 0}));
+});
+
+rulesTest('Challenge 240 is accepted and Challenge 241 is denied', async () => {
+  await seedChallengeState(239);
+  await assertSucceeds(createChallengeAt('last', {count: 240}));
+  await assertFails(createChallengeAt('overflow', {count: 241}));
+  const db = dbFor('admin');
+  assert.equal((await getDoc(doc(db, 'circles/circle'))).data().challengeCount, 240);
+  assert.equal((await getDocs(collection(db, 'circles/circle/challenges'))).size, 240);
+});
+
+rulesTest('Concurrent transactions at 239 admit only one Challenge', async () => {
+  await seedChallengeState(239);
+  const db = dbFor('admin');
+  const root = doc(db, 'circles/circle');
+  async function attempt(id) {
+    const ref = doc(db, 'circles/circle/challenges', id);
+    return runTransaction(db, async tx => {
+      const count = (await tx.get(root)).data().challengeCount;
+      if (count >= 240) throw new Error('CAP_REACHED');
+      tx.set(ref, newChallenge());
+      tx.update(root, {challengeCount: count + 1, lastChallengeId: id, updatedAt: serverTimestamp()});
+    });
+  }
+  const results = await Promise.allSettled([attempt('race-a'), attempt('race-b')]);
+  assert.equal(results.filter(result => result.status === 'fulfilled').length, 1);
+  assert.equal((await getDoc(root)).data().challengeCount, 240);
+  assert.equal((await getDocs(collection(db, 'circles/circle/challenges'))).size, 240);
+});
+
+for (const [label, edit] of [
+  ['missing counters', data => {delete data.challengeCount; delete data.lastChallengeId;}],
+  ['partial counters', data => {delete data.lastChallengeId;}],
+  ['string count', data => {data.challengeCount = '0';}],
+  ['null count', data => {data.challengeCount = null;}],
+  ['negative count', data => {data.challengeCount = -1;}],
+  ['invalid last ID', data => {data.lastChallengeId = ' bad ';}],
+  ['deleting Circle', data => {data.deletionState = 'SERVER_DELETING';}],
+]) {
+  rulesTest(`${label} denies Challenge creation until safely reconciled`, async () => {
+    await seedCircle(3, 1);
+    await env.withSecurityRulesDisabled(async context => {
+      const ref = doc(context.firestore(), 'circles/circle');
+      const data = (await getDoc(ref)).data();
+      edit(data);
+      await setDoc(ref, data);
+    });
+    await assertFails(createChallengeAt('first'));
+  });
+}
+
+rulesTest('Join and leave preserve existing Challenge metadata', async () => {
+  await seedChallengeState(1);
+  await assertSucceeds(join());
+  const ref = doc(dbFor('admin'), 'circles/circle');
+  assert.equal((await getDoc(ref)).data().challengeCount, 1);
+  assert.equal((await getDoc(ref)).data().lastChallengeId, 'c-0');
+  await assertSucceeds(leave('joiner'));
+  assert.equal((await getDoc(ref)).data().challengeCount, 1);
+  assert.equal((await getDoc(ref)).data().lastChallengeId, 'c-0');
 });

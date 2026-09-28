@@ -242,6 +242,9 @@ void main() {
               as Map)['memberLimit'],
           entry.value.$2,
         );
+        final circle = store.recordingBatch.writes['circles/new-circle'] as Map;
+        expect(circle['challengeCount'], 0);
+        expect(circle['lastChallengeId'], isNull);
         expect(store.recordingBatch.writes['users/admin'], {
           'activeCircleId': 'new-circle',
         });
