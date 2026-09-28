@@ -1,6 +1,6 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
-const {MAX_CIRCLE_CHALLENGES, inspectCircle, backfillCircle, backfillCircles, parseArgs} =
+const {MAX_CIRCLE_CHALLENGES, inspectCircle, backfillCircle, backfillCircles, parseArgs, runCli} =
   require("../scripts/backfill-circle-challenge-count");
 
 const legacy = () => ({schemaVersion: 2, adminId: "admin", memberCount: 1,
@@ -130,3 +130,103 @@ test("runner paginates Circles and reports each result without implicit writes",
   assert.deepEqual(first.writes, []);
   assert.deepEqual(second.writes, []);
 });
+
+function cliFixture(count, root = legacy()) {
+  const f = fixture(count, root);
+  f.db.collection = (name) => {
+    assert.equal(name, "circles");
+    let after;
+    const query = {
+      orderBy: () => query,
+      limit: (value) => {assert.equal(value, 200); return query;},
+      startAfter: (value) => {after = value; return query;},
+      get: async () => after ? {empty: true, docs: []} :
+        {empty: false, docs: [{id: f.ref.id, ref: f.ref}]},
+    };
+    return query;
+  };
+  return f;
+}
+
+test("importing the CLI does not load or initialize Firebase Admin", (t) => {
+  const Module = require("node:module");
+  const originalLoad = Module._load;
+  const path = require.resolve("../scripts/backfill-circle-challenge-count");
+  const cached = require.cache[path];
+  t.mock.method(Module, "_load", function(request, ...args) {
+    if (request === "firebase-admin" || request.startsWith("firebase-admin/")) {
+      assert.fail("Import must not load Firebase Admin");
+    }
+    return originalLoad.call(this, request, ...args);
+  });
+  delete require.cache[path];
+  try {
+    assert.equal(typeof require(path).runCli, "function");
+  } finally {
+    require.cache[path] = cached;
+  }
+});
+
+test("CLI modular bootstrap passes its Firestore to the real dry-run flow", async (t) => {
+  const Module = require("node:module");
+  const originalLoad = Module._load;
+  const f = cliFixture(7);
+  const events = [];
+  const output = [];
+  t.mock.method(Module, "_load", function(request, ...args) {
+    if (request === "firebase-admin") assert.fail("Legacy Admin API must not be used");
+    if (request === "firebase-admin/app") {
+      return {initializeApp: (options) => events.push(["initializeApp", options])};
+    }
+    if (request === "firebase-admin/firestore") {
+      return {
+        getFirestore: () => {events.push(["getFirestore"]); return f.db;},
+        FieldPath: {documentId: () => "documentId"},
+      };
+    }
+    return originalLoad.call(this, request, ...args);
+  });
+  assert.equal(await runCli(["--project", "demo-life-os"], {log: (value) => output.push(JSON.parse(value))}), 0);
+  assert.deepEqual(events, [["initializeApp", {projectId: "demo-life-os"}], ["getFirestore"]]);
+  assert.deepEqual(output, [{mode: "DRY_RUN", results: [{circleId: "circle", status: "CANDIDATE",
+    actualCount: 7, patch: {challengeCount: 7, lastChallengeId: null}}]}]);
+  assert.deepEqual(f.writes, []);
+});
+
+test("CLI rejects a missing project before initializing Firebase", async () => {
+  await assert.rejects(runCli([], {
+    initializeApp: () => assert.fail("Must not initialize without project"),
+    getFirestore: () => assert.fail("Must not get Firestore without project"),
+  }), /An explicit --project PROJECT_ID is required/);
+});
+
+test("CLI writes only with explicit apply using an injected in-memory Firestore", async () => {
+  const f = cliFixture(7);
+  const output = [];
+  assert.equal(await runCli(["--project", "demo-life-os", "--apply"], {
+    initializeApp: () => {}, getFirestore: () => f.db,
+    log: (value) => output.push(JSON.parse(value)),
+  }), 0);
+  assert.equal(output[0].mode, "APPLY");
+  assert.equal(output[0].results[0].status, "APPLIED");
+  assert.deepEqual(f.writes, [{challengeCount: 7, lastChallengeId: null}]);
+});
+
+for (const [status, count, root, exitCode] of [
+  ["UNCHANGED", 0, {...legacy(), challengeCount: 0, lastChallengeId: null}, 0],
+  ["CONFLICT", 0, {...legacy(), challengeCount: 1, lastChallengeId: null}, 1],
+  ["OVER_LIMIT", 241, legacy(), 1],
+]) {
+  test(`CLI preserves ${status} exit code ${exitCode} without writes`, async () => {
+    const f = cliFixture(count, {...root});
+    const original = {...f.root};
+    const output = [];
+    assert.equal(await runCli(["--project", "demo-life-os"], {
+      initializeApp: () => {}, getFirestore: () => f.db,
+      log: (value) => output.push(JSON.parse(value)),
+    }), exitCode);
+    assert.equal(output[0].results[0].status, status);
+    assert.deepEqual(f.writes, []);
+    assert.deepEqual(f.root, original);
+  });
+}

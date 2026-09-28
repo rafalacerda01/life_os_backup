@@ -76,19 +76,25 @@ function parseArgs(args) {
   return {apply, projectId};
 }
 
+async function runCli(args, dependencies = {}) {
+  const options = parseArgs(args);
+  const initializeApp = dependencies.initializeApp ?? require("firebase-admin/app").initializeApp;
+  const getFirestore = dependencies.getFirestore ?? require("firebase-admin/firestore").getFirestore;
+  initializeApp({projectId: options.projectId});
+  const results = await backfillCircles(getFirestore(), options);
+  const log = dependencies.log ?? console.log;
+  log(JSON.stringify({mode: options.apply ? "APPLY" : "DRY_RUN", results}, null, 2));
+  return results.some(({status}) => ["CONFLICT", "OVER_LIMIT"].includes(status)) ? 1 : 0;
+}
+
 // Only an explicit CLI invocation initializes Admin; imports/tests never do.
 if (require.main === module) {
-  (async () => {
-    const options = parseArgs(process.argv.slice(2));
-    const admin = require("firebase-admin");
-    admin.initializeApp({projectId: options.projectId});
-    const results = await backfillCircles(admin.firestore(), options);
-    console.log(JSON.stringify({mode: options.apply ? "APPLY" : "DRY_RUN", results}, null, 2));
-    if (results.some(({status}) => ["CONFLICT", "OVER_LIMIT"].includes(status))) process.exitCode = 1;
-  })().catch(() => {
+  runCli(process.argv.slice(2)).then((exitCode) => {
+    process.exitCode = exitCode;
+  }).catch(() => {
     console.error("Circle challenge-count backfill failed; no automatic recovery performed.");
     process.exitCode = 1;
   });
 }
 
-module.exports = {MAX_CIRCLE_CHALLENGES, inspectCircle, backfillCircle, backfillCircles, parseArgs};
+module.exports = {MAX_CIRCLE_CHALLENGES, inspectCircle, backfillCircle, backfillCircles, parseArgs, runCli};
