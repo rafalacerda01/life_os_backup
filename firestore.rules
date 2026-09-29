@@ -35,7 +35,7 @@ service cloud.firestore {
       return 240;
     }
 
-    function accountCircleAdmissionBlocked(userId) {
+    function accountDeletionBlocked(userId) {
       let guardPath = /databases/$(database)/documents/account_deletion_guards/$(userId);
       return exists(guardPath)
         && (
@@ -43,6 +43,11 @@ service cloud.firestore {
           || !(get(guardPath).data.retainUntil is timestamp)
           || request.time <= get(guardPath).data.retainUntil
         );
+    }
+
+    function canWriteUserData(userId) {
+      return isOwner(userId)
+        && !accountDeletionBlocked(userId);
     }
 
     function circleDeletionPath(circleId) {
@@ -125,7 +130,7 @@ service cloud.firestore {
 
     function userActivatesCircle(userId, circleId) {
       return validCircleDocumentId(circleId)
-        && !accountCircleAdmissionBlocked(userId)
+        && !accountDeletionBlocked(userId)
         && hasNoActiveCircle(userId)
         && changesOnlyActiveCircle(userId)
         && getAfter(userPath(userId)).data.activeCircleId == circleId;
@@ -143,7 +148,7 @@ service cloud.firestore {
         && (
           (
             validCircleDocumentId(request.resource.data.activeCircleId)
-            && !accountCircleAdmissionBlocked(userId)
+            && !accountDeletionBlocked(userId)
             && (
               !resource.data.keys().hasAny(['activeCircleId'])
               || resource.data.activeCircleId == null
@@ -897,10 +902,10 @@ service cloud.firestore {
 
   allow read: if isOwner(userId);
 
-  allow create: if isOwner(userId)
+  allow create: if canWriteUserData(userId)
     && validUserCreate();
 
-  allow update: if isOwner(userId)
+  allow update: if canWriteUserData(userId)
     && validUserUpdate(userId);
 
   allow delete: if false;
@@ -908,7 +913,7 @@ service cloud.firestore {
       match /habits/{habitId} {
         allow read: if isOwner(userId);
         allow create, delete: if false;
-        allow update: if isOwner(userId)
+        allow update: if canWriteUserData(userId)
           && isUpdatingOnly(['completedDates'])
           && request.resource.data.completedDates is list
           && request.resource.data.completedDates.size() <= 5000;
@@ -917,7 +922,7 @@ service cloud.firestore {
       match /tasks/{taskId} {
         allow read: if isOwner(userId);
         allow create, delete: if false;
-        allow update: if isOwner(userId)
+        allow update: if canWriteUserData(userId)
           && isUpdatingOnly(['isCompleted'])
           && request.resource.data.isCompleted is bool;
       }
@@ -925,7 +930,7 @@ service cloud.firestore {
       match /goals/{goalId} {
         allow read: if isOwner(userId);
         allow create, delete: if false;
-        allow update: if isOwner(userId)
+        allow update: if canWriteUserData(userId)
           && isUpdatingOnly([
             'currentValue',
             'lastReset'
@@ -952,7 +957,7 @@ service cloud.firestore {
       match /subjects/{subjectId} {
         allow read: if isOwner(userId);
         allow create, delete: if false;
-        allow update: if isOwner(userId)
+        allow update: if canWriteUserData(userId)
           && isUpdatingOnly([
             'cardsToReview',
             'progress',
@@ -1003,31 +1008,31 @@ service cloud.firestore {
 
       match /checkins/{checkinId} {
         allow read: if isOwner(userId);
-        allow create, update: if isOwner(userId)
+        allow create, update: if canWriteUserData(userId)
           && validCheckinData();
         allow delete: if false;
       }
 
       match /focus_logs/{focusLogId} {
         allow read: if isOwner(userId);
-        allow create, update: if isOwner(userId)
+        allow create, update: if canWriteUserData(userId)
           && validFocusLogData();
         allow delete: if false;
       }
 
       match /health_info/{healthInfoId} {
         allow read: if isOwner(userId);
-        allow create, update: if isOwner(userId)
+        allow create, update: if canWriteUserData(userId)
           && validHealthData();
         allow delete: if false;
       }
 
       match /study_info/{studyInfoId} {
         allow read: if isOwner(userId);
-        allow create: if isOwner(userId)
+        allow create: if canWriteUserData(userId)
           && studyInfoId == 'main'
           && validStudyInfoCreate();
-        allow update: if isOwner(userId)
+        allow update: if canWriteUserData(userId)
           && studyInfoId == 'main'
           && validStudyInfoUpdate();
         allow delete: if false;
@@ -1049,7 +1054,7 @@ service cloud.firestore {
       match /review_queue/{reviewId} {
   allow read: if isOwner(userId);
 
-  allow create: if isOwner(userId)
+  allow create: if canWriteUserData(userId)
     && validReviewQueueCreate();
 
   allow update: if false;
@@ -1059,17 +1064,17 @@ service cloud.firestore {
 
       match /notifications/{notificationId} {
         allow read: if isOwner(userId);
-        allow create, update: if isOwner(userId)
+        allow create, update: if canWriteUserData(userId)
           && validNotificationData();
-        allow delete: if isOwner(userId);
+        allow delete: if canWriteUserData(userId);
       }
 
       match /privacy/{privacyId} {
         allow read: if isOwner(userId);
-        allow create: if isOwner(userId)
+        allow create: if canWriteUserData(userId)
           && privacyId == 'ai_consent'
           && validPrivacyCreate(userId);
-        allow update: if isOwner(userId)
+        allow update: if canWriteUserData(userId)
           && privacyId == 'ai_consent'
           && validPrivacyUpdate(userId);
         allow delete: if false;
