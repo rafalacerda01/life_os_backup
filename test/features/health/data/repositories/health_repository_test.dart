@@ -4,6 +4,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:drift/drift.dart' show Value;
 import 'package:drift/native.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -1141,6 +1142,51 @@ void main() {
       expect(nextDay.menstrualCycle?['periodLengthDays'], 6);
     },
   );
+
+  test('mesmo stream acompanha o dia atual em cada emissão Drift', () async {
+    clock.value = DateTime(2026, 8, 21, 23, 59);
+    await repository.updateMood('Radiante');
+    await repository.addWater(1250);
+    await repository.updatePillStatus(true, expectedUid: 'user-123');
+    await repository.updateCycleSettings({
+      'isEnabled': true,
+      'lastPeriodStart': '2026-08-01T00:00:00.000',
+      'cycleLengthDays': 30,
+      'periodLengthDays': 6,
+    }, expectedUid: 'user-123');
+
+    final stream = repository.getHealthStream();
+    final iterator = StreamIterator<HealthModel>(stream);
+    addTearDown(iterator.cancel);
+    expect(await iterator.moveNext(), isTrue);
+    expect(iterator.current.mood, 'Radiante');
+    expect(iterator.current.waterIntakeMl, 1500);
+    expect(iterator.current.hasTakenPillToday, isTrue);
+
+    clock.value = DateTime(2026, 8, 22, 0, 1);
+    final nextEmission = iterator.moveNext();
+    await (db.update(db.healthEntries)
+          ..where((table) => table.docId.equals('2026-08-21')))
+        .write(const HealthEntriesCompanion(waterIntakeMl: Value(1750)));
+    expect(await nextEmission, isTrue);
+    expect(iterator.current.date, clock.value);
+    expect(iterator.current.mood, '—');
+    expect(iterator.current.waterIntakeMl, 0);
+    expect(iterator.current.hasTakenPillToday, isFalse);
+    expect(iterator.current.menstrualCycle?['cycleLengthDays'], 30);
+
+    final todayEmission = iterator.moveNext();
+    await repository.updateMood('Focado');
+    expect(await todayEmission, isTrue);
+    expect(iterator.current.mood, 'Focado');
+    expect(iterator.current.waterIntakeMl, 0);
+    expect(iterator.current.hasTakenPillToday, isFalse);
+    final today = await (db.select(
+      db.healthEntries,
+    )..where((table) => table.docId.equals('2026-08-22'))).getSingle();
+    expect(today.mood, 'Focado');
+    await iterator.cancel();
+  });
 
   test(
     'reconstrução usa o ciclo válido mais recente sem copiar humor e água',

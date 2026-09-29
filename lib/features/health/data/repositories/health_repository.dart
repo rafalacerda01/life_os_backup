@@ -343,9 +343,8 @@ class HealthRepository {
   // ===========================================================================
 
   Stream<HealthModel> getHealthStream() {
-    final todayDocId = _getTodayDocId();
-
     return _db.select(_db.healthEntries).watch().map((entries) {
+      final todayDocId = _getTodayDocId();
       HealthEntry? todayEntry;
 
       for (final entry in entries) {

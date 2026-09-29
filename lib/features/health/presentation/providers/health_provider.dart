@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -13,6 +15,18 @@ import 'package:life_os/features/health/data/repositories/health_repository.dart
 // REPOSITORY
 // ===========================================================================
 
+final healthDayClockProvider = Provider<DateTime Function()>(
+  (ref) => DateTime.now,
+);
+
+final healthDayTimerProvider =
+    Provider<Timer Function(Duration, void Function())>((ref) => Timer.new);
+
+DateTime nextHealthDayBoundary(DateTime now) {
+  final localNow = now.toLocal();
+  return DateTime(localNow.year, localNow.month, localNow.day + 1);
+}
+
 final healthRepositoryProvider = Provider<HealthRepository>((ref) {
   final db = ref.watch(databaseProvider);
 
@@ -22,6 +36,7 @@ final healthRepositoryProvider = Provider<HealthRepository>((ref) {
     FirebaseAuth.instance,
     db,
     ref.watch(syncManagerProvider),
+    now: ref.watch(healthDayClockProvider),
   );
 });
 
@@ -31,6 +46,14 @@ final healthRepositoryProvider = Provider<HealthRepository>((ref) {
 
 final healthStreamProvider = StreamProvider<HealthModel>((ref) {
   final repository = ref.watch(healthRepositoryProvider);
+  final now = ref.watch(healthDayClockProvider)();
+  final timer = ref.watch(healthDayTimerProvider)(
+    nextHealthDayBoundary(now).difference(now),
+    () {
+      if (ref.mounted) ref.invalidateSelf();
+    },
+  );
+  ref.onDispose(timer.cancel);
 
   // 🛡️ CORREÇÃO: Removido o .cast<HealthModel>() que estava matando o Broadcast
   // e impedindo a UI de receber as atualizações em tempo real.
