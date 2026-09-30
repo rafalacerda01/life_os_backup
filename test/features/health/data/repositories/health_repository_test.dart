@@ -199,6 +199,8 @@ class _RecordingNotificationService extends NotificationService {
   int platformPermissionRequests = 0;
   int exactPermissionRequests = 0;
   int scheduleCalls = 0;
+  Future<void> Function()? beforeSchedule;
+  Future<void> Function()? beforeExactPermission;
   final List<int> cancelledIds = [];
   final Set<int> failCancelIds = {};
   String? lastPermissionPreferenceKey;
@@ -224,6 +226,7 @@ class _RecordingNotificationService extends NotificationService {
   @override
   Future<bool> requestExactAlarmPermission() async {
     exactPermissionRequests += 1;
+    await beforeExactPermission?.call();
     return exactPermissionGranted;
   }
 
@@ -237,6 +240,7 @@ class _RecordingNotificationService extends NotificationService {
     bool repeatDaily = false,
   }) async {
     scheduleCalls += 1;
+    await beforeSchedule?.call();
     return scheduleResult;
   }
 
@@ -1372,6 +1376,171 @@ void main() {
       expect(syncManager.calls, 1);
       expect(notificationService.cancelledIds, <int>[
         notificationIdForMedication(firestoreId),
+      ]);
+    },
+  );
+
+  test(
+    'criação de medicamento encerrado salva sem agendar nem pedir permissão',
+    () async {
+      clock.value = DateTime(2026, 8, 25, 22);
+      await repository.addMedication('Teste', DateTime(2026, 8, 20, 21), 5);
+      final row = await db.select(db.medications).getSingle();
+      expect(row.startDate, DateTime(2026, 8, 20, 21));
+      expect(row.durationDays, 5);
+      expect(row.endDate, DateTime(2026, 8, 25, 21));
+      expect(notificationService.scheduleCalls, 0);
+      expect(notificationService.notificationPermissionRequests, 0);
+      expect(notificationService.exactPermissionRequests, 0);
+      expect(notificationService.cancelledIds, [
+        notificationIdForMedication(row.firestoreId),
+      ]);
+      expect(await db.getPendingSyncItems('user-123'), hasLength(1));
+    },
+  );
+
+  test(
+    'última ocorrência expira durante permissão: criação não agenda',
+    () async {
+      clock.value = DateTime(2026, 8, 25, 12);
+      notificationService.beforeExactPermission = () async {
+        clock.value = DateTime(2026, 8, 25, 22);
+      };
+      await repository.addMedication('Teste', DateTime(2026, 8, 20, 21), 5);
+      final row = await db.select(db.medications).getSingle();
+      expect(notificationService.scheduleCalls, 0);
+      expect(notificationService.cancelledIds, [
+        notificationIdForMedication(row.firestoreId),
+      ]);
+      expect(await db.getPendingSyncItems('user-123'), hasLength(1));
+    },
+  );
+
+  for (final scenario in [
+    (
+      name: 'ativo',
+      now: DateTime(2026, 8, 24, 12),
+      end: DateTime(2026, 8, 25, 21),
+      duration: 5,
+      scheduled: true,
+    ),
+    (
+      name: 'endDate expirado',
+      now: DateTime(2026, 8, 26, 12),
+      end: DateTime(2026, 8, 25, 21),
+      duration: 10,
+      scheduled: false,
+    ),
+    (
+      name: 'durationDays expirado sem endDate',
+      now: DateTime(2026, 8, 26, 12),
+      end: null,
+      duration: 5,
+      scheduled: false,
+    ),
+    (
+      name: 'último dia antes do horário',
+      now: DateTime(2026, 8, 25, 12),
+      end: DateTime(2026, 8, 25, 21),
+      duration: 5,
+      scheduled: true,
+    ),
+    (
+      name: 'último dia após horário',
+      now: DateTime(2026, 8, 25, 22),
+      end: DateTime(2026, 8, 25, 21),
+      duration: 5,
+      scheduled: false,
+    ),
+  ]) {
+    test(
+      'hidratação ${scenario.name} persiste e respeita elegibilidade',
+      () async {
+        clock.value = scenario.now;
+        final start = DateTime(2026, 8, 20, 21);
+        configureRepositoryWithHealthDocuments(
+          [],
+          medicationDocuments: [
+            _RecordingQueryDocumentSnapshot('remote-med', {
+              'name': 'Teste',
+              'startDate': Timestamp.fromDate(start),
+              'durationDays': scenario.duration,
+              if (scenario.end != null)
+                'endDate': Timestamp.fromDate(scenario.end!),
+            }),
+          ],
+        );
+        await repository.syncHealthFromFirebase();
+        final row = await db.select(db.medications).getSingle();
+        expect(row.firestoreId, 'remote-med');
+        expect(row.startDate, start);
+        expect(row.durationDays, scenario.duration);
+        expect(row.endDate, scenario.end);
+        expect(notificationService.scheduleCalls, scenario.scheduled ? 1 : 0);
+        expect(
+          notificationService.cancelledIds,
+          scenario.scheduled
+              ? <int>[]
+              : [notificationIdForMedication('remote-med')],
+        );
+        expect(notificationService.notificationPermissionRequests, 0);
+        expect(notificationService.exactPermissionRequests, 0);
+        expect(await db.getPendingSyncItems('user-123'), isEmpty);
+      },
+    );
+  }
+
+  test(
+    'UID muda durante GET: hidratação não agenda nem cancela sessão antiga',
+    () async {
+      configureRepositoryWithHealthDocuments(
+        [],
+        medicationDocuments: [
+          _RecordingQueryDocumentSnapshot('expired', {
+            'name': 'Teste',
+            'startDate': Timestamp.fromDate(DateTime(2026, 8, 1)),
+            'endDate': Timestamp.fromDate(DateTime(2026, 8, 2)),
+          }),
+          _RecordingQueryDocumentSnapshot('active', {
+            'name': 'Teste',
+            'startDate': Timestamp.fromDate(DateTime(2026, 8, 20)),
+          }),
+        ],
+      );
+      medicationCollection.beforeGet = () async {
+        auth.user = FakeFirebaseUser('user-b');
+      };
+      await repository.syncHealthFromFirebase();
+      expect(await db.select(db.medications).get(), isEmpty);
+      expect(notificationService.scheduleCalls, 0);
+      expect(notificationService.cancelledIds, isEmpty);
+    },
+  );
+
+  test(
+    'UID muda durante schedule: compensa e não processa próximos lembretes',
+    () async {
+      configureRepositoryWithHealthDocuments(
+        [],
+        medicationDocuments: [
+          _RecordingQueryDocumentSnapshot('first', {
+            'name': 'Teste',
+            'startDate': Timestamp.fromDate(DateTime(2026, 8, 20)),
+          }),
+          _RecordingQueryDocumentSnapshot('expired', {
+            'name': 'Teste',
+            'startDate': Timestamp.fromDate(DateTime(2026, 8, 1)),
+            'endDate': Timestamp.fromDate(DateTime(2026, 8, 2)),
+          }),
+        ],
+      );
+      notificationService.beforeSchedule = () async {
+        auth.user = FakeFirebaseUser('user-b');
+      };
+      await repository.syncHealthFromFirebase();
+      expect(notificationService.scheduleCalls, 1);
+      expect(notificationService.cancelledIds, [
+        notificationIdForMedication('first'),
       ]);
     },
   );

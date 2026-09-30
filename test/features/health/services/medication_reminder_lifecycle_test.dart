@@ -166,6 +166,9 @@ void main() {
 
     expect(result.eligible, 0);
     expect(notificationService.scheduledIds, isEmpty);
+    expect(notificationService.cancelledIds, [
+      notificationIdForMedication('med-last-day-expired'),
+    ]);
   });
 
   test('rebuild preserva início futuro e seu horário', () async {
@@ -193,6 +196,9 @@ void main() {
 
     expect(result.eligible, 0);
     expect(notificationService.scheduledIds, isEmpty);
+    expect(notificationService.cancelledIds, [
+      notificationIdForMedication('med-ended'),
+    ]);
   });
 
   test('durationDays deriva término quando endDate está ausente', () async {
@@ -206,6 +212,9 @@ void main() {
 
     expect(result.eligible, 0);
     expect(notificationService.scheduledIds, isEmpty);
+    expect(notificationService.cancelledIds, [
+      notificationIdForMedication('med-derived-ended'),
+    ]);
   });
 
   test('durationDays com término hoje respeita a próxima ocorrência', () async {
@@ -269,5 +278,72 @@ void main() {
     await lifecycle.rebuildMedicationReminders();
 
     expect(notificationService.scheduledDates.single, legacyStart);
+  });
+
+  test(
+    'rebuild mistura ativo, expirado e aberto sem recriar expirado',
+    () async {
+      await insertMedication(
+        firestoreId: 'active',
+        startDate: DateTime(2026, 8, 20, 21),
+        endDate: DateTime(2026, 8, 26),
+      );
+      await insertMedication(
+        firestoreId: 'expired',
+        startDate: DateTime(2026, 8, 20, 21),
+        endDate: DateTime(2026, 8, 24),
+      );
+      await insertMedication(
+        firestoreId: 'open',
+        startDate: DateTime(2026, 8, 20, 21),
+      );
+      final result = await lifecycle.rebuildMedicationReminders();
+      expect(notificationService.scheduledIds, [
+        notificationIdForMedication('active'),
+        notificationIdForMedication('open'),
+      ]);
+      expect(notificationService.cancelledIds, [
+        notificationIdForMedication('expired'),
+      ]);
+      expect(result.eligible, 2);
+      expect(result.scheduled, 2);
+      expect(result.failed, 0);
+    },
+  );
+
+  test('falha ao cancelar expirado não impede ativo e aberto', () async {
+    await insertMedication(
+      firestoreId: 'expired',
+      startDate: DateTime(2026, 8, 20, 21),
+      durationDays: 1,
+    );
+    await insertMedication(
+      firestoreId: 'active',
+      startDate: DateTime(2026, 8, 20, 21),
+      durationDays: 10,
+    );
+    await insertMedication(
+      firestoreId: 'open',
+      startDate: DateTime(2026, 8, 20, 21),
+    );
+    notificationService.cancelResults.add(Exception('private-cancel-marker'));
+    final result = await lifecycle.rebuildMedicationReminders();
+    expect(notificationService.cancelledIds, [
+      notificationIdForMedication('expired'),
+    ]);
+    expect(result.scheduled, 2);
+    expect(result.failed, 1);
+  });
+
+  test('endDate explícito tem prioridade sobre durationDays', () {
+    expect(
+      isMedicationReminderEligible(
+        startDate: DateTime(2026, 8, 20, 21),
+        durationDays: 1,
+        endDate: DateTime(2026, 8, 30),
+        now: DateTime(2026, 8, 25, 12),
+      ),
+      isTrue,
+    );
   });
 }

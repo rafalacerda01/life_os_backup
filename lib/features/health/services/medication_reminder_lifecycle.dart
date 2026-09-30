@@ -19,6 +19,26 @@ int notificationIdForMedication(String medicationId) {
   return hash == 0 ? 1 : hash;
 }
 
+bool isMedicationReminderEligible({
+  required DateTime startDate,
+  required DateTime now,
+  DateTime? endDate,
+  int? durationDays,
+}) {
+  final end =
+      endDate ??
+      (durationDays != null && durationDays > 0
+          ? startDate.add(Duration(days: durationDays))
+          : null);
+  if (end == null) return true;
+  final next = nextDailyMedicationOccurrence(startDate, now);
+  return !DateTime(
+    next.year,
+    next.month,
+    next.day,
+  ).isAfter(DateTime(end.year, end.month, end.day));
+}
+
 class MedicationReminderRebuildResult {
   const MedicationReminderRebuildResult({
     required this.eligible,
@@ -32,9 +52,11 @@ class MedicationReminderRebuildResult {
 }
 
 abstract interface class MedicationReminderLifecycle {
-  Future<void> cancelAllMedicationReminders();
+  Future<void> cancelAllMedicationReminders({bool Function()? shouldContinue});
 
-  Future<MedicationReminderRebuildResult> rebuildMedicationReminders();
+  Future<MedicationReminderRebuildResult> rebuildMedicationReminders({
+    bool Function()? shouldContinue,
+  });
 }
 
 class MedicationReminderLifecycleService
@@ -48,9 +70,21 @@ class MedicationReminderLifecycleService
   final AppDatabase _db;
   final NotificationService _notificationService;
   final DateTime Function() _now;
+  Future<void> _tail = Future<void>.value();
+
+  Future<T> _serialize<T>(Future<T> Function() action) {
+    final operation = _tail.then((_) => action());
+    _tail = operation.then<void>((_) {}, onError: (_, _) {});
+    return operation;
+  }
 
   @override
-  Future<void> cancelAllMedicationReminders() async {
+  Future<void> cancelAllMedicationReminders({
+    bool Function()? shouldContinue,
+  }) => _serialize(() => _cancelAll(shouldContinue ?? () => true));
+
+  Future<void> _cancelAll(bool Function() shouldContinue) async {
+    if (!shouldContinue()) return;
     late final List<Medication> medications;
 
     try {
@@ -63,6 +97,7 @@ class MedicationReminderLifecycleService
     var failed = 0;
 
     for (final medication in medications) {
+      if (!shouldContinue()) return;
       try {
         await _notificationService.cancelNotification(
           notificationIdForMedication(medication.firestoreId),
@@ -78,16 +113,43 @@ class MedicationReminderLifecycleService
   }
 
   @override
-  Future<MedicationReminderRebuildResult> rebuildMedicationReminders() async {
+  Future<MedicationReminderRebuildResult> rebuildMedicationReminders({
+    bool Function()? shouldContinue,
+  }) => _serialize(() => _rebuild(shouldContinue ?? () => true));
+
+  Future<MedicationReminderRebuildResult> _rebuild(
+    bool Function() shouldContinue,
+  ) async {
     try {
+      if (!shouldContinue()) {
+        return const MedicationReminderRebuildResult(
+          eligible: 0,
+          scheduled: 0,
+          failed: 0,
+        );
+      }
       final medications = await _db.select(_db.medications).get();
-      final now = _now();
       var eligible = 0;
       var scheduled = 0;
       var failed = 0;
 
       for (final medication in medications) {
-        if (!_isEligible(medication, now)) continue;
+        if (!shouldContinue()) break;
+        if (!isMedicationReminderEligible(
+          startDate: medication.startDate,
+          endDate: medication.endDate,
+          durationDays: medication.durationDays,
+          now: _now(),
+        )) {
+          try {
+            await _notificationService.cancelNotification(
+              notificationIdForMedication(medication.firestoreId),
+            );
+          } catch (_) {
+            failed += 1;
+          }
+          continue;
+        }
 
         eligible += 1;
 
@@ -101,6 +163,14 @@ class MedicationReminderLifecycleService
                 repeatDaily: true,
                 preferenceKey: NotificationPreferenceKeys.medicationReminders,
               );
+
+          // A native schedule may finish after session authority was revoked.
+          if (!shouldContinue()) {
+            await _notificationService.cancelNotification(
+              notificationIdForMedication(medication.firestoreId),
+            );
+            break;
+          }
 
           if (success) {
             scheduled += 1;
@@ -132,25 +202,4 @@ class MedicationReminderLifecycleService
       );
     }
   }
-
-  bool _isEligible(Medication medication, DateTime now) {
-    final endDate = medication.endDate ?? _derivedEndDate(medication);
-    if (endDate == null) return true;
-
-    final nextOccurrence = nextDailyMedicationOccurrence(
-      medication.startDate,
-      now,
-    );
-
-    return !_startOfDay(nextOccurrence).isAfter(_startOfDay(endDate));
-  }
-
-  DateTime? _derivedEndDate(Medication medication) {
-    final durationDays = medication.durationDays;
-    if (durationDays == null || durationDays <= 0) return null;
-    return medication.startDate.add(Duration(days: durationDays));
-  }
-
-  DateTime _startOfDay(DateTime value) =>
-      DateTime(value.year, value.month, value.day);
 }

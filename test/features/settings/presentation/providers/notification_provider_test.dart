@@ -41,12 +41,16 @@ class _RecordingMedicationLifecycle implements MedicationReminderLifecycle {
   int rebuildCalls = 0;
 
   @override
-  Future<void> cancelAllMedicationReminders() async {
+  Future<void> cancelAllMedicationReminders({
+    bool Function()? shouldContinue,
+  }) async {
     cancelCalls += 1;
   }
 
   @override
-  Future<MedicationReminderRebuildResult> rebuildMedicationReminders() async {
+  Future<MedicationReminderRebuildResult> rebuildMedicationReminders({
+    bool Function()? shouldContinue,
+  }) async {
     rebuildCalls += 1;
     return const MedicationReminderRebuildResult(
       eligible: 1,

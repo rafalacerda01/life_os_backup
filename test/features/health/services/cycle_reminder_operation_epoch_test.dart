@@ -163,10 +163,14 @@ class _RecordingNotificationService extends NotificationService {
 
 class _NoopMedicationLifecycle implements MedicationReminderLifecycle {
   @override
-  Future<void> cancelAllMedicationReminders() async {}
+  Future<void> cancelAllMedicationReminders({
+    bool Function()? shouldContinue,
+  }) async {}
 
   @override
-  Future<MedicationReminderRebuildResult> rebuildMedicationReminders() async {
+  Future<MedicationReminderRebuildResult> rebuildMedicationReminders({
+    bool Function()? shouldContinue,
+  }) async {
     return const MedicationReminderRebuildResult(
       eligible: 0,
       scheduled: 0,

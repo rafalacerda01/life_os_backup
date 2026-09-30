@@ -175,4 +175,48 @@ void main() {
     expect(source, contains('_notifyCycleReminderActionSessionPrepared(uid);'));
     expect(source, contains('_restoreCycleReminderForPreparedSession(uid);'));
   });
+
+  test(
+    'medication restore ocorre somente após ownership da sessão preparada',
+    () {
+      final start = source.indexOf('Future<bool> _prepareAuthenticatedSession');
+      final end = source.indexOf(
+        'void _notifyCycleReminderActionSessionPrepared',
+        start,
+      );
+      final method = source.substring(start, end);
+      final prepared = method.indexOf('if (isPrepared) {');
+      final owner = method.indexOf('_activeLocalSessionUid = uid;', prepared);
+      final restore = method.indexOf(
+        '_restoreMedicationRemindersForPreparedSession(uid);',
+      );
+      expect(prepared, greaterThanOrEqualTo(0));
+      expect(owner, greaterThan(prepared));
+      expect(restore, greaterThan(owner));
+      expect(
+        RegExp(
+          r'_restoreMedicationRemindersForPreparedSession\(uid\);',
+        ).allMatches(method),
+        hasLength(1),
+      );
+    },
+  );
+
+  test('medication clear e drain antecedem limpeza destrutiva', () {
+    final clear = source.substring(
+      source.indexOf('void _clearCycleReminderActionSession()'),
+      source.indexOf('void _restoreMedicationRemindersForPreparedSession'),
+    );
+    expect(clear, contains('_medicationReconciler?.onSessionCleared();'));
+    final start = source.indexOf('Future<void> _performLocalDataClear');
+    final end = source.indexOf('Future<void> _clearFirestoreLocalState', start);
+    final cleanup = source.substring(start, end);
+    final invalidation = cleanup.indexOf('_clearCycleReminderActionSession();');
+    final drain = cleanup.indexOf('await _medicationReconciler?.drain()');
+    final drift = cleanup.indexOf('await db.clearAllData();');
+    expect(invalidation, greaterThanOrEqualTo(0));
+    expect(drain, greaterThan(invalidation));
+    expect(drift, greaterThan(drain));
+    expect(source, contains('ref.onDispose(reconciler.dispose);'));
+  });
 }

@@ -509,10 +509,23 @@ class HealthRepository {
       //
 
       try {
+        if (!_isCurrentUser(userId)) return;
+        if (!isMedicationReminderEligible(
+          startDate: startDate,
+          endDate: endDate,
+          durationDays: durationDays,
+          now: _now(),
+        )) {
+          await _notifService.cancelNotification(
+            notificationIdForMedication(firestoreId),
+          );
+          return;
+        }
         final permissionGranted = await _notifService.requestPermissions(
           preferenceKey: NotificationPreferenceKeys.medicationReminders,
         );
 
+        if (!_isCurrentUser(userId)) return;
         if (!permissionGranted) {
           AppLogger.w(
             'Permissão de notificações não concedida. '
@@ -522,6 +535,18 @@ class HealthRepository {
         }
 
         await _notifService.requestExactAlarmPermission();
+        if (!_isCurrentUser(userId)) return;
+        if (!isMedicationReminderEligible(
+          startDate: startDate,
+          endDate: endDate,
+          durationDays: durationDays,
+          now: _now(),
+        )) {
+          await _notifService.cancelNotification(
+            notificationIdForMedication(firestoreId),
+          );
+          return;
+        }
 
         final scheduled = await _notifService.scheduleMedicationNotification(
           id: notificationIdForMedication(firestoreId),
@@ -531,6 +556,13 @@ class HealthRepository {
           repeatDaily: true,
           preferenceKey: NotificationPreferenceKeys.medicationReminders,
         );
+
+        if (!_isCurrentUser(userId)) {
+          await _notifService.cancelNotification(
+            notificationIdForMedication(firestoreId),
+          );
+          return;
+        }
 
         if (scheduled) {
           AppLogger.i('Lembrete de medicamento agendado com sucesso.');
@@ -935,7 +967,15 @@ class HealthRepository {
           .map((doc) => doc.id)
           .toSet();
       final remindersToSchedule =
-          <({String id, String name, DateTime startDate})>[];
+          <
+            ({
+              String id,
+              String name,
+              DateTime startDate,
+              DateTime? endDate,
+              int? durationDays,
+            })
+          >[];
       final remindersToCancel = <String>[];
 
       await _db.transaction(() async {
@@ -1006,6 +1046,17 @@ class HealthRepository {
       for (final reminder in remindersToSchedule) {
         if (!_isCurrentUser(userId)) return;
         try {
+          if (!isMedicationReminderEligible(
+            startDate: reminder.startDate,
+            endDate: reminder.endDate,
+            durationDays: reminder.durationDays,
+            now: _now(),
+          )) {
+            await _notifService.cancelNotification(
+              notificationIdForMedication(reminder.id),
+            );
+            continue;
+          }
           final scheduled = await _notifService.scheduleMedicationNotification(
             id: notificationIdForMedication(reminder.id),
             title: 'Hora do medicamento 💊',
@@ -1014,6 +1065,12 @@ class HealthRepository {
             repeatDaily: true,
             preferenceKey: NotificationPreferenceKeys.medicationReminders,
           );
+          if (!_isCurrentUser(userId)) {
+            await _notifService.cancelNotification(
+              notificationIdForMedication(reminder.id),
+            );
+            return;
+          }
           if (!scheduled) {
             AppLogger.w(
               'Medicamento sincronizado sem lembrete local agendado.',
@@ -1053,7 +1110,15 @@ class HealthRepository {
     }
   }
 
-  Future<({String id, String name, DateTime startDate})?>
+  Future<
+    ({
+      String id,
+      String name,
+      DateTime startDate,
+      DateTime? endDate,
+      int? durationDays,
+    })?
+  >
   _syncMedicationDocument({
     required QueryDocumentSnapshot<Map<String, dynamic>> doc,
     required String expectedUid,
@@ -1109,7 +1174,13 @@ class HealthRepository {
           ),
         );
     _requireCurrentUser(expectedUid);
-    return (id: doc.id, name: name, startDate: startDate);
+    return (
+      id: doc.id,
+      name: name,
+      startDate: startDate,
+      endDate: endDate,
+      durationDays: durationDays,
+    );
   }
 
   Future _syncHealthDocument({

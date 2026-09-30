@@ -6,6 +6,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:life_os/core/services/notification_service.dart';
+import 'package:life_os/core/services/notification_preferences.dart';
 import 'package:life_os/core/services/analytics_service.dart';
 import 'package:life_os/core/services/sync_manager_provider.dart';
 import 'package:life_os/core/utils/app_logger.dart';
@@ -18,6 +19,8 @@ import 'package:life_os/features/checkin/presentation/providers/check_in_provide
 import 'package:life_os/features/health/presentation/providers/health_provider.dart';
 import 'package:life_os/features/health/services/cycle_reminder_action_coordinator.dart';
 import 'package:life_os/features/health/services/cycle_reminder_session_reconciler.dart';
+import 'package:life_os/features/health/services/medication_reminder_session_reconciler.dart';
+import 'package:life_os/features/settings/presentation/providers/notification_provider.dart';
 import 'package:life_os/features/focus/presentation/providers/providers/focus_provider.dart';
 import 'package:life_os/features/study/presentation/providers/study_provider.dart';
 import 'package:life_os/features/tasks/presentation/providers/tasks_notifier.dart';
@@ -42,6 +45,19 @@ import 'package:life_os/core/database/database_provider.dart';
 // Providers de infraestrutura
 final firebaseAuthProvider = Provider((ref) => FirebaseAuth.instance);
 final firestoreProvider = Provider((ref) => FirebaseFirestore.instance);
+
+final medicationReminderSessionReconcilerProvider =
+    Provider<MedicationReminderSessionReconciler>((ref) {
+      final auth = ref.watch(firebaseAuthProvider);
+      final store = ref.watch(notificationPreferencesStoreProvider);
+      final reconciler = MedicationReminderSessionReconciler(
+        lifecycle: ref.watch(medicationReminderLifecycleProvider),
+        loadPreferences: store.load,
+        currentUserId: () => auth.currentUser?.uid,
+      );
+      ref.onDispose(reconciler.dispose);
+      return reconciler;
+    });
 
 typedef AuthNotificationCleanup = Future<void> Function();
 
@@ -101,6 +117,7 @@ class AuthNotifier extends Notifier<AuthState> {
   String? _hydrationUid;
   bool _authResultReconciliationInProgress = false;
   int _sessionGeneration = 0;
+  MedicationReminderSessionReconciler? _medicationReconciler;
 
   @override
   AuthState build() {
@@ -125,6 +142,7 @@ class AuthNotifier extends Notifier<AuthState> {
 
     ref.onDispose(() {
       _disposed = true;
+      _medicationReconciler?.onSessionCleared();
       subscription.cancel();
     });
   }
@@ -288,6 +306,7 @@ class AuthNotifier extends Notifier<AuthState> {
       }
       _notifyCycleReminderActionSessionPrepared(uid);
       _restoreCycleReminderForPreparedSession(uid);
+      _restoreMedicationRemindersForPreparedSession(uid);
     }
 
     return isPrepared;
@@ -310,6 +329,17 @@ class AuthNotifier extends Notifier<AuthState> {
 
   void _clearCycleReminderActionSession() {
     ref.read(cycleReminderActionCoordinatorProvider).onSessionCleared();
+    _medicationReconciler?.onSessionCleared();
+  }
+
+  void _restoreMedicationRemindersForPreparedSession(String uid) {
+    try {
+      final reconciler = ref.read(medicationReminderSessionReconcilerProvider);
+      _medicationReconciler = reconciler;
+      unawaited(reconciler.onSessionPrepared(uid));
+    } on Object {
+      AppLogger.w('Falha ao iniciar lembretes locais de medicamentos.');
+    }
   }
 
   void _restoreCycleReminderForPreparedSession(String uid) {
@@ -952,6 +982,7 @@ class AuthNotifier extends Notifier<AuthState> {
   Future<void> _performLocalDataClear(String? cleanupUserId) async {
     _clearCycleReminderActionSession();
     _sessionGeneration += 1;
+    await _medicationReconciler?.drain().timeout(const Duration(seconds: 20));
     final hydration = _hydrationInFlight;
 
     if (hydration != null) {
