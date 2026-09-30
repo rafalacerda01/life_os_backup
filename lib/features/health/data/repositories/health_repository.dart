@@ -1082,25 +1082,64 @@ class HealthRepository {
       }
 
       _requireCurrentUser(userId);
+      final healthPullStartedAt = DateTime.now().millisecondsSinceEpoch;
+      final pendingHealthAtPullStart =
+          await (_db.select(_db.syncQueueTable)..where(
+                (item) =>
+                    item.ownerUid.equals(userId) &
+                    item.collection.equals('health_info') &
+                    item.status.equals(SyncQueuePersistenceStatus.pending),
+              ))
+              .get();
+      _requireCurrentUser(userId);
+      final pendingHealthOperationIds = pendingHealthAtPullStart
+          .map((item) => item.id)
+          .toList();
       final healthSnapshot = await _firestore
           .collection('users')
           .doc(userId)
           .collection('health_info')
-          .get();
+          .get(const GetOptions(source: Source.server));
 
-      for (final doc in healthSnapshot.docs) {
-        if (!_isCurrentUser(userId)) return;
-        try {
-          await _syncHealthDocument(doc: doc);
-        } catch (e, stack) {
-          AppLogger.e(
-            'Erro ao sincronizar registro '
-            'de saúde.',
-            e,
-            stack,
-          );
+      await _db.transaction(() async {
+        _requireCurrentUser(userId);
+        final authoritativeHealthItems =
+            await (_db.select(_db.syncQueueTable)..where(
+                  (item) =>
+                      item.ownerUid.equals(userId) &
+                      item.collection.equals('health_info') &
+                      (item.status.equals(SyncQueuePersistenceStatus.pending) |
+                          (item.status.equals(
+                                SyncQueuePersistenceStatus.succeeded,
+                              ) &
+                              (item.createdAt.isBiggerOrEqualValue(
+                                    healthPullStartedAt,
+                                  ) |
+                                  item.id.isIn(pendingHealthOperationIds)))),
+                ))
+                .get();
+        _requireCurrentUser(userId);
+        final protectedHealthDocIds = authoritativeHealthItems
+            .map((item) => item.docId)
+            .toSet();
+
+        for (final doc in healthSnapshot.docs) {
+          _requireCurrentUser(userId);
+          if (protectedHealthDocIds.contains(doc.id)) continue;
+          try {
+            await _syncHealthDocument(doc: doc);
+          } catch (e, stack) {
+            AppLogger.e(
+              'Erro ao sincronizar registro '
+              'de saúde.',
+              e,
+              stack,
+            );
+          }
+          _requireCurrentUser(userId);
         }
-      }
+        _requireCurrentUser(userId);
+      });
 
       AppLogger.i('SYNC Saúde: Concluído.');
     } on _HealthSessionChanged {

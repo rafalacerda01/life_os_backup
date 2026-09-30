@@ -42,6 +42,7 @@ class _RecordingQueryDocumentSnapshot extends Fake
     implements QueryDocumentSnapshot<Map<String, dynamic>> {
   final String docIdValue;
   final Map<String, dynamic> dataValue;
+  void Function()? beforeData;
 
   _RecordingQueryDocumentSnapshot(this.docIdValue, this.dataValue);
 
@@ -49,7 +50,10 @@ class _RecordingQueryDocumentSnapshot extends Fake
   String get id => docIdValue;
 
   @override
-  Map<String, dynamic> data() => Map<String, dynamic>.from(dataValue);
+  Map<String, dynamic> data() {
+    beforeData?.call();
+    return Map<String, dynamic>.from(dataValue);
+  }
 }
 
 class _RecordingQuerySnapshot extends Fake
@@ -78,7 +82,7 @@ class _RecordingCollectionReference extends Fake
 
   @override
   Future<QuerySnapshot<Map<String, dynamic>>> get([Object? options]) async {
-    if (name == 'medications') {
+    if (name == 'medications' || name == 'health_info') {
       expect((options as GetOptions).source, Source.server);
     }
     await beforeGet?.call();
@@ -267,6 +271,7 @@ void main() {
   late FakeFirebaseUser user;
   late _RecordingFirestore firestore;
   late _RecordingCollectionReference medicationCollection;
+  late _RecordingCollectionReference healthCollection;
   late FakeSyncManager syncManager;
   late _RecordingNotificationService notificationService;
   late HealthRepository repository;
@@ -286,6 +291,7 @@ void main() {
       name: 'health_info',
       snapshot: _RecordingQuerySnapshot(healthDocuments),
     );
+    healthCollection = healthInfo;
     final userDoc = _RecordingUserDocumentReference({
       'medications': medications,
       'health_info': healthInfo,
@@ -328,6 +334,7 @@ void main() {
         const <QueryDocumentSnapshot<Map<String, dynamic>>>[],
       ),
     );
+    healthCollection = emptyHealthInfo;
     final emptyUserDoc = _RecordingUserDocumentReference({
       'medications': emptyMedications,
       'health_info': emptyHealthInfo,
@@ -400,6 +407,47 @@ void main() {
         payloadJson: '{}',
         createdAt: createdAt,
       );
+
+  Future<void> seedHealth({
+    String docId = '2026-08-21',
+    int water = 1250,
+    String? cycleJson,
+  }) => db
+      .into(db.healthEntries)
+      .insert(
+        HealthEntriesCompanion.insert(
+          docId: docId,
+          mood: const Value('Radiante'),
+          waterIntakeMl: Value(water),
+          hasTakenPillToday: const Value(true),
+          menstrualCycleJson: Value(cycleJson),
+          date: clock.value,
+        ),
+      )
+      .then((_) {});
+
+  Future<int> enqueueHealth({
+    String docId = '2026-08-21',
+    String ownerUid = 'user-123',
+    int? createdAt = 1,
+  }) => db.insertSyncItem(
+    ownerUid: ownerUid,
+    collection: 'health_info',
+    docId: docId,
+    operationType: 'update',
+    payloadJson: jsonEncode({'waterIntakeMl': 1250}),
+    createdAt: createdAt,
+  );
+
+  Future<void> settleHealthWritesBeforePull() async {
+    for (final item in await db.getPendingSyncItems('user-123')) {
+      if (item.collection != 'health_info') continue;
+      await (db.update(db.syncQueueTable)
+            ..where((row) => row.id.equals(item.id)))
+          .write(const SyncQueueTableCompanion(createdAt: Value(1)));
+      await db.markSyncItemAsSucceeded(item.id, 'user-123');
+    }
+  }
 
   test('updateMood salva localmente e enfileira o payload correto', () async {
     await repository.updateMood('Radiante');
@@ -889,6 +937,275 @@ void main() {
     expect(syncManager.calls, 1);
   });
 
+  group('health_info pull protegido por SyncQueue', () {
+    void configureStaleHealth() {
+      configureRepositoryWithHealthDocuments([
+        _RecordingQueryDocumentSnapshot('2026-08-21', {'waterIntakeMl': 1000}),
+      ]);
+    }
+
+    test('pending existente preserva água local e a operação', () async {
+      await seedHealth();
+      await enqueueHealth();
+      final queueBefore = await db.select(db.syncQueueTable).getSingle();
+      configureStaleHealth();
+      await repository.syncHealthFromFirebase();
+      expect(
+        (await db.select(db.healthEntries).getSingle()).waterIntakeMl,
+        1250,
+      );
+      expect(await db.select(db.syncQueueTable).getSingle(), queueBefore);
+      expect(await db.getPendingSyncItems('user-123'), hasLength(1));
+    });
+
+    test(
+      'pending antigo succeeded durante GET não regride estado local',
+      () async {
+        await seedHealth();
+        final id = await enqueueHealth();
+        configureStaleHealth();
+        final started = Completer<void>();
+        final release = Completer<void>();
+        healthCollection.beforeGet = () async {
+          started.complete();
+          await release.future;
+        };
+        final pull = repository.syncHealthFromFirebase();
+        await started.future;
+        await db.markSyncItemAsSucceeded(id, 'user-123');
+        release.complete();
+        await pull;
+        expect(
+          (await db.select(db.healthEntries).getSingle()).waterIntakeMl,
+          1250,
+        );
+        final item = await db.select(db.syncQueueTable).getSingle();
+        expect(item.id, id);
+        expect(item.createdAt, 1);
+        expect(item.status, SyncQueuePersistenceStatus.succeeded);
+      },
+    );
+
+    for (final succeeded in [false, true]) {
+      test(
+        'mutação nova durante GET ${succeeded ? 'succeeded' : 'pending'} protege local',
+        () async {
+          await seedHealth(water: 1000);
+          configureStaleHealth();
+          final started = Completer<void>();
+          final release = Completer<void>();
+          healthCollection.beforeGet = () async {
+            started.complete();
+            await release.future;
+          };
+          final pull = repository.syncHealthFromFirebase();
+          await started.future;
+          await repository.addWater(1000);
+          final item = await db.select(db.syncQueueTable).getSingle();
+          expect(item.collection, 'health_info');
+          expect(item.docId, '2026-08-21');
+          if (succeeded) await db.markSyncItemAsSucceeded(item.id, 'user-123');
+          release.complete();
+          await pull;
+          expect(
+            (await db.select(db.healthEntries).getSingle()).waterIntakeMl,
+            1250,
+          );
+          expect(
+            (await db.select(db.syncQueueTable).getSingle()).status,
+            succeeded
+                ? SyncQueuePersistenceStatus.succeeded
+                : SyncQueuePersistenceStatus.pending,
+          );
+        },
+      );
+    }
+
+    test(
+      'pending inicial rejected durante GET não protege por docId antigo',
+      () async {
+        await seedHealth();
+        final oldSucceeded = await enqueueHealth();
+        await db.markSyncItemAsSucceeded(oldSucceeded, 'user-123');
+        final pending = await enqueueHealth();
+        configureStaleHealth();
+        final started = Completer<void>();
+        final release = Completer<void>();
+        healthCollection.beforeGet = () async {
+          started.complete();
+          await release.future;
+        };
+        final pull = repository.syncHealthFromFirebase();
+        await started.future;
+        await db.markSyncItemRejected(pending, 'user-123', 'INVALID_PAYLOAD');
+        release.complete();
+        await pull;
+        expect(
+          (await db.select(db.healthEntries).getSingle()).waterIntakeMl,
+          1000,
+        );
+        final queue = await db.select(db.syncQueueTable).get();
+        expect(
+          queue.singleWhere((item) => item.id == pending).status,
+          SyncQueuePersistenceStatus.rejected,
+        );
+        expect(
+          queue.singleWhere((item) => item.id == oldSucceeded).status,
+          SyncQueuePersistenceStatus.succeeded,
+        );
+      },
+    );
+
+    test(
+      'docId diferente hidrata normalmente com outro documento protegido',
+      () async {
+        await seedHealth();
+        await enqueueHealth();
+        configureRepositoryWithHealthDocuments([
+          _RecordingQueryDocumentSnapshot('2026-08-21', {
+            'waterIntakeMl': 1000,
+          }),
+          _RecordingQueryDocumentSnapshot('2026-08-20', {'waterIntakeMl': 500}),
+        ]);
+        await repository.syncHealthFromFirebase();
+        final rows = await db.select(db.healthEntries).get();
+        expect(
+          rows.singleWhere((row) => row.docId == '2026-08-21').waterIntakeMl,
+          1250,
+        );
+        expect(
+          rows.singleWhere((row) => row.docId == '2026-08-20').waterIntakeMl,
+          500,
+        );
+      },
+    );
+
+    test(
+      'pull posterior converge após fila resolvida sem proteção eterna',
+      () async {
+        await seedHealth();
+        final id = await enqueueHealth();
+        configureStaleHealth();
+        await repository.syncHealthFromFirebase();
+        expect(
+          (await db.select(db.healthEntries).getSingle()).waterIntakeMl,
+          1250,
+        );
+        await db.markSyncItemAsSucceeded(id, 'user-123');
+        await repository.syncHealthFromFirebase();
+        expect(
+          (await db.select(db.healthEntries).getSingle()).waterIntakeMl,
+          1000,
+        );
+      },
+    );
+
+    test('pending parcial protege todos os campos do documento', () async {
+      final cycle = jsonEncode({
+        'isEnabled': true,
+        'lastPeriodStart': '2026-08-01T00:00:00.000',
+        'cycleLengthDays': 30,
+        'periodLengthDays': 6,
+      });
+      await seedHealth(cycleJson: cycle);
+      await enqueueHealth();
+      final before = await db.select(db.healthEntries).getSingle();
+      configureRepositoryWithHealthDocuments([
+        _RecordingQueryDocumentSnapshot('2026-08-21', {
+          'mood': 'Cansado',
+          'waterIntakeMl': 1000,
+          'hasTakenPillToday': false,
+          'date': Timestamp.fromDate(DateTime.utc(2026, 8, 21)),
+          'menstrualCycle': {
+            'isEnabled': false,
+            'lastPeriodStart': '2026-07-01T00:00:00.000',
+            'cycleLengthDays': 28,
+            'periodLengthDays': 5,
+          },
+        }),
+      ]);
+      await repository.syncHealthFromFirebase();
+      expect(await db.select(db.healthEntries).getSingle(), before);
+    });
+
+    test(
+      'pending de outro owner não protege documento do usuário atual',
+      () async {
+        await seedHealth();
+        await enqueueHealth(ownerUid: 'user-b');
+        configureStaleHealth();
+        await repository.syncHealthFromFirebase();
+        expect(
+          (await db.select(db.healthEntries).getSingle()).waterIntakeMl,
+          1000,
+        );
+        expect(await db.getPendingSyncItems('user-b'), hasLength(1));
+      },
+    );
+
+    test('UID muda durante GET: nenhum documento remoto é aplicado', () async {
+      await seedHealth();
+      final before = await db.select(db.healthEntries).get();
+      configureStaleHealth();
+      final started = Completer<void>();
+      final release = Completer<void>();
+      healthCollection.beforeGet = () async {
+        started.complete();
+        await release.future;
+      };
+      final pull = repository.syncHealthFromFirebase();
+      await started.future;
+      auth.user = FakeFirebaseUser('user-b');
+      release.complete();
+      await pull;
+      expect(await db.select(db.healthEntries).get(), before);
+    });
+
+    test(
+      'UID muda na aplicação: transação reverte inclusive documento anterior',
+      () async {
+        await seedHealth();
+        final before = await db.select(db.healthEntries).get();
+        final switched =
+            _RecordingQueryDocumentSnapshot('2026-08-21', {
+                'waterIntakeMl': 1000,
+              })
+              ..beforeData = () {
+                auth.user = FakeFirebaseUser('user-b');
+              };
+        configureRepositoryWithHealthDocuments([
+          _RecordingQueryDocumentSnapshot('2026-08-20', {'waterIntakeMl': 500}),
+          switched,
+        ]);
+        await repository.syncHealthFromFirebase();
+        expect(await db.select(db.healthEntries).get(), before);
+      },
+    );
+
+    test(
+      'GET Source.server falha sem apagar ou resetar Drift e SyncQueue',
+      () async {
+        await seedHealth();
+        await enqueueHealth();
+        final healthBefore = await db.select(db.healthEntries).get();
+        final queueBefore = await db.select(db.syncQueueTable).get();
+        configureStaleHealth();
+        healthCollection.failGet = true;
+        await expectLater(repository.syncHealthFromFirebase(), completes);
+        expect(await db.select(db.healthEntries).get(), healthBefore);
+        expect(await db.select(db.syncQueueTable).get(), queueBefore);
+      },
+    );
+
+    test('snapshot remoto vazio não apaga healthEntries locais', () async {
+      await seedHealth();
+      final before = await db.select(db.healthEntries).get();
+      configureRepositoryWithHealthDocuments([]);
+      await repository.syncHealthFromFirebase();
+      expect(await db.select(db.healthEntries).get(), before);
+    });
+  });
+
   test('Firebase reidrata todos os campos do dia em banco vazio', () async {
     final cycle = <String, dynamic>{
       'isEnabled': true,
@@ -927,6 +1244,7 @@ void main() {
       'cycleLengthDays': 28,
       'periodLengthDays': 5,
     }, expectedUid: 'user-123');
+    await settleHealthWritesBeforePull();
     configureRepositoryWithHealthDocuments([
       _RecordingQueryDocumentSnapshot('2026-08-21', {
         'menstrualCycle': {
@@ -975,6 +1293,7 @@ void main() {
       'cycleLengthDays': 28,
       'periodLengthDays': 5,
     }, expectedUid: 'user-123');
+    await settleHealthWritesBeforePull();
     configureRepositoryWithHealthDocuments([
       _RecordingQueryDocumentSnapshot('2026-08-21', {
         'menstrualCycle': {
@@ -1074,6 +1393,7 @@ void main() {
       await repository.addWater(750);
       await repository.updatePillStatus(true, expectedUid: 'user-123');
 
+      await settleHealthWritesBeforePull();
       configureRepositoryWithHealthDocuments([
         _RecordingQueryDocumentSnapshot('2026-08-21', {
           'waterIntakeMl': 0,
