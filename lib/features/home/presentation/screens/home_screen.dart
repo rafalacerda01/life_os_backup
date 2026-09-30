@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
@@ -43,15 +45,84 @@ String _pendingLabel(int count) => count == 1 ? 'pendente' : 'pendentes';
 
 String _activeLabel(int count) => count == 1 ? 'ativo' : 'ativos';
 
-class HomeScreen extends ConsumerWidget {
-  const HomeScreen({super.key});
+String homeGreetingFor(DateTime now) {
+  final hour = now.toLocal().hour;
+  if (hour >= 5 && hour < 12) return 'Bom dia';
+  if (hour >= 12 && hour < 18) return 'Boa tarde';
+  return 'Boa noite';
+}
+
+DateTime nextHomeTimeBoundary(DateTime now) {
+  final localNow = now.toLocal();
+  for (final hour in [5, 12, 18]) {
+    final boundary = DateTime(
+      localNow.year,
+      localNow.month,
+      localNow.day,
+      hour,
+    );
+    if (boundary.isAfter(localNow)) return boundary;
+  }
+  return DateTime(localNow.year, localNow.month, localNow.day + 1);
+}
+
+class HomeScreen extends ConsumerStatefulWidget {
+  const HomeScreen({super.key, this.now, this.scheduleBoundary});
+
+  final DateTime Function()? now;
+  final Timer Function(Duration, void Function())? scheduleBoundary;
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<HomeScreen> createState() => _HomeScreenState();
+}
+
+class _HomeScreenState extends ConsumerState<HomeScreen>
+    with WidgetsBindingObserver {
+  late DateTime _now;
+  Timer? _boundaryTimer;
+
+  DateTime _readNow() => (widget.now ?? DateTime.now)().toLocal();
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _now = _readNow();
+    _scheduleNextBoundary();
+  }
+
+  void _scheduleNextBoundary() {
+    _boundaryTimer?.cancel();
+    _boundaryTimer = (widget.scheduleBoundary ?? Timer.new)(
+      nextHomeTimeBoundary(_now).difference(_now),
+      _refreshTime,
+    );
+  }
+
+  void _refreshTime() {
+    if (!mounted) return;
+    setState(() => _now = _readNow());
+    _scheduleNextBoundary();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) _refreshTime();
+  }
+
+  @override
+  void dispose() {
+    _boundaryTimer?.cancel();
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final homeState = ref.watch(homeStateProvider);
     final authState = ref.watch(authNotifierProvider);
 
-    final now = DateTime.now();
+    final now = _now;
     final formattedDate = DateFormat("dd/MM/yyyy - EEEE", "pt_BR").format(now);
 
     final isPremium = homeState.isLoading || homeState.isUnavailable
@@ -63,9 +134,7 @@ class HomeScreen extends ConsumerWidget {
       orElse: () => "Usuário",
     );
 
-    final greeting = now.hour < 12
-        ? "Bom dia"
-        : (now.hour < 18 ? "Boa tarde" : "Boa noite");
+    final greeting = homeGreetingFor(now);
 
     final content = homeState.isLoading
         ? const _HomeScreenSkeleton()
