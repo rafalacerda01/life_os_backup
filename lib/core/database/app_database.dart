@@ -254,6 +254,22 @@ class AppDatabase extends _$AppDatabase {
         .get();
   }
 
+  Future<bool> hasRejectedSyncItems(String ownerUid) async {
+    final cleanOwnerUid = ownerUid.trim();
+    if (cleanOwnerUid.isEmpty) return false;
+
+    final item =
+        await (select(syncQueueTable)
+              ..where(
+                (table) =>
+                    table.ownerUid.equals(cleanOwnerUid) &
+                    table.status.equals(SyncQueuePersistenceStatus.rejected),
+              )
+              ..limit(1))
+            .getSingleOrNull();
+    return item != null;
+  }
+
   /// Retorna somente uma operação pendente específica.
   Future<dynamic> getSyncItemById(int id) {
     if (id <= 0) {
@@ -349,18 +365,15 @@ class AppDatabase extends _$AppDatabase {
     return (delete(syncQueueTable)..where((table) => table.id.equals(id))).go();
   }
 
-  /// Remove somente terminais antigos do owner, preservando mutações recentes.
-  Future<int> cleanupTerminalSyncItems(String ownerUid, int olderThanEpochMs) {
+  /// Remove sucessos antigos do owner, preservando rejeições não resolvidas.
+  Future<int> cleanupSucceededSyncItems(String ownerUid, int olderThanEpochMs) {
     final cleanOwnerUid = ownerUid.trim();
     if (cleanOwnerUid.isEmpty) return Future.value(0);
 
     return (delete(syncQueueTable)..where(
           (table) =>
               table.ownerUid.equals(cleanOwnerUid) &
-              table.status.isIn([
-                SyncQueuePersistenceStatus.succeeded,
-                SyncQueuePersistenceStatus.rejected,
-              ]) &
+              table.status.equals(SyncQueuePersistenceStatus.succeeded) &
               (table.lastAttemptAt.isSmallerThanValue(olderThanEpochMs) |
                   (table.lastAttemptAt.isNull() &
                       table.createdAt.isSmallerThanValue(olderThanEpochMs))),

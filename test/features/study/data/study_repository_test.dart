@@ -127,7 +127,7 @@ class _Firestore extends Fake implements FirebaseFirestore {
 
 class _Store implements SyncQueueStore {
   @override
-  Future<int> cleanupTerminalSyncItems(
+  Future<int> cleanupSucceededSyncItems(
     String ownerUid,
     int olderThanEpochMs,
   ) async => 0;

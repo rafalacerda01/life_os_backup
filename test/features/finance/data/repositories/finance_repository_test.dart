@@ -99,7 +99,7 @@ class _FakeFirestore extends Fake implements FirebaseFirestore {
 
 class _NoopQueueStore implements SyncQueueStore {
   @override
-  Future<int> cleanupTerminalSyncItems(
+  Future<int> cleanupSucceededSyncItems(
     String ownerUid,
     int olderThanEpochMs,
   ) async => 0;

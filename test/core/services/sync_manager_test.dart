@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:life_os/core/database/app_database.dart';
 import 'package:life_os/core/services/sync_manager.dart';
@@ -8,7 +9,8 @@ import 'package:life_os/core/services/sync_operation_result.dart';
 import 'package:life_os/core/services/sync_queue_store.dart';
 import 'package:life_os/core/services/sync_remote_data_source.dart';
 
-class FakeSyncQueueStore implements SyncQueueStore {
+class FakeSyncQueueStore
+    implements SyncQueueStore, SyncQueueDiscardSafetyStore {
   final List<SyncQueueTableData> items;
 
   final List<int> markedAsSynced = [];
@@ -22,7 +24,17 @@ class FakeSyncQueueStore implements SyncQueueStore {
   FakeSyncQueueStore(this.items);
 
   @override
-  Future<int> cleanupTerminalSyncItems(
+  Future<bool> hasRejectedSyncItems(String ownerUid) async {
+    return items.any(
+      (item) =>
+          item.ownerUid == ownerUid &&
+          (item.status == SyncQueuePersistenceStatus.rejected ||
+              rejected.contains(item.id)),
+    );
+  }
+
+  @override
+  Future<int> cleanupSucceededSyncItems(
     String ownerUid,
     int olderThanEpochMs,
   ) async {
@@ -39,7 +51,9 @@ class FakeSyncQueueStore implements SyncQueueStore {
     return List.unmodifiable(
       items.where(
         (item) =>
-            !markedAsSynced.contains(item.id) && !rejected.contains(item.id),
+            item.status == SyncQueuePersistenceStatus.pending &&
+            !markedAsSynced.contains(item.id) &&
+            !rejected.contains(item.id),
       ),
     );
   }
@@ -158,9 +172,226 @@ class FakeHealthMergeRemoteDataSource implements SyncRemoteDataSource {
 }
 
 void main() {
+  group('SyncManager safe local discard', () {
+    test('pending success permits local discard', () async {
+      final store = FakeSyncQueueStore([createSyncItem()]);
+      final manager = SyncManager(
+        queueStore: store,
+        remoteDataSource: FakeSyncRemoteDataSource(
+          (_, _) async => const SyncOperationResult.success(),
+        ),
+        currentUserId: () => 'user-123',
+      );
+      addTearDown(manager.dispose);
+
+      expect(await manager.prepareForLocalDataDiscard(), isTrue);
+      expect(store.markedAsSynced, [1]);
+    });
+
+    test('retryable pending blocks local discard', () async {
+      final store = FakeSyncQueueStore([createSyncItem()]);
+      final manager = SyncManager(
+        queueStore: store,
+        remoteDataSource: FakeSyncRemoteDataSource(
+          (_, _) async => const SyncOperationResult.retryable(),
+        ),
+        currentUserId: () => 'user-123',
+      );
+      addTearDown(manager.dispose);
+
+      expect(await manager.prepareForLocalDataDiscard(), isFalse);
+      expect(store.retried, [1]);
+      expect(store.markedAsSynced, isEmpty);
+    });
+
+    for (final testCase in <String, SyncOperationResult>{
+      'quotaExceeded': const SyncOperationResult.quotaExceeded(),
+      'permissionDenied': const SyncOperationResult.permissionDenied(),
+      'invalidPayload': const SyncOperationResult.invalidPayload(),
+      'unsupportedOperation': const SyncOperationResult.unsupportedOperation(),
+    }.entries) {
+      test('${testCase.key} blocks discard including second attempt', () async {
+        final store = FakeSyncQueueStore([
+          createSyncItem(),
+          createSyncItem(id: 2, docId: 'habit-2'),
+        ]);
+        final remote = FakeSyncRemoteDataSource(
+          (_, item) async => item.id == 1
+              ? testCase.value
+              : const SyncOperationResult.success(),
+        );
+        final manager = SyncManager(
+          queueStore: store,
+          remoteDataSource: remote,
+          currentUserId: () => 'user-123',
+        );
+        addTearDown(manager.dispose);
+
+        expect(await manager.prepareForLocalDataDiscard(), isFalse);
+        expect(store.rejected, [1]);
+        expect(store.markedAsSynced, [2]);
+        expect(await manager.prepareForLocalDataDiscard(), isFalse);
+        expect(store.cleanupRequests, hasLength(1));
+        expect(remote.processedItems, hasLength(2));
+        expect(await manager.processPendingItems(), isTrue);
+        expect(remote.processedItems, hasLength(2));
+      });
+    }
+
+    test(
+      'old persisted rejection blocks discard before succeeded cleanup',
+      () async {
+        final db = AppDatabase(executor: NativeDatabase.memory());
+        addTearDown(db.close);
+        final id = await db.insertSyncItem(
+          ownerUid: 'user-123',
+          collection: 'habits',
+          docId: 'habit-1',
+          operationType: 'create',
+          payloadJson: '{}',
+          createdAt: 1,
+        );
+        await db.markSyncItemRejected(id, 'user-123', 'INVALID_PAYLOAD');
+        await db.customStatement(
+          'UPDATE sync_queue_table SET last_attempt_at = 1 WHERE id = ?',
+          [id],
+        );
+        final remote = FakeSyncRemoteDataSource(
+          (_, _) async => const SyncOperationResult.success(),
+        );
+        final manager = SyncManager(
+          queueStore: AppDatabaseSyncQueueStore(db),
+          remoteDataSource: remote,
+          currentUserId: () => 'user-123',
+        );
+        addTearDown(manager.dispose);
+
+        expect(await manager.prepareForLocalDataDiscard(), isFalse);
+        expect(await manager.prepareForLocalDataDiscard(), isFalse);
+        expect(await db.hasRejectedSyncItems('user-123'), isTrue);
+        expect(await db.getSyncItemById(id), isNotNull);
+        expect(remote.processedItems, isEmpty);
+      },
+    );
+
+    test(
+      'normal drain preserves old rejected, expires old succeeded and blocks future discard',
+      () async {
+        final db = AppDatabase(executor: NativeDatabase.memory());
+        addTearDown(db.close);
+        final ids = <String, int>{};
+        for (final docId in ['rejected', 'succeeded', 'pending']) {
+          ids[docId] = await db.insertSyncItem(
+            ownerUid: 'user-a',
+            collection: 'habits',
+            docId: docId,
+            operationType: 'create',
+            payloadJson: '{}',
+            createdAt: 1,
+          );
+        }
+        await db.markSyncItemRejected(
+          ids['rejected']!,
+          'user-a',
+          'INVALID_PAYLOAD',
+        );
+        await db.markSyncItemAsSucceeded(ids['succeeded']!, 'user-a');
+        await db.customStatement(
+          'UPDATE sync_queue_table SET last_attempt_at = 1 '
+          'WHERE id IN (?, ?)',
+          [ids['rejected']!, ids['succeeded']!],
+        );
+        final rejectionBefore = await db.getSyncItemById(ids['rejected']!);
+        final remote = FakeSyncRemoteDataSource(
+          (_, _) async => const SyncOperationResult.success(),
+        );
+        final manager = SyncManager(
+          queueStore: AppDatabaseSyncQueueStore(db),
+          remoteDataSource: remote,
+          currentUserId: () => 'user-a',
+        );
+        addTearDown(manager.dispose);
+
+        expect(await manager.processPendingItems(), isTrue);
+        expect(
+          await db.getSyncItemById(ids['rejected']!),
+          equals(rejectionBefore),
+        );
+        expect(await db.hasRejectedSyncItems('user-a'), isTrue);
+        expect(await db.getSyncItemById(ids['succeeded']!), isNull);
+        final confirmed =
+            await db.getSyncItemById(ids['pending']!) as SyncQueueTableData;
+        expect(confirmed.status, SyncQueuePersistenceStatus.succeeded);
+        expect(remote.processedItems, ['user-a:habits:pending:create']);
+
+        expect(await manager.prepareForLocalDataDiscard(), isFalse);
+        expect(await manager.prepareForLocalDataDiscard(), isFalse);
+        expect(await manager.processPendingItems(), isTrue);
+        expect(await db.hasRejectedSyncItems('user-a'), isTrue);
+        expect(
+          await db.getSyncItemById(ids['rejected']!),
+          equals(rejectionBefore),
+        );
+        expect(remote.processedItems, ['user-a:habits:pending:create']);
+      },
+    );
+
+    test(
+      'persisted rejection of another owner does not block discard',
+      () async {
+        final db = AppDatabase(executor: NativeDatabase.memory());
+        addTearDown(db.close);
+        final id = await db.insertSyncItem(
+          ownerUid: 'user-b',
+          collection: 'habits',
+          docId: 'habit-1',
+          operationType: 'create',
+          payloadJson: '{}',
+        );
+        await db.markSyncItemRejected(id, 'user-b', 'INVALID_PAYLOAD');
+        final manager = SyncManager(
+          queueStore: AppDatabaseSyncQueueStore(db),
+          remoteDataSource: FakeSyncRemoteDataSource(
+            (_, _) async => const SyncOperationResult.success(),
+          ),
+          currentUserId: () => 'user-a',
+        );
+        addTearDown(manager.dispose);
+
+        expect(await manager.prepareForLocalDataDiscard(), isTrue);
+        expect(await db.hasRejectedSyncItems('user-a'), isFalse);
+        expect(await db.hasRejectedSyncItems('user-b'), isTrue);
+      },
+    );
+
+    test('UID change during drain blocks local discard', () async {
+      var uid = 'user-123';
+      final started = Completer<void>();
+      final release = Completer<void>();
+      final store = FakeSyncQueueStore([createSyncItem()]);
+      final manager = SyncManager(
+        queueStore: store,
+        remoteDataSource: FakeSyncRemoteDataSource((_, _) async {
+          started.complete();
+          await release.future;
+          return const SyncOperationResult.success();
+        }),
+        currentUserId: () => uid,
+      );
+      addTearDown(manager.dispose);
+
+      final discard = manager.prepareForLocalDataDiscard();
+      await started.future;
+      uid = 'user-b';
+      release.complete();
+      expect(await discard, isFalse);
+      expect(store.markedAsSynced, isEmpty);
+    });
+  });
+
   group('SyncManager', () {
     test(
-      'cleans terminals once for current UID with seven-day cutoff before FIFO',
+      'cleans succeeded once for current UID with seven-day cutoff before FIFO',
       () async {
         final store = FakeSyncQueueStore([]);
         final remote = FakeSyncRemoteDataSource(

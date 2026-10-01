@@ -22,7 +22,7 @@ void main() {
   for (final (name, status, owner, created, attempted, removed)
       in <(String, String, String, int, int?, bool)>[
         ('old succeeded', 'succeeded', 'user-a', old, old, true),
-        ('old rejected', 'rejected', 'user-a', old, old, true),
+        ('old rejected', 'rejected', 'user-a', old, old, false),
         ('old pending', 'pending', 'user-a', old, old, false),
         ('recent succeeded', 'succeeded', 'user-a', recent, recent, false),
         ('recent rejected', 'rejected', 'user-a', recent, recent, false),
@@ -37,19 +37,27 @@ void main() {
           false,
         ),
         (
-          'old attempt overrides recent creation',
-          'rejected',
+          'old succeeded attempt overrides recent creation',
+          'succeeded',
           'user-a',
           recent,
           old,
           true,
         ),
+        (
+          'old rejected attempt preserves recent creation',
+          'rejected',
+          'user-a',
+          recent,
+          old,
+          false,
+        ),
         ('legacy old succeeded', 'succeeded', 'user-a', old, null, true),
-        ('legacy old rejected', 'rejected', 'user-a', old, null, true),
-        ('legacy recent terminal', 'succeeded', 'user-a', recent, null, false),
+        ('legacy old rejected', 'rejected', 'user-a', old, null, false),
+        ('legacy recent succeeded', 'succeeded', 'user-a', recent, null, false),
         ('cutoff boundary remains', 'succeeded', 'user-a', old, cutoff, false),
       ]) {
-    test('terminal retention: $name', () async {
+    test('succeeded retention preserves unresolved rejected: $name', () async {
       final id = await db
           .into(db.syncQueueTable)
           .insert(
@@ -68,7 +76,7 @@ void main() {
 
       final count = await AppDatabaseSyncQueueStore(
         db,
-      ).cleanupTerminalSyncItems(' user-a ', cutoff);
+      ).cleanupSucceededSyncItems(' user-a ', cutoff);
 
       expect(count, removed ? 1 : 0);
       expect(await db.getSyncItemById(id), removed ? isNull : equals(before));
@@ -76,7 +84,7 @@ void main() {
   }
 
   test(
-    'terminal retention rejects empty owner without deleting rows',
+    'succeeded retention rejects empty owner without deleting rows',
     () async {
       final id = await db
           .into(db.syncQueueTable)
@@ -95,7 +103,7 @@ void main() {
       expect(
         await AppDatabaseSyncQueueStore(
           db,
-        ).cleanupTerminalSyncItems('   ', cutoff),
+        ).cleanupSucceededSyncItems('   ', cutoff),
         0,
       );
       expect(await db.getSyncItemById(id), isNotNull);

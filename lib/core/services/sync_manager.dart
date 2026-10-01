@@ -8,7 +8,7 @@ import 'sync_queue_store.dart';
 import 'sync_remote_data_source.dart';
 
 class SyncManager {
-  static const _terminalRetention = Duration(days: 7);
+  static const _succeededRetention = Duration(days: 7);
 
   static const _retryDelays = [
     Duration(seconds: 5),
@@ -34,6 +34,49 @@ class SyncManager {
     required this._remoteDataSource,
     required this._currentUserId,
   });
+
+  Future<bool> prepareForLocalDataDiscard() async {
+    final initialUid = _currentUserId()?.trim();
+    final store = _queueStore;
+    if (_disposed ||
+        initialUid == null ||
+        initialUid.isEmpty ||
+        store is! SyncQueueDiscardSafetyStore) {
+      return false;
+    }
+    final safetyStore = store as SyncQueueDiscardSafetyStore;
+
+    try {
+      // Unresolved rejections block destructive cleanup, including later attempts.
+      final hasRejected = await safetyStore.hasRejectedSyncItems(initialUid);
+      if (_disposed || _currentUserId()?.trim() != initialUid || hasRejected) {
+        return false;
+      }
+
+      if (!await processPendingItems() ||
+          _disposed ||
+          _currentUserId()?.trim() != initialUid) {
+        return false;
+      }
+
+      final hasNewRejected = await safetyStore.hasRejectedSyncItems(initialUid);
+      if (_disposed ||
+          _currentUserId()?.trim() != initialUid ||
+          hasNewRejected) {
+        return false;
+      }
+
+      final pending = await store.getPendingSyncItems(initialUid);
+      return !_disposed &&
+          _currentUserId()?.trim() == initialUid &&
+          pending.isEmpty;
+    } catch (_) {
+      AppLogger.w(
+        'Não foi possível verificar o descarte seguro da fila de sync.',
+      );
+      return false;
+    }
+  }
 
   Future<bool> processPendingItems() {
     if (_disposed) return Future.value(false);
@@ -75,9 +118,9 @@ class SyncManager {
 
     try {
       try {
-        await _queueStore.cleanupTerminalSyncItems(
+        await _queueStore.cleanupSucceededSyncItems(
           initialUid,
-          DateTime.now().subtract(_terminalRetention).millisecondsSinceEpoch,
+          DateTime.now().subtract(_succeededRetention).millisecondsSinceEpoch,
         );
       } catch (_) {
         AppLogger.w('Não foi possível concluir a manutenção da fila de sync.');

@@ -594,7 +594,7 @@ class AuthNotifier extends Notifier<AuthState> {
       try {
         queueDrained = await ref
             .read(syncManagerProvider)
-            .processPendingItems();
+            .prepareForLocalDataDiscard();
       } catch (_) {
         queueDrained = false;
       }

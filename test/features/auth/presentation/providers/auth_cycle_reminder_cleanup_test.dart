@@ -232,6 +232,14 @@ class _SyncManager extends Fake implements SyncManager {
   bool shouldDrain = true;
   int calls = 0;
   Future<bool> Function()? onProcess;
+  Future<bool> Function()? hasRejected;
+
+  @override
+  Future<bool> prepareForLocalDataDiscard() async {
+    if (await hasRejected?.call() ?? false) return false;
+    if (!await processPendingItems()) return false;
+    return !(await hasRejected?.call() ?? false);
+  }
 
   @override
   Future<bool> processPendingItems() {
@@ -811,6 +819,52 @@ void main() {
     await harness.notifier.logout();
     expect(harness.state, isA<AuthUnauthenticated>());
     expect(harness.repository.signOutCalls, 1);
+  });
+
+  test('rejected persistido bloqueia logout e segunda tentativa', () async {
+    final harness = await _Harness.create(<int>[0]);
+    addTearDown(harness.dispose);
+    await seedPendingLocalChange(harness.database);
+    final queue = await harness.database
+        .select(harness.database.syncQueueTable)
+        .get();
+    await harness.database.markSyncItemRejected(
+      queue.single.id,
+      _userA.uid,
+      'INVALID_PAYLOAD',
+    );
+    harness.syncManager.hasRejected = () =>
+        harness.database.hasRejectedSyncItems(_userA.uid);
+
+    for (var attempt = 0; attempt < 2; attempt++) {
+      await harness.notifier.logout();
+
+      expect(harness.state, isA<AuthError>());
+      expect(
+        (harness.state as AuthError).message,
+        'Há alterações pendentes que ainda não foram sincronizadas. '
+        'Verifique sua conexão e tente sair novamente.',
+      );
+      expect(harness.auth.currentUser?.uid, _userA.uid);
+      expect(harness.repository.signOutCalls, 0);
+      expect(harness.auth.signOutCalls, 0);
+      expect(
+        await harness.database.select(harness.database.taskTable).get(),
+        hasLength(1),
+      );
+      final retained = await harness.database
+          .select(harness.database.syncQueueTable)
+          .get();
+      expect(retained, hasLength(1));
+      expect(retained.single.id, queue.single.id);
+      expect(retained.single.status, SyncQueuePersistenceStatus.rejected);
+      expect(harness.lifecycle.cancellationCalls, 0);
+      expect(harness.firestore.clearPersistenceCalls, 0);
+      expect(harness.notificationCleanup.calls, 0);
+      expect(harness.rotation.calls, 0);
+      expect(harness.preferencesDeletion.calls, 0);
+      expect(await harness.readPendingCleanup(), isNull);
+    }
   });
 
   test('logout drena antes do cleanup destrutivo', () async {
