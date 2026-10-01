@@ -6,6 +6,7 @@ import 'package:life_os/core/utils/app_logger.dart';
 import 'sync_operation_result.dart';
 import 'sync_queue_store.dart';
 import 'sync_remote_data_source.dart';
+import 'sync_ui_event.dart';
 
 class SyncManager {
   static const _succeededRetention = Duration(days: 7);
@@ -21,6 +22,11 @@ class SyncManager {
   final SyncQueueStore _queueStore;
   final SyncRemoteDataSource _remoteDataSource;
   final String? Function() _currentUserId;
+  final _uiEvents = StreamController<SyncUiEvent>.broadcast();
+  String? _recoveryUid;
+  bool _recoveryResumed = false;
+
+  Stream<SyncUiEvent> get uiEvents => _uiEvents.stream;
 
   Future<bool>? _processingFuture;
   bool _processAgain = false;
@@ -82,6 +88,7 @@ class SyncManager {
     if (_disposed) return Future.value(false);
 
     final currentUid = _currentUserId()?.trim();
+    if (_recoveryUid != currentUid) _resetRecovery();
     if (currentUid == null ||
         currentUid.isEmpty ||
         (_retryUid != null && _retryUid != currentUid)) {
@@ -134,6 +141,12 @@ class SyncManager {
       do {
         _processAgain = false;
         final pendingItems = await _queueStore.getPendingSyncItems(initialUid);
+        if (pendingItems.any(
+          (item) =>
+              item.ownerUid?.trim() == initialUid && item.attemptCount > 0,
+        )) {
+          _beginRecovery(initialUid);
+        }
 
         for (final SyncQueueTableData item in pendingItems) {
           final currentUid = _currentUserId()?.trim();
@@ -165,10 +178,15 @@ class SyncManager {
 
           switch (result.status) {
             case SyncOperationStatus.success:
+              if (_recoveryUid == ownerUid && !_recoveryResumed) {
+                _emitUiEvent(SyncUiEventType.resumed, ownerUid);
+                _recoveryResumed = true;
+              }
               await _queueStore.markSyncItemAsSucceeded(item.id, ownerUid);
               break;
 
             case SyncOperationStatus.retryableError:
+              _beginRecovery(ownerUid);
               final code = result.code ?? 'RETRYABLE_ERROR';
               AppLogger.w('Operação de sync mantida pendente: $code');
               await _queueStore.markSyncItemRetryableFailure(
@@ -188,6 +206,7 @@ class SyncManager {
               await _queueStore.markSyncItemRejected(item.id, ownerUid, code);
           }
         }
+        if (!_processAgain) await _maybeEmitRecoveryCompleted(initialUid);
       } while (_processAgain);
     } catch (_) {
       AppLogger.w('Falha inesperada ao processar a fila de sincronização.');
@@ -199,6 +218,52 @@ class SyncManager {
     final sameUser = _currentUserId()?.trim() == initialUid;
     _resetRetry();
     return sameUser;
+  }
+
+  void _beginRecovery(String uid) {
+    if (_disposed || _currentUserId()?.trim() != uid || _recoveryUid == uid) {
+      return;
+    }
+    _recoveryUid = uid;
+    _recoveryResumed = false;
+  }
+
+  Future<void> _maybeEmitRecoveryCompleted(String uid) async {
+    final store = _queueStore;
+    if (_disposed ||
+        _recoveryUid != uid ||
+        !_recoveryResumed ||
+        _currentUserId()?.trim() != uid ||
+        store is! SyncQueueDiscardSafetyStore) {
+      return;
+    }
+    try {
+      final hasRejected = await (store as SyncQueueDiscardSafetyStore)
+          .hasRejectedSyncItems(uid);
+      if (_disposed || _currentUserId()?.trim() != uid || hasRejected) return;
+      final pending = await store.getPendingSyncItems(uid);
+      if (_disposed ||
+          _currentUserId()?.trim() != uid ||
+          _processAgain ||
+          pending.isNotEmpty) {
+        return;
+      }
+      _emitUiEvent(SyncUiEventType.recoveryCompleted, uid);
+      _resetRecovery();
+    } catch (_) {
+      // Feedback failure must not change the queue's drain result.
+      AppLogger.w('Não foi possível verificar a conclusão da sincronização.');
+    }
+  }
+
+  void _emitUiEvent(SyncUiEventType type, String uid) {
+    if (_disposed || _currentUserId()?.trim() != uid) return;
+    _uiEvents.add(SyncUiEvent(type: type, ownerUid: uid));
+  }
+
+  void _resetRecovery() {
+    _recoveryUid = null;
+    _recoveryResumed = false;
   }
 
   void _scheduleRetry(String uid) {
@@ -234,5 +299,7 @@ class SyncManager {
     if (_disposed) return;
     _disposed = true;
     _resetRetry();
+    _resetRecovery();
+    unawaited(_uiEvents.close());
   }
 }

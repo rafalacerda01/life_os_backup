@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:life_os/core/theme/app_colors.dart';
+import 'package:life_os/core/services/sync_manager_provider.dart';
+import 'package:life_os/core/services/sync_ui_event.dart';
 import 'package:life_os/features/auth/presentation/providers/auth_provider.dart';
 
 class MainNavigationScreen extends ConsumerWidget {
@@ -97,6 +99,47 @@ class MainNavigationScreen extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    ref.listen(syncUiEventsProvider, (_, next) {
+      final event = next.asData?.value;
+      if (event == null) return;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!context.mounted) return;
+        if (ref.read(firebaseAuthProvider).currentUser?.uid != event.ownerUid) {
+          return;
+        }
+        final message = switch (event.type) {
+          SyncUiEventType.resumed =>
+            'Sincronização retomada — enviando suas alterações…',
+          SyncUiEventType.recoveryCompleted =>
+            'Sincronização retomada concluída.',
+        };
+        final messenger = ScaffoldMessenger.of(context);
+        if (event.type == SyncUiEventType.resumed) {
+          messenger
+            ..clearSnackBars()
+            ..removeCurrentSnackBar();
+        }
+        messenger.showSnackBar(
+          SnackBar(
+            duration: const Duration(seconds: 2),
+            behavior: SnackBarBehavior.floating,
+            backgroundColor: AppColors.cardBackground,
+            content: Row(
+              children: [
+                const Icon(Icons.sync_rounded, color: AppColors.primary),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Text(
+                    message,
+                    style: const TextStyle(color: Colors.white),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      });
+    });
     return Scaffold(
       appBar: AppBar(
         backgroundColor: AppColors.scaffoldBackground,

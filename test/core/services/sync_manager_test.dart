@@ -8,6 +8,7 @@ import 'package:life_os/core/services/sync_manager.dart';
 import 'package:life_os/core/services/sync_operation_result.dart';
 import 'package:life_os/core/services/sync_queue_store.dart';
 import 'package:life_os/core/services/sync_remote_data_source.dart';
+import 'package:life_os/core/services/sync_ui_event.dart';
 
 class FakeSyncQueueStore
     implements SyncQueueStore, SyncQueueDiscardSafetyStore {
@@ -20,11 +21,15 @@ class FakeSyncQueueStore
   final List<String> events = [];
   bool cleanupFails = false;
   Future<void> Function()? cleanupOperation;
+  Future<void> Function()? rejectionReadOperation;
+  bool rejectionReadFails = false;
 
   FakeSyncQueueStore(this.items);
 
   @override
   Future<bool> hasRejectedSyncItems(String ownerUid) async {
+    await rejectionReadOperation?.call();
+    if (rejectionReadFails) throw StateError('technical-rejection-read-marker');
     return items.any(
       (item) =>
           item.ownerUid == ownerUid &&
@@ -61,6 +66,7 @@ class FakeSyncQueueStore
   @override
   Future<int> markSyncItemAsSucceeded(int id, String ownerUid) async {
     markedAsSynced.add(id);
+    _updateItem(id, ownerUid, SyncQueuePersistenceStatus.succeeded, true);
     return 1;
   }
 
@@ -71,6 +77,7 @@ class FakeSyncQueueStore
     String errorCode,
   ) async {
     rejected.add(id);
+    _updateItem(id, ownerUid, SyncQueuePersistenceStatus.rejected, false);
     return 1;
   }
 
@@ -81,7 +88,21 @@ class FakeSyncQueueStore
     String errorCode,
   ) async {
     retried.add(id);
+    _updateItem(id, ownerUid, SyncQueuePersistenceStatus.pending, false);
     return 1;
+  }
+
+  void _updateItem(int id, String ownerUid, String status, bool isSynced) {
+    final index = items.indexWhere(
+      (item) => item.id == id && item.ownerUid == ownerUid,
+    );
+    if (index == -1) return;
+    final item = items[index];
+    items[index] = item.copyWith(
+      status: status,
+      isSynced: isSynced,
+      attemptCount: item.attemptCount + 1,
+    );
   }
 }
 
@@ -116,6 +137,8 @@ SyncQueueTableData createSyncItem({
   String operationType = 'create',
   String payloadJson = '{"title":"Hábito"}',
   String? ownerUid = 'user-123',
+  int attemptCount = 0,
+  String status = SyncQueuePersistenceStatus.pending,
 }) {
   return SyncQueueTableData(
     id: id,
@@ -126,8 +149,8 @@ SyncQueueTableData createSyncItem({
     payloadJson: payloadJson,
     createdAt: DateTime.now().millisecondsSinceEpoch,
     isSynced: false,
-    status: SyncQueuePersistenceStatus.pending,
-    attemptCount: 0,
+    status: status,
+    attemptCount: attemptCount,
   );
 }
 
@@ -171,7 +194,445 @@ class FakeHealthMergeRemoteDataSource implements SyncRemoteDataSource {
   }
 }
 
+SyncManager _recordUiEvents(
+  FakeSyncQueueStore store,
+  FakeSyncRemoteDataSource remote,
+  List<SyncUiEvent> events, {
+  String? Function()? currentUserId,
+}) {
+  final manager = SyncManager(
+    queueStore: store,
+    remoteDataSource: remote,
+    currentUserId: currentUserId ?? () => 'user-123',
+  );
+  final subscription = manager.uiEvents.listen(events.add);
+  addTearDown(() async {
+    manager.dispose();
+    await subscription.cancel();
+  });
+  return manager;
+}
+
 void main() {
+  group('SyncManager recovery UI events', () {
+    test('first-attempt success emits no recovery feedback', () async {
+      final events = <SyncUiEvent>[];
+      final manager = _recordUiEvents(
+        FakeSyncQueueStore([createSyncItem()]),
+        FakeSyncRemoteDataSource(
+          (_, _) async => const SyncOperationResult.success(),
+        ),
+        events,
+      );
+
+      expect(await manager.processPendingItems(), isTrue);
+      expect(events, isEmpty);
+    });
+
+    test(
+      'retryable alone emits no resumed or recoveryCompleted event',
+      () async {
+        final events = <SyncUiEvent>[];
+        final store = FakeSyncQueueStore([createSyncItem()]);
+        final manager = _recordUiEvents(
+          store,
+          FakeSyncRemoteDataSource(
+            (_, _) async => const SyncOperationResult.retryable(),
+          ),
+          events,
+        );
+
+        expect(await manager.processPendingItems(), isFalse);
+        expect(store.items.single.attemptCount, 1);
+        expect(store.items.single.status, SyncQueuePersistenceStatus.pending);
+        expect(events, isEmpty);
+      },
+    );
+
+    test(
+      'retry then success emits resumed and recoveryCompleted exactly once',
+      () async {
+        final events = <SyncUiEvent>[];
+        var calls = 0;
+        final manager = _recordUiEvents(
+          FakeSyncQueueStore([createSyncItem()]),
+          FakeSyncRemoteDataSource(
+            (_, _) async => ++calls == 1
+                ? const SyncOperationResult.retryable()
+                : const SyncOperationResult.success(),
+          ),
+          events,
+        );
+
+        expect(await manager.processPendingItems(), isFalse);
+        expect(events, isEmpty);
+        expect(await manager.processPendingItems(), isTrue);
+        expect(await manager.processPendingItems(), isTrue);
+        expect(events.map((event) => event.type), [
+          SyncUiEventType.resumed,
+          SyncUiEventType.recoveryCompleted,
+        ]);
+        expect(events.map((event) => event.ownerUid), everyElement('user-123'));
+        expect(calls, 2);
+      },
+    );
+
+    testWidgets('multiple automatic retries do not spam recovery events', (
+      tester,
+    ) async {
+      final events = <SyncUiEvent>[];
+      var calls = 0;
+      final manager = _recordUiEvents(
+        FakeSyncQueueStore([createSyncItem()]),
+        FakeSyncRemoteDataSource(
+          (_, _) async => ++calls <= 3
+              ? const SyncOperationResult.retryable(code: 'BACKEND_429')
+              : const SyncOperationResult.success(),
+        ),
+        events,
+      );
+
+      expect(await manager.processPendingItems(), isFalse);
+      for (final delay in [
+        const Duration(seconds: 5),
+        const Duration(seconds: 15),
+      ]) {
+        await tester.pump(delay);
+        await tester.pump();
+        expect(events, isEmpty);
+      }
+      await tester.pump(const Duration(seconds: 30));
+      await tester.pump();
+      expect(calls, 4);
+      expect(events.map((event) => event.type), [
+        SyncUiEventType.resumed,
+        SyncUiEventType.recoveryCompleted,
+      ]);
+    });
+
+    test('persisted retry attempts recover after manager restart', () async {
+      final store = FakeSyncQueueStore([createSyncItem(attemptCount: 2)]);
+      final events = <SyncUiEvent>[];
+      final manager = _recordUiEvents(
+        store,
+        FakeSyncRemoteDataSource(
+          (_, _) async => const SyncOperationResult.success(),
+        ),
+        events,
+      );
+
+      expect(await manager.processPendingItems(), isTrue);
+      await Future<void>.value();
+      expect(events.map((event) => event.type), [
+        SyncUiEventType.resumed,
+        SyncUiEventType.recoveryCompleted,
+      ]);
+      expect(store.items.single.status, SyncQueuePersistenceStatus.succeeded);
+    });
+
+    test(
+      'new rejection blocks recoveryCompleted even when drain returns true',
+      () async {
+        final store = FakeSyncQueueStore([
+          createSyncItem(attemptCount: 1),
+          createSyncItem(id: 2),
+        ]);
+        final events = <SyncUiEvent>[];
+        final manager = _recordUiEvents(
+          store,
+          FakeSyncRemoteDataSource(
+            (_, item) async => item.id == 1
+                ? const SyncOperationResult.success()
+                : const SyncOperationResult.invalidPayload(),
+          ),
+          events,
+        );
+
+        expect(await manager.processPendingItems(), isTrue);
+        expect(await manager.processPendingItems(), isTrue);
+        expect(events.map((event) => event.type), [SyncUiEventType.resumed]);
+        expect(await store.hasRejectedSyncItems('user-123'), isTrue);
+        expect(store.rejected, [2]);
+      },
+    );
+
+    test('old persisted rejection blocks recoveryCompleted', () async {
+      final store = FakeSyncQueueStore([
+        createSyncItem(attemptCount: 1),
+        createSyncItem(id: 2, status: SyncQueuePersistenceStatus.rejected),
+      ]);
+      final events = <SyncUiEvent>[];
+      final manager = _recordUiEvents(
+        store,
+        FakeSyncRemoteDataSource(
+          (_, _) async => const SyncOperationResult.success(),
+        ),
+        events,
+      );
+
+      expect(await manager.processPendingItems(), isTrue);
+      expect(events.map((event) => event.type), [SyncUiEventType.resumed]);
+      expect(store.items.last.status, SyncQueuePersistenceStatus.rejected);
+      expect(store.markedAsSynced, [1]);
+    });
+
+    test('rejection for another UID does not block current recovery', () async {
+      final events = <SyncUiEvent>[];
+      final manager = _recordUiEvents(
+        FakeSyncQueueStore([
+          createSyncItem(attemptCount: 1),
+          createSyncItem(
+            id: 2,
+            ownerUid: 'user-b',
+            status: SyncQueuePersistenceStatus.rejected,
+          ),
+        ]),
+        FakeSyncRemoteDataSource(
+          (_, _) async => const SyncOperationResult.success(),
+        ),
+        events,
+      );
+
+      expect(await manager.processPendingItems(), isTrue);
+      await Future<void>.value();
+      expect(events.map((event) => event.type), [
+        SyncUiEventType.resumed,
+        SyncUiEventType.recoveryCompleted,
+      ]);
+    });
+
+    test(
+      'another retryable delays completion without another resumed event',
+      () async {
+        final events = <SyncUiEvent>[];
+        var secondCalls = 0;
+        final store = FakeSyncQueueStore([
+          createSyncItem(attemptCount: 1),
+          createSyncItem(id: 2),
+        ]);
+        final manager = _recordUiEvents(
+          store,
+          FakeSyncRemoteDataSource(
+            (_, item) async => item.id == 2 && ++secondCalls == 1
+                ? const SyncOperationResult.retryable()
+                : const SyncOperationResult.success(),
+          ),
+          events,
+        );
+
+        expect(await manager.processPendingItems(), isFalse);
+        expect(events.map((event) => event.type), [SyncUiEventType.resumed]);
+        expect(store.items.last.status, SyncQueuePersistenceStatus.pending);
+        expect(await manager.processPendingItems(), isTrue);
+        await Future<void>.value();
+        expect(events.map((event) => event.type), [
+          SyncUiEventType.resumed,
+          SyncUiEventType.recoveryCompleted,
+        ]);
+      },
+    );
+
+    test(
+      'UID change during remote call suppresses old recovery events',
+      () async {
+        var uid = 'user-123';
+        final started = Completer<void>();
+        final release = Completer<void>();
+        final events = <SyncUiEvent>[];
+        final manager = _recordUiEvents(
+          FakeSyncQueueStore([createSyncItem(attemptCount: 1)]),
+          FakeSyncRemoteDataSource((_, _) async {
+            started.complete();
+            await release.future;
+            return const SyncOperationResult.success();
+          }),
+          events,
+          currentUserId: () => uid,
+        );
+
+        final drain = manager.processPendingItems();
+        await started.future;
+        uid = 'user-b';
+        release.complete();
+        expect(await drain, isFalse);
+        expect(events, isEmpty);
+      },
+    );
+
+    test(
+      'UID change during completion check suppresses recoveryCompleted',
+      () async {
+        var uid = 'user-123';
+        final store = FakeSyncQueueStore([createSyncItem(attemptCount: 1)]);
+        store.rejectionReadOperation = () async {
+          uid = 'user-b';
+        };
+        final events = <SyncUiEvent>[];
+        final manager = _recordUiEvents(
+          store,
+          FakeSyncRemoteDataSource(
+            (_, _) async => const SyncOperationResult.success(),
+          ),
+          events,
+          currentUserId: () => uid,
+        );
+
+        expect(await manager.processPendingItems(), isFalse);
+        expect(events.map((event) => event.type), [SyncUiEventType.resumed]);
+      },
+    );
+
+    test(
+      'new pending item during completion check prevents recoveryCompleted',
+      () async {
+        final store = FakeSyncQueueStore([createSyncItem(attemptCount: 1)]);
+        store.rejectionReadOperation = () async {
+          store.items.add(createSyncItem(id: 2));
+          store.rejectionReadOperation = null;
+        };
+        final events = <SyncUiEvent>[];
+        final manager = _recordUiEvents(
+          store,
+          FakeSyncRemoteDataSource(
+            (_, _) async => const SyncOperationResult.success(),
+          ),
+          events,
+        );
+
+        expect(await manager.processPendingItems(), isTrue);
+        expect(events.map((event) => event.type), [SyncUiEventType.resumed]);
+        expect(await manager.processPendingItems(), isTrue);
+        await Future<void>.value();
+        expect(events.map((event) => event.type), [
+          SyncUiEventType.resumed,
+          SyncUiEventType.recoveryCompleted,
+        ]);
+      },
+    );
+
+    test(
+      'drain requested during completion check preserves single-flight and FIFO',
+      () async {
+        final store = FakeSyncQueueStore([createSyncItem(attemptCount: 1)]);
+        final started = Completer<void>();
+        final release = Completer<void>();
+        store.rejectionReadOperation = () async {
+          store.rejectionReadOperation = null;
+          started.complete();
+          await release.future;
+        };
+        final events = <SyncUiEvent>[];
+        final remote = FakeSyncRemoteDataSource(
+          (_, _) async => const SyncOperationResult.success(),
+        );
+        final manager = _recordUiEvents(store, remote, events);
+
+        final first = manager.processPendingItems();
+        await started.future;
+        store.items.add(createSyncItem(id: 2, docId: 'habit-2'));
+        final second = manager.processPendingItems();
+        expect(identical(first, second), isTrue);
+        expect(events.map((event) => event.type), [SyncUiEventType.resumed]);
+        release.complete();
+        expect(await first, isTrue);
+        expect(await second, isTrue);
+        await Future<void>.value();
+
+        expect(store.markedAsSynced, [1, 2]);
+        expect(remote.processedItems, [
+          'user-123:habits:habit-1:create',
+          'user-123:habits:habit-2:create',
+        ]);
+        expect(events.map((event) => event.type), [
+          SyncUiEventType.resumed,
+          SyncUiEventType.recoveryCompleted,
+        ]);
+      },
+    );
+
+    test(
+      'failed completion read cannot claim recoveryCompleted or change drain result',
+      () async {
+        final store = FakeSyncQueueStore([createSyncItem(attemptCount: 1)])
+          ..rejectionReadFails = true;
+        final events = <SyncUiEvent>[];
+        final manager = _recordUiEvents(
+          store,
+          FakeSyncRemoteDataSource(
+            (_, _) async => const SyncOperationResult.success(),
+          ),
+          events,
+        );
+
+        expect(await manager.processPendingItems(), isTrue);
+        expect(events.map((event) => event.type), [SyncUiEventType.resumed]);
+        store.rejectionReadFails = false;
+        expect(await manager.processPendingItems(), isTrue);
+        await Future<void>.value();
+        expect(events.map((event) => event.type), [
+          SyncUiEventType.resumed,
+          SyncUiEventType.recoveryCompleted,
+        ]);
+      },
+    );
+
+    test(
+      'broadcast supports multiple listeners and closes on dispose',
+      () async {
+        final events = <SyncUiEvent>[];
+        final manager = _recordUiEvents(
+          FakeSyncQueueStore([createSyncItem(attemptCount: 1)]),
+          FakeSyncRemoteDataSource(
+            (_, _) async => const SyncOperationResult.success(),
+          ),
+          events,
+        );
+        final secondEvents = <SyncUiEvent>[];
+        final closed = Completer<void>();
+        final subscription = manager.uiEvents.listen(
+          secondEvents.add,
+          onDone: closed.complete,
+        );
+        addTearDown(subscription.cancel);
+
+        expect(await manager.processPendingItems(), isTrue);
+        await Future<void>.value();
+        expect(secondEvents.map((event) => event.type), [
+          SyncUiEventType.resumed,
+          SyncUiEventType.recoveryCompleted,
+        ]);
+        manager.dispose();
+        await closed.future;
+        expect(await manager.processPendingItems(), isFalse);
+      },
+    );
+
+    test(
+      'dispose during remote call prevents emission on the closed stream',
+      () async {
+        final started = Completer<void>();
+        final release = Completer<void>();
+        final events = <SyncUiEvent>[];
+        final manager = _recordUiEvents(
+          FakeSyncQueueStore([createSyncItem(attemptCount: 1)]),
+          FakeSyncRemoteDataSource((_, _) async {
+            started.complete();
+            await release.future;
+            return const SyncOperationResult.success();
+          }),
+          events,
+        );
+        final drain = manager.processPendingItems();
+        await started.future;
+        manager.dispose();
+        release.complete();
+        await drain;
+        expect(events, isEmpty);
+        expect(await manager.processPendingItems(), isFalse);
+      },
+    );
+  });
+
   group('SyncManager safe local discard', () {
     test('pending success permits local discard', () async {
       final store = FakeSyncQueueStore([createSyncItem()]);
