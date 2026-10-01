@@ -61,43 +61,59 @@ class AnalyticsScreen extends ConsumerWidget {
                   Stack(
                     children: [
                       // Renderização do gráfico via injeção de layout nativo adaptável
-                      SizedBox(
-                        height: 160,
-                        child: Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                          crossAxisAlignment: CrossAxisAlignment.end,
-                          children: analyticsData.weeklyEvolution.map((day) {
-                            return Column(
-                              mainAxisAlignment: MainAxisAlignment.end,
-                              children: [
-                                Container(
-                                  width: 14,
-                                  height: 110 * day.scorePercentage,
-                                  decoration: BoxDecoration(
-                                    gradient: const LinearGradient(
-                                      begin: Alignment.bottomCenter,
-                                      end: Alignment.topCenter,
-                                      colors: [
-                                        Color(0xFF5D0EFF),
-                                        Color(0xFFB026FF),
-                                      ],
+                      if (canAccessAdvancedAnalytics &&
+                          analyticsData.weeklyEvolution.isEmpty)
+                        const SizedBox(
+                          height: 160,
+                          child: Center(
+                            child: Text(
+                              'Sem dados de hábitos nesta semana.',
+                              textAlign: TextAlign.center,
+                              style: TextStyle(
+                                color: Colors.white70,
+                                fontSize: 14,
+                              ),
+                            ),
+                          ),
+                        )
+                      else
+                        SizedBox(
+                          height: 160,
+                          child: Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                            crossAxisAlignment: CrossAxisAlignment.end,
+                            children: analyticsData.weeklyEvolution.map((day) {
+                              return Column(
+                                mainAxisAlignment: MainAxisAlignment.end,
+                                children: [
+                                  Container(
+                                    width: 14,
+                                    height: 110 * day.scorePercentage,
+                                    decoration: BoxDecoration(
+                                      gradient: const LinearGradient(
+                                        begin: Alignment.bottomCenter,
+                                        end: Alignment.topCenter,
+                                        colors: [
+                                          Color(0xFF5D0EFF),
+                                          Color(0xFFB026FF),
+                                        ],
+                                      ),
+                                      borderRadius: BorderRadius.circular(4),
                                     ),
-                                    borderRadius: BorderRadius.circular(4),
                                   ),
-                                ),
-                                const SizedBox(height: 8),
-                                Text(
-                                  day.dayName,
-                                  style: const TextStyle(
-                                    color: Colors.white54,
-                                    fontSize: 11,
+                                  const SizedBox(height: 8),
+                                  Text(
+                                    day.dayName,
+                                    style: const TextStyle(
+                                      color: Colors.white54,
+                                      fontSize: 11,
+                                    ),
                                   ),
-                                ),
-                              ],
-                            );
-                          }).toList(),
+                                ],
+                              );
+                            }).toList(),
+                          ),
                         ),
-                      ),
 
                       // Proteção Server-Side Visual (Blur/Overlay se for Free)
                       if (!canAccessAdvancedAnalytics)

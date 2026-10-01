@@ -92,7 +92,7 @@ class AnalyticsRepository {
       final now = DateTime.now();
       List<DailyPerformance> dynamicWeeklyEvolution = [];
 
-      for (int i = 6; i >= 0; i--) {
+      for (int i = 6; habits.isNotEmpty && i >= 0; i--) {
         final dayDate = now.subtract(Duration(days: i));
         final dayStr = DateFormat('yyyy-MM-dd').format(dayDate);
 
@@ -107,8 +107,6 @@ class AnalyticsRepository {
             }
           }
           dayScore = (completedOnThatDay / habits.length).clamp(0.0, 1.0);
-        } else {
-          dayScore = 0.5;
         }
 
         dynamicWeeklyEvolution.add(

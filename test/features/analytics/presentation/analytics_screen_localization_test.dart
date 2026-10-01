@@ -28,6 +28,116 @@ class _PremiumTestNotifier extends PremiumNotifier {
 }
 
 void main() {
+  const emptyAnalytics = AnalyticsEntity(
+    productivityIndex: 0,
+    healthIndex: 0,
+    financeIndex: 0,
+    habitConsistency: 0,
+    weeklyEvolution: [],
+  );
+  const weeklyEvolution = [
+    DailyPerformance(dayName: 'Seg', scorePercentage: 1.0),
+    DailyPerformance(dayName: 'Ter', scorePercentage: 0.0),
+    DailyPerformance(dayName: 'Qua', scorePercentage: 0.25),
+    DailyPerformance(dayName: 'Qui', scorePercentage: 0.5),
+    DailyPerformance(dayName: 'Sex', scorePercentage: 0.75),
+    DailyPerformance(dayName: 'Sáb', scorePercentage: 0.0),
+    DailyPerformance(dayName: 'Dom', scorePercentage: 1.0),
+  ];
+  final weeklyBars = find.byWidgetPredicate((widget) {
+    if (widget is! Container) return false;
+    final decoration = widget.decoration;
+    return widget.constraints?.maxWidth == 14 &&
+        decoration is BoxDecoration &&
+        decoration.gradient is LinearGradient;
+  });
+
+  testWidgets(
+    'Premium without habits shows an empty state without weekly bars',
+    (tester) async {
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            analyticsProvider.overrideWithValue(emptyAnalytics),
+            premiumProvider.overrideWith(_PremiumTestNotifier.new),
+          ],
+          child: const MaterialApp(home: AnalyticsScreen()),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('Sem dados de hábitos nesta semana.'), findsOneWidget);
+      expect(find.text('Consistência Geral da Semana'), findsOneWidget);
+      expect(weeklyBars, findsNothing);
+      for (final day in weeklyEvolution) {
+        expect(find.text(day.dayName), findsNothing);
+      }
+      expect(find.text('Gráfico Semanal Premium'), findsNothing);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets('Premium with data preserves weekly bars and labels', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          analyticsProvider.overrideWithValue(
+            const AnalyticsEntity(
+              productivityIndex: 0,
+              healthIndex: 0,
+              financeIndex: 0,
+              habitConsistency: 0,
+              weeklyEvolution: weeklyEvolution,
+            ),
+          ),
+          premiumProvider.overrideWith(_PremiumTestNotifier.new),
+        ],
+        child: const MaterialApp(home: AnalyticsScreen()),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(weeklyBars, findsNWidgets(7));
+    final bars = tester.widgetList<Container>(weeklyBars).toList();
+    for (var i = 0; i < weeklyEvolution.length; i++) {
+      expect(find.text(weeklyEvolution[i].dayName), findsOneWidget);
+      expect(
+        bars[i].constraints?.maxHeight,
+        110 * weeklyEvolution[i].scorePercentage,
+      );
+      expect(
+        ((bars[i].decoration! as BoxDecoration).gradient! as LinearGradient)
+            .colors,
+        const [Color(0xFF5D0EFF), Color(0xFFB026FF)],
+      );
+    }
+    expect(find.text('Sem dados de hábitos nesta semana.'), findsNothing);
+    expect(find.text('Gráfico Semanal Premium'), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets(
+    'Free keeps its weekly Premium overlay instead of the empty state',
+    (tester) async {
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            analyticsProvider.overrideWithValue(emptyAnalytics),
+            premiumProvider.overrideWith(_FreePremiumNotifier.new),
+          ],
+          child: const MaterialApp(home: AnalyticsScreen()),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('Gráfico Semanal Premium'), findsOneWidget);
+      expect(find.text('Sem dados de hábitos nesta semana.'), findsNothing);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
   testWidgets('Analytics CTA navigates to typed weekly V2 intent', (
     tester,
   ) async {
