@@ -148,6 +148,16 @@ class MainNavigationScreen extends ConsumerWidget {
                   title: Text("Foco", style: TextStyle(color: Colors.white)),
                 ),
               ),
+              const PopupMenuItem<String>(
+                value: '/tasks',
+                child: ListTile(
+                  leading: Icon(
+                    Icons.task_alt_rounded,
+                    color: Colors.purpleAccent,
+                  ),
+                  title: Text("Tarefas", style: TextStyle(color: Colors.white)),
+                ),
+              ),
               // 2. METAS
               const PopupMenuItem(
                 value: '/goals',
