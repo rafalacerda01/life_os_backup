@@ -2,7 +2,7 @@
   "name": "life-os-firestore-rules-tests",
   "private": true,
   "scripts": {
-    "test:rules": "firebase emulators:exec --config ../../firebase.json --only firestore --project demo-life-os \"node --test circles.rules.test.js\""
+    "test:rules": "firebase emulators:exec --config ../../firebase.json --only firestore --project demo-life-os \"node --test --test-concurrency=1 circles.rules.test.js consent.rules.test.js account-deletion.rules.test.js\""
   },
   "engines": {
     "node": "22"

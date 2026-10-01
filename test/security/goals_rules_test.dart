@@ -7,10 +7,11 @@ import 'package:flutter_test/flutter_test.dart';
 // substituem testes de autorização contra o motor real de Firestore Rules.
 
 void main() {
+  late String rules;
   late String goalsRules;
 
   setUpAll(() async {
-    final rules = (await File(
+    rules = (await File(
       'firestore.rules',
     ).readAsString()).replaceAll('\r\n', '\n');
     goalsRules = RegExp(
@@ -20,7 +21,15 @@ void main() {
 
   test('goals mantém leitura e update restritos ao owner', () {
     expect(goalsRules, contains('allow read: if isOwner(userId);'));
-    expect(goalsRules, contains('allow update: if isOwner(userId)'));
+    expect(goalsRules, contains('allow update: if canWriteUserData(userId)'));
+    expect(
+      rules,
+      matches(
+        r'function canWriteUserData\(userId\) \{\s*'
+        r'return isOwner\(userId\)\s*'
+        r'&& !accountDeletionBlocked\(userId\);\s*\}',
+      ),
+    );
   });
 
   test('goals mantém create e delete bloqueados', () {

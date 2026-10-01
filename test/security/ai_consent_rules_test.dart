@@ -10,12 +10,22 @@ void main() {
   late String rules;
 
   setUpAll(() async {
-    rules = (await File('firestore.rules').readAsString()).replaceAll('\r\n', '\n');
+    rules = (await File(
+      'firestore.rules',
+    ).readAsString()).replaceAll('\r\n', '\n');
   });
 
   test('privacy rules contêm proteção de owner e bloqueio de delete', () {
-    expect(rules, contains('allow create: if isOwner(userId)'));
-    expect(rules, contains('allow update: if isOwner(userId)'));
+    expect(rules, contains('allow create: if canWriteUserData(userId)'));
+    expect(rules, contains('allow update: if canWriteUserData(userId)'));
+    expect(
+      rules,
+      matches(
+        r'function canWriteUserData\(userId\) \{\s*'
+        r'return isOwner\(userId\)\s*'
+        r'&& !accountDeletionBlocked\(userId\);\s*\}',
+      ),
+    );
     expect(rules, contains("privacyId == 'ai_consent'"));
     expect(rules, contains('allow delete: if false;'));
   });
