@@ -1037,9 +1037,9 @@ class StudyRepository {
     Map<String, dynamic> data,
   ) {
     final title = data['title'];
-    final cards = data['cardsToReview'];
-    final streak = data['streakDays'];
-    final progress = data['progress'];
+    final cards = data.containsKey('cardsToReview') ? data['cardsToReview'] : 0;
+    final streak = data.containsKey('streakDays') ? data['streakDays'] : 0;
+    final progress = data.containsKey('progress') ? data['progress'] : 0.0;
     final hasExam = data['hasExam'];
     final rawExamDate = data['examDate'];
     final examDate = rawExamDate == null ? null : _parseRemoteDate(rawExamDate);

@@ -1021,6 +1021,153 @@ void main() {
     expect(sync.calls, 0);
   });
 
+  group('compatibilidade de matérias remotas históricas', () {
+    Map<String, dynamic> legacySubject() => {
+      'title': 'Matemática',
+      'hasExam': false,
+      'examDate': null,
+      'createdAt': Timestamp.fromDate(DateTime.utc(2025, 1, 1)),
+    };
+
+    for (final fields in <Map<String, dynamic>>[
+      {},
+      {'cardsToReview': 4},
+      {'streakDays': 3},
+      {'progress': .4},
+      {'cardsToReview': 4, 'streakDays': 3},
+      {'cardsToReview': 4, 'progress': .4},
+      {'streakDays': 3, 'progress': .4},
+      {'cardsToReview': 4, 'streakDays': 3, 'progress': .4},
+    ]) {
+      final schema = fields.isEmpty
+          ? 'histórico exato'
+          : fields.keys.join(', ');
+      test(
+        'banco vazio hidrata $schema sem escrita remota ou SyncQueue',
+        () async {
+          final data = {...legacySubject(), ...fields};
+          final remote = _QueryDoc('subject-1', Map.of(data));
+          fire.subjects.documents = [remote];
+          expect(await db.select(db.subjects).get(), isEmpty);
+
+          await repository.syncStudyFromFirebaseToLocal();
+
+          final local = await db.select(db.subjects).getSingle();
+          expect(local.id, 'subject-1');
+          expect(local.title, 'Matemática');
+          expect(local.cardsToReview, fields['cardsToReview'] ?? 0);
+          expect(local.streakDays, fields['streakDays'] ?? 0);
+          expect(local.progress, fields['progress'] ?? 0.0);
+          expect(local.hasExam, isFalse);
+          expect(local.examDate, null);
+          expect(fire.subjects.options?.source, Source.server);
+          expect(remote.values, data);
+          expect(await db.select(db.syncQueueTable).get(), isEmpty);
+        },
+      );
+    }
+
+    test('matéria local existente é hidratada pelo schema histórico', () async {
+      await subject(cards: 9);
+      fire.subjects.documents = [_QueryDoc('subject-1', legacySubject())];
+
+      await repository.syncStudyFromFirebaseToLocal();
+
+      final local = await db.select(db.subjects).getSingle();
+      expect(local.id, 'subject-1');
+      expect(local.title, 'Matemática');
+      expect(local.cardsToReview, 0);
+      expect(local.streakDays, 0);
+      expect(local.progress, 0.0);
+      expect(await db.select(db.syncQueueTable).get(), isEmpty);
+    });
+
+    for (final testCase in <String, Map<String, dynamic>>{
+      'cardsToReview String': {'cardsToReview': '3'},
+      'cardsToReview negativo': {'cardsToReview': -1},
+      'cardsToReview null': {'cardsToReview': null},
+      'cardsToReview fracionário': {'cardsToReview': 1.5},
+      'streakDays negativo': {'streakDays': -1},
+      'streakDays fracionário': {'streakDays': 1.5},
+      'streakDays String': {'streakDays': '3'},
+      'streakDays null': {'streakDays': null},
+      'progress String': {'progress': '0.5'},
+      'progress negativo': {'progress': -.1},
+      'progress acima de um': {'progress': 1.1},
+      'progress NaN': {'progress': double.nan},
+      'progress infinito': {'progress': double.infinity},
+      'progress null': {'progress': null},
+      'title vazio': {'title': '   '},
+      'title não String': {'title': 3},
+      'hasExam não bool': {'hasExam': 'false'},
+      'examDate inválido': {'examDate': 'invalid'},
+    }.entries) {
+      test('valor presente inválido rejeitado: ${testCase.key}', () async {
+        fire.subjects.documents = [
+          _QueryDoc('subject-1', {...legacySubject(), ...testCase.value}),
+        ];
+
+        await repository.syncStudyFromFirebaseToLocal();
+
+        expect(await db.select(db.subjects).get(), isEmpty);
+        expect(await db.select(db.syncQueueTable).get(), isEmpty);
+      });
+    }
+
+    for (final field in ['title', 'hasExam']) {
+      test('$field ausente continua rejeitado', () async {
+        final data = legacySubject()..remove(field);
+        fire.subjects.documents = [_QueryDoc('subject-1', data)];
+
+        await repository.syncStudyFromFirebaseToLocal();
+
+        expect(await db.select(db.subjects).get(), isEmpty);
+      });
+    }
+
+    test('ID vazio continua rejeitado', () async {
+      fire.subjects.documents = [_QueryDoc('   ', legacySubject())];
+
+      await repository.syncStudyFromFirebaseToLocal();
+
+      expect(await db.select(db.subjects).get(), isEmpty);
+    });
+
+    final examDate = DateTime.utc(2026, 11, 1);
+    for (final testCase in <String, Object>{
+      'Timestamp': Timestamp.fromDate(examDate),
+      'DateTime': examDate,
+      'String parseável': examDate.toIso8601String(),
+    }.entries) {
+      test(
+        'schema moderno preserva examDate ${testCase.key} e metadata',
+        () async {
+          final data = {
+            ...remoteSubject('Matemática'),
+            'hasExam': true,
+            'examDate': testCase.value,
+            'createdAt': Timestamp.fromDate(DateTime.utc(2025, 1, 1)),
+            'updatedAt': Timestamp.fromDate(DateTime.utc(2026, 1, 1)),
+          };
+          final remote = _QueryDoc('subject-1', Map.of(data));
+          fire.subjects.documents = [remote];
+
+          await repository.syncStudyFromFirebaseToLocal();
+
+          final local = await db.select(db.subjects).getSingle();
+          expect(local.title, 'Matemática');
+          expect(local.cardsToReview, 2);
+          expect(local.streakDays, 3);
+          expect(local.progress, .4);
+          expect(local.hasExam, isTrue);
+          expect(local.examDate, examDate.millisecondsSinceEpoch);
+          expect(remote.values, data);
+          expect(await db.select(db.syncQueueTable).get(), isEmpty);
+        },
+      );
+    }
+  });
+
   test('fila não drenada impede GET', () async {
     sync.drains = false;
     await repository.syncStudyFromFirebaseToLocal();
