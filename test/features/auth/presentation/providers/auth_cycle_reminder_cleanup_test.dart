@@ -11,6 +11,7 @@ import 'package:life_os/core/database/database_provider.dart';
 import 'package:life_os/core/errors/failure.dart';
 import 'package:life_os/core/services/sync_manager.dart';
 import 'package:life_os/core/services/sync_manager_provider.dart';
+import 'package:life_os/core/storage/secure_storage_service.dart';
 import 'package:life_os/features/auth/data/local/auth_cleanup_barrier.dart';
 import 'package:life_os/features/auth/domain/entities/user_entity.dart';
 import 'package:life_os/features/auth/domain/repositories/auth_repository.dart';
@@ -56,16 +57,37 @@ const _userB = UserEntity(
 );
 
 class _FirebaseUser extends Fake implements User {
-  _FirebaseUser(this.uid);
+  _FirebaseUser(
+    this.uid, {
+    this.email,
+    this.displayName,
+    this.photoURL,
+    this.tokenError,
+    this.onGetIdToken,
+  });
 
   @override
   final String uid;
+  @override
+  final String? email;
+  @override
+  final String? displayName;
+  @override
+  final String? photoURL;
+  final Object? tokenError;
+  final Future<void> Function()? onGetIdToken;
+  int tokenCalls = 0;
 
   @override
   List<UserInfo> get providerData => const <UserInfo>[];
 
   @override
-  Future<String?> getIdToken([bool forceRefresh = false]) async => 'test-token';
+  Future<String?> getIdToken([bool forceRefresh = false]) async {
+    tokenCalls += 1;
+    await onGetIdToken?.call();
+    if (tokenError != null) throw tokenError!;
+    return 'test-token';
+  }
 }
 
 class _FirebaseAuth extends Fake implements FirebaseAuth {
@@ -132,6 +154,7 @@ class _AuthRepository extends Fake implements AuthRepository {
     this.allowDelete,
     this.completeDeletionBySigningOut = false,
     this.onGetCurrentUser,
+    this.currentUserFailure,
   });
 
   final _FirebaseAuth auth;
@@ -140,12 +163,18 @@ class _AuthRepository extends Fake implements AuthRepository {
   final Completer<void>? allowDelete;
   final bool completeDeletionBySigningOut;
   final Future<void> Function(String userId)? onGetCurrentUser;
+  final Failure? currentUserFailure;
   int signOutCalls = 0;
   final List<String> deletedExpectedUserIds = <String>[];
 
   @override
   Future<Result<UserEntity, Failure>> getCurrentUser() async {
     final userId = auth.currentUser?.uid;
+    final failure = currentUserFailure;
+    if (failure != null) {
+      if (userId != null) await onGetCurrentUser?.call(userId);
+      return Error(failure);
+    }
     if (userId == null) {
       return const Error(AuthFailure('not authenticated'));
     }
@@ -204,6 +233,11 @@ class _MemoryBarrierStorage implements AuthCleanupBarrierStorage {
 }
 
 class _SecureStorage extends Fake implements FlutterSecureStorage {
+  final values = <String, String>{};
+  int writeCalls = 0;
+  int deleteCalls = 0;
+  Object? writeError;
+
   @override
   Future<void> write({
     required String key,
@@ -214,7 +248,11 @@ class _SecureStorage extends Fake implements FlutterSecureStorage {
     WebOptions? webOptions,
     AppleOptions? mOptions,
     WindowsOptions? wOptions,
-  }) async {}
+  }) async {
+    writeCalls += 1;
+    if (writeError != null) throw writeError!;
+    if (value != null) values[key] = value;
+  }
 
   @override
   Future<void> delete({
@@ -225,7 +263,10 @@ class _SecureStorage extends Fake implements FlutterSecureStorage {
     WebOptions? webOptions,
     AppleOptions? mOptions,
     WindowsOptions? wOptions,
-  }) async {}
+  }) async {
+    deleteCalls += 1;
+    values.remove(key);
+  }
 }
 
 class _SyncManager extends Fake implements SyncManager {
@@ -455,6 +496,10 @@ class _Harness {
     _MemoryBarrierStorage? barrierStorage,
     _ScriptedTokenRotation? tokenRotation,
     String? firebaseUserId = 'user-a',
+    User? firebaseUser,
+    Failure? currentUserFailure,
+    FlutterSecureStorage? secureStorage,
+    _SyncManager? syncManagerOverride,
     bool waitForAuthentication = true,
     Completer<void>? deleteStarted,
     Completer<void>? allowDelete,
@@ -468,7 +513,8 @@ class _Harness {
     IPremiumRepository Function(String? uid)? createPremiumRepository,
   }) async {
     final auth = _FirebaseAuth(
-      firebaseUserId == null ? null : _FirebaseUser(firebaseUserId),
+      firebaseUser ??
+          (firebaseUserId == null ? null : _FirebaseUser(firebaseUserId)),
     );
     final database = AppDatabase(executor: NativeDatabase.memory());
     final localFirestore = firestore ?? _ScriptedFirestore();
@@ -478,6 +524,7 @@ class _Harness {
       deleteStarted: deleteStarted,
       allowDelete: allowDelete,
       completeDeletionBySigningOut: completeDeletionBySigningOut,
+      currentUserFailure: currentUserFailure,
       onGetCurrentUser: onGetCurrentUser == null
           ? null
           : (userId) => onGetCurrentUser(userId, database),
@@ -500,7 +547,7 @@ class _Harness {
       failuresRemaining: notificationCleanupFailures,
     );
     final durableStorage = barrierStorage ?? _MemoryBarrierStorage();
-    final syncManager = _SyncManager();
+    final syncManager = syncManagerOverride ?? _SyncManager();
     final coordinator = _SessionCoordinator(authority, epoch);
     final cleanup = CycleReminderSessionCleanup(
       mutationGate,
@@ -519,7 +566,9 @@ class _Harness {
         firebaseAuthProvider.overrideWithValue(auth),
         firestoreProvider.overrideWithValue(localFirestore),
         authRepositoryProvider.overrideWithValue(repository),
-        secureStorageProvider.overrideWithValue(_SecureStorage()),
+        secureStorageProvider.overrideWithValue(
+          secureStorage ?? _SecureStorage(),
+        ),
         databaseProvider.overrideWithValue(database),
         syncManagerProvider.overrideWithValue(syncManager),
         checkInRepositoryProvider.overrideWithValue(
@@ -654,6 +703,256 @@ void main() {
       ),
     );
   }
+
+  group('offline startup', () {
+    test(
+      'restores Firebase profile without clearing existing Drift data',
+      () async {
+        final firebaseUser = _FirebaseUser(
+          _userA.uid,
+          email: 'offline@example.invalid',
+          displayName: '  Nome Firebase  ',
+          photoURL: 'https://example.invalid/avatar.png',
+        );
+        final storage = _SecureStorage();
+        final harness = await _Harness.create(
+          <int>[0],
+          firebaseUser: firebaseUser,
+          currentUserFailure: ServerFailure.connection(),
+          secureStorage: storage,
+          syncManagerOverride: _SyncManager()..shouldDrain = false,
+          onGetCurrentUser: (_, db) => seedPendingLocalChange(db),
+        );
+        addTearDown(harness.dispose);
+
+        final user = (harness.state as AuthAuthenticated).user;
+        expect(user.uid, _userA.uid);
+        expect(user.email, 'offline@example.invalid');
+        expect(user.displayName, 'Nome Firebase');
+        expect(user.photoUrl, 'https://example.invalid/avatar.png');
+        expect(user.isPremium, isFalse);
+        expect(user.xp, 0);
+        expect(user.level, 1);
+        expect(user.streak, 0);
+        expect(firebaseUser.tokenCalls, 1);
+        expect(storage.values[SecureStorageService.tokenKey], 'test-token');
+        expect(storage.deleteCalls, 0);
+        final tasks = await harness.database
+            .select(harness.database.taskTable)
+            .get();
+        expect(tasks.single.id, 'pending-task');
+        expect(tasks.single.title, 'Pending task');
+        final queue = await harness.database
+            .select(harness.database.syncQueueTable)
+            .get();
+        expect(queue.single.status, SyncQueuePersistenceStatus.pending);
+        expect(harness.auth.currentUser?.uid, _userA.uid);
+        expect(harness.repository.signOutCalls, 0);
+        expect(harness.auth.signOutCalls, 0);
+        expect(harness.firestore.clearPersistenceCalls, 0);
+        expect(harness.lifecycle.cancellationCalls, 0);
+        expect(harness.notificationCleanup.calls, 0);
+        expect(await harness.readPendingCleanup(), isNull);
+        expect(harness.coordinator.preparedUserIds, [_userA.uid]);
+      },
+    );
+
+    for (final name in <String?>[null, '   ']) {
+      test('missing or blank displayName uses safe fallback ($name)', () async {
+        final harness = await _Harness.create(
+          <int>[0],
+          firebaseUser: _FirebaseUser(_userA.uid, displayName: name),
+          currentUserFailure: ServerFailure.connection(),
+          syncManagerOverride: _SyncManager()..shouldDrain = false,
+        );
+        addTearDown(harness.dispose);
+        expect(
+          (harness.state as AuthAuthenticated).user.displayName,
+          'Usuário',
+        );
+      });
+    }
+
+    test(
+      'NETWORK_ERROR without a Firebase session does not authenticate',
+      () async {
+        final harness = await _Harness.create(
+          <int>[0],
+          firebaseUserId: null,
+          currentUserFailure: ServerFailure.connection(),
+          waitForAuthentication: false,
+        );
+        addTearDown(harness.dispose);
+        await harness.waitForState<AuthUnauthenticated>();
+        expect(harness.auth.currentUser, isNull);
+        expect(harness.state, isNot(isA<AuthAuthenticated>()));
+      },
+    );
+
+    for (final failure in <Failure>[
+      const ServerFailure(
+        'Não foi possível preparar seu perfil.',
+        code: 'USER_PROFILE_PROVISION_FAILED',
+      ),
+      const SecurityFailure(
+        'Acesso não autorizado.',
+        code: 'permission-denied',
+      ),
+      const AuthFailure('Sua sessão não é válida.', code: 'UNAUTHENTICATED'),
+    ]) {
+      test('${failure.code} does not activate offline fallback', () async {
+        final harness = await _Harness.create(
+          <int>[0],
+          currentUserFailure: failure,
+          waitForAuthentication: false,
+        );
+        addTearDown(harness.dispose);
+        await harness.waitForState<AuthError>();
+        expect(harness.state, isNot(isA<AuthAuthenticated>()));
+        expect(harness.auth.currentUser?.uid, _userA.uid);
+        expect(harness.repository.signOutCalls, 0);
+      });
+    }
+
+    test(
+      'UID change during token preparation never publishes old offline user',
+      () async {
+        final started = Completer<void>();
+        final release = Completer<void>();
+        final harness = await _Harness.create(
+          <int>[0],
+          firebaseUser: _FirebaseUser(
+            _userA.uid,
+            onGetIdToken: () async {
+              started.complete();
+              await release.future;
+            },
+          ),
+          currentUserFailure: ServerFailure.connection(),
+          waitForAuthentication: false,
+        );
+        addTearDown(harness.dispose);
+        final published = <UserEntity>[];
+        harness.container.listen<AuthState>(authNotifierProvider, (_, next) {
+          if (next is AuthAuthenticated) published.add(next.user);
+        });
+        await started.future;
+        harness.auth.user = _FirebaseUser(_userB.uid);
+        release.complete();
+        await harness.waitForState<AuthError>();
+        expect(published, isEmpty);
+        expect(harness.auth.currentUser?.uid, _userB.uid);
+        expect(harness.repository.signOutCalls, 0);
+      },
+    );
+
+    test(
+      'token network failure preserves saved token and Firebase session',
+      () async {
+        final storage = _SecureStorage()
+          ..values[SecureStorageService.tokenKey] = 'previous-test-token';
+        final firebaseUser = _FirebaseUser(
+          _userA.uid,
+          tokenError: FirebaseAuthException(code: 'network-request-failed'),
+        );
+        final harness = await _Harness.create(
+          <int>[0],
+          firebaseUser: firebaseUser,
+          currentUserFailure: ServerFailure.connection(),
+          secureStorage: storage,
+          syncManagerOverride: _SyncManager()..shouldDrain = false,
+        );
+        addTearDown(harness.dispose);
+        expect(harness.state, isA<AuthAuthenticated>());
+        expect(harness.auth.currentUser?.uid, _userA.uid);
+        expect(harness.auth.signOutCalls, 0);
+        expect(harness.repository.signOutCalls, 0);
+        expect(
+          storage.values[SecureStorageService.tokenKey],
+          'previous-test-token',
+        );
+        expect(storage.writeCalls, 0);
+        expect(storage.deleteCalls, 0);
+      },
+    );
+
+    for (final code in [
+      'user-token-expired',
+      'user-disabled',
+      'invalid-user-token',
+      'user-not-found',
+    ]) {
+      test('token $code remains fail-closed', () async {
+        final harness = await _Harness.create(
+          <int>[0],
+          firebaseUser: _FirebaseUser(
+            _userA.uid,
+            tokenError: FirebaseAuthException(code: code),
+          ),
+          currentUserFailure: ServerFailure.connection(),
+          waitForAuthentication: false,
+        );
+        addTearDown(harness.dispose);
+        final error = await harness.waitForState<AuthError>();
+        expect(error.message, 'Não foi possível proteger a sessão local.');
+        expect(harness.coordinator.preparedUserIds, isEmpty);
+        expect(harness.syncManager.calls, 0);
+      });
+    }
+
+    test('unknown token error remains fail-closed', () async {
+      final harness = await _Harness.create(
+        <int>[0],
+        firebaseUser: _FirebaseUser(
+          _userA.uid,
+          tokenError: StateError('technical-token-marker'),
+        ),
+        currentUserFailure: ServerFailure.connection(),
+        waitForAuthentication: false,
+      );
+      addTearDown(harness.dispose);
+      final error = await harness.waitForState<AuthError>();
+      expect(error.message, 'Não foi possível proteger a sessão local.');
+      expect(error.message, isNot(contains('technical-token-marker')));
+    });
+
+    test('storage failure is not bypassed as token network failure', () async {
+      final storage = _SecureStorage()
+        ..writeError = FirebaseAuthException(code: 'network-request-failed');
+      final harness = await _Harness.create(
+        <int>[0],
+        currentUserFailure: ServerFailure.connection(),
+        secureStorage: storage,
+        waitForAuthentication: false,
+      );
+      addTearDown(harness.dispose);
+      await harness.waitForState<AuthError>();
+      expect(harness.state, isNot(isA<AuthAuthenticated>()));
+    });
+
+    test('hydration failure leaves offline session authenticated', () async {
+      final started = Completer<void>();
+      final drain = Completer<bool>();
+      final sync = _SyncManager()
+        ..onProcess = () {
+          started.complete();
+          return drain.future;
+        };
+      final harness = await _Harness.create(
+        <int>[0],
+        currentUserFailure: ServerFailure.connection(),
+        syncManagerOverride: sync,
+      );
+      addTearDown(harness.dispose);
+      await started.future;
+      drain.completeError(StateError('technical-hydration-marker'));
+      await drain.future.then<void>((_) {}, onError: (Object _) {});
+      expect(sync.calls, 1);
+      expect(harness.state, isA<AuthAuthenticated>());
+      expect(harness.auth.currentUser?.uid, _userA.uid);
+      expect(harness.auth.signOutCalls, 0);
+    });
+  });
 
   test('logout bloqueia cleanup quando Check-in permanece pendente', () async {
     final checkIns = _CheckInRepository();

@@ -142,12 +142,14 @@ class FakeUserDocumentReference extends Fake
   int updateCalls = 0;
   int setFailuresRemaining = 0;
   bool persistBeforeSetFailure = false;
+  Object? getError;
 
   @override
   Future<DocumentSnapshot<Map<String, dynamic>>> get([
     GetOptions? options,
   ]) async {
     getCalls += 1;
+    if (getError != null) throw getError!;
     return FakeUserDocumentSnapshot(id, value);
   }
 
@@ -885,6 +887,81 @@ void main() {
   });
 
   group('provisionamento de perfil', () {
+    for (final code in ['unavailable', 'deadline-exceeded']) {
+      test('getCurrentUser classifica Firestore $code como rede', () async {
+        final document = firestore.users.document('user-a')
+          ..getError = FirebaseException(
+            plugin: 'cloud_firestore',
+            code: code,
+            message: 'technical-network-marker',
+          );
+
+        final result = await repository.getCurrentUser();
+
+        Failure? failure;
+        result.when(
+          (_) => fail('Não deve autenticar no repository'),
+          (value) => failure = value,
+        );
+        expect(failure, ServerFailure.connection());
+        expect(document.setCalls, 0);
+        expect(auth.signOutCalls, 0);
+      });
+    }
+
+    for (final code in ['permission-denied', 'unauthenticated']) {
+      test('getCurrentUser não classifica $code como rede', () async {
+        firestore.users.document('user-a').getError = FirebaseException(
+          plugin: 'cloud_firestore',
+          code: code,
+          message: 'technical-security-marker',
+        );
+
+        final result = await repository.getCurrentUser();
+
+        Failure? failure;
+        result.when(
+          (_) => fail('Não deve retornar sucesso'),
+          (value) => failure = value,
+        );
+        expect(failure?.code, 'USER_PROFILE_PROVISION_FAILED');
+        expect(failure?.message, isNot(contains('technical-security-marker')));
+      });
+    }
+
+    test('getCurrentUser mantém erro genérico sanitizado no GET', () async {
+      firestore.users.document('user-a').getError = StateError(
+        'technical-get-marker',
+      );
+
+      final result = await repository.getCurrentUser();
+
+      Failure? failure;
+      result.when(
+        (_) => fail('Não deve retornar sucesso'),
+        (value) => failure = value,
+      );
+      expect(failure?.code, 'USER_PROFILE_PROVISION_FAILED');
+      expect(failure?.message, isNot(contains('technical-get-marker')));
+    });
+
+    test('perfil corrompido não é indisponibilidade de rede', () async {
+      firestore.users.document('user-a').value = {
+        ..._profileData(),
+        'xp': 'invalid',
+      };
+
+      final result = await repository.getCurrentUser();
+
+      Failure? failure;
+      result.when(
+        (_) => fail('Não deve retornar sucesso'),
+        (value) => failure = value,
+      );
+      expect(failure?.code, 'USER_PROFILE_PROVISION_FAILED');
+      expect(firestore.users.document('user-a').setCalls, 0);
+    });
+
     test('perfil existente é retornado sem recriar o documento', () async {
       final document = firestore.users.document('user-a')
         ..value = {

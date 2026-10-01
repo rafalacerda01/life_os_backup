@@ -354,6 +354,12 @@ class AuthRepositoryImpl implements AuthRepository {
       }
 
       return Success(newUser);
+    } on FirebaseException catch (error) {
+      if (error.plugin == 'cloud_firestore' &&
+          (error.code == 'unavailable' || error.code == 'deadline-exceeded')) {
+        return Error(ServerFailure.connection());
+      }
+      return _profileProvisionFailure();
     } catch (_) {
       return _profileProvisionFailure();
     }

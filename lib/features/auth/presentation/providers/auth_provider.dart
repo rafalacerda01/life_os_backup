@@ -10,6 +10,7 @@ import 'package:life_os/core/services/notification_preferences.dart';
 import 'package:life_os/core/services/analytics_service.dart';
 import 'package:life_os/core/services/sync_manager_provider.dart';
 import 'package:life_os/core/utils/app_logger.dart';
+import 'package:life_os/core/security/input_sanitizer.dart';
 // Imports dos providers de todos os módulos
 import 'package:life_os/features/finance/presentation/providers/finance_provider.dart';
 import 'package:life_os/features/tasks/presentation/providers/tasks_provider.dart';
@@ -281,7 +282,12 @@ class AuthNotifier extends Notifier<AuthState> {
     }
 
     try {
-      final token = await firebaseUser.getIdToken();
+      String? token;
+      try {
+        token = await firebaseUser.getIdToken();
+      } on FirebaseAuthException catch (error) {
+        if (error.code != 'network-request-failed') rethrow;
+      }
       if (token != null) {
         await _secureStorage.saveToken(token);
       }
@@ -355,6 +361,7 @@ class AuthNotifier extends Notifier<AuthState> {
 
   // --- Métodos de Autenticação e Perfil ---
   Future<void> checkCurrentUser() async {
+    final restoredUser = ref.read(firebaseAuthProvider).currentUser;
     final result = await _repository.getCurrentUser();
     await result.when(
       (user) async {
@@ -363,6 +370,26 @@ class AuthNotifier extends Notifier<AuthState> {
       },
       (failure) async {
         if (_disposed || _accountDeletionInProgress) return;
+        if (failure.code == 'NETWORK_ERROR' &&
+            restoredUser != null &&
+            restoredUser.uid.trim().isNotEmpty &&
+            ref.read(firebaseAuthProvider).currentUser?.uid ==
+                restoredUser.uid) {
+          final displayName = InputSanitizer.sanitize(restoredUser.displayName);
+          await _publishAuthenticatedResult(
+            UserEntity(
+              uid: restoredUser.uid,
+              email: InputSanitizer.sanitize(restoredUser.email),
+              displayName: displayName.isEmpty ? 'Usuário' : displayName,
+              photoUrl: restoredUser.photoURL,
+              isPremium: false,
+              xp: 0,
+              level: 1,
+              streak: 0,
+            ),
+          );
+          return;
+        }
         await _handleAuthenticationFailure(
           failure.message,
           finishLocalSignOutWhenNoUser: true,
