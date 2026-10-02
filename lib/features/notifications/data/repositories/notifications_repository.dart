@@ -140,6 +140,9 @@ class NotificationsRepository {
     if (user == null || dao == null) return;
 
     try {
+      final admission = dao.attachedDatabase.localMutations.capture(
+        expectedUid: user.uid,
+      );
       final snapshot = await firestore
           .collection('users')
           .doc(user.uid)
@@ -156,7 +159,10 @@ class NotificationsRepository {
           createdAt: local?.createdAt ?? remote.createdAt,
         );
 
-        await dao.upsertPreservingState(NotificationModel.toCompanion(merged));
+        await dao.upsertPreservingState(
+          NotificationModel.toCompanion(merged),
+          admission: admission,
+        );
       }
 
       AppLogger.i('SYNC Notificações: hidratação concluída.');

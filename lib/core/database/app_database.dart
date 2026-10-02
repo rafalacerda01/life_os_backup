@@ -6,6 +6,7 @@ import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
 import 'package:life_os/core/database/database_encryption.dart';
+import 'package:life_os/core/database/local_mutation_gate.dart';
 import 'package:life_os/core/db/db_key_manager.dart';
 import 'package:life_os/features/checkin/data/local/checkin_table.dart';
 import 'package:life_os/features/finance/data/local/transaction_table.dart';
@@ -40,7 +41,25 @@ part 'app_database.g.dart';
 )
 class AppDatabase extends _$AppDatabase {
   /// Permite injetar um executor, principalmente para testes.
-  AppDatabase({QueryExecutor? executor}) : super(executor ?? _openConnection());
+  AppDatabase({QueryExecutor? executor})
+    : this._(executor ?? _openConnection(), LocalMutationGate());
+
+  AppDatabase._(QueryExecutor executor, this.localMutations)
+    : super(executor.interceptWith(LocalMutationInterceptor(localMutations)));
+
+  final LocalMutationGate localMutations;
+
+  @override
+  Future<T> transaction<T>(
+    Future<T> Function() action, {
+    bool requireNew = false,
+    LocalMutationTicket? admission,
+    bool waitForReopen = true,
+  }) => localMutations.run(
+    () => super.transaction(action, requireNew: requireNew),
+    ticket: admission,
+    waitForReopen: waitForReopen,
+  );
 
   // =========================================================================
   // CONFIGURAÇÃO DO SCHEMA
@@ -136,9 +155,9 @@ class AppDatabase extends _$AppDatabase {
   ///
   /// O comportamento REPLACE é preservado porque o projeto
   /// utiliza o identificador do check-in como chave lógica.
-  Future<int> insertCheckIn(CheckInTableCompanion entry) {
-    return into(checkInTable).insert(entry, mode: InsertMode.replace);
-  }
+  Future<int> insertCheckIn(CheckInTableCompanion entry) => localMutations.run(
+    () => into(checkInTable).insert(entry, mode: InsertMode.replace),
+  );
 
   /// Retorna somente os check-ins ainda não sincronizados.
   Future<List> getPendingCheckIns() {
@@ -148,15 +167,18 @@ class AppDatabase extends _$AppDatabase {
   }
 
   /// Marca um check-in como sincronizado.
-  Future<int> markCheckInAsSynced(String id) {
+  Future<int> markCheckInAsSynced(String id, {String? ownerUid}) {
     final cleanId = id.trim();
 
     if (cleanId.isEmpty) {
       return Future.value(0);
     }
 
-    return (update(checkInTable)..where((table) => table.id.equals(cleanId)))
-        .write(const CheckInTableCompanion(isSynced: Value(true)));
+    return localMutations.systemWrite(
+      ownerUid,
+      () => (update(checkInTable)..where((table) => table.id.equals(cleanId)))
+          .write(const CheckInTableCompanion(isSynced: Value(true))),
+    );
   }
 
   // =========================================================================
@@ -282,11 +304,14 @@ class AppDatabase extends _$AppDatabase {
   }
 
   Future<int> markSyncItemAsSucceeded(int id, String ownerUid) {
-    return _updateSyncItemState(
-      id: id,
-      ownerUid: ownerUid,
-      status: SyncQueuePersistenceStatus.succeeded,
-      isSynced: true,
+    return localMutations.systemWrite(
+      ownerUid,
+      () => _updateSyncItemState(
+        id: id,
+        ownerUid: ownerUid,
+        status: SyncQueuePersistenceStatus.succeeded,
+        isSynced: true,
+      ),
     );
   }
 
@@ -295,22 +320,28 @@ class AppDatabase extends _$AppDatabase {
     String ownerUid,
     String errorCode,
   ) {
-    return _updateSyncItemState(
-      id: id,
-      ownerUid: ownerUid,
-      status: SyncQueuePersistenceStatus.pending,
-      isSynced: false,
-      errorCode: errorCode,
+    return localMutations.systemWrite(
+      ownerUid,
+      () => _updateSyncItemState(
+        id: id,
+        ownerUid: ownerUid,
+        status: SyncQueuePersistenceStatus.pending,
+        isSynced: false,
+        errorCode: errorCode,
+      ),
     );
   }
 
   Future<int> markSyncItemRejected(int id, String ownerUid, String errorCode) {
-    return _updateSyncItemState(
-      id: id,
-      ownerUid: ownerUid,
-      status: SyncQueuePersistenceStatus.rejected,
-      isSynced: false,
-      errorCode: errorCode,
+    return localMutations.systemWrite(
+      ownerUid,
+      () => _updateSyncItemState(
+        id: id,
+        ownerUid: ownerUid,
+        status: SyncQueuePersistenceStatus.rejected,
+        isSynced: false,
+        errorCode: errorCode,
+      ),
     );
   }
 
@@ -370,15 +401,21 @@ class AppDatabase extends _$AppDatabase {
     final cleanOwnerUid = ownerUid.trim();
     if (cleanOwnerUid.isEmpty) return Future.value(0);
 
-    return (delete(syncQueueTable)..where(
-          (table) =>
-              table.ownerUid.equals(cleanOwnerUid) &
-              table.status.equals(SyncQueuePersistenceStatus.succeeded) &
-              (table.lastAttemptAt.isSmallerThanValue(olderThanEpochMs) |
-                  (table.lastAttemptAt.isNull() &
-                      table.createdAt.isSmallerThanValue(olderThanEpochMs))),
-        ))
-        .go();
+    return localMutations.systemWrite(
+      ownerUid,
+      () =>
+          (delete(syncQueueTable)..where(
+                (table) =>
+                    table.ownerUid.equals(cleanOwnerUid) &
+                    table.status.equals(SyncQueuePersistenceStatus.succeeded) &
+                    (table.lastAttemptAt.isSmallerThanValue(olderThanEpochMs) |
+                        (table.lastAttemptAt.isNull() &
+                            table.createdAt.isSmallerThanValue(
+                              olderThanEpochMs,
+                            ))),
+              ))
+              .go(),
+    );
   }
 
   /// Remove todas as operações de sincronização de um documento.
@@ -439,6 +476,7 @@ class AppDatabase extends _$AppDatabase {
     required String docId,
     required String operationType,
     required String payloadJson,
+    LocalMutationTicket? admission,
   }) async {
     final cleanOwnerUid = ownerUid.trim();
     final cleanCollection = collection.trim();
@@ -470,28 +508,32 @@ class AppDatabase extends _$AppDatabase {
       throw ArgumentError('O payload da sincronização não pode estar vazio.');
     }
 
-    return transaction<T>(() async {
-      // O Drift executa todo o callback dentro da transação.
-      //
-      // Nas versões atuais do Drift utilizadas pelo projeto,
-      // transaction() não fornece um objeto Transaction ao callback.
-      //
-      // Portanto a operação local deve ser executada diretamente.
-      final result = await localOperation();
+    return transaction<T>(
+      () async {
+        // O Drift executa todo o callback dentro da transação.
+        //
+        // Nas versões atuais do Drift utilizadas pelo projeto,
+        // transaction() não fornece um objeto Transaction ao callback.
+        //
+        // Portanto a operação local deve ser executada diretamente.
+        final result = await localOperation();
 
-      await into(syncQueueTable).insert(
-        SyncQueueTableCompanion.insert(
-          ownerUid: Value(cleanOwnerUid),
-          collection: cleanCollection,
-          docId: cleanDocId,
-          operationType: cleanOperationType,
-          payloadJson: cleanPayload,
-          createdAt: DateTime.now().millisecondsSinceEpoch,
-        ),
-      );
+        await into(syncQueueTable).insert(
+          SyncQueueTableCompanion.insert(
+            ownerUid: Value(cleanOwnerUid),
+            collection: cleanCollection,
+            docId: cleanDocId,
+            operationType: cleanOperationType,
+            payloadJson: cleanPayload,
+            createdAt: DateTime.now().millisecondsSinceEpoch,
+          ),
+        );
 
-      return result;
-    });
+        return result;
+      },
+      admission:
+          admission ?? localMutations.capture(expectedUid: cleanOwnerUid),
+    );
   }
 
   // =========================================================================
@@ -506,25 +548,27 @@ class AppDatabase extends _$AppDatabase {
   /// Esta operação é destrutiva e NÃO deve ser chamada durante
   /// um simples refresh de sessão.
   Future<void> clearAllData() async {
-    await exclusively(() async {
-      try {
-        // Keep the security cleanup commit durable without changing normal use.
-        await customStatement('PRAGMA synchronous = FULL');
+    await localMutations.cleanupWrite(
+      () => exclusively(() async {
         try {
-          // SQLite only applies foreign_keys changes outside a transaction.
-          await customStatement('PRAGMA foreign_keys = OFF');
-          await transaction(() async {
-            for (final table in allTables) {
-              await delete(table).go();
-            }
-          });
+          // Keep the security cleanup commit durable without changing normal use.
+          await customStatement('PRAGMA synchronous = FULL');
+          try {
+            // SQLite only applies foreign_keys changes outside a transaction.
+            await customStatement('PRAGMA foreign_keys = OFF');
+            await transaction(() async {
+              for (final table in allTables) {
+                await delete(table).go();
+              }
+            });
+          } finally {
+            await customStatement('PRAGMA foreign_keys = ON');
+          }
         } finally {
-          await customStatement('PRAGMA foreign_keys = ON');
+          await customStatement('PRAGMA synchronous = NORMAL');
         }
-      } finally {
-        await customStatement('PRAGMA synchronous = NORMAL');
-      }
-    });
+      }),
+    );
   }
 
   // =========================================================================

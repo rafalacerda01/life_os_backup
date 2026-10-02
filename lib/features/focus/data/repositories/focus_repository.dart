@@ -76,6 +76,7 @@ class FocusRepository {
   Future<void> syncFocusFromFirebaseToLocal() async {
     final user = _auth.currentUser;
     if (user == null) return;
+    final admission = _db.localMutations.capture(expectedUid: user.uid);
 
     try {
       AppLogger.i("SYNC Focus: Iniciando...");
@@ -104,16 +105,20 @@ class FocusRepository {
                 .get();
 
         if (existing.isEmpty) {
-          await _db
-              .into(_db.focusLogs)
-              .insert(
-                FocusLogsCompanion.insert(
-                  targetId: targetId,
-                  targetType: data['targetType'] as String? ?? 'unknown',
-                  durationSeconds: data['durationSeconds'] as int? ?? 0,
-                  timestamp: timestamp,
+          await _db.localMutations.run(
+            () => _db
+                .into(_db.focusLogs)
+                .insert(
+                  FocusLogsCompanion.insert(
+                    targetId: targetId,
+                    targetType: data['targetType'] as String? ?? 'unknown',
+                    durationSeconds: data['durationSeconds'] as int? ?? 0,
+                    timestamp: timestamp,
+                  ),
                 ),
-              );
+            ticket: admission,
+            waitForReopen: false,
+          );
         }
       }
       AppLogger.i("SYNC Focus: Concluído com sucesso.");

@@ -199,6 +199,7 @@ class HabitsRepository {
   Future<void> syncHabitsFromFirebaseToLocal() async {
     final expectedUid = _auth.currentUser?.uid.trim();
     if (expectedUid == null || expectedUid.isEmpty) return;
+    final ticket = _db.localMutations.capture(expectedUid: expectedUid);
 
     try {
       AppLogger.i('SYNC Hábitos: Iniciando...');
@@ -225,7 +226,7 @@ class HabitsRepository {
       if (_auth.currentUser?.uid != expectedUid) return;
       final remoteDocIds = snapshot.docs.map((doc) => doc.id).toSet();
 
-      await _db.transaction(() async {
+      await _db.transaction(admission: ticket, waitForReopen: false, () async {
         void requireCurrentUser() {
           if (_auth.currentUser?.uid != expectedUid) {
             throw const _HabitSessionChanged();

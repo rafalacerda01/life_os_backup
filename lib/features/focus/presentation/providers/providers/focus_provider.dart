@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter/foundation.dart';
 import 'package:life_os/core/utils/app_logger.dart';
 import 'package:life_os/core/database/database_provider.dart';
+import 'package:life_os/core/database/local_mutation_gate.dart';
 import 'package:life_os/core/services/sync_manager_provider.dart';
 import 'package:life_os/features/focus/data/remote/focus_remote_data_source.dart';
 import 'package:life_os/features/focus/data/repositories/focus_repository.dart';
@@ -55,11 +56,13 @@ class _FocusCycleContext {
   final String targetId;
   final FocusTargetType targetType;
   final int plannedDurationSeconds;
+  final LocalMutationTicket admission;
 
   const _FocusCycleContext({
     required this.targetId,
     required this.targetType,
     required this.plannedDurationSeconds,
+    required this.admission,
   });
 }
 
@@ -200,6 +203,7 @@ class FocusNotifier extends Notifier<FocusState> {
       targetId: targetId,
       targetType: targetType,
       plannedDurationSeconds: _timerDurationInSeconds,
+      admission: ref.read(databaseProvider).localMutations.capture(),
     );
   }
 
@@ -277,6 +281,7 @@ class FocusNotifier extends Notifier<FocusState> {
     _timer = ref.read(focusPeriodicTimerFactoryProvider)(
       const Duration(seconds: 1),
       (timer) {
+        if (!ref.mounted) return;
         final remaining = startingRemaining - timer.tick;
         if (remaining > 0) {
           state = state.copyWith(durationRemaining: remaining);
@@ -290,6 +295,20 @@ class FocusNotifier extends Notifier<FocusState> {
   }
 
   Future<void> _handleSessionEnd() async {
+    if (!ref.mounted) return;
+    final cycle = _activeCycle;
+    try {
+      await ref
+          .read(databaseProvider)
+          .localMutations
+          .run(_completeLocalSession, ticket: cycle?.admission);
+    } on LocalMutationUnavailable {
+      // A confirmed sign-out must not revive this timer's old session.
+    }
+  }
+
+  Future<void> _completeLocalSession() async {
+    if (!ref.mounted) return;
     if (_isCompletingSession) return;
 
     _isCompletingSession = true;
@@ -311,6 +330,8 @@ class FocusNotifier extends Notifier<FocusState> {
         await ref
             .read(focusRepositoryProvider)
             .saveFocusSession(targetIdStr, targetType.value, elapsedSeconds);
+
+        if (!ref.mounted) return;
 
         // 2. Atualiza Tarefa se for do tipo TASK
         if (targetType == FocusTargetType.task) {
@@ -337,14 +358,14 @@ class FocusNotifier extends Notifier<FocusState> {
     } catch (e, stack) {
       AppLogger.e("Erro ao finalizar sessão de foco", e, stack);
     } finally {
-      if (!state.isBreak) {
+      if (ref.mounted && !state.isBreak) {
         final durationSeconds =
             cycle?.plannedDurationSeconds ?? _timerDurationInSeconds;
         unawaited(
           analytics.logFocusCompleted(durationMinutes: durationSeconds ~/ 60),
         );
       }
-      toggleSessionType();
+      if (ref.mounted) toggleSessionType();
       _isCompletingSession = false;
     }
   }

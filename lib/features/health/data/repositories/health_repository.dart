@@ -944,6 +944,7 @@ class HealthRepository {
 
     try {
       AppLogger.i('SYNC Saúde: Iniciando...');
+      final ticket = _db.localMutations.capture(expectedUid: userId);
       final pullStartedAt = DateTime.now().millisecondsSinceEpoch;
       final pendingAtPullStart =
           await (_db.select(_db.syncQueueTable)..where(
@@ -978,7 +979,7 @@ class HealthRepository {
           >[];
       final remindersToCancel = <String>[];
 
-      await _db.transaction(() async {
+      await _db.transaction(admission: ticket, waitForReopen: false, () async {
         _requireCurrentUser(userId);
         final authoritativeItems =
             await (_db.select(_db.syncQueueTable)..where(
@@ -1101,7 +1102,7 @@ class HealthRepository {
           .collection('health_info')
           .get(const GetOptions(source: Source.server));
 
-      await _db.transaction(() async {
+      await _db.transaction(admission: ticket, waitForReopen: false, () async {
         _requireCurrentUser(userId);
         final authoritativeHealthItems =
             await (_db.select(_db.syncQueueTable)..where(

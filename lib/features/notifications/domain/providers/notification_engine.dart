@@ -281,6 +281,23 @@ class NotificationModuleReconciler {
     required NotificationPreferences preferences,
     DateTime? today,
     bool Function()? isCancelled,
+  }) => db.localMutations.run(
+    () => _syncAdmitted(
+      repository: repository,
+      db: db,
+      preferences: preferences,
+      today: today,
+      isCancelled: isCancelled,
+    ),
+    waitForReopen: false,
+  );
+
+  Future<void> _syncAdmitted({
+    required NotificationsRepository repository,
+    required AppDatabase db,
+    required NotificationPreferences preferences,
+    DateTime? today,
+    bool Function()? isCancelled,
   }) async {
     final now = DateTime.now();
     final baseDay = _startOfDay(today ?? now);

@@ -8,8 +8,11 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:life_os/core/database/app_database.dart';
 import 'package:life_os/core/database/database_provider.dart';
+import 'package:life_os/core/database/local_mutation_gate.dart';
 import 'package:life_os/core/errors/failure.dart';
 import 'package:life_os/core/services/sync_manager.dart';
+import 'package:life_os/core/services/analytics_service.dart';
+import 'package:life_os/core/services/notification_service.dart';
 import 'package:life_os/core/services/sync_manager_provider.dart';
 import 'package:life_os/core/storage/secure_storage_service.dart';
 import 'package:life_os/features/auth/data/local/auth_cleanup_barrier.dart';
@@ -21,7 +24,12 @@ import 'package:life_os/features/checkin/data/repositories/checkin_repository.da
 import 'package:life_os/features/checkin/presentation/providers/check_in_provider.dart';
 import 'package:life_os/features/finance/data/repositories/finance_repository.dart';
 import 'package:life_os/features/finance/presentation/providers/finance_provider.dart';
+import 'package:life_os/features/focus/data/repositories/focus_repository.dart';
+import 'package:life_os/features/focus/presentation/providers/providers/focus_provider.dart';
+import 'package:life_os/features/tasks/presentation/providers/tasks_provider.dart';
+import 'package:life_os/features/settings/presentation/providers/analytics_provider.dart';
 import 'package:life_os/features/health/presentation/cycle/cycle_reminder_preferences.dart';
+import 'package:life_os/features/health/data/repositories/health_repository.dart';
 import 'package:life_os/features/health/services/cycle_reminder_action_coordinator.dart';
 import 'package:life_os/features/health/services/cycle_reminder_mutation_gate.dart';
 import 'package:life_os/features/health/services/cycle_reminder_notification_lifecycle.dart';
@@ -35,6 +43,23 @@ import 'package:life_os/features/premium/domain/entities/premium_status_entity.d
 import 'package:life_os/features/premium/domain/repositories/i_premium_repository.dart';
 import 'package:life_os/features/premium/presentation/premium_provider.dart';
 import 'package:multiple_result/multiple_result.dart';
+
+import '../../../../helpers/recording_analytics_platform.dart';
+
+class _FocusTimer implements Timer {
+  _FocusTimer(this.callback);
+  final void Function(Timer) callback;
+  @override
+  int tick = 0;
+  @override
+  bool isActive = true;
+  @override
+  void cancel() => isActive = false;
+  void finish() {
+    tick = 420;
+    callback(this);
+  }
+}
 
 const _userA = UserEntity(
   uid: 'user-a',
@@ -158,7 +183,7 @@ class _AuthRepository extends Fake implements AuthRepository {
   });
 
   final _FirebaseAuth auth;
-  final bool failSignOut;
+  bool failSignOut;
   final Completer<void>? deleteStarted;
   final Completer<void>? allowDelete;
   final bool completeDeletionBySigningOut;
@@ -438,6 +463,7 @@ class _Harness {
     required this.repository,
     required this.firestore,
     required this.database,
+    required this.mutationGate,
     required this.authority,
     required this.epoch,
     required this.lifecycle,
@@ -454,6 +480,7 @@ class _Harness {
   final _AuthRepository repository;
   final _ScriptedFirestore firestore;
   final AppDatabase database;
+  final CycleReminderMutationGate mutationGate;
   final CycleReminderSessionAuthority authority;
   final CycleReminderOperationEpoch epoch;
   final _ScriptedLifecycle lifecycle;
@@ -511,12 +538,15 @@ class _Harness {
     FinanceRepository? financeRepository,
     List<String>? lifecycleEvents,
     IPremiumRepository Function(String? uid)? createPremiumRepository,
+    FocusPeriodicTimerFactory? focusTimerFactory,
+    Future<void> Function(AppDatabase)? seedBeforeAuth,
   }) async {
     final auth = _FirebaseAuth(
       firebaseUser ??
           (firebaseUserId == null ? null : _FirebaseUser(firebaseUserId)),
     );
     final database = AppDatabase(executor: NativeDatabase.memory());
+    await seedBeforeAuth?.call(database);
     final localFirestore = firestore ?? _ScriptedFirestore();
     final repository = _AuthRepository(
       auth,
@@ -531,7 +561,7 @@ class _Harness {
     );
     final authority = CycleReminderSessionAuthority();
     final epoch = CycleReminderOperationEpoch();
-    final mutationGate = CycleReminderMutationGate();
+    final mutationGate = CycleReminderMutationGate(database.localMutations);
     final lifecycle = _ScriptedLifecycle(
       cancellationResults,
       events: lifecycleEvents,
@@ -557,6 +587,20 @@ class _Harness {
     );
     final container = ProviderContainer(
       overrides: [
+        if (focusTimerFactory != null) ...[
+          focusPeriodicTimerFactoryProvider.overrideWithValue(
+            focusTimerFactory,
+          ),
+          focusRepositoryProvider.overrideWithValue(
+            FocusRepository(database, localFirestore, auth, syncManager),
+          ),
+          tasksRepositoryProvider.overrideWithValue(
+            TasksRepository(database, localFirestore, auth),
+          ),
+          analyticsServiceProvider.overrideWithValue(
+            AnalyticsService(platform: RecordingAnalyticsPlatform()),
+          ),
+        ],
         if (createPremiumRepository != null)
           premiumRepositoryProvider.overrideWith((ref) {
             final premium = createPremiumRepository(auth.currentUser?.uid);
@@ -613,6 +657,7 @@ class _Harness {
       repository: repository,
       firestore: localFirestore,
       database: database,
+      mutationGate: mutationGate,
       authority: authority,
       epoch: epoch,
       lifecycle: lifecycle,
@@ -672,6 +717,597 @@ class _SessionPremiumRepository implements IPremiumRepository {
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
+  HealthRepository healthFor(_Harness harness) => HealthRepository(
+    NotificationService.instance,
+    harness.firestore,
+    harness.auth,
+    harness.database,
+    harness.syncManager,
+    now: () => DateTime(2026, 10, 2, 12),
+  );
+
+  test(
+    'sign-out failure after destructive cleanup keeps domain writes sealed',
+    () async {
+      final harness = await _Harness.create(
+        [0],
+        failSignOut: true,
+        syncManagerOverride: _SyncManager()..shouldDrain = false,
+      );
+      addTearDown(harness.dispose);
+      final health = healthFor(harness);
+      expect(
+        await health.updatePillStatus(true, expectedUid: _userA.uid),
+        isTrue,
+      );
+      expect(
+        await harness.database.getPendingSyncItems(_userA.uid),
+        hasLength(1),
+      );
+      harness.syncManager.shouldDrain = true;
+      await harness.notifier.logout();
+      expect(harness.state, isA<AuthError>());
+      expect(harness.auth.currentUser?.uid, _userA.uid);
+      expect(harness.repository.signOutCalls, 1);
+      final marker = await harness.readPendingCleanup();
+      expect(marker?.requiresSignOut, isTrue);
+      expect(
+        await harness.database.select(harness.database.healthEntries).get(),
+        isEmpty,
+      );
+      expect(
+        await harness.database.select(harness.database.syncQueueTable).get(),
+        isEmpty,
+      );
+      await expectLater(
+        health.updatePillStatus(true, expectedUid: _userA.uid),
+        throwsA(isA<LocalMutationUnavailable>()),
+      );
+      expect(await harness.readPendingCleanup(), marker);
+      expect(
+        await harness.database.select(harness.database.healthEntries).get(),
+        isEmpty,
+      );
+      expect(
+        await harness.database.select(harness.database.syncQueueTable).get(),
+        isEmpty,
+      );
+    },
+  );
+
+  test(
+    'post-quiesce waiter completes unavailable when sign-out fails after cleanup',
+    () async {
+      final checkIns = _CheckInRepository();
+      final harness = await _Harness.create(
+        [0],
+        failSignOut: true,
+        checkInRepository: checkIns,
+        syncManagerOverride: _SyncManager()..shouldDrain = false,
+      );
+      addTearDown(harness.dispose);
+      harness.syncManager.shouldDrain = true;
+      final started = Completer<void>();
+      final release = Completer<void>();
+      checkIns.onDrain = () async {
+        started.complete();
+        await release.future;
+        return true;
+      };
+      final logout = harness.notifier.logout();
+      await started.future;
+      var entered = false;
+      final waiting = harness.database.localMutations.run(() async {
+        entered = true;
+        return healthFor(
+          harness,
+        ).updatePillStatus(true, expectedUid: _userA.uid);
+      });
+      final rejected = expectLater(
+        waiting,
+        throwsA(isA<LocalMutationUnavailable>()),
+      );
+      expect(entered, isFalse);
+      release.complete();
+      await logout;
+      await rejected;
+      expect(entered, isFalse);
+      expect(harness.state, isA<AuthError>());
+      expect((await harness.readPendingCleanup())?.requiresSignOut, isTrue);
+      expect(
+        await harness.database.select(harness.database.healthEntries).get(),
+        isEmpty,
+      );
+      expect(
+        await harness.database.select(harness.database.syncQueueTable).get(),
+        isEmpty,
+      );
+    },
+  );
+
+  test(
+    'same-process retry resolves durable logout without reopening old authority',
+    () async {
+      final harness = await _Harness.create(
+        [0, 0, 0],
+        failSignOut: true,
+        syncManagerOverride: _SyncManager()..shouldDrain = false,
+      );
+      addTearDown(harness.dispose);
+      harness.syncManager.shouldDrain = true;
+      final gate = harness.database.localMutations;
+      final old = gate.capture(expectedUid: _userA.uid);
+      await harness.notifier.logout();
+      final marker = await harness.readPendingCleanup();
+      expect(marker?.requiresSignOut, isTrue);
+      await harness.notifier.logout();
+      expect(harness.state, isA<AuthError>());
+      expect(harness.repository.signOutCalls, 2);
+      expect(harness.auth.currentUser?.uid, _userA.uid);
+      expect(await harness.readPendingCleanup(), marker);
+      await expectLater(
+        healthFor(harness).updatePillStatus(true, expectedUid: _userA.uid),
+        throwsA(isA<LocalMutationUnavailable>()),
+      );
+      harness.repository.failSignOut = false;
+      await harness.notifier.logout();
+      expect(harness.repository.signOutCalls, 3);
+      expect(harness.auth.currentUser, isNull);
+      expect(harness.state, isA<AuthUnauthenticated>());
+      expect(await harness.readPendingCleanup(), isNull);
+      expect(
+        await harness.database.select(harness.database.healthEntries).get(),
+        isEmpty,
+      );
+      expect(
+        await harness.database.select(harness.database.syncQueueTable).get(),
+        isEmpty,
+      );
+      await expectLater(
+        gate.run(() async {}),
+        throwsA(isA<LocalMutationUnavailable>()),
+      );
+
+      final started = Completer<void>();
+      final release = Completer<void>();
+      harness.auth.emit(
+        _FirebaseUser(
+          _userA.uid,
+          onGetIdToken: () async {
+            if (!started.isCompleted) started.complete();
+            await release.future;
+          },
+        ),
+      );
+      await started.future;
+      await expectLater(
+        healthFor(harness).updatePillStatus(true, expectedUid: _userA.uid),
+        throwsA(isA<LocalMutationUnavailable>()),
+      );
+      release.complete();
+      await harness.notifier.checkCurrentUser();
+      expect(harness.state, isA<AuthAuthenticated>());
+      await expectLater(
+        gate.run(
+          () => healthFor(
+            harness,
+          ).updatePillStatus(true, expectedUid: _userA.uid),
+          ticket: old,
+        ),
+        throwsA(isA<LocalMutationUnavailable>()),
+      );
+      expect(
+        await healthFor(
+          harness,
+        ).updatePillStatus(true, expectedUid: _userA.uid),
+        isTrue,
+      );
+      expect(
+        await harness.database.select(harness.database.healthEntries).get(),
+        hasLength(1),
+      );
+      expect(
+        await harness.database.getPendingSyncItems(_userA.uid),
+        hasLength(1),
+      );
+    },
+  );
+
+  test(
+    'restored cold-start session rejects Health writes until prepared',
+    () async {
+      final started = Completer<void>();
+      final release = Completer<void>();
+      final harness = await _Harness.create(
+        [0],
+        firebaseUser: _FirebaseUser(
+          _userA.uid,
+          onGetIdToken: () async {
+            if (!started.isCompleted) started.complete();
+            await release.future;
+          },
+        ),
+        syncManagerOverride: _SyncManager()..shouldDrain = false,
+        waitForAuthentication: false,
+      );
+      addTearDown(harness.dispose);
+      await started.future;
+      expect(harness.auth.currentUser?.uid, _userA.uid);
+      expect(harness.state, isNot(isA<AuthAuthenticated>()));
+      await expectLater(
+        healthFor(harness).updatePillStatus(true, expectedUid: _userA.uid),
+        throwsA(isA<LocalMutationUnavailable>()),
+      );
+      expect(
+        await harness.database.select(harness.database.healthEntries).get(),
+        isEmpty,
+      );
+      expect(
+        await harness.database.select(harness.database.syncQueueTable).get(),
+        isEmpty,
+      );
+      release.complete();
+      await harness.waitForState<AuthAuthenticated>();
+      expect(
+        await healthFor(
+          harness,
+        ).updatePillStatus(true, expectedUid: _userA.uid),
+        isTrue,
+      );
+      expect(
+        await harness.database.select(harness.database.healthEntries).get(),
+        hasLength(1),
+      );
+      expect(
+        await harness.database.getPendingSyncItems(_userA.uid),
+        hasLength(1),
+      );
+    },
+  );
+
+  for (final intent in AuthCleanupIntent.values) {
+    test(
+      'cold-start durable ${intent.name} recovery never admits a domain write',
+      () async {
+        final storage = _MemoryBarrierStorage();
+        final marker = await AuthCleanupBarrierStore(
+          storage,
+        ).setPending(_userA.uid, intent);
+        final started = Completer<void>();
+        final release = Completer<void>();
+        final harness = await _Harness.create(
+          [0],
+          barrierStorage: storage,
+          tokenRotation: _ScriptedTokenRotation(
+            callStarted: started,
+            allowCall: release,
+          ),
+          syncManagerOverride: _SyncManager()..shouldDrain = false,
+          waitForAuthentication: false,
+        );
+        addTearDown(harness.dispose);
+        await started.future;
+        expect(await harness.readPendingCleanup(), marker);
+        expect(harness.auth.currentUser?.uid, _userA.uid);
+        expect(harness.coordinator.preparedUserIds, isEmpty);
+        await expectLater(
+          healthFor(harness).updatePillStatus(true, expectedUid: _userA.uid),
+          throwsA(isA<LocalMutationUnavailable>()),
+        );
+        expect(
+          await harness.database.select(harness.database.healthEntries).get(),
+          isEmpty,
+        );
+        expect(
+          await harness.database.select(harness.database.syncQueueTable).get(),
+          isEmpty,
+        );
+        release.complete();
+        await harness.notifier.checkCurrentUser();
+        if (intent == AuthCleanupIntent.logout) {
+          await harness.notifier.checkCurrentUser();
+          expect(harness.auth.currentUser, isNull);
+          expect(harness.state, isA<AuthUnauthenticated>());
+          expect(harness.coordinator.preparedUserIds, isEmpty);
+          await expectLater(
+            harness.database.transaction(() async {}),
+            throwsA(isA<LocalMutationUnavailable>()),
+          );
+        } else {
+          expect(harness.state, isA<AuthAuthenticated>());
+        }
+        expect(await harness.readPendingCleanup(), isNull);
+        expect(harness.notificationCleanup.calls, greaterThan(0));
+        expect(
+          await harness.database.select(harness.database.healthEntries).get(),
+          isEmpty,
+        );
+        expect(
+          await harness.database.select(harness.database.syncQueueTable).get(),
+          isEmpty,
+        );
+        if (intent == AuthCleanupIntent.isolation) {
+          expect(
+            await healthFor(
+              harness,
+            ).updatePillStatus(true, expectedUid: _userA.uid),
+            isTrue,
+          );
+          expect(
+            await harness.database.getPendingSyncItems(_userA.uid),
+            hasLength(1),
+          );
+        }
+      },
+    );
+  }
+
+  for (final logoutSucceeds in [true, false]) {
+    test(
+      'Cycle lease precedes feature gate and late action ${logoutSucceeds ? "is rejected after logout" : "resumes after abort"}',
+      () async {
+        final checkIns = _CheckInRepository();
+        final harness = await _Harness.create(
+          [0],
+          checkInRepository: checkIns,
+          syncManagerOverride: _SyncManager()..shouldDrain = false,
+        );
+        addTearDown(harness.dispose);
+        harness.syncManager.shouldDrain = true;
+        final health = healthFor(harness);
+        final occupied = Completer<void>();
+        final release = Completer<void>();
+        final events = <String>[];
+        final first = harness.mutationGate.run(_userA.uid, () async {
+          occupied.complete();
+          await release.future;
+          events.add('first');
+        });
+        await occupied.future;
+        final admitted = harness.mutationGate.run(_userA.uid, () async {
+          expect(
+            await health.updatePillStatus(true, expectedUid: _userA.uid),
+            isTrue,
+          );
+          events.add('health');
+        });
+        checkIns.onDrain = () async {
+          events.add('logout-drain');
+          expect(events, ['first', 'health', 'logout-drain']);
+          expect(
+            (await harness.database
+                    .select(harness.database.healthEntries)
+                    .get())
+                .single
+                .hasTakenPillToday,
+            isTrue,
+          );
+          expect(
+            await harness.database.getPendingSyncItems(_userA.uid),
+            hasLength(1),
+          );
+          return logoutSucceeds;
+        };
+        final logout = harness.notifier.logout();
+        var lateEntered = false;
+        final lateAction = harness.mutationGate.run(_userA.uid, () async {
+          lateEntered = true;
+          return health.updatePillStatus(false, expectedUid: _userA.uid);
+        });
+        final lateRejected = logoutSucceeds
+            ? expectLater(lateAction, throwsA(isA<LocalMutationUnavailable>()))
+            : null;
+        release.complete();
+        await first;
+        await admitted;
+        await logout;
+        if (logoutSucceeds) {
+          await lateRejected;
+          expect(lateEntered, isFalse);
+          expect(harness.state, isA<AuthUnauthenticated>());
+          expect(
+            await harness.database.select(harness.database.healthEntries).get(),
+            isEmpty,
+          );
+          expect(
+            await harness.database
+                .select(harness.database.syncQueueTable)
+                .get(),
+            isEmpty,
+          );
+        } else {
+          expect(await lateAction, isTrue);
+          expect(lateEntered, isTrue);
+          expect(harness.state, isA<AuthError>());
+          expect(harness.repository.signOutCalls, 0);
+          expect(
+            await harness.database.getPendingSyncItems(_userA.uid),
+            hasLength(2),
+          );
+        }
+      },
+    );
+  }
+
+  for (final newUid in [_userA.uid, _userB.uid]) {
+    test(
+      'external sign-out invalidates old ticket before login $newUid',
+      () async {
+        final harness = await _Harness.create([
+          0,
+        ], syncManagerOverride: _SyncManager()..shouldDrain = false);
+        addTearDown(harness.dispose);
+        final gate = harness.database.localMutations;
+        final old = gate.capture(expectedUid: _userA.uid);
+        harness.auth.emit(null);
+        await harness.waitForState<AuthUnauthenticated>();
+        expect(harness.notificationCleanup.calls, greaterThan(0));
+        expect(await harness.readPendingCleanup(), isNull);
+        final prepared = Completer<void>();
+        final release = Completer<void>();
+        harness.auth.emit(
+          _FirebaseUser(
+            newUid,
+            onGetIdToken: () async {
+              if (!prepared.isCompleted) prepared.complete();
+              await release.future;
+            },
+          ),
+        );
+        await prepared.future;
+        await expectLater(
+          gate.run(
+            () =>
+                healthFor(harness).updatePillStatus(true, expectedUid: newUid),
+          ),
+          throwsA(isA<LocalMutationUnavailable>()),
+        );
+        release.complete();
+        await harness.notifier.checkCurrentUser();
+        expect((harness.state as AuthAuthenticated).user.uid, newUid);
+        await expectLater(
+          gate.run(
+            () =>
+                healthFor(harness).updatePillStatus(true, expectedUid: newUid),
+            ticket: old,
+          ),
+          throwsA(isA<LocalMutationUnavailable>()),
+        );
+        expect(
+          await harness.database.select(harness.database.healthEntries).get(),
+          isEmpty,
+        );
+        expect(
+          await harness.database.select(harness.database.syncQueueTable).get(),
+          isEmpty,
+        );
+        final fresh = gate.capture(expectedUid: newUid);
+        expect(
+          await gate.run(
+            () =>
+                healthFor(harness).updatePillStatus(true, expectedUid: newUid),
+            ticket: fresh,
+          ),
+          isTrue,
+        );
+        expect(
+          await harness.database.select(harness.database.healthEntries).get(),
+          hasLength(1),
+        );
+        expect(
+          await harness.database.getPendingSyncItems(newUid),
+          hasLength(1),
+        );
+      },
+    );
+  }
+
+  test(
+    'repeated same-session event preserves existing mutation ticket',
+    () async {
+      final harness = await _Harness.create([
+        0,
+      ], syncManagerOverride: _SyncManager()..shouldDrain = false);
+      addTearDown(harness.dispose);
+      final ticket = harness.database.localMutations.capture();
+      final seen = Completer<void>();
+      harness.auth.emit(
+        _FirebaseUser(
+          _userA.uid,
+          onGetIdToken: () async {
+            if (!seen.isCompleted) seen.complete();
+          },
+        ),
+      );
+      await seen.future;
+      expect(
+        await harness.database.localMutations.run(
+          () => healthFor(
+            harness,
+          ).updatePillStatus(true, expectedUid: _userA.uid),
+          ticket: ticket,
+        ),
+        isTrue,
+      );
+      expect(
+        await harness.database.getPendingSyncItems(_userA.uid),
+        hasLength(1),
+      );
+      expect(harness.notificationCleanup.calls, 0);
+    },
+  );
+
+  for (final logoutSucceeds in [true, false]) {
+    test(
+      'Focus completion during CheckIn drain ${logoutSucceeds ? "cannot write after logout" : "resumes after logout abort"}',
+      () async {
+        final checkIns = _CheckInRepository();
+        late _FocusTimer timer;
+        final harness = await _Harness.create(
+          [0],
+          checkInRepository: checkIns,
+          focusTimerFactory: (_, callback) => timer = _FocusTimer(callback),
+        );
+        addTearDown(harness.dispose);
+        final focus = harness.container.read(focusProvider.notifier);
+        focus.selectTarget('focus-task', 'Task', FocusTargetType.task);
+        focus.setCustomDuration(7);
+        focus.startTimer();
+        expect(harness.container.read(focusProvider).isRunning, isTrue);
+        final started = Completer<void>();
+        final release = Completer<void>();
+        checkIns.onDrain = () async {
+          started.complete();
+          await release.future;
+          return logoutSucceeds;
+        };
+        final logout = harness.notifier.logout();
+        await started.future;
+        timer.finish();
+        expect(
+          await harness.database.select(harness.database.focusLogs).get(),
+          isEmpty,
+        );
+        expect(await harness.database.getPendingSyncItems(_userA.uid), isEmpty);
+        final completion = Completer<void>();
+        final subscription = harness.container.listen(focusProvider, (_, next) {
+          if (next.isBreak && !completion.isCompleted) completion.complete();
+        });
+        addTearDown(subscription.close);
+        release.complete();
+        await logout;
+        if (logoutSucceeds) {
+          expect(harness.state, isA<AuthUnauthenticated>());
+          expect(harness.repository.signOutCalls, 1);
+          expect(
+            await harness.database.select(harness.database.focusLogs).get(),
+            isEmpty,
+          );
+          expect(
+            await harness.database.getPendingSyncItems(_userA.uid),
+            isEmpty,
+          );
+        } else {
+          await completion.future;
+          expect(harness.state, isA<AuthError>());
+          expect(harness.auth.currentUser?.uid, _userA.uid);
+          expect(harness.repository.signOutCalls, 0);
+          expect(
+            await harness.database.select(harness.database.focusLogs).get(),
+            hasLength(1),
+          );
+          final pending = await harness.database.getPendingSyncItems(
+            _userA.uid,
+          );
+          expect(
+            pending.map((row) => row.collection),
+            containsAll(['focus_logs', 'tasks']),
+          );
+        }
+      },
+    );
+  }
+
   Future<void> seedPendingLocalChange(AppDatabase db) async {
     await db
         .into(db.taskTable)
@@ -721,7 +1357,7 @@ void main() {
           currentUserFailure: ServerFailure.connection(),
           secureStorage: storage,
           syncManagerOverride: _SyncManager()..shouldDrain = false,
-          onGetCurrentUser: (_, db) => seedPendingLocalChange(db),
+          seedBeforeAuth: seedPendingLocalChange,
         );
         addTearDown(harness.dispose);
 
@@ -1000,7 +1636,10 @@ void main() {
           .select(harness.database.checkInTable)
           .getSingle();
       expect(local.isSynced, isFalse);
-      await harness.database.markCheckInAsSynced(local.id);
+      await harness.database.markCheckInAsSynced(
+        local.id,
+        ownerUid: _userA.uid,
+      );
       return true;
     };
 
@@ -1330,16 +1969,38 @@ void main() {
       expect(harness.repository.signOutCalls, 0);
       expect(harness.auth.currentUser?.uid, _userA.uid);
       expect(harness.authority.preparedUserId, isNull);
-      expect((await harness.readPendingCleanup())?.userId, _userA.uid);
+      final marker = await harness.readPendingCleanup();
+      expect(marker?.userId, _userA.uid);
+      expect(marker?.requiresSignOut, isTrue);
       expect(await db.select(db.taskTable).get(), hasLength(1));
+      await expectLater(
+        healthFor(harness).updatePillStatus(true, expectedUid: _userA.uid),
+        throwsA(isA<LocalMutationUnavailable>()),
+      );
+      expect(await db.select(db.healthEntries).get(), isEmpty);
+      expect(await db.select(db.syncQueueTable).get(), isEmpty);
+      expect(await db.select(db.taskTable).get(), hasLength(1));
+      expect(await harness.readPendingCleanup(), marker);
 
-      await db.customStatement('DROP TRIGGER fail_cleanup');
+      await db.localMutations.cleanupWrite(
+        () => db.customStatement('DROP TRIGGER fail_cleanup'),
+      );
       await harness.notifier.logout();
 
       expect(harness.state, isA<AuthUnauthenticated>());
       expect(harness.repository.signOutCalls, 1);
       expect(await db.select(db.taskTable).get(), isEmpty);
       expect(await harness.readPendingCleanup(), isNull);
+      await expectLater(
+        db.localMutations.run(
+          () => healthFor(
+            harness,
+          ).updatePillStatus(true, expectedUid: _userA.uid),
+        ),
+        throwsA(isA<LocalMutationUnavailable>()),
+      );
+      expect(await db.select(db.healthEntries).get(), isEmpty);
+      expect(await db.select(db.syncQueueTable).get(), isEmpty);
     },
   );
 
@@ -1816,10 +2477,23 @@ void main() {
 
   test('falha ao armar barrier não inicia cleanup crítico', () async {
     final barrierStorage = _MemoryBarrierStorage()..throwOnWrite = true;
-    final harness = await _Harness.create(<int>[
-      0,
-    ], barrierStorage: barrierStorage);
+    final harness = await _Harness.create(
+      <int>[0],
+      barrierStorage: barrierStorage,
+      syncManagerOverride: _SyncManager()..shouldDrain = false,
+    );
     addTearDown(harness.dispose);
+    final health = healthFor(harness);
+    final db = harness.database;
+    expect(
+      await health.updatePillStatus(true, expectedUid: _userA.uid),
+      isTrue,
+    );
+    final originalHealth = await db.select(db.healthEntries).get();
+    final originalQueue = await db.select(db.syncQueueTable).get();
+    expect(originalHealth, hasLength(1));
+    expect(originalQueue, hasLength(1));
+    harness.syncManager.shouldDrain = true;
 
     await harness.notifier.logout();
 
@@ -1829,6 +2503,30 @@ void main() {
     expect(harness.repository.signOutCalls, 0);
     expect(harness.authority.preparedUserId, isNull);
     expect(await harness.readPendingCleanup(), isNull);
+    expect(harness.auth.currentUser?.uid, _userA.uid);
+    expect(harness.firestore.clearPersistenceCalls, 0);
+    expect(harness.notificationCleanup.calls, 0);
+    expect(await db.select(db.healthEntries).get(), originalHealth);
+    expect(await db.select(db.syncQueueTable).get(), originalQueue);
+    expect(
+      await health.updatePillStatus(false, expectedUid: _userA.uid),
+      isTrue,
+    );
+    expect(
+      (await db.select(db.healthEntries).getSingle()).hasTakenPillToday,
+      isFalse,
+    );
+    expect(await db.select(db.syncQueueTable).get(), hasLength(2));
+
+    barrierStorage.throwOnWrite = false;
+    await harness.notifier.logout();
+
+    expect(harness.state, isA<AuthUnauthenticated>());
+    expect(harness.repository.signOutCalls, 1);
+    expect(harness.auth.currentUser, isNull);
+    expect(await harness.readPendingCleanup(), isNull);
+    expect(await db.select(db.healthEntries).get(), isEmpty);
+    expect(await db.select(db.syncQueueTable).get(), isEmpty);
   });
 
   test('falha ao limpar barrier mantém logout fail-closed', () async {
@@ -1861,16 +2559,19 @@ void main() {
         onGetCurrentUser: (userId, database) async {
           if (userId != _userB.uid) return;
           events.add('prepare:$userId');
-          await database
-              .into(database.taskTable)
-              .insert(
-                TaskTableCompanion.insert(
-                  id: 'user-b-local-data',
-                  title: 'B local data',
-                  priority: 'normal',
-                  date: DateTime(2026, 9, 1),
+          // Seed the repository fixture, not a domain mutation before preparation.
+          await database.localMutations.cleanupWrite(
+            () => database
+                .into(database.taskTable)
+                .insert(
+                  TaskTableCompanion.insert(
+                    id: 'user-b-local-data',
+                    title: 'B local data',
+                    priority: 'normal',
+                    date: DateTime(2026, 9, 1),
+                  ),
                 ),
-              );
+          );
         },
       );
       addTearDown(harness.dispose);

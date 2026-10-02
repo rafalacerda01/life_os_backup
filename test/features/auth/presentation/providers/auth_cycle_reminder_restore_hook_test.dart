@@ -68,7 +68,7 @@ void main() {
       'Future<void> _performLocalDataClear(String? cleanupUserId)',
     );
     final methodEnd = source.indexOf(
-      'Future<void> _recoverPendingLocalCleanup()',
+      'Future<void> _recoverPendingLocalCleanup(',
       methodStart,
     );
     final method = source.substring(methodStart, methodEnd);

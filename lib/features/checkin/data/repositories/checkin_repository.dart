@@ -5,6 +5,7 @@ import 'package:drift/drift.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:intl/intl.dart';
 import 'package:life_os/core/database/app_database.dart';
+import 'package:life_os/core/database/local_mutation_gate.dart';
 import 'package:life_os/core/utils/app_logger.dart';
 
 class CheckInRepository {
@@ -57,6 +58,24 @@ class CheckInRepository {
       return;
     }
 
+    final admission = _db.localMutations.capture(expectedUid: user.uid);
+    await _db.localMutations.run(
+      () => _saveDailyMetrics(
+        user.uid,
+        energy: energy,
+        focus: focus,
+        motivation: motivation,
+      ),
+      ticket: admission,
+    );
+  }
+
+  Future<void> _saveDailyMetrics(
+    String userId, {
+    required double energy,
+    required double focus,
+    required double motivation,
+  }) async {
     try {
       final now = DateTime.now();
 
@@ -86,8 +105,8 @@ class CheckInRepository {
       // Tenta sincronizar em background.
       // -----------------------------------------------------------------------
 
-      if (_isCurrentUser(user.uid)) {
-        unawaited(_syncWithFirebase(userId: user.uid, checkInId: todayId));
+      if (_isCurrentUser(userId)) {
+        unawaited(_syncWithFirebase(userId: userId, checkInId: todayId));
       }
     } catch (error, stackTrace) {
       AppLogger.e('Erro ao salvar check-in localmente', error, stackTrace);
@@ -110,6 +129,7 @@ class CheckInRepository {
       return;
     }
     final expectedUid = user.uid;
+    final ticket = _db.localMutations.capture(expectedUid: expectedUid);
 
     try {
       AppLogger.i('SYNC Check-ins: iniciando download do Firebase...');
@@ -121,7 +141,7 @@ class CheckInRepository {
           .get();
 
       if (!_isCurrentUser(expectedUid)) return;
-      await _db.transaction(() async {
+      await _db.transaction(admission: ticket, waitForReopen: false, () async {
         for (final doc in snapshot.docs) {
           if (!_isCurrentUser(expectedUid)) {
             throw StateError('CHECKIN_SESSION_CHANGED');
@@ -185,8 +205,13 @@ class CheckInRepository {
     required String userId,
     required String checkInId,
   }) {
+    final admission = _db.localMutations.capture(expectedUid: userId);
     final result = _uploadTail.then(
-      (_) => _uploadCurrentCheckIn(userId: userId, checkInId: checkInId),
+      (_) => _uploadCurrentCheckIn(
+        userId: userId,
+        checkInId: checkInId,
+        admission: admission,
+      ),
     );
     _uploadTail = result.then<void>(
       (_) {},
@@ -196,6 +221,7 @@ class CheckInRepository {
   }
 
   Future<bool> _uploadCurrentCheckIn({
+    required LocalMutationTicket admission,
     required String userId,
     required String checkInId,
   }) async {
@@ -221,24 +247,28 @@ class CheckInRepository {
           .timeout(_remoteWriteTimeout);
 
       if (!_isCurrentUser(userId)) return false;
-      final marked = await _db.transaction(() async {
-        if (!_isCurrentUser(userId)) return 0;
-        final count =
-            await (_db.update(_db.checkInTable)..where(
-                  (table) =>
-                      table.id.equals(checkInId) &
-                      table.createdAt.equals(checkIn.createdAt) &
-                      table.energy.equals(checkIn.energy) &
-                      table.focus.equals(checkIn.focus) &
-                      table.motivation.equals(checkIn.motivation) &
-                      table.isSynced.equals(false),
-                ))
-                .write(const CheckInTableCompanion(isSynced: Value(true)));
-        if (!_isCurrentUser(userId)) {
-          throw StateError('CHECKIN_SESSION_CHANGED');
-        }
-        return count;
-      });
+      final marked = await _db.localMutations.systemWrite(
+        userId,
+        () => _db.transaction(() async {
+          if (!_isCurrentUser(userId)) return 0;
+          final count =
+              await (_db.update(_db.checkInTable)..where(
+                    (table) =>
+                        table.id.equals(checkInId) &
+                        table.createdAt.equals(checkIn.createdAt) &
+                        table.energy.equals(checkIn.energy) &
+                        table.focus.equals(checkIn.focus) &
+                        table.motivation.equals(checkIn.motivation) &
+                        table.isSynced.equals(false),
+                  ))
+                  .write(const CheckInTableCompanion(isSynced: Value(true)));
+          if (!_isCurrentUser(userId)) {
+            throw StateError('CHECKIN_SESSION_CHANGED');
+          }
+          return count;
+        }),
+        admission: admission,
+      );
 
       if (marked != 1 || !_isCurrentUser(userId)) return false;
       AppLogger.i('Check-in sincronizado com sucesso.');

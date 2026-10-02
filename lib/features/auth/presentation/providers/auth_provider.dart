@@ -42,6 +42,7 @@ import 'package:life_os/features/auth/domain/repositories/auth_repository.dart';
 import 'package:life_os/features/auth/presentation/providers/auth_state.dart';
 import 'package:life_os/core/storage/secure_storage_service.dart';
 import 'package:life_os/core/database/database_provider.dart';
+import 'package:life_os/core/database/local_mutation_gate.dart';
 
 // Providers de infraestrutura
 final firebaseAuthProvider = Provider((ref) => FirebaseAuth.instance);
@@ -129,12 +130,21 @@ class AuthNotifier extends Notifier<AuthState> {
 
   void _initializeAuthListener() {
     final auth = ref.read(firebaseAuthProvider);
+    ref
+        .read(databaseProvider)
+        .localMutations
+        .bindSessionReader(() => auth.currentUser?.uid);
 
     unawaited(checkCurrentUser());
 
     final subscription = auth.authStateChanges().listen((firebaseUser) async {
+      ref
+          .read(databaseProvider)
+          .localMutations
+          .observeSession(firebaseUser?.uid);
       if (firebaseUser == null) {
         if (_accountDeletionInProgress || _explicitSignOutInProgress) return;
+        _localCleanupRequired = true;
         await _finishLocalSignOut();
       } else if (!_accountDeletionInProgress) {
         await _prepareAuthenticatedSession(firebaseUser);
@@ -151,7 +161,11 @@ class AuthNotifier extends Notifier<AuthState> {
   void _scheduleHydration(String uid) {
     final cleanUid = uid.trim();
 
-    if (cleanUid.isEmpty || _disposed || _accountDeletionInProgress) return;
+    if (cleanUid.isEmpty ||
+        _disposed ||
+        _accountDeletionInProgress ||
+        _explicitSignOutInProgress)
+      return;
 
     if (_hydrationInFlight != null && _hydrationUid == cleanUid) return;
 
@@ -222,6 +236,7 @@ class AuthNotifier extends Notifier<AuthState> {
   bool _isCurrentSession(String uid, int generation) {
     return !_disposed &&
         !_accountDeletionInProgress &&
+        !_explicitSignOutInProgress &&
         generation == _sessionGeneration &&
         ref.read(firebaseAuthProvider).currentUser?.uid == uid;
   }
@@ -232,6 +247,16 @@ class AuthNotifier extends Notifier<AuthState> {
     }
 
     final uid = firebaseUser.uid;
+    final localMutations = ref.read(databaseProvider).localMutations;
+    late final LocalMutationTicket preparation;
+    try {
+      localMutations.observeSession(
+        ref.read(firebaseAuthProvider).currentUser?.uid,
+      );
+      preparation = localMutations.capture(expectedUid: uid);
+    } on LocalMutationUnavailable {
+      return false;
+    }
     try {
       await _recoverPendingLocalCleanup();
     } catch (_) {
@@ -299,9 +324,18 @@ class AuthNotifier extends Notifier<AuthState> {
     }
 
     final isPrepared =
-        !_disposed && ref.read(firebaseAuthProvider).currentUser?.uid == uid;
+        !_disposed &&
+        !_localCleanupRequired &&
+        !_explicitSignOutInProgress &&
+        !_accountDeletionInProgress &&
+        ref.read(firebaseAuthProvider).currentUser?.uid == uid;
 
     if (isPrepared) {
+      try {
+        localMutations.openPreparedSession(admission: preparation);
+      } on LocalMutationUnavailable {
+        return false;
+      }
       _activeLocalSessionUid = uid;
       _firestoreLocalStateCleared = false;
       try {
@@ -600,19 +634,55 @@ class AuthNotifier extends Notifier<AuthState> {
   }
 
   Future<void> logout() async {
+    if (_explicitSignOutInProgress || _accountDeletionInProgress) return;
     state = AuthState.loading();
     final firebaseAuth = ref.read(firebaseAuthProvider);
     final logoutUserId =
         _activeLocalSessionUid ?? firebaseAuth.currentUser?.uid;
     _explicitSignOutInProgress = true;
     PendingAuthCleanup? logoutMarker;
+    LocalMutationQuiescence? quiescence;
+    var keepMutationGateSealed = false;
+    final database = ref.read(databaseProvider);
 
     try {
+      if (_localCleanupRequired) {
+        await _recoverPendingLocalCleanup(useRepositorySignOut: true);
+        if (_disposed) return;
+        if (firebaseAuth.currentUser == null) {
+          if (_localCleanupRequired) {
+            await _finishLocalSignOut();
+          } else {
+            _invalidateSessionProviders();
+            state = AuthState.unauthenticated();
+          }
+          return;
+        }
+      }
       if (logoutUserId == null ||
           logoutUserId.trim().isEmpty ||
           firebaseAuth.currentUser?.uid != logoutUserId) {
         if (!_disposed) {
           state = AuthState.error('Sua sessão mudou. Tente novamente.');
+        }
+        return;
+      }
+
+      // Close admission before the first await. Lazy DB initialization is internal.
+      quiescence = database.localMutations.beginQuiesce(logoutUserId);
+      await quiescence.cleanup(() => database.customSelect('SELECT 1').get());
+      if (_disposed || firebaseAuth.currentUser?.uid != logoutUserId) {
+        if (!_disposed)
+          state = AuthState.error('Sua sessão mudou. Tente novamente.');
+        return;
+      }
+      try {
+        await quiescence.drain().timeout(const Duration(seconds: 20));
+      } catch (_) {
+        if (!_disposed) {
+          state = AuthState.error(
+            'Não foi possível concluir suas alterações. Tente sair novamente.',
+          );
         }
         return;
       }
@@ -670,12 +740,26 @@ class AuthNotifier extends Notifier<AuthState> {
       }
 
       try {
-        logoutMarker = await _clearLocalData(
-          targetUserId: logoutUserId,
-          intent: AuthCleanupIntent.logout,
+        quiescence.requireCurrentSession();
+        logoutMarker = await quiescence.cleanup(
+          () => _clearLocalData(
+            targetUserId: logoutUserId,
+            intent: AuthCleanupIntent.logout,
+          ),
         );
+        keepMutationGateSealed = true;
       } catch (_) {
         _localCleanupRequired = true;
+        try {
+          final pending = await ref
+              .read(authCleanupBarrierProvider)
+              .readPending();
+          keepMutationGateSealed =
+              pending?.userId == logoutUserId &&
+              pending?.requiresSignOut == true;
+        } catch (_) {
+          keepMutationGateSealed = true;
+        }
         if (!_disposed) {
           state = AuthState.error(
             'Não foi possível isolar os dados locais. Tente novamente.',
@@ -684,17 +768,20 @@ class AuthNotifier extends Notifier<AuthState> {
         return;
       }
 
+      quiescence.requireCurrentSession();
       final result = await _repository.signOut();
 
       await result.when(
         (_) async {
           try {
             // Fecha a pequena janela entre a limpeza prévia e o sign-out.
-            await _runCriticalLocalDataClear(null);
-            if (ref.read(firebaseAuthProvider).currentUser?.uid ==
-                logoutUserId) {
+            if (firebaseAuth.currentUser != null) {
               throw StateError('AUTH_SIGN_OUT_NOT_CONFIRMED');
             }
+            await quiescence!.cleanup(
+              () => _runCriticalLocalDataClear(null),
+              signedOut: true,
+            );
             final expectedMarker = logoutMarker;
             if (expectedMarker == null ||
                 !await ref
@@ -730,6 +817,10 @@ class AuthNotifier extends Notifier<AuthState> {
         state = AuthState.error('Não foi possível encerrar a sessão.');
       }
     } finally {
+      quiescence?.finish(
+        signOutConfirmed: firebaseAuth.currentUser == null,
+        keepSealed: keepMutationGateSealed,
+      );
       _explicitSignOutInProgress = false;
     }
   }
@@ -916,6 +1007,10 @@ class AuthNotifier extends Notifier<AuthState> {
 
   Future<void> _finishLocalSignOut() async {
     if (_disposed) return;
+    ref
+        .read(databaseProvider)
+        .localMutations
+        .observeSession(ref.read(firebaseAuthProvider).currentUser?.uid);
 
     try {
       await _recoverPendingLocalCleanup();
@@ -1083,21 +1178,28 @@ class AuthNotifier extends Notifier<AuthState> {
     _firestoreLocalStateCleared = true;
   }
 
-  Future<void> _recoverPendingLocalCleanup() {
+  Future<void> _recoverPendingLocalCleanup({
+    bool useRepositorySignOut = false,
+  }) {
     final running = _durableCleanupRecoveryInFlight;
     if (running != null) return running;
 
     late final Future<void> operation;
-    operation = _performPendingLocalCleanupRecovery().whenComplete(() {
-      if (identical(_durableCleanupRecoveryInFlight, operation)) {
-        _durableCleanupRecoveryInFlight = null;
-      }
-    });
+    operation =
+        _performPendingLocalCleanupRecovery(
+          useRepositorySignOut: useRepositorySignOut,
+        ).whenComplete(() {
+          if (identical(_durableCleanupRecoveryInFlight, operation)) {
+            _durableCleanupRecoveryInFlight = null;
+          }
+        });
     _durableCleanupRecoveryInFlight = operation;
     return operation;
   }
 
-  Future<void> _performPendingLocalCleanupRecovery() async {
+  Future<void> _performPendingLocalCleanupRecovery({
+    required bool useRepositorySignOut,
+  }) async {
     final barrier = ref.read(authCleanupBarrierProvider);
     PendingAuthCleanup? pending;
     try {
@@ -1116,7 +1218,15 @@ class AuthNotifier extends Notifier<AuthState> {
 
       final auth = ref.read(firebaseAuthProvider);
       if (pending.requiresSignOut && auth.currentUser?.uid == pending.userId) {
-        await auth.signOut();
+        if (useRepositorySignOut) {
+          final result = await _repository.signOut();
+          result.when(
+            (_) {},
+            (_) => throw StateError('AUTH_SIGN_OUT_NOT_CONFIRMED'),
+          );
+        } else {
+          await auth.signOut();
+        }
         if (auth.currentUser?.uid == pending.userId) {
           throw StateError('AUTH_SIGN_OUT_NOT_CONFIRMED');
         }

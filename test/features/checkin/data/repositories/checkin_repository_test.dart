@@ -8,6 +8,7 @@ import 'package:drift/native.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:life_os/core/database/app_database.dart';
+import 'package:life_os/core/database/local_mutation_gate.dart';
 import 'package:life_os/features/checkin/data/repositories/checkin_repository.dart';
 
 class _User extends Fake implements User {
@@ -288,4 +289,83 @@ void main() {
 
     expect(await db.select(db.checkInTable).get(), isEmpty);
   });
+
+  test('CheckIn drain acknowledges under quiescence', () async {
+    db.localMutations.bindSessionReader(() => auth.currentUser?.uid);
+    db.localMutations.openPreparedSession();
+    await seed('2026-09-24', 3);
+    final barrier = db.localMutations.beginQuiesce('user-a');
+    expect(await repository.syncPendingCheckIns(), isTrue);
+    expect((await db.select(db.checkInTable).getSingle()).isSynced, isTrue);
+    barrier.finish(signOutConfirmed: false);
+  });
+
+  test('CheckIn domain save waits and resumes on same-session abort', () async {
+    db.localMutations.bindSessionReader(() => auth.currentUser?.uid);
+    db.localMutations.openPreparedSession();
+    await db.customSelect('SELECT 1').get();
+    final barrier = db.localMutations.beginQuiesce('user-a');
+    final saving = repository.saveDailyMetrics(
+      energy: 5,
+      focus: 3,
+      motivation: 4,
+    );
+    expect(await db.select(db.checkInTable).get(), isEmpty);
+    barrier.finish(signOutConfirmed: false);
+    await saving;
+    await repository.syncPendingCheckIns();
+    expect((await db.select(db.checkInTable).getSingle()).energy, 5);
+  });
+
+  test(
+    'CheckIn waiting save cannot repopulate after confirmed sign-out',
+    () async {
+      db.localMutations.bindSessionReader(() => auth.currentUser?.uid);
+      db.localMutations.openPreparedSession();
+      await db.customSelect('SELECT 1').get();
+      final barrier = db.localMutations.beginQuiesce('user-a');
+      final saving = repository.saveDailyMetrics(
+        energy: 5,
+        focus: 3,
+        motivation: 4,
+      );
+      final failure = expectLater(
+        saving,
+        throwsA(isA<LocalMutationUnavailable>()),
+      );
+      await barrier.cleanup(db.clearAllData);
+      auth.currentUser = null;
+      barrier.finish(signOutConfirmed: true);
+      await failure;
+      expect(await db.select(db.checkInTable).get(), isEmpty);
+      expect(firestore.setCalls, 0);
+    },
+  );
+
+  test(
+    'old upload cannot acknowledge a new generation of the same UID',
+    () async {
+      db.localMutations.bindSessionReader(() => auth.currentUser?.uid);
+      db.localMutations.openPreparedSession();
+      await seed('2026-09-24', 3);
+      final started = Completer<void>();
+      final release = Completer<void>();
+      firestore.beforeSet = (_) async {
+        started.complete();
+        await release.future;
+      };
+      final uploading = repository.syncPendingCheckIns();
+      await started.future;
+      final barrier = db.localMutations.beginQuiesce('user-a');
+      await barrier.cleanup(db.clearAllData);
+      auth.currentUser = null;
+      barrier.finish(signOutConfirmed: true);
+      auth.currentUser = _User('user-a');
+      db.localMutations.openPreparedSession();
+      await seed('2026-09-24', 3);
+      release.complete();
+      expect(await uploading, isFalse);
+      expect((await db.select(db.checkInTable).getSingle()).isSynced, isFalse);
+    },
+  );
 }

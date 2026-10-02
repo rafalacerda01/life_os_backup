@@ -18,7 +18,7 @@ class CycleReminderSessionCleanup {
   final CycleReminderPreferencesDeletion deletePreferences;
 
   Future<int> cancelAfterCurrentMutations(String userId) {
-    return _mutationGate.run(userId, () async {
+    return _mutationGate.runCleanup(userId, () async {
       await rotateActionToken(userId);
       final failedCancellations = await _lifecycle.cancelAllCycleReminders(
         userId,

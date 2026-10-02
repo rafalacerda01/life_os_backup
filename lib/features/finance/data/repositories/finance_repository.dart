@@ -114,6 +114,7 @@ class FinanceRepository {
     }
 
     try {
+      final admission = _db.localMutations.capture(expectedUid: user.uid);
       final transaction = await (_db.select(
         _db.transactions,
       )..where((table) => table.id.equals(localId))).getSingleOrNull();
@@ -130,12 +131,13 @@ class FinanceRepository {
           firestoreId == 'synced') {
         await _db.transaction(() async {
           await _deleteLocalTransaction(localId);
-        });
+        }, admission: admission);
 
         return;
       }
 
       await _db.transactionWithSync(
+        admission: admission,
         ownerUid: user.uid,
         localOperation: () async {
           await _deleteLocalTransaction(localId);
@@ -159,6 +161,7 @@ class FinanceRepository {
     if (expectedUid == null || expectedUid.isEmpty) return;
 
     try {
+      final ticket = _db.localMutations.capture(expectedUid: expectedUid);
       final pullStartedAt = DateTime.now().millisecondsSinceEpoch;
       final queueDrained = await _syncManager.processPendingItems();
       if (!queueDrained || !_isCurrentUser(expectedUid)) return;
@@ -172,7 +175,7 @@ class FinanceRepository {
 
       final remoteDocIds = snapshot.docs.map((doc) => doc.id).toSet();
 
-      await _db.transaction(() async {
+      await _db.transaction(admission: ticket, waitForReopen: false, () async {
         _requireCurrentUser(expectedUid);
 
         final authoritativeItems =

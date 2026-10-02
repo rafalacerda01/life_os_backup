@@ -1,5 +1,6 @@
 import 'package:drift/drift.dart';
 import 'package:life_os/core/database/app_database.dart';
+import 'package:life_os/core/database/local_mutation_gate.dart';
 import 'package:life_os/features/notifications/data/tables/notifications_table.dart';
 
 part 'notification_dao.g.dart';
@@ -29,6 +30,15 @@ class NotificationDao extends DatabaseAccessor<AppDatabase>
   /// O estado de interação do usuário (isRead/isCompleted) é preservado
   /// enquanto o evento representado pela notificação não mudou de data.
   Future<bool> upsertPreservingState(
+    NotificationsTableCompanion incoming, {
+    LocalMutationTicket? admission,
+  }) => attachedDatabase.localMutations.run(
+    () => _upsertPreservingState(incoming),
+    ticket: admission,
+    waitForReopen: false,
+  );
+
+  Future<bool> _upsertPreservingState(
     NotificationsTableCompanion incoming,
   ) async {
     final existing = await getNotificationById(incoming.id.value);
@@ -108,21 +118,27 @@ class NotificationDao extends DatabaseAccessor<AppDatabase>
     return true;
   }
 
-  Future<void> markAsRead(String id) =>
-      (update(notificationsTable)..where((t) => t.id.equals(id))).write(
-        const NotificationsTableCompanion(isRead: Value(true)),
-      );
+  Future<void> markAsRead(String id) => attachedDatabase.localMutations.run(
+    () async => (update(notificationsTable)..where((t) => t.id.equals(id)))
+        .write(const NotificationsTableCompanion(isRead: Value(true))),
+  );
 
   Future<void> markAsCompleted(String id) =>
-      (update(notificationsTable)..where((t) => t.id.equals(id))).write(
-        const NotificationsTableCompanion(
-          isRead: Value(true),
-          isCompleted: Value(true),
-        ),
+      attachedDatabase.localMutations.run(
+        () async =>
+            (update(notificationsTable)..where((t) => t.id.equals(id))).write(
+              const NotificationsTableCompanion(
+                isRead: Value(true),
+                isCompleted: Value(true),
+              ),
+            ),
       );
 
   Future<void> deleteNotification(String id) =>
-      (delete(notificationsTable)..where((t) => t.id.equals(id))).go();
+      attachedDatabase.localMutations.run(
+        () async =>
+            (delete(notificationsTable)..where((t) => t.id.equals(id))).go(),
+      );
 
   bool _sameLocalDay(DateTime? a, DateTime? b) {
     if (a == null || b == null) return a == b;

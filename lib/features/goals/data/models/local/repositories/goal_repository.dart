@@ -115,6 +115,7 @@ class GoalRepository {
     }
 
     try {
+      final admission = _db.localMutations.capture(expectedUid: user.uid);
       final currentRow = await (_db.select(
         _db.goals,
       )..where((table) => table.id.equals(id))).getSingleOrNull();
@@ -135,6 +136,7 @@ class GoalRepository {
           : newValue;
 
       await _db.transactionWithSync(
+        admission: admission,
         ownerUid: user.uid,
         localOperation: () async {
           await (_db.update(
@@ -234,6 +236,7 @@ class GoalRepository {
 
     try {
       AppLogger.i("SYNC Metas: Iniciando...");
+      final ticket = _db.localMutations.capture(expectedUid: expectedUid);
       final pullStartedAt = DateTime.now().millisecondsSinceEpoch;
       final pendingAtPullStart =
           await (_db.select(_db.syncQueueTable)..where(
@@ -255,7 +258,7 @@ class GoalRepository {
       if (_auth.currentUser?.uid != expectedUid) return;
       final remoteDocIds = snapshot.docs.map((doc) => doc.id).toSet();
 
-      await _db.transaction(() async {
+      await _db.transaction(admission: ticket, waitForReopen: false, () async {
         void requireCurrentUser() {
           if (_auth.currentUser?.uid != expectedUid) {
             throw const _GoalSessionChanged();

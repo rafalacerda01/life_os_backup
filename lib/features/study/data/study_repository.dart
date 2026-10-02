@@ -4,6 +4,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:drift/drift.dart' hide Query;
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:life_os/core/database/app_database.dart';
+import 'package:life_os/core/database/local_mutation_gate.dart';
 import 'package:life_os/core/security/input_sanitizer.dart';
 import 'package:life_os/core/services/sync_manager.dart';
 import 'package:life_os/core/utils/app_logger.dart';
@@ -658,6 +659,7 @@ class StudyRepository {
     if (expectedUid == null) return;
 
     try {
+      final admission = _db.localMutations.capture(expectedUid: expectedUid);
       final pullStartedAt = DateTime.now().millisecondsSinceEpoch;
       final queueDrained = await _syncManager.processPendingItems();
       if (!queueDrained || !_isCurrentUser(expectedUid)) return;
@@ -712,6 +714,7 @@ class StudyRepository {
       }
 
       await _reconcileStudySnapshot(
+        admission: admission,
         expectedUid: expectedUid,
         pullStartedAt: pullStartedAt,
         remoteStats: remoteStats,
@@ -838,6 +841,7 @@ class StudyRepository {
   }
 
   Future<void> _reconcileStudySnapshot({
+    required LocalMutationTicket admission,
     required String expectedUid,
     required int pullStartedAt,
     required _RemoteStudyStats? remoteStats,
@@ -846,7 +850,7 @@ class StudyRepository {
     required Set<String> remoteSubjectDocIds,
     required Set<String> remoteFlashcardDocIds,
   }) async {
-    await _db.transaction(() async {
+    await _db.transaction(admission: admission, waitForReopen: false, () async {
       _requireCurrentUser(expectedUid);
       final authoritativeItems =
           await (_db.select(_db.syncQueueTable)..where(
