@@ -563,7 +563,11 @@ void main() {
     final remoteDeletes = <String>[];
     repository = _TrackingNotificationsRepository(
       db,
-      remoteDelete: (id) async => remoteDeletes.add(id),
+      auth: _FakeFirebaseAuth(_FakeUser('user-a')),
+      remoteDelete: (expectedUid, id) async {
+        expect(expectedUid, 'user-a');
+        remoteDeletes.add(id);
+      },
     );
     await insertSubject(id: 'past', examDate: yesterday);
     await seedNotification(id: 'exam_past', dueDate: yesterday);

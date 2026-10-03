@@ -31,6 +31,7 @@ import 'package:life_os/features/circles/presentation/circles_provider.dart';
 import 'package:life_os/features/premium/presentation/premium_provider.dart';
 import 'package:life_os/features/settings/presentation/providers/analytics_provider.dart';
 import 'package:life_os/features/notifications/domain/providers/notification_engine.dart';
+import 'package:life_os/features/notifications/data/repositories/notifications_repository.dart';
 
 import 'package:life_os/features/dashboard/presentation/providers/dashboard_provider.dart';
 import 'package:life_os/features/auth/data/repositories/auth_repository_impl.dart';
@@ -331,6 +332,9 @@ class AuthNotifier extends Notifier<AuthState> {
         ref.read(firebaseAuthProvider).currentUser?.uid == uid;
 
     if (isPrepared) {
+      if (!ref.read(notificationRemoteEffectsBarrierProvider).resume()) {
+        return false;
+      }
       try {
         localMutations.openPreparedSession(admission: preparation);
       } on LocalMutationUnavailable {
@@ -857,6 +861,10 @@ class AuthNotifier extends Notifier<AuthState> {
 
     _accountDeletionInProgress = true;
     state = AuthState.loading();
+    final notificationEffects = ref.read(
+      notificationRemoteEffectsBarrierProvider,
+    );
+    var notificationEffectsSealed = false;
 
     try {
       final providerIds = user.providerData.map((e) => e.providerId).toList();
@@ -889,6 +897,15 @@ class AuthNotifier extends Notifier<AuthState> {
         await user.reauthenticateWithCredential(credential);
       }
 
+      if (!_isExpectedFirebaseSession(expectedUid)) {
+        await _handleChangedAccountDeletionSession(expectedUid);
+        return;
+      }
+
+      notificationEffectsSealed = true;
+      await notificationEffects.sealAndDrain().timeout(
+        const Duration(seconds: 20),
+      );
       if (!_isExpectedFirebaseSession(expectedUid)) {
         await _handleChangedAccountDeletionSession(expectedUid);
         return;
@@ -937,6 +954,14 @@ class AuthNotifier extends Notifier<AuthState> {
       state = AuthState.error(
         'Não foi possível excluir a conta. Tente novamente.',
       );
+    } finally {
+      if (notificationEffectsSealed &&
+          !_disposed &&
+          !_localCleanupRequired &&
+          !_accountDeletionInProgress &&
+          _isExpectedFirebaseSession(expectedUid)) {
+        notificationEffects.resume();
+      }
     }
   }
 
@@ -1102,6 +1127,10 @@ class AuthNotifier extends Notifier<AuthState> {
   }
 
   Future<void> _performLocalDataClear(String? cleanupUserId) async {
+    await ref
+        .read(notificationRemoteEffectsBarrierProvider)
+        .sealAndDrain()
+        .timeout(const Duration(seconds: 20));
     _clearCycleReminderActionSession();
     _sessionGeneration += 1;
     await _medicationReconciler?.drain().timeout(const Duration(seconds: 20));

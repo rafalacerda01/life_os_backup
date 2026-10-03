@@ -42,6 +42,7 @@ import 'package:life_os/features/premium/domain/entities/premium_plan_offer_enti
 import 'package:life_os/features/premium/domain/entities/premium_status_entity.dart';
 import 'package:life_os/features/premium/domain/repositories/i_premium_repository.dart';
 import 'package:life_os/features/premium/presentation/premium_provider.dart';
+import 'package:life_os/features/notifications/data/repositories/notifications_repository.dart';
 import 'package:multiple_result/multiple_result.dart';
 
 import '../../../../helpers/recording_analytics_platform.dart';
@@ -457,6 +458,16 @@ class _ScriptedNotificationCleanup {
   }
 }
 
+class _ObservedNotificationEffects extends NotificationRemoteEffectsBarrier {
+  final drainStarted = Completer<void>();
+
+  @override
+  Future<void> sealAndDrain() {
+    if (!drainStarted.isCompleted) drainStarted.complete();
+    return super.sealAndDrain();
+  }
+}
+
 class _Harness {
   _Harness._({
     required this.auth,
@@ -531,6 +542,7 @@ class _Harness {
     Completer<void>? deleteStarted,
     Completer<void>? allowDelete,
     bool completeDeletionBySigningOut = false,
+    NotificationRemoteEffectsBarrier? notificationEffects,
     _ScriptedFirestore? firestore,
     Future<void> Function(String userId, AppDatabase database)?
     onGetCurrentUser,
@@ -614,6 +626,10 @@ class _Harness {
           secureStorage ?? _SecureStorage(),
         ),
         databaseProvider.overrideWithValue(database),
+        if (notificationEffects != null)
+          notificationRemoteEffectsBarrierProvider.overrideWithValue(
+            notificationEffects,
+          ),
         syncManagerProvider.overrideWithValue(syncManager),
         checkInRepositoryProvider.overrideWithValue(
           checkInRepository ?? _CheckInRepository(),
@@ -716,6 +732,100 @@ class _SessionPremiumRepository implements IPremiumRepository {
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+
+  test(
+    'logout drains notification effects before destructive cleanup',
+    () async {
+      final effects = _ObservedNotificationEffects();
+      final harness = await _Harness.create([0], notificationEffects: effects);
+      addTearDown(harness.dispose);
+      await harness.database
+          .into(harness.database.taskTable)
+          .insert(
+            TaskTableCompanion.insert(
+              id: 'local-a',
+              title: 'Fixture',
+              priority: 'normal',
+              date: DateTime(2026, 10, 3),
+            ),
+          );
+      final release = Completer<void>();
+      final write = effects.track(() => release.future);
+      final logout = harness.notifier.logout();
+      await effects.drainStarted.future;
+      expect(harness.repository.signOutCalls, 0);
+      expect(harness.firestore.clearPersistenceCalls, 0);
+      expect(
+        await harness.database.select(harness.database.taskTable).get(),
+        hasLength(1),
+      );
+      expect(effects.resume(), isFalse);
+      release.complete();
+      await write;
+      await logout;
+      expect(harness.repository.signOutCalls, 1);
+      expect(harness.state, isA<AuthUnauthenticated>());
+      expect(
+        await harness.database.select(harness.database.taskTable).get(),
+        isEmpty,
+      );
+      expect(effects.isCurrent(effects.generation), isFalse);
+    },
+  );
+
+  test(
+    'account deletion drains notifications before invoking remote deletion',
+    () async {
+      final effects = _ObservedNotificationEffects();
+      final harness = await _Harness.create(
+        [0],
+        notificationEffects: effects,
+        completeDeletionBySigningOut: true,
+      );
+      addTearDown(harness.dispose);
+      final release = Completer<void>();
+      var remoteWriteCompleted = false;
+      final write = effects.track(() async {
+        await release.future;
+        remoteWriteCompleted = true;
+      });
+      final deletion = harness.notifier.deleteAccount();
+      await effects.drainStarted.future;
+      expect(remoteWriteCompleted, isFalse);
+      expect(harness.repository.deletedExpectedUserIds, isEmpty);
+      expect(harness.firestore.clearPersistenceCalls, 0);
+      release.complete();
+      await write;
+      await deletion;
+      expect(remoteWriteCompleted, isTrue);
+      expect(harness.repository.deletedExpectedUserIds, [_userA.uid]);
+      expect(harness.state, isA<AuthUnauthenticated>());
+      expect(effects.isCurrent(effects.generation), isFalse);
+    },
+  );
+
+  test(
+    'session B is prepared only after draining notification effects of A',
+    () async {
+      final effects = _ObservedNotificationEffects();
+      final harness = await _Harness.create([0], notificationEffects: effects);
+      addTearDown(harness.dispose);
+      final release = Completer<void>();
+      final write = effects.track(() => release.future);
+      harness.auth.user = _FirebaseUser(_userB.uid);
+      final preparation = harness.notifier.checkCurrentUser();
+      await effects.drainStarted.future;
+      expect((harness.state as AuthAuthenticated).user.uid, _userA.uid);
+      expect(harness.firestore.clearPersistenceCalls, 0);
+      release.complete();
+      await write;
+      await preparation;
+      expect(harness.auth.currentUser?.uid, _userB.uid);
+      expect((harness.state as AuthAuthenticated).user.uid, _userB.uid);
+      expect(harness.firestore.clearPersistenceCalls, 1);
+      expect(effects.isCurrent(effects.generation), isTrue);
+    },
+  );
 
   HealthRepository healthFor(_Harness harness) => HealthRepository(
     NotificationService.instance,
