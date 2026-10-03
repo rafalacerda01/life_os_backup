@@ -13,6 +13,7 @@ import 'package:life_os/core/errors/failure.dart';
 import 'package:life_os/core/services/sync_manager.dart';
 import 'package:life_os/core/services/analytics_service.dart';
 import 'package:life_os/core/services/notification_service.dart';
+import 'package:life_os/core/services/notification_preferences.dart';
 import 'package:life_os/core/services/sync_manager_provider.dart';
 import 'package:life_os/core/storage/secure_storage_service.dart';
 import 'package:life_os/features/auth/data/local/auth_cleanup_barrier.dart';
@@ -37,6 +38,8 @@ import 'package:life_os/features/health/services/cycle_reminder_operation_epoch.
 import 'package:life_os/features/health/services/cycle_reminder_session_authority.dart';
 import 'package:life_os/features/health/services/cycle_reminder_session_cleanup.dart';
 import 'package:life_os/features/health/services/cycle_reminder_session_reconciler.dart';
+import 'package:life_os/features/health/services/medication_reminder_lifecycle.dart';
+import 'package:life_os/features/settings/presentation/providers/notification_provider.dart';
 import 'package:life_os/features/premium/data/repositories/google_play_premium_repository.dart';
 import 'package:life_os/features/premium/domain/entities/premium_plan_offer_entity.dart';
 import 'package:life_os/features/premium/domain/entities/premium_status_entity.dart';
@@ -355,6 +358,7 @@ class _SessionCoordinator extends Fake
   final CycleReminderSessionAuthority authority;
   final CycleReminderOperationEpoch epoch;
   final List<String> preparedUserIds = <String>[];
+  Completer<void>? sessionCleared;
 
   @override
   Future<void> onSessionPrepared(String userId) async {
@@ -366,6 +370,7 @@ class _SessionCoordinator extends Fake
   void onSessionCleared() {
     final previousUserId = authority.clear();
     if (previousUserId != null) epoch.invalidate(previousUserId);
+    if (sessionCleared?.isCompleted == false) sessionCleared!.complete();
   }
 }
 
@@ -468,6 +473,59 @@ class _ObservedNotificationEffects extends NotificationRemoteEffectsBarrier {
   }
 }
 
+class _SettingsMedicationStore extends NotificationPreferencesStore {
+  bool enabled = false;
+
+  @override
+  Future<NotificationPreferences> load() async => NotificationPreferences(
+    allNotifications: true,
+    studyReminders: true,
+    habitReminders: true,
+    medicationReminders: enabled,
+  );
+
+  @override
+  Future<void> save(String key, bool value) async {
+    if (key == NotificationPreferenceKeys.medicationReminders) enabled = value;
+  }
+}
+
+class _SettingsNotifications extends NotificationService {
+  @override
+  Future<bool> requestPermissions({String? preferenceKey}) async => true;
+  @override
+  Future<bool> requestExactAlarmPermission() async => false;
+}
+
+class _SettingsMedicationLifecycle implements MedicationReminderLifecycle {
+  final started = Completer<void>();
+  final release = Completer<void>();
+  bool active = false;
+  bool Function()? guard;
+
+  @override
+  Future<void> cancelAllMedicationReminders({
+    bool Function()? shouldContinue,
+  }) async {
+    if (shouldContinue!()) active = false;
+  }
+
+  @override
+  Future<MedicationReminderRebuildResult> rebuildMedicationReminders({
+    bool Function()? shouldContinue,
+  }) async {
+    guard = shouldContinue;
+    started.complete();
+    await release.future;
+    active = shouldContinue!();
+    return MedicationReminderRebuildResult(
+      eligible: 1,
+      scheduled: active ? 1 : 0,
+      failed: 0,
+    );
+  }
+}
+
 class _Harness {
   _Harness._({
     required this.auth,
@@ -543,6 +601,8 @@ class _Harness {
     Completer<void>? allowDelete,
     bool completeDeletionBySigningOut = false,
     NotificationRemoteEffectsBarrier? notificationEffects,
+    _SettingsMedicationLifecycle? medicationLifecycle,
+    _SettingsMedicationStore? medicationPreferences,
     _ScriptedFirestore? firestore,
     Future<void> Function(String userId, AppDatabase database)?
     onGetCurrentUser,
@@ -626,6 +686,18 @@ class _Harness {
           secureStorage ?? _SecureStorage(),
         ),
         databaseProvider.overrideWithValue(database),
+        if (medicationLifecycle != null) ...[
+          medicationReminderLifecycleProvider.overrideWithValue(
+            medicationLifecycle,
+          ),
+          notificationPreferencesStoreProvider.overrideWithValue(
+            medicationPreferences!,
+          ),
+          notificationServiceProvider.overrideWithValue(
+            _SettingsNotifications(),
+          ),
+          notificationPreferencesChangedProvider.overrideWithValue(() {}),
+        ],
         if (notificationEffects != null)
           notificationRemoteEffectsBarrierProvider.overrideWithValue(
             notificationEffects,
@@ -732,6 +804,59 @@ class _SessionPremiumRepository implements IPremiumRepository {
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+
+  test(
+    'Auth logout drains and invalidates the same medication job started by Settings',
+    () async {
+      final medication = _SettingsMedicationLifecycle();
+      final harness = await _Harness.create(
+        [0],
+        medicationLifecycle: medication,
+        medicationPreferences: _SettingsMedicationStore(),
+      );
+      addTearDown(harness.dispose);
+      final reconciler = harness.container.read(
+        medicationReminderSessionReconcilerProvider,
+      );
+      await reconciler.drain();
+      harness.coordinator.sessionCleared = Completer<void>();
+      await harness.database
+          .into(harness.database.medications)
+          .insert(
+            MedicationsCompanion.insert(
+              firestoreId: 'medication-a',
+              name: 'Fixture',
+              startDate: DateTime(2026, 10, 3, 21),
+            ),
+          );
+      await harness.container.read(notificationsProvider.future);
+      final toggle = harness.container
+          .read(notificationsProvider.notifier)
+          .toggleMedication(true);
+      await medication.started.future;
+      expect(medication.guard!(), isTrue);
+      final logout = harness.notifier.logout();
+      await harness.coordinator.sessionCleared!.future;
+      expect(harness.auth.currentUser?.uid, 'user-a');
+      expect(medication.guard!(), isFalse);
+      expect(harness.repository.signOutCalls, 0);
+      expect(harness.firestore.clearPersistenceCalls, 0);
+      expect(
+        await harness.database.select(harness.database.medications).get(),
+        hasLength(1),
+      );
+      medication.release.complete();
+      await toggle;
+      await logout;
+      expect(medication.active, isFalse);
+      expect(harness.repository.signOutCalls, 1);
+      expect(harness.state, isA<AuthUnauthenticated>());
+      expect(
+        await harness.database.select(harness.database.medications).get(),
+        isEmpty,
+      );
+    },
+  );
 
   test(
     'logout drains notification effects before destructive cleanup',

@@ -217,6 +217,11 @@ void main() {
     expect(invalidation, greaterThanOrEqualTo(0));
     expect(drain, greaterThan(invalidation));
     expect(drift, greaterThan(drain));
-    expect(source, contains('ref.onDispose(reconciler.dispose);'));
+    expect(
+      File(
+        'lib/features/health/services/medication_reminder_providers.dart',
+      ).readAsStringSync(),
+      contains('ref.onDispose(reconciler.dispose);'),
+    );
   });
 }

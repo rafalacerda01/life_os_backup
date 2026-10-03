@@ -1,4 +1,5 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_riverpod/misc.dart' show Override;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:life_os/core/services/notification_preferences.dart';
 import 'package:life_os/core/services/notification_service.dart';
@@ -7,6 +8,7 @@ import 'package:life_os/features/health/services/cycle_reminder_notification_lif
 import 'package:life_os/features/health/services/cycle_reminder_operation_epoch.dart';
 import 'package:life_os/features/health/services/cycle_reminder_session_authority.dart';
 import 'package:life_os/features/health/services/medication_reminder_lifecycle.dart';
+import 'package:life_os/features/health/services/medication_reminder_session_reconciler.dart';
 import 'package:life_os/features/settings/presentation/providers/notification_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -118,6 +120,34 @@ CycleReminderPreferences _cyclePreferences({bool enabled = true}) {
   );
 }
 
+Future<ProviderContainer> _preparedContainer({
+  required List<Override> overrides,
+}) async {
+  final container = ProviderContainer(
+    overrides: [
+      ...overrides,
+      medicationReminderSessionReconcilerProvider.overrideWith((ref) {
+        final reconciler = MedicationReminderSessionReconciler(
+          lifecycle: ref.watch(medicationReminderLifecycleProvider),
+          loadPreferences: ref.watch(notificationPreferencesStoreProvider).load,
+          currentUserId: () => 'user-a',
+        );
+        ref.onDispose(reconciler.dispose);
+        return reconciler;
+      }),
+    ],
+  );
+  await container
+      .read(medicationReminderSessionReconcilerProvider)
+      .onSessionPrepared('user-a');
+  final lifecycle =
+      container.read(medicationReminderLifecycleProvider)
+          as _RecordingMedicationLifecycle;
+  lifecycle.cancelCalls = 0;
+  lifecycle.rebuildCalls = 0;
+  return container;
+}
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
@@ -161,7 +191,7 @@ void main() {
     final service = _RecordingNotificationService();
     final lifecycle = _RecordingMedicationLifecycle();
     var refreshes = 0;
-    final container = ProviderContainer(
+    final container = await _preparedContainer(
       overrides: [
         notificationServiceProvider.overrideWithValue(service),
         medicationReminderLifecycleProvider.overrideWithValue(lifecycle),
@@ -196,7 +226,7 @@ void main() {
     final service = _RecordingNotificationService();
     final lifecycle = _RecordingMedicationLifecycle();
     var refreshes = 0;
-    final container = ProviderContainer(
+    final container = await _preparedContainer(
       overrides: [
         notificationServiceProvider.overrideWithValue(service),
         medicationReminderLifecycleProvider.overrideWithValue(lifecycle),
@@ -242,7 +272,7 @@ void main() {
     final service = _RecordingNotificationService();
     final lifecycle = _RecordingMedicationLifecycle();
     var refreshes = 0;
-    final container = ProviderContainer(
+    final container = await _preparedContainer(
       overrides: [
         notificationServiceProvider.overrideWithValue(service),
         medicationReminderLifecycleProvider.overrideWithValue(lifecycle),
@@ -273,7 +303,7 @@ void main() {
     });
     final service = _RecordingNotificationService()..permissionGranted = false;
     final lifecycle = _RecordingMedicationLifecycle();
-    final container = ProviderContainer(
+    final container = await _preparedContainer(
       overrides: [
         notificationServiceProvider.overrideWithValue(service),
         medicationReminderLifecycleProvider.overrideWithValue(lifecycle),
@@ -299,7 +329,7 @@ void main() {
     });
     final service = _RecordingNotificationService();
     final lifecycle = _RecordingMedicationLifecycle();
-    final container = ProviderContainer(
+    final container = await _preparedContainer(
       overrides: [
         notificationServiceProvider.overrideWithValue(service),
         medicationReminderLifecycleProvider.overrideWithValue(lifecycle),
@@ -321,7 +351,7 @@ void main() {
     });
     final service = _RecordingNotificationService();
     final lifecycle = _RecordingMedicationLifecycle();
-    final container = ProviderContainer(
+    final container = await _preparedContainer(
       overrides: [
         notificationServiceProvider.overrideWithValue(service),
         medicationReminderLifecycleProvider.overrideWithValue(lifecycle),
@@ -355,7 +385,7 @@ void main() {
         _MemoryCycleReminderStorage(),
       );
       await cycleStore.save('user-a', _cyclePreferences());
-      final container = ProviderContainer(
+      final container = await _preparedContainer(
         overrides: [
           notificationServiceProvider.overrideWithValue(service),
           medicationReminderLifecycleProvider.overrideWithValue(
@@ -393,7 +423,7 @@ void main() {
       _MemoryCycleReminderStorage(),
     );
     await cycleStore.save('user-a', _cyclePreferences(enabled: false));
-    final container = ProviderContainer(
+    final container = await _preparedContainer(
       overrides: [
         notificationServiceProvider.overrideWithValue(service),
         medicationReminderLifecycleProvider.overrideWithValue(
@@ -423,7 +453,7 @@ void main() {
     });
     final service = _RecordingNotificationService();
     final cycleLifecycle = _RecordingCycleLifecycle();
-    final container = ProviderContainer(
+    final container = await _preparedContainer(
       overrides: [
         notificationServiceProvider.overrideWithValue(service),
         medicationReminderLifecycleProvider.overrideWithValue(
@@ -454,7 +484,7 @@ void main() {
     });
     final service = _RecordingNotificationService();
     final cycleLifecycle = _RecordingCycleLifecycle();
-    final container = ProviderContainer(
+    final container = await _preparedContainer(
       overrides: [
         notificationServiceProvider.overrideWithValue(service),
         medicationReminderLifecycleProvider.overrideWithValue(
@@ -498,7 +528,7 @@ void main() {
       sessionAuthority.clear();
       final operationEpoch = CycleReminderOperationEpoch();
       final generation = operationEpoch.snapshot('user-a');
-      final container = ProviderContainer(
+      final container = await _preparedContainer(
         overrides: [
           notificationServiceProvider.overrideWithValue(service),
           medicationReminderLifecycleProvider.overrideWithValue(

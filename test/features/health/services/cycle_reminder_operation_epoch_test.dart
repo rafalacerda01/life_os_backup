@@ -16,6 +16,7 @@ import 'package:life_os/features/health/services/cycle_reminder_session_authorit
 import 'package:life_os/features/health/services/cycle_reminder_session_cleanup.dart';
 import 'package:life_os/features/health/services/cycle_reminder_session_reconciler.dart';
 import 'package:life_os/features/health/services/medication_reminder_lifecycle.dart';
+import 'package:life_os/features/health/services/medication_reminder_session_reconciler.dart';
 import 'package:life_os/features/settings/presentation/providers/notification_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -497,6 +498,15 @@ void main() {
     final container = ProviderContainer(
       overrides: [
         notificationPreferencesStoreProvider.overrideWithValue(store),
+        medicationReminderSessionReconcilerProvider.overrideWith((ref) {
+          final reconciler = MedicationReminderSessionReconciler(
+            lifecycle: ref.watch(medicationReminderLifecycleProvider),
+            loadPreferences: store.load,
+            currentUserId: () => null,
+          );
+          ref.onDispose(reconciler.dispose);
+          return reconciler;
+        }),
         notificationServiceProvider.overrideWithValue(service),
         medicationReminderLifecycleProvider.overrideWithValue(
           _NoopMedicationLifecycle(),

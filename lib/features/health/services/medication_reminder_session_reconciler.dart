@@ -6,6 +6,14 @@ import 'package:life_os/core/utils/app_logger.dart';
 
 import 'medication_reminder_lifecycle.dart';
 
+class MedicationReminderSession {
+  const MedicationReminderSession._(this._owner, this._uid, this._generation);
+
+  final MedicationReminderSessionReconciler _owner;
+  final String _uid;
+  final int _generation;
+}
+
 class MedicationReminderSessionReconciler with WidgetsBindingObserver {
   factory MedicationReminderSessionReconciler({
     required MedicationReminderLifecycle lifecycle,
@@ -56,17 +64,40 @@ class MedicationReminderSessionReconciler with WidgetsBindingObserver {
 
   Future<void> drain() => _tail;
 
-  Future<void> reconcile() {
+  MedicationReminderSession? captureSession() {
     final uid = _preparedUid;
-    final generation = _generation;
-    bool isCurrent() =>
-        !_disposed &&
-        _preparedUid == uid &&
-        _generation == generation &&
-        _currentUserId() == uid;
+    if (uid == null || _disposed || _currentUserId() != uid) return null;
+    return MedicationReminderSession._(this, uid, _generation);
+  }
 
-    if (uid == null || !isCurrent()) return Future<void>.value();
-    if (_inFlight != null && _inFlightGeneration == generation) {
+  bool isCurrentSession(MedicationReminderSession? session) =>
+      session != null &&
+      identical(session._owner, this) &&
+      !_disposed &&
+      _preparedUid == session._uid &&
+      _generation == session._generation &&
+      _currentUserId() == session._uid;
+
+  // Explicit preference changes queue a fresh read, never reuse an older job.
+  Future<void> reconcileForSession(MedicationReminderSession? session) {
+    if (!isCurrentSession(session)) return Future<void>.value();
+    return _enqueue(session!, coalesce: false);
+  }
+
+  Future<void> reconcile() {
+    final session = captureSession();
+    if (session == null) return Future<void>.value();
+    return _enqueue(session, coalesce: true);
+  }
+
+  Future<void> _enqueue(
+    MedicationReminderSession session, {
+    required bool coalesce,
+  }) {
+    bool isCurrent() => isCurrentSession(session);
+    if (coalesce &&
+        _inFlight != null &&
+        _inFlightGeneration == session._generation) {
       return _inFlight!;
     }
 
@@ -100,7 +131,7 @@ class MedicationReminderSessionReconciler with WidgetsBindingObserver {
           }
         });
     _inFlight = operation;
-    _inFlightGeneration = generation;
+    _inFlightGeneration = session._generation;
     _tail = operation;
     return operation;
   }
