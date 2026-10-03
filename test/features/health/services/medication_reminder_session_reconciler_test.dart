@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:drift/drift.dart' show Value;
 import 'package:drift/native.dart';
 import 'package:flutter/widgets.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:life_os/core/database/app_database.dart';
 import 'package:life_os/core/services/notification_preferences.dart';
@@ -11,6 +12,11 @@ import 'package:life_os/features/health/services/medication_reminder_lifecycle.d
 import 'package:life_os/features/health/services/medication_reminder_session_reconciler.dart';
 
 class _Notifications extends NotificationService {
+  final pending = <PendingNotificationRequest>[];
+
+  @override
+  Future<List<PendingNotificationRequest>>
+  pendingNotificationRequests() async => List.of(pending);
   final scheduled = <int>[];
   final cancelled = <int>[];
   int permissionRequests = 0;
@@ -39,12 +45,15 @@ class _Notifications extends NotificationService {
     required DateTime scheduledDate,
     String? preferenceKey,
     bool repeatDaily = false,
+    String? payload,
   }) async {
     scheduled.add(id);
     concurrent += 1;
     if (concurrent > maximumConcurrent) maximumConcurrent = concurrent;
     try {
       await beforeSchedule?.call();
+      pending.removeWhere((request) => request.id == id);
+      pending.add(PendingNotificationRequest(id, title, body, payload));
       return true;
     } finally {
       concurrent -= 1;
@@ -52,7 +61,10 @@ class _Notifications extends NotificationService {
   }
 
   @override
-  Future<void> cancelNotification(int id) async => cancelled.add(id);
+  Future<void> cancelNotificationOrThrow(int id) async {
+    cancelled.add(id);
+    pending.removeWhere((request) => request.id == id);
+  }
 }
 
 void main() {
@@ -92,6 +104,7 @@ void main() {
       db,
       notifications,
       now: () => now,
+      loadPreferences: () async => preferences,
     );
     reconciler = MedicationReminderSessionReconciler(
       lifecycle: lifecycle,
@@ -123,10 +136,25 @@ void main() {
       await reconciler.onSessionPrepared('user-b');
       expect(preferenceReads, 0);
       await reconciler.onSessionPrepared('user-a');
-      expect(notifications.cancelled, [notificationIdForMedication('expired')]);
-      expect(notifications.scheduled, [notificationIdForMedication('active')]);
+      expect(
+        notifications.cancelled,
+        containsAll([
+          notificationIdForMedication('expired'),
+          notificationIdForMedication('active'),
+        ]),
+      );
+      expect(notifications.scheduled, [
+        notificationIdForMedicationOccurrence(
+          'active',
+          DateTime(2026, 8, 25, 21),
+        ),
+        notificationIdForMedicationOccurrence(
+          'active',
+          DateTime(2026, 8, 26, 21),
+        ),
+      ]);
       await reconciler.onSessionPrepared('user-a');
-      expect(notifications.scheduled, hasLength(1));
+      expect(notifications.scheduled, hasLength(2));
     },
   );
 
@@ -136,8 +164,13 @@ void main() {
     now = DateTime(2026, 8, 25, 22);
     binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
     await reconciler.drain();
-    expect(notifications.scheduled, [notificationIdForMedication('last-day')]);
-    expect(notifications.cancelled, [notificationIdForMedication('last-day')]);
+    final occurrence = notificationIdForMedicationOccurrence(
+      'last-day',
+      DateTime(2026, 8, 25, 21),
+    );
+    expect(notifications.scheduled, [occurrence]);
+    expect(notifications.cancelled, contains(occurrence));
+    expect(notifications.pending, isEmpty);
   });
 
   for (final disabled in ['all', 'medication']) {
@@ -172,7 +205,10 @@ void main() {
     binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
     await reconciler.drain();
     expect(notifications.scheduled, hasLength(1));
-    expect(notifications.cancelled, [notificationIdForMedication('active')]);
+    expect(
+      notifications.cancelled,
+      contains(notificationIdForMedication('active')),
+    );
   });
 
   test(
@@ -272,7 +308,11 @@ void main() {
       await drain;
       expect(drained, isTrue);
       expect(notifications.scheduled, [notificationIdForMedication('first')]);
-      expect(notifications.cancelled, [notificationIdForMedication('first')]);
+      expect(
+        notifications.cancelled,
+        contains(notificationIdForMedication('first')),
+      );
+      expect(notifications.pending, isEmpty);
       binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
       await reconciler.drain();
       expect(notifications.scheduled, hasLength(1));
@@ -296,7 +336,10 @@ void main() {
       release.complete();
       await old;
       await next;
-      expect(notifications.cancelled, [notificationIdForMedication('active')]);
+      expect(
+        notifications.cancelled,
+        contains(notificationIdForMedication('active')),
+      );
       expect(notifications.scheduled, hasLength(2));
       expect(notifications.maximumConcurrent, 1);
     },

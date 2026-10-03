@@ -53,8 +53,10 @@ class NotificationService {
     FlutterLocalNotificationsPlugin? notificationsPlugin,
     AndroidFlutterLocalNotificationsPlugin? androidPlugin,
     DeviceTimeZoneResolver? deviceTimeZoneResolver,
+    DateTime Function()? now,
     this.isAndroidOverride,
-  }) : _androidPluginOverride = androidPlugin,
+  }) : _now = now ?? DateTime.now,
+       _androidPluginOverride = androidPlugin,
        _deviceTimeZoneResolver =
            deviceTimeZoneResolver ?? _resolveDeviceTimeZone,
        _notificationsPlugin =
@@ -65,6 +67,7 @@ class NotificationService {
   final FlutterLocalNotificationsPlugin _notificationsPlugin;
   final AndroidFlutterLocalNotificationsPlugin? _androidPluginOverride;
   final DeviceTimeZoneResolver _deviceTimeZoneResolver;
+  final DateTime Function() _now;
   final bool? isAndroidOverride;
 
   bool _initialized = false;
@@ -286,6 +289,7 @@ class NotificationService {
     required DateTime scheduledDate,
     String? preferenceKey,
     bool repeatDaily = false,
+    String? payload,
   }) async {
     try {
       final medicationPreference =
@@ -301,15 +305,24 @@ class NotificationService {
             : AndroidScheduleMode.inexactAllowWhileIdle;
       }
 
-      final now = DateTime.now();
-      DateTime validDate = repeatDaily
+      final now = _now();
+      final validDate = repeatDaily
           ? nextDailyMedicationOccurrence(scheduledDate, now)
           : scheduledDate;
 
       if (!repeatDaily && validDate.isBefore(now)) {
-        validDate = validDate.add(const Duration(days: 1));
+        return false;
       }
       final location = await _resolveTimeZoneLocation();
+      if (!repeatDaily && validDate.isBefore(_now())) return false;
+      final nativeDate = _wallClockInLocation(validDate, location);
+      // A timezone's skipped civil day must not move a finite alarm past its bound.
+      if (!repeatDaily &&
+          (nativeDate.year != validDate.year ||
+              nativeDate.month != validDate.month ||
+              nativeDate.day != validDate.day)) {
+        return false;
+      }
 
       const AndroidNotificationDetails androidDetails =
           AndroidNotificationDetails(
@@ -329,12 +342,13 @@ class NotificationService {
         id: id,
         title: title,
         body: body,
-        scheduledDate: _wallClockInLocation(validDate, location),
+        scheduledDate: nativeDate,
         notificationDetails: notificationDetails,
 
         androidScheduleMode: scheduleMode,
 
         matchDateTimeComponents: repeatDaily ? DateTimeComponents.time : null,
+        payload: payload,
       );
 
       return true;
@@ -486,12 +500,20 @@ class NotificationService {
 
   Future<void> cancelNotification(int id) async {
     try {
-      await init();
-
-      await _notificationsPlugin.cancel(id: id);
+      await cancelNotificationOrThrow(id);
     } catch (_) {
       // Não propagar erro para o fluxo principal.
     }
+  }
+
+  Future<void> cancelNotificationOrThrow(int id) async {
+    await init();
+    await _notificationsPlugin.cancel(id: id);
+  }
+
+  Future<List<PendingNotificationRequest>> pendingNotificationRequests() async {
+    await init();
+    return _notificationsPlugin.pendingNotificationRequests();
   }
 
   // ---------------------------------------------------------------------------

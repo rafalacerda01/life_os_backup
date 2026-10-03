@@ -7,6 +7,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:drift/drift.dart' show Value;
 import 'package:drift/native.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:life_os/core/database/app_database.dart';
 import 'package:life_os/core/services/notification_preferences.dart';
@@ -196,6 +197,11 @@ class FakeSyncManager extends SyncManager {
 }
 
 class _RecordingNotificationService extends NotificationService {
+  final pendingRequests = <PendingNotificationRequest>[];
+
+  @override
+  Future<List<PendingNotificationRequest>>
+  pendingNotificationRequests() async => List.of(pendingRequests);
   bool notificationPermissionGranted = true;
   bool exactPermissionGranted = true;
   bool scheduleResult = true;
@@ -242,18 +248,24 @@ class _RecordingNotificationService extends NotificationService {
     required DateTime scheduledDate,
     String? preferenceKey,
     bool repeatDaily = false,
+    String? payload,
   }) async {
     scheduleCalls += 1;
     await beforeSchedule?.call();
+    if (scheduleResult) {
+      pendingRequests.removeWhere((request) => request.id == id);
+      pendingRequests.add(PendingNotificationRequest(id, title, body, payload));
+    }
     return scheduleResult;
   }
 
   @override
-  Future<void> cancelNotification(int id) async {
+  Future<void> cancelNotificationOrThrow(int id) async {
     cancelledIds.add(id);
     if (failCancelIds.contains(id)) {
       throw StateError('technical-cancel-marker');
     }
+    pendingRequests.removeWhere((request) => request.id == id);
   }
 }
 
@@ -263,6 +275,29 @@ class _MutableClock {
   _MutableClock(this.value);
 
   DateTime now() => value;
+}
+
+class _RecordingMedicationLifecycle implements MedicationReminderLifecycle {
+  int rebuildCalls = 0;
+  bool? authority;
+
+  @override
+  Future<void> cancelAllMedicationReminders({
+    bool Function()? shouldContinue,
+  }) async {}
+
+  @override
+  Future<MedicationReminderRebuildResult> rebuildMedicationReminders({
+    bool Function()? shouldContinue,
+  }) async {
+    rebuildCalls += 1;
+    authority = shouldContinue?.call();
+    return const MedicationReminderRebuildResult(
+      eligible: 0,
+      scheduled: 0,
+      failed: 0,
+    );
+  }
 }
 
 void main() {
@@ -387,6 +422,14 @@ void main() {
   }
 
   Future<void> seedMedication(String firestoreId) async {
+    notificationService.pendingRequests.add(
+      PendingNotificationRequest(
+        notificationIdForMedication(firestoreId),
+        'Hora do medicamento 💊',
+        'Está na hora de tomar: Local',
+        null,
+      ),
+    );
     await db
         .into(db.medications)
         .insert(
@@ -1568,6 +1611,51 @@ void main() {
     expect(syncManager.calls, 1);
   });
 
+  test('add/delete/sync usam exclusivamente o lifecycle injetado', () async {
+    final lifecycle = _RecordingMedicationLifecycle();
+    repository = HealthRepository(
+      notificationService,
+      firestore,
+      auth,
+      db,
+      syncManager,
+      now: clock.now,
+      medicationLifecycle: lifecycle,
+    );
+    await repository.addMedication('Test', DateTime(2026, 8, 25, 21), 2);
+    expect(lifecycle.rebuildCalls, 1);
+    expect(lifecycle.authority, isTrue);
+    final row = await db.select(db.medications).getSingle();
+    await repository.deleteMedication(row.firestoreId, row.id);
+    expect(lifecycle.rebuildCalls, 2);
+    await repository.syncHealthFromFirebase();
+    expect(lifecycle.rebuildCalls, 3);
+    expect(notificationService.scheduleCalls, 0);
+    expect(notificationService.cancelledIds, isEmpty);
+  });
+
+  test(
+    'delete após add finito remove todos os one-shots e preserva SyncQueue',
+    () async {
+      await repository.addMedication('Test', DateTime(2026, 8, 25, 21), 2);
+      final row = await db.select(db.medications).getSingle();
+      final ids = notificationService.pendingRequests
+          .map((request) => request.id)
+          .toSet();
+      expect(ids, hasLength(3));
+      expect(
+        notificationService.pendingRequests.map((request) => request.payload),
+        everyElement('$medicationReminderPayloadPrefix${row.firestoreId}'),
+      );
+      await repository.deleteMedication(row.firestoreId, row.id);
+      expect(notificationService.pendingRequests, isEmpty);
+      expect(notificationService.cancelledIds, containsAll(ids));
+      expect(await db.select(db.medications).get(), isEmpty);
+      final items = await db.getPendingSyncItems('user-123');
+      expect(items.map((item) => item.operationType), ['create', 'delete']);
+    },
+  );
+
   test('permissão normal negada preserva medicamento salvo', () async {
     notificationService.notificationPermissionGranted = false;
 
@@ -1675,6 +1763,14 @@ void main() {
     'deleteMedication mantém cancelamento individual pelo mesmo ID',
     () async {
       const firestoreId = 'medication-to-delete';
+      notificationService.pendingRequests.add(
+        PendingNotificationRequest(
+          notificationIdForMedication(firestoreId),
+          'Hora do medicamento 💊',
+          'Está na hora de tomar: Teste',
+          null,
+        ),
+      );
       final localId = await db
           .into(db.medications)
           .insert(
@@ -1796,13 +1892,13 @@ void main() {
         expect(row.startDate, start);
         expect(row.durationDays, scenario.duration);
         expect(row.endDate, scenario.end);
-        expect(notificationService.scheduleCalls, scenario.scheduled ? 1 : 0);
         expect(
-          notificationService.cancelledIds,
-          scenario.scheduled
-              ? <int>[]
-              : [notificationIdForMedication('remote-med')],
+          notificationService.scheduleCalls,
+          scenario.scheduled ? (scenario.name == 'ativo' ? 2 : 1) : 0,
         );
+        expect(notificationService.cancelledIds, [
+          notificationIdForMedication('remote-med'),
+        ]);
         expect(notificationService.notificationPermissionRequests, 0);
         expect(notificationService.exactPermissionRequests, 0);
         expect(await db.getPendingSyncItems('user-123'), isEmpty);
@@ -1861,6 +1957,8 @@ void main() {
       expect(notificationService.scheduleCalls, 1);
       expect(notificationService.cancelledIds, [
         notificationIdForMedication('first'),
+        notificationIdForMedication('expired'),
+        notificationIdForMedication('first'),
       ]);
     },
   );
@@ -1882,7 +1980,7 @@ void main() {
 
     final medication = await db.select(db.medications).getSingle();
     expect(medication.startDate, DateTime(2026, 8, 25, 21));
-    expect(notificationService.scheduleCalls, 1);
+    expect(notificationService.scheduleCalls, 8);
     expect(notificationService.exactPermissionRequests, 0);
   });
 
@@ -1917,7 +2015,10 @@ void main() {
     await repository.syncHealthFromFirebase();
 
     expect(await db.select(db.medications).get(), hasLength(1));
-    expect(notificationService.cancelledIds, isEmpty);
+    expect(
+      notificationService.pendingRequests.single.payload,
+      '${medicationReminderPayloadPrefix}med-1',
+    );
   });
 
   test('sucesso criado durante GET protege medicamento ausente', () async {
@@ -1937,7 +2038,10 @@ void main() {
     await pull;
 
     expect(await db.select(db.medications).get(), hasLength(1));
-    expect(notificationService.cancelledIds, isEmpty);
+    expect(
+      notificationService.pendingRequests.single.payload,
+      '${medicationReminderPayloadPrefix}med-1',
+    );
   });
 
   test('sucesso antigo não protege medicamento remoto ausente', () async {
@@ -1966,7 +2070,10 @@ void main() {
     await repository.syncHealthFromFirebase();
 
     expect(await db.select(db.medications).get(), hasLength(1));
-    expect(notificationService.cancelledIds, isEmpty);
+    expect(
+      notificationService.pendingRequests.single.payload,
+      '${medicationReminderPayloadPrefix}med-1',
+    );
   });
 
   test(
@@ -1996,7 +2103,10 @@ void main() {
     await repository.syncHealthFromFirebase();
 
     expect(await db.select(db.medications).get(), hasLength(1));
-    expect(notificationService.cancelledIds, isEmpty);
+    expect(
+      notificationService.pendingRequests.single.payload,
+      '${medicationReminderPayloadPrefix}pending',
+    );
   });
 
   test('falha no cancelamento não interrompe outros medicamentos', () async {

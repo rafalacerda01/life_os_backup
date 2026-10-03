@@ -30,6 +30,7 @@ class HealthRepository {
   final SyncManager _syncManager;
   final DateTime Function() _now;
   final Future<void> Function()? _beforeCycleSyncEnqueue;
+  final MedicationReminderLifecycle _medicationLifecycle;
 
   final Uuid _uuid = const Uuid();
 
@@ -41,6 +42,7 @@ class HealthRepository {
     SyncManager syncManager, {
     DateTime Function()? now,
     Future<void> Function()? beforeCycleSyncEnqueue,
+    MedicationReminderLifecycle? medicationLifecycle,
   }) : this._(
          notifService,
          firestore,
@@ -49,6 +51,8 @@ class HealthRepository {
          syncManager,
          now ?? DateTime.now,
          beforeCycleSyncEnqueue,
+         medicationLifecycle ??
+             MedicationReminderLifecycleService(db, notifService, now: now),
        );
 
   HealthRepository._(
@@ -59,7 +63,19 @@ class HealthRepository {
     this._syncManager,
     this._now,
     this._beforeCycleSyncEnqueue,
+    this._medicationLifecycle,
   );
+
+  Future<void> _rebuildMedicationReminders(String userId) async {
+    if (!_isCurrentUser(userId)) return;
+    try {
+      await _medicationLifecycle.rebuildMedicationReminders(
+        shouldContinue: () => _isCurrentUser(userId),
+      );
+    } catch (_) {
+      AppLogger.w('Falha ao reconciliar lembretes locais de medicamentos.');
+    }
+  }
 
   // ===========================================================================
   // CONSTANTES
@@ -516,9 +532,7 @@ class HealthRepository {
           durationDays: durationDays,
           now: _now(),
         )) {
-          await _notifService.cancelNotification(
-            notificationIdForMedication(firestoreId),
-          );
+          await _rebuildMedicationReminders(userId);
           return;
         }
         final permissionGranted = await _notifService.requestPermissions(
@@ -542,33 +556,11 @@ class HealthRepository {
           durationDays: durationDays,
           now: _now(),
         )) {
-          await _notifService.cancelNotification(
-            notificationIdForMedication(firestoreId),
-          );
+          await _rebuildMedicationReminders(userId);
           return;
         }
 
-        final scheduled = await _notifService.scheduleMedicationNotification(
-          id: notificationIdForMedication(firestoreId),
-          title: 'Hora do medicamento 💊',
-          body: 'Está na hora de tomar: $cleanName',
-          scheduledDate: startDate,
-          repeatDaily: true,
-          preferenceKey: NotificationPreferenceKeys.medicationReminders,
-        );
-
-        if (!_isCurrentUser(userId)) {
-          await _notifService.cancelNotification(
-            notificationIdForMedication(firestoreId),
-          );
-          return;
-        }
-
-        if (scheduled) {
-          AppLogger.i('Lembrete de medicamento agendado com sucesso.');
-        } else {
-          AppLogger.w('Medicamento salvo sem lembrete local agendado.');
-        }
+        await _rebuildMedicationReminders(userId);
       } catch (_) {
         AppLogger.w('Medicamento salvo sem lembrete local agendado.');
       }
@@ -619,20 +611,9 @@ class HealthRepository {
       }
 
       try {
-        if (cleanDocId.isNotEmpty) {
-          await _notifService.cancelNotification(
-            notificationIdForMedication(cleanDocId),
-          );
-
-          AppLogger.i('Notificação de medicamento cancelada.');
-        }
-      } catch (e, stack) {
-        AppLogger.e(
-          'Medicamento removido, mas não foi possível '
-          'cancelar a notificação.',
-          e,
-          stack,
-        );
+        await _rebuildMedicationReminders(userId);
+      } catch (_) {
+        AppLogger.w('Medicamento removido sem reconciliação dos lembretes.');
       }
     } catch (e, stack) {
       AppLogger.e('Erro ao excluir medicamento.', e, stack);
@@ -967,18 +948,6 @@ class HealthRepository {
       final remoteMedicationIds = medsSnapshot.docs
           .map((doc) => doc.id)
           .toSet();
-      final remindersToSchedule =
-          <
-            ({
-              String id,
-              String name,
-              DateTime startDate,
-              DateTime? endDate,
-              int? durationDays,
-            })
-          >[];
-      final remindersToCancel = <String>[];
-
       await _db.transaction(admission: ticket, waitForReopen: false, () async {
         _requireCurrentUser(userId);
         final authoritativeItems =
@@ -1004,11 +973,7 @@ class HealthRepository {
         for (final doc in medsSnapshot.docs) {
           _requireCurrentUser(userId);
           if (protectedMedicationIds.contains(doc.id)) continue;
-          final reminder = await _syncMedicationDocument(
-            doc: doc,
-            expectedUid: userId,
-          );
-          if (reminder != null) remindersToSchedule.add(reminder);
+          await _syncMedicationDocument(doc: doc, expectedUid: userId);
         }
 
         final localMedications = await _db.select(_db.medications).get();
@@ -1027,60 +992,10 @@ class HealthRepository {
             _db.medications,
           )..where((table) => table.id.equals(medication.id))).go();
           _requireCurrentUser(userId);
-          remindersToCancel.add(id);
         }
       });
 
-      for (final id in remindersToCancel) {
-        if (!_isCurrentUser(userId)) return;
-        try {
-          await _notifService.cancelNotification(
-            notificationIdForMedication(id),
-          );
-        } catch (_) {
-          AppLogger.w(
-            'Lembrete de medicamento removido não pôde ser cancelado.',
-          );
-        }
-      }
-
-      for (final reminder in remindersToSchedule) {
-        if (!_isCurrentUser(userId)) return;
-        try {
-          if (!isMedicationReminderEligible(
-            startDate: reminder.startDate,
-            endDate: reminder.endDate,
-            durationDays: reminder.durationDays,
-            now: _now(),
-          )) {
-            await _notifService.cancelNotification(
-              notificationIdForMedication(reminder.id),
-            );
-            continue;
-          }
-          final scheduled = await _notifService.scheduleMedicationNotification(
-            id: notificationIdForMedication(reminder.id),
-            title: 'Hora do medicamento 💊',
-            body: 'Está na hora de tomar: ${reminder.name}',
-            scheduledDate: reminder.startDate,
-            repeatDaily: true,
-            preferenceKey: NotificationPreferenceKeys.medicationReminders,
-          );
-          if (!_isCurrentUser(userId)) {
-            await _notifService.cancelNotification(
-              notificationIdForMedication(reminder.id),
-            );
-            return;
-          }
-          if (!scheduled) {
-            AppLogger.w(
-              'Medicamento sincronizado sem lembrete local agendado.',
-            );
-          }
-        } catch (_) {
-          AppLogger.w('Medicamento sincronizado sem lembrete local agendado.');
-        }
-      }
+      await _rebuildMedicationReminders(userId);
 
       _requireCurrentUser(userId);
       final healthPullStartedAt = DateTime.now().millisecondsSinceEpoch;

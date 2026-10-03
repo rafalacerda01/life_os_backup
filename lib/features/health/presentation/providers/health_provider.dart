@@ -10,6 +10,7 @@ import 'package:life_os/core/services/notification_service.dart';
 import 'package:life_os/core/services/sync_manager_provider.dart';
 import 'package:life_os/features/health/data/models/health_model.dart';
 import 'package:life_os/features/health/data/repositories/health_repository.dart';
+import 'package:life_os/features/settings/presentation/providers/notification_provider.dart';
 
 // ===========================================================================
 // REPOSITORY
@@ -37,6 +38,7 @@ final healthRepositoryProvider = Provider<HealthRepository>((ref) {
     db,
     ref.watch(syncManagerProvider),
     now: ref.watch(healthDayClockProvider),
+    medicationLifecycle: ref.watch(medicationReminderLifecycleProvider),
   );
 });
 

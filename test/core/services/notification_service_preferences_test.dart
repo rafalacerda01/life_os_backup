@@ -1,9 +1,13 @@
 import 'dart:async';
 
+import 'package:drift/drift.dart' show Value;
+import 'package:drift/native.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:life_os/core/services/notification_preferences.dart';
 import 'package:life_os/core/services/notification_service.dart';
+import 'package:life_os/core/database/app_database.dart';
+import 'package:life_os/features/health/services/medication_reminder_lifecycle.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:timezone/timezone.dart';
 
@@ -27,6 +31,10 @@ class _RecordingNotificationsPlugin extends Fake
   int cancelAllCalls = 0;
   bool throwOnSchedule = false;
   bool throwOnCancelAll = false;
+  bool throwOnCancel = false;
+  bool throwOnPending = false;
+  final pending = <PendingNotificationRequest>[];
+  final scheduledDates = <TZDateTime>[];
   Future<bool?> Function(int call)? initializeHandler;
 
   @override
@@ -81,14 +89,25 @@ class _RecordingNotificationsPlugin extends Fake
     lastBody = body;
     lastPayload = payload;
     lastScheduledDate = scheduledDate;
+    scheduledDates.add(scheduledDate);
     if (throwOnSchedule) {
       throw StateError('private scheduling failure');
     }
+    pending.removeWhere((request) => request.id == id);
+    pending.add(PendingNotificationRequest(id, title, body, payload));
   }
 
   @override
   Future<void> cancel({required int id, String? tag}) async {
     cancelledIds.add(id);
+    if (throwOnCancel) throw StateError('private-cancel-marker');
+    pending.removeWhere((request) => request.id == id);
+  }
+
+  @override
+  Future<List<PendingNotificationRequest>> pendingNotificationRequests() async {
+    if (throwOnPending) throw StateError('private-pending-marker');
+    return List.of(pending);
   }
 
   @override
@@ -1062,6 +1081,182 @@ void main() {
     expect(oldHandlerCalls, 0);
     expect(plugin.initializeCalls, 1);
   });
+
+  for (final zone in ['America/Sao_Paulo', 'America/New_York']) {
+    test(
+      'one-shots V2 preservam wall-clock ao avançar calendário em $zone',
+      () async {
+        final plugin = _RecordingNotificationsPlugin();
+        final service = NotificationService(
+          notificationsPlugin: plugin,
+          deviceTimeZoneResolver: _timeZoneResolver(zone),
+          isAndroidOverride: false,
+          now: () => DateTime(2030, 3, 8),
+        );
+        for (var day = 9; day <= 10; day++) {
+          expect(
+            await service.scheduleMedicationNotification(
+              id: day,
+              title: 'Test',
+              body: 'Test',
+              scheduledDate: DateTime(2030, 3, day, 21, 35),
+              repeatDaily: false,
+              payload: 'life_os_medication_v2:opaque-id',
+            ),
+            isTrue,
+          );
+        }
+        expect(plugin.lastDateTimeComponents, isNull);
+        expect(plugin.lastPayload, 'life_os_medication_v2:opaque-id');
+        expect(plugin.scheduledDates.map((date) => date.hour), [21, 21]);
+        expect(plugin.scheduledDates.map((date) => date.minute), [35, 35]);
+        expect(plugin.scheduledDates.map((date) => date.day), [9, 10]);
+        expect(
+          plugin.scheduledDates.map((date) => date.location.name),
+          everyElement(zone),
+        );
+        expect(
+          plugin.scheduledDates.last
+              .difference(plugin.scheduledDates.first)
+              .inHours,
+          zone == 'America/New_York' ? 23 : 24,
+        );
+      },
+    );
+  }
+
+  test(
+    'lifecycle real materializa finitos no plugin sem recurrence e respeita end bound',
+    () async {
+      final db = AppDatabase(executor: NativeDatabase.memory());
+      addTearDown(db.closeDatabase);
+      await db
+          .into(db.medications)
+          .insert(
+            MedicationsCompanion.insert(
+              firestoreId: 'finite',
+              name: 'Test',
+              startDate: DateTime(2030, 3, 9, 21, 35),
+              endDate: Value(DateTime(2030, 3, 11)),
+            ),
+          );
+      final plugin = _RecordingNotificationsPlugin()
+        ..pending.add(
+          PendingNotificationRequest(
+            notificationIdForMedication('finite'),
+            'Hora do medicamento 💊',
+            'Está na hora de tomar: Test',
+            null,
+          ),
+        );
+      final clock = DateTime(2030, 3, 9, 12);
+      final service = NotificationService(
+        notificationsPlugin: plugin,
+        deviceTimeZoneResolver: _timeZoneResolver('America/New_York'),
+        isAndroidOverride: false,
+        now: () => clock,
+      );
+      final lifecycle = MedicationReminderLifecycleService(
+        db,
+        service,
+        now: () => clock,
+      );
+      final result = await lifecycle.rebuildMedicationReminders();
+      expect(result.failed, 0);
+      expect(result.scheduled, 3);
+      expect(plugin.scheduleCalls, 3);
+      expect(plugin.lastDateTimeComponents, isNull);
+      expect(plugin.scheduledDates.map((date) => date.day), [9, 10, 11]);
+      expect(plugin.scheduledDates.map((date) => date.hour), everyElement(21));
+      expect(
+        plugin.scheduledDates[1].difference(plugin.scheduledDates[0]).inHours,
+        23,
+      );
+      expect(plugin.pending, hasLength(3));
+      expect(
+        plugin.pending.map((request) => request.payload),
+        everyElement('${medicationReminderPayloadPrefix}finite'),
+      );
+      expect(
+        plugin.cancelledIds,
+        contains(notificationIdForMedication('finite')),
+      );
+      expect(plugin.cancelAllCalls, 0);
+    },
+  );
+
+  test(
+    'timezone com dia civil inexistente não desloca one-shot para o dia seguinte',
+    () async {
+      final plugin = _RecordingNotificationsPlugin();
+      final service = NotificationService(
+        notificationsPlugin: plugin,
+        deviceTimeZoneResolver: _timeZoneResolver('Pacific/Apia'),
+        isAndroidOverride: false,
+        now: () => DateTime(2011, 12, 29),
+      );
+      expect(
+        await service.scheduleMedicationNotification(
+          id: 1,
+          title: 'Test',
+          body: 'Test',
+          scheduledDate: DateTime(2011, 12, 30, 21),
+        ),
+        isFalse,
+      );
+      expect(plugin.scheduleCalls, 0);
+    },
+  );
+
+  test('one-shot vencido não é deslocado para amanhã', () async {
+    final plugin = _RecordingNotificationsPlugin();
+    final service = NotificationService(
+      notificationsPlugin: plugin,
+      deviceTimeZoneResolver: _timeZoneResolver('UTC'),
+      isAndroidOverride: false,
+      now: () => DateTime(2030, 3, 10, 22),
+    );
+    expect(
+      await service.scheduleMedicationNotification(
+        id: 1,
+        title: 'Test',
+        body: 'Test',
+        scheduledDate: DateTime(2030, 3, 10, 21),
+      ),
+      isFalse,
+    );
+    expect(plugin.scheduleCalls, 0);
+  });
+
+  test('pending requests expõe inventário nativo e propaga falha', () async {
+    final plugin = _RecordingNotificationsPlugin()
+      ..pending.add(
+        const PendingNotificationRequest(
+          1,
+          'Test',
+          'Test',
+          'life_os_medication_v2:id',
+        ),
+      );
+    final service = NotificationService(notificationsPlugin: plugin);
+    expect((await service.pendingNotificationRequests()).single.id, 1);
+    plugin.throwOnPending = true;
+    await expectLater(service.pendingNotificationRequests(), throwsStateError);
+  });
+
+  test(
+    'cancelamento individual verificável propaga erro, wrapper continua best effort',
+    () async {
+      final plugin = _RecordingNotificationsPlugin()..throwOnCancel = true;
+      final service = NotificationService(notificationsPlugin: plugin);
+      await expectLater(service.cancelNotificationOrThrow(1), throwsStateError);
+      await expectLater(service.cancelNotification(1), completes);
+      expect(plugin.cancelledIds, [1, 1]);
+      plugin.throwOnCancel = false;
+      await expectLater(service.cancelNotificationOrThrow(2), completes);
+      expect(plugin.cancelledIds, [1, 1, 2]);
+    },
+  );
 
   test('launch details são expostos pelo owner do plugin', () async {
     const response = NotificationResponse(
