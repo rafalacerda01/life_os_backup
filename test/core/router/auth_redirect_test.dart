@@ -14,6 +14,39 @@ const _user = UserEntity(
 );
 
 void main() {
+  for (final authState in [const AuthInitial(), const AuthLoading()]) {
+    for (final location in ['/home', '/tasks', '/health/cycle', '/contact']) {
+      test('${authState.runtimeType} desvia $location para splash', () {
+        expect(
+          authRedirectFor(
+            authState: authState,
+            hasFirebaseUser: true,
+            location: location,
+          ),
+          '/splash',
+        );
+      });
+    }
+    for (final location in [
+      '/splash',
+      '/onboarding',
+      '/login',
+      '/register',
+      '/privacy-policy',
+    ]) {
+      test('${authState.runtimeType} preserva rota pública $location', () {
+        expect(
+          authRedirectFor(
+            authState: authState,
+            hasFirebaseUser: true,
+            location: location,
+          ),
+          isNull,
+        );
+      });
+    }
+  }
+
   test('usuário deslogado pode abrir a política', () {
     expect(
       authRedirectFor(

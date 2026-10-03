@@ -56,7 +56,7 @@ String? authRedirectFor({
     error: (_) => !hasFirebaseUser && !isAuthEntryRoute && !isPublicRoute
         ? '/splash'
         : null,
-    orElse: () => null,
+    orElse: () => !isAuthEntryRoute && !isPublicRoute ? '/splash' : null,
   );
 }
 

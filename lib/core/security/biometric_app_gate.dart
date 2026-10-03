@@ -19,12 +19,22 @@ class _BiometricAppGateState extends ConsumerState<BiometricAppGate>
   bool _signOutInProgress = false;
   bool _sessionWasAuthenticated = false;
   bool _lifecycleLocked = false;
+  bool _wasContentEligible = false;
   String? _authenticatedUid;
   AppLifecycleState? _lifecycleState;
   BiometricLockStatus? _lastBiometricStatus;
 
   bool get _isForeground =>
       _lifecycleState == null || _lifecycleState == AppLifecycleState.resumed;
+
+  bool get _hasPreviouslyConfirmedFirebaseSession =>
+      _sessionWasAuthenticated &&
+      _authenticatedUid != null &&
+      ref.read(firebaseAuthProvider).currentUser?.uid == _authenticatedUid;
+
+  bool _canRevealPrivateContent(AuthState authState) =>
+      authState is AuthAuthenticated ||
+      (authState is AuthError && _hasPreviouslyConfirmedFirebaseSession);
 
   @override
   void initState() {
@@ -46,7 +56,7 @@ class _BiometricAppGateState extends ConsumerState<BiometricAppGate>
     if (state == AppLifecycleState.inactive ||
         state == AppLifecycleState.paused ||
         state == AppLifecycleState.hidden) {
-      if (ref.read(authNotifierProvider) is AuthAuthenticated &&
+      if (_hasPreviouslyConfirmedFirebaseSession &&
           ref.read(biometricProvider).isEnabled) {
         _lifecycleLocked = true;
         ref.read(biometricProvider.notifier).lock();
@@ -61,7 +71,7 @@ class _BiometricAppGateState extends ConsumerState<BiometricAppGate>
     if (_authenticationRequestScheduled || !mounted) return;
     final authState = ref.read(authNotifierProvider);
     final biometricState = ref.read(biometricProvider);
-    if (authState is! AuthAuthenticated ||
+    if (!_canRevealPrivateContent(authState) ||
         !biometricState.isLocked ||
         biometricState.authenticationInProgress) {
       return;
@@ -71,7 +81,7 @@ class _BiometricAppGateState extends ConsumerState<BiometricAppGate>
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       try {
         if (mounted &&
-            ref.read(authNotifierProvider) is AuthAuthenticated &&
+            _canRevealPrivateContent(ref.read(authNotifierProvider)) &&
             ref.read(biometricProvider).isLocked) {
           final unlocked = await ref.read(biometricProvider.notifier).unlock();
           _handleUnlockResult(unlocked);
@@ -121,13 +131,21 @@ class _BiometricAppGateState extends ConsumerState<BiometricAppGate>
   Widget build(BuildContext context) {
     final authState = ref.watch(authNotifierProvider);
     final biometricState = ref.watch(biometricProvider);
+    final canRevealPrivateContent = _canRevealPrivateContent(authState);
+    final becameContentEligible =
+        canRevealPrivateContent && !_wasContentEligible;
+    _wasContentEligible = canRevealPrivateContent;
     final enteredLockedState =
         biometricState.isLocked &&
         _lastBiometricStatus != BiometricLockStatus.locked;
     _lastBiometricStatus = biometricState.status;
 
-    if (authState is AuthError &&
-        ref.read(firebaseAuthProvider).currentUser == null) {
+    if (authState is! AuthAuthenticated &&
+        authState is! AuthUnauthenticated &&
+        !canRevealPrivateContent &&
+        (authState is AuthError ||
+            _sessionWasAuthenticated ||
+            ref.read(firebaseAuthProvider).currentUser != null)) {
       return _BiometricLockScreen(
         loading: true,
         signOutInProgress: _signOutInProgress,
@@ -167,7 +185,8 @@ class _BiometricAppGateState extends ConsumerState<BiometricAppGate>
       return widget.child;
     }
 
-    if (enteredLockedState && _isForeground) {
+    if ((enteredLockedState || (becameContentEligible && _lifecycleLocked)) &&
+        _isForeground) {
       _scheduleUnlockIfNeeded();
     }
     return _BiometricLockScreen(

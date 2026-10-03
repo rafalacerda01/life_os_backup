@@ -31,6 +31,8 @@ class _StaticAuthNotifier extends AuthNotifier {
   @override
   AuthState build() => initialState;
 
+  void emit(AuthState next) => state = next;
+
   @override
   Future<void> logout() async {
     logoutCalls += 1;
@@ -38,15 +40,21 @@ class _StaticAuthNotifier extends AuthNotifier {
   }
 }
 
-class _FirebaseUser extends Fake implements User {}
+class _FirebaseUser extends Fake implements User {
+  _FirebaseUser(this.uid);
+
+  @override
+  final String uid;
+}
 
 class _FirebaseAuth extends Fake implements FirebaseAuth {
   _FirebaseAuth({required this.hasUser});
 
-  final bool hasUser;
+  bool hasUser;
+  String uid = 'test-user';
 
   @override
-  User? get currentUser => hasUser ? _FirebaseUser() : null;
+  User? get currentUser => hasUser ? _FirebaseUser(uid) : null;
 }
 
 class _FakeBiometricService extends BiometricService {
@@ -67,14 +75,16 @@ Widget _app({
   required _FakeBiometricService service,
   BiometricPreferencesLoader? preferencesLoader,
   bool? hasFirebaseUser,
+  FirebaseAuth? firebaseAuth,
 }) {
   return ProviderScope(
     overrides: [
       authNotifierProvider.overrideWith(() => _StaticAuthNotifier(authState)),
       firebaseAuthProvider.overrideWithValue(
-        _FirebaseAuth(
-          hasUser: hasFirebaseUser ?? authState is AuthAuthenticated,
-        ),
+        firebaseAuth ??
+            _FirebaseAuth(
+              hasUser: hasFirebaseUser ?? authState is AuthAuthenticated,
+            ),
       ),
       biometricServiceProvider.overrideWithValue(service),
       if (preferencesLoader != null)
@@ -100,6 +110,55 @@ void main() {
     TestWidgetsFlutterBinding.instance.handleAppLifecycleStateChanged(
       AppLifecycleState.resumed,
     );
+  });
+
+  for (final authState in [const AuthInitial(), const AuthLoading()]) {
+    testWidgets('${authState.runtimeType} with restored UID stays opaque', (
+      tester,
+    ) async {
+      final service = _FakeBiometricService();
+      await tester.pumpWidget(
+        _app(authState: authState, hasFirebaseUser: true, service: service),
+      );
+      await _pumpAsync(tester);
+      expect(find.text('Sensitive router content'), findsNothing);
+      expect(find.text('Protegendo sua sessão...'), findsOneWidget);
+      expect(service.calls, 0);
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('${authState.runtimeType} without Firebase keeps public flow', (
+      tester,
+    ) async {
+      final service = _FakeBiometricService();
+      await tester.pumpWidget(
+        _app(authState: authState, hasFirebaseUser: false, service: service),
+      );
+      await _pumpAsync(tester);
+      expect(find.text('Sensitive router content'), findsOneWidget);
+      expect(service.calls, 0);
+    });
+  }
+
+  testWidgets('cold AuthError with restored UID remains opaque', (
+    tester,
+  ) async {
+    final service = _FakeBiometricService();
+    await tester.pumpWidget(
+      _app(
+        authState: const AuthError('technical-preparation-error'),
+        hasFirebaseUser: true,
+        service: service,
+      ),
+    );
+    await _pumpAsync(tester);
+    expect(find.text('Sensitive router content'), findsNothing);
+    expect(find.text('Protegendo sua sessão...'), findsOneWidget);
+    expect(find.textContaining('technical-preparation-error'), findsNothing);
+    expect(find.text('Tentar novamente'), findsNothing);
+    expect(find.text('Encerrar sessão'), findsOneWidget);
+    expect(service.calls, 0);
+    expect(tester.takeException(), isNull);
   });
 
   testWidgets('unauthenticated flow is visible and never prompts biometrics', (
@@ -144,16 +203,243 @@ void main() {
     final service = _FakeBiometricService();
     await tester.pumpWidget(
       _app(
-        authState: AuthState.error('recoverable-operation-error'),
+        authState: AuthState.authenticated(_user),
         hasFirebaseUser: true,
         service: service,
       ),
     );
     await _pumpAsync(tester);
 
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(BiometricAppGate)),
+    );
+    (container.read(authNotifierProvider.notifier) as _StaticAuthNotifier).emit(
+      const AuthError('recoverable-operation-error'),
+    );
+    await _pumpAsync(tester);
+
     expect(find.text('Sensitive router content'), findsOneWidget);
     expect(service.calls, 0);
   });
+
+  testWidgets('post-auth error cannot retain a different Firebase UID', (
+    tester,
+  ) async {
+    final auth = _FirebaseAuth(hasUser: true);
+    final service = _FakeBiometricService();
+    await tester.pumpWidget(
+      _app(
+        authState: const AuthAuthenticated(_user),
+        firebaseAuth: auth,
+        service: service,
+      ),
+    );
+    await _pumpAsync(tester);
+    expect(find.text('Sensitive router content'), findsOneWidget);
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(BiometricAppGate)),
+    );
+    auth.uid = 'other-user';
+    (container.read(authNotifierProvider.notifier) as _StaticAuthNotifier).emit(
+      const AuthError('recoverable-operation-error'),
+    );
+    await _pumpAsync(tester);
+    expect(find.text('Sensitive router content'), findsNothing);
+    expect(service.calls, 0);
+  });
+
+  testWidgets('loading after authenticated stays opaque until resolved', (
+    tester,
+  ) async {
+    final service = _FakeBiometricService();
+    await tester.pumpWidget(
+      _app(authState: const AuthAuthenticated(_user), service: service),
+    );
+    await _pumpAsync(tester);
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(BiometricAppGate)),
+    );
+    final notifier =
+        container.read(authNotifierProvider.notifier) as _StaticAuthNotifier;
+    notifier.emit(const AuthLoading());
+    await _pumpAsync(tester);
+    expect(find.text('Sensitive router content'), findsNothing);
+    notifier.emit(const AuthUnauthenticated());
+    await _pumpAsync(tester);
+    expect(find.text('Sensitive router content'), findsOneWidget);
+    expect(service.calls, 0);
+  });
+
+  testWidgets('recoverable same-UID error still locks on background', (
+    tester,
+  ) async {
+    SharedPreferences.setMockInitialValues({
+      BiometricNotifier.storageKey: true,
+    });
+    final service = _FakeBiometricService()..results.add(true);
+    await tester.pumpWidget(
+      _app(authState: const AuthAuthenticated(_user), service: service),
+    );
+    await _pumpAsync(tester);
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(BiometricAppGate)),
+    );
+    (container.read(authNotifierProvider.notifier) as _StaticAuthNotifier).emit(
+      const AuthError('recoverable-operation-error'),
+    );
+    await _pumpAsync(tester);
+    expect(find.text('Sensitive router content'), findsOneWidget);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+    await _pumpAsync(tester);
+    expect(find.text('Sensitive router content'), findsNothing);
+    expect(container.read(biometricProvider).isLocked, isTrue);
+    service.results.add(true);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await _pumpAsync(tester);
+    expect(service.calls, 2);
+    expect(find.text('Sensitive router content'), findsOneWidget);
+  });
+
+  for (final resolvedState in [
+    const AuthError('recoverable-operation-error'),
+    const AuthAuthenticated(_user),
+  ]) {
+    testWidgets(
+      'background during AuthLoading requires new unlock before $resolvedState',
+      (tester) async {
+        SharedPreferences.setMockInitialValues({
+          BiometricNotifier.storageKey: true,
+        });
+        final service = _FakeBiometricService()..results.add(true);
+        await tester.pumpWidget(
+          _app(authState: const AuthAuthenticated(_user), service: service),
+        );
+        await _pumpAsync(tester);
+        final container = ProviderScope.containerOf(
+          tester.element(find.byType(BiometricAppGate)),
+        );
+        final notifier =
+            container.read(authNotifierProvider.notifier)
+                as _StaticAuthNotifier;
+        expect(service.calls, 1);
+        expect(find.text('Sensitive router content'), findsOneWidget);
+
+        notifier.emit(const AuthLoading());
+        await _pumpAsync(tester);
+        expect(find.text('Sensitive router content'), findsNothing);
+        tester.binding.handleAppLifecycleStateChanged(
+          AppLifecycleState.inactive,
+        );
+        tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+        await _pumpAsync(tester);
+        expect(container.read(biometricProvider).isLocked, isTrue);
+
+        tester.binding.handleAppLifecycleStateChanged(
+          AppLifecycleState.resumed,
+        );
+        await _pumpAsync(tester);
+        expect(find.text('Sensitive router content'), findsNothing);
+        expect(service.calls, 1);
+
+        final pending = Completer<bool>();
+        service.pending = pending;
+        notifier.emit(resolvedState);
+        await _pumpAsync(tester);
+        expect(service.calls, 2);
+        expect(container.read(biometricProvider).isLocked, isTrue);
+        expect(find.text('Sensitive router content'), findsNothing);
+        await tester.pump();
+        expect(service.calls, 2);
+
+        pending.complete(true);
+        await _pumpAsync(tester);
+        expect(find.text('Sensitive router content'), findsOneWidget);
+        expect(service.calls, 2);
+        expect(tester.takeException(), isNull);
+      },
+    );
+  }
+
+  testWidgets('failed unlock after AuthLoading does not loop prompts', (
+    tester,
+  ) async {
+    SharedPreferences.setMockInitialValues({
+      BiometricNotifier.storageKey: true,
+    });
+    final service = _FakeBiometricService()
+      ..results.addAll([true, false, true]);
+    await tester.pumpWidget(
+      _app(authState: const AuthAuthenticated(_user), service: service),
+    );
+    await _pumpAsync(tester);
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(BiometricAppGate)),
+    );
+    final notifier =
+        container.read(authNotifierProvider.notifier) as _StaticAuthNotifier;
+    notifier.emit(const AuthLoading());
+    await _pumpAsync(tester);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await _pumpAsync(tester);
+    notifier.emit(const AuthAuthenticated(_user));
+    await _pumpAsync(tester);
+    expect(service.calls, 2);
+    expect(container.read(biometricProvider).isLocked, isTrue);
+    expect(find.text('Sensitive router content'), findsNothing);
+    await _pumpAsync(tester);
+    await _pumpAsync(tester);
+    expect(service.calls, 2);
+    await tester.tap(find.text('Tentar novamente'));
+    await _pumpAsync(tester);
+    expect(service.calls, 3);
+    expect(find.text('Sensitive router content'), findsOneWidget);
+  });
+
+  for (final nextUid in ['other-user', null]) {
+    testWidgets('AuthLoading does not retain confirmed session for $nextUid', (
+      tester,
+    ) async {
+      SharedPreferences.setMockInitialValues({
+        BiometricNotifier.storageKey: true,
+      });
+      final auth = _FirebaseAuth(hasUser: true);
+      final service = _FakeBiometricService()..results.add(true);
+      await tester.pumpWidget(
+        _app(
+          authState: const AuthAuthenticated(_user),
+          firebaseAuth: auth,
+          service: service,
+        ),
+      );
+      await _pumpAsync(tester);
+      expect(find.text('Sensitive router content'), findsOneWidget);
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(BiometricAppGate)),
+      );
+      final notifier =
+          container.read(authNotifierProvider.notifier) as _StaticAuthNotifier;
+      auth.hasUser = nextUid != null;
+      if (nextUid != null) auth.uid = nextUid;
+      notifier.emit(const AuthLoading());
+      await _pumpAsync(tester);
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+      await _pumpAsync(tester);
+      expect(
+        container.read(biometricProvider).status,
+        BiometricLockStatus.unlocked,
+      );
+      expect(find.text('Sensitive router content'), findsNothing);
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+      notifier.emit(const AuthError('recoverable-operation-error'));
+      await _pumpAsync(tester);
+      expect(find.text('Sensitive router content'), findsNothing);
+      expect(service.calls, 1);
+    });
+  }
 
   testWidgets('authenticated preference loading is opaque and fail-closed', (
     tester,
