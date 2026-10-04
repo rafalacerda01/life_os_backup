@@ -28,12 +28,17 @@ class _Lease {
 
 /// One admission covers the entire logical write, not individual SQL statements.
 class LocalMutationGate {
+  LocalMutationGate({this.ownerUid});
+
+  final String? ownerUid;
+  static final Object _producerZoneKey = Object();
   final Object _zoneKey = Object();
   String? Function()? _currentUserId;
   String? _observedUserId;
   int _generation = 0;
   int _active = 0;
   bool _sealed = false;
+  bool _detaching = false;
   LocalMutationQuiescence? _quiescence;
   Completer<void>? _idle;
 
@@ -51,7 +56,7 @@ class LocalMutationGate {
 
   LocalMutationTicket capture({String? expectedUid}) {
     if (_currentUserId != null) observeSession(_currentUserId!());
-    final inherited = Zone.current[_zoneKey] as _Lease?;
+    final inherited = Zone.current[_producerZoneKey] as _Lease?;
     final ticket =
         inherited?.ticket ??
         LocalMutationTicket._(
@@ -71,6 +76,7 @@ class LocalMutationGate {
   void _validate(LocalMutationTicket ticket) {
     if (_currentUserId != null) observeSession(_currentUserId!());
     if (!identical(ticket._gate, this) ||
+        _detaching ||
         ticket._generation != _generation ||
         (_currentUserId != null && _currentUserId!() != ticket._uid)) {
       throw const LocalMutationUnavailable();
@@ -110,7 +116,10 @@ class LocalMutationGate {
     final lease = _Lease(ticket, system: system);
     _active++;
     try {
-      return await runZoned(action, zoneValues: {_zoneKey: lease});
+      return await runZoned(
+        action,
+        zoneValues: {_zoneKey: lease, _producerZoneKey: lease},
+      );
     } finally {
       lease.active = false;
       if (--_active == 0) {
@@ -153,6 +162,25 @@ class LocalMutationGate {
     }
   }
 
+  Future<T> read<T>(Future<T> Function() action) async {
+    final inherited = Zone.current[_producerZoneKey] as _Lease?;
+    void validateRead() {
+      if (inherited != null) {
+        _validate(inherited.ticket);
+      } else if (_detaching ||
+          (ownerUid != null &&
+              _currentUserId != null &&
+              _currentUserId!() != ownerUid)) {
+        throw const LocalMutationUnavailable();
+      }
+    }
+
+    validateRead();
+    final result = await action();
+    validateRead();
+    return result;
+  }
+
   LocalMutationQuiescence beginQuiesce(String expectedUid) {
     if (_currentUserId != null) observeSession(_currentUserId!());
     if (_sealed ||
@@ -182,6 +210,21 @@ class LocalMutationGate {
     if (_quiescence != null) throw const LocalMutationUnavailable();
     _validate(admission ?? capture());
     _sealed = false;
+  }
+
+  /// Definitive detach: invalidate admitted producers even after Auth changed.
+  Future<void> sealAndDrainForDetach() async {
+    if (!_detaching) {
+      _detaching = true;
+      _sealed = true;
+      _generation++;
+      final quiescence = _quiescence;
+      _quiescence = null;
+      if (quiescence != null && !quiescence._finished.isCompleted) {
+        quiescence._finished.complete();
+      }
+    }
+    if (_active != 0) await (_idle ??= Completer<void>()).future;
   }
 }
 
@@ -240,6 +283,13 @@ class LocalMutationInterceptor extends QueryInterceptor {
   LocalMutationInterceptor(this.gate);
 
   final LocalMutationGate gate;
+
+  @override
+  Future<List<Map<String, Object?>>> runSelect(
+    QueryExecutor executor,
+    String statement,
+    List<Object?> args,
+  ) => gate.read(() => executor.runSelect(statement, args));
 
   @override
   Future<bool> ensureOpen(QueryExecutor executor, QueryExecutorUser user) =>

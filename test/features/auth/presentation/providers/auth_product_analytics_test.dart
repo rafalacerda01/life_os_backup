@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:life_os/core/database/database_provider.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -19,6 +20,7 @@ import 'package:life_os/features/settings/presentation/providers/analytics_provi
 import 'package:multiple_result/multiple_result.dart';
 
 import '../../../../helpers/recording_analytics_platform.dart';
+import '../../../../helpers/test_user_database_factory.dart';
 
 const _user = UserEntity(
   uid: 'user-a',
@@ -209,9 +211,11 @@ class _Harness {
     required this.repository,
     required this.analytics,
     required this.syncManager,
+    required this.databaseFactory,
   }) : container = ProviderContainer(
          overrides: [
            firebaseAuthProvider.overrideWithValue(auth),
+           userDatabaseFactoryProvider.overrideWithValue(databaseFactory),
            authRepositoryProvider.overrideWithValue(repository),
            secureStorageProvider.overrideWithValue(_SecureStorage()),
            authCleanupBarrierProvider.overrideWithValue(_CleanupBarrier()),
@@ -233,13 +237,17 @@ class _Harness {
   final RecordingAnalyticsPlatform analytics;
   final _SyncManager syncManager;
   final ProviderContainer container;
+  final TestUserDatabaseFactory databaseFactory;
 
   AuthNotifier get notifier => container.read(authNotifierProvider.notifier);
   AuthState get state => container.read(authNotifierProvider);
 
-  void dispose() {
+  Future<void> dispose() async {
+    final databases = container.read(sessionDatabaseCoordinatorProvider);
     container.dispose();
-    unawaited(auth.close());
+    await databases.dispose();
+    await databaseFactory.dispose();
+    await auth.close();
   }
 }
 
@@ -253,6 +261,7 @@ _Harness _harness({bool restoreSession = false}) {
     repository: _AuthRepository(auth, restoreSession: restoreSession),
     analytics: analytics,
     syncManager: syncManager,
+    databaseFactory: TestUserDatabaseFactory(),
   );
   addTearDown(harness.dispose);
   return harness;

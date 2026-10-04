@@ -25,6 +25,15 @@ class UserDatabaseFactory {
   Future<AppDatabase> open(LocalDatabaseIdentity identity) async {
     final directory = await _directoryProvider();
     final file = identity.fileIn(directory);
+    if (!await file.exists() &&
+        !await File('${file.path}.plaintext-backup').exists() &&
+        !await File('${file.path}.encryption-candidate').exists()) {
+      for (final suffix in const ['-wal', '-shm', '-journal']) {
+        if (await File('${file.path}$suffix').exists()) {
+          throw StateError('USER_DATABASE_ORPHAN_SIDECAR');
+        }
+      }
+    }
     var alreadyExists = false;
     for (final suffix in const [
       '',

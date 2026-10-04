@@ -20,6 +20,39 @@ class _Lifecycle extends Fake implements CycleReminderNotificationLifecycle {
 
 void main() {
   test(
+    'session exit drains mutations and preserves preferences by default',
+    () async {
+      final events = <String>[];
+      final gate = CycleReminderMutationGate();
+      final started = Completer<void>();
+      final release = Completer<void>();
+      var preferenceExists = false;
+      final mutation = gate.run('user-a', () async {
+        started.complete();
+        await release.future;
+        preferenceExists = true;
+      });
+      await started.future;
+      final cleanup = CycleReminderSessionCleanup(
+        gate,
+        _Lifecycle(events),
+        rotateActionToken: (uid) async => events.add('rotate:$uid'),
+        deletePreferences: (_) async {
+          preferenceExists = false;
+          fail('Session exit must not delete preferences');
+        },
+      );
+      final pending = cleanup.cancelAfterCurrentMutations('user-a');
+      expect(events, isEmpty);
+      release.complete();
+      await mutation;
+      expect(await pending, 0);
+      expect(preferenceExists, isTrue);
+      expect(events, ['rotate:user-a', 'cancel:user-a']);
+    },
+  );
+
+  test(
     'cleanup aguarda mutação anterior e exclui preferência sem recriação stale',
     () async {
       const userId = 'user-a';
@@ -50,7 +83,10 @@ void main() {
         },
       );
 
-      final pendingCleanup = cleanup.cancelAfterCurrentMutations(userId);
+      final pendingCleanup = cleanup.cancelAfterCurrentMutations(
+        userId,
+        intent: CycleReminderCleanupIntent.accountDeletion,
+      );
       expect(events, <String>['save-start:$userId']);
       allowMutation.complete();
 
@@ -85,7 +121,10 @@ void main() {
       );
 
       await expectLater(
-        cleanup.cancelAfterCurrentMutations(userId),
+        cleanup.cancelAfterCurrentMutations(
+          userId,
+          intent: CycleReminderCleanupIntent.accountDeletion,
+        ),
         throwsStateError,
       );
       expect(events, <String>[

@@ -48,7 +48,7 @@ class AppDatabase extends _$AppDatabase {
   AppDatabase.forUser({
     required LocalDatabaseIdentity identity,
     required QueryExecutor executor,
-  }) : this._(executor, LocalMutationGate(), identity);
+  }) : this._(executor, LocalMutationGate(ownerUid: identity.uid), identity);
 
   AppDatabase._(QueryExecutor executor, this.localMutations, this.identity)
     : super(executor.interceptWith(LocalMutationInterceptor(localMutations)));

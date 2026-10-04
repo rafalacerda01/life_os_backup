@@ -1,7 +1,10 @@
 import 'dart:async';
 
+import 'package:drift/native.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:life_os/core/database/app_database.dart';
+import 'package:life_os/core/database/database_provider.dart';
 import 'package:life_os/core/services/sync_manager.dart';
 import 'package:life_os/core/services/sync_manager_provider.dart';
 import 'package:life_os/features/focus/data/remote/focus_remote_data_source.dart';
@@ -235,9 +238,12 @@ void main() {
     remoteDataSource = _FakeFocusRemoteDataSource();
     syncManager = _RecordingSyncManager();
     analytics = RecordingAnalyticsPlatform();
+    final database = AppDatabase(executor: NativeDatabase.memory());
+    addTearDown(database.close);
 
     container = ProviderContainer(
       overrides: [
+        databaseProvider.overrideWithValue(database),
         focusRepositoryProvider.overrideWithValue(focusRepository),
         syncManagerProvider.overrideWithValue(syncManager),
         tasksRepositoryProvider.overrideWithValue(tasksRepository),

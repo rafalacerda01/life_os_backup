@@ -3,14 +3,19 @@ import 'package:life_os/core/database/database_provider.dart';
 import 'package:life_os/core/database/local_mutation_gate.dart';
 
 class CycleReminderMutationGate {
-  CycleReminderMutationGate([this._localMutations]);
+  CycleReminderMutationGate([this._localMutations])
+    : _localMutationReader = null;
+
+  CycleReminderMutationGate.withReader(this._localMutationReader)
+    : _localMutations = null;
 
   final LocalMutationGate? _localMutations;
+  final LocalMutationGate Function()? _localMutationReader;
   final Map<String, Future<void>> _tails = <String, Future<void>>{};
 
   Future<T> run<T>(String userId, Future<T> Function() operation) async {
     final normalizedUserId = _normalizeUserId(userId);
-    final localMutations = _localMutations;
+    final localMutations = _localMutationReader?.call() ?? _localMutations;
     if (localMutations == null) return _serialize(normalizedUserId, operation);
     final ticket = localMutations.capture(expectedUid: normalizedUserId);
     // Admission must precede the feature tail awaited by Auth cleanup.
@@ -51,5 +56,9 @@ class CycleReminderMutationGate {
 final cycleReminderMutationGateProvider = Provider<CycleReminderMutationGate>((
   ref,
 ) {
-  return CycleReminderMutationGate(ref.watch(databaseProvider).localMutations);
+  // Bootstrap/cleanup exists before any database is prepared. Resolve only
+  // when admitting a session-bound action; the cleanup tail stays stable.
+  return CycleReminderMutationGate.withReader(
+    () => ref.read(databaseProvider).localMutations,
+  );
 });

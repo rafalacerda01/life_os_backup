@@ -27,6 +27,42 @@ class _Remote extends Fake implements SyncRemoteDataSource {
 }
 
 void main() {
+  test(
+    'scoped read result is rejected if owner changes while SQL is pending',
+    () async {
+      String? currentUid = 'a';
+      final gate = LocalMutationGate(ownerUid: 'a');
+      gate.bindSessionReader(() => currentUid);
+      final release = Completer<String>();
+      final read = gate.read(() => release.future);
+      final rejected = expectLater(
+        read,
+        throwsA(isA<LocalMutationUnavailable>()),
+      );
+      currentUid = 'b';
+      release.complete('private A result');
+      await rejected;
+    },
+  );
+
+  test(
+    'definitive detach rejects scoped reads and never reopens old gate',
+    () async {
+      final gate = LocalMutationGate(ownerUid: 'a');
+      gate.bindSessionReader(() => 'a');
+      gate.openPreparedSession();
+      await gate.sealAndDrainForDetach();
+      await expectLater(
+        gate.read(() async => 'private'),
+        throwsA(isA<LocalMutationUnavailable>()),
+      );
+      expect(
+        gate.openPreparedSession,
+        throwsA(isA<LocalMutationUnavailable>()),
+      );
+    },
+  );
+
   late AppDatabase db;
   late String? uid;
 

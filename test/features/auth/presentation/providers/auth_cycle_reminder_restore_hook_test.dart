@@ -64,9 +64,7 @@ void main() {
   });
 
   test('cleanup invalida actions antes de qualquer limpeza crítica', () {
-    final methodStart = source.indexOf(
-      'Future<void> _performLocalDataClear(String? cleanupUserId)',
-    );
+    final methodStart = source.indexOf('Future<void> _performLocalDataClear(');
     final methodEnd = source.indexOf(
       'Future<void> _recoverPendingLocalCleanup(',
       methodStart,
@@ -76,9 +74,7 @@ void main() {
     final actionClear = method.indexOf('_clearCycleReminderActionSession();');
     final generationInvalidation = method.indexOf('_sessionGeneration += 1;');
     final hydrationWait = method.indexOf('await hydration.timeout');
-    final cycleCleanup = method.indexOf(
-      '.cancelAfterCurrentMutations(cleanupUserId);',
-    );
+    final cycleCleanup = method.indexOf('.cancelAfterCurrentMutations(');
     final tokenCleanup = method.indexOf('await secureStorage.deleteToken();');
     final driftCleanup = method.indexOf('await db.clearAllData();');
     final notificationCleanup = method.indexOf(
@@ -89,6 +85,9 @@ void main() {
     expect(generationInvalidation, greaterThan(actionClear));
     expect(hydrationWait, greaterThan(actionClear));
     expect(cycleCleanup, greaterThan(hydrationWait));
+    expect(method, contains('intent: destroyRows'));
+    expect(method, contains('CycleReminderCleanupIntent.accountDeletion'));
+    expect(method, contains('CycleReminderCleanupIntent.sessionExit'));
     expect(tokenCleanup, greaterThan(cycleCleanup));
     expect(tokenCleanup, greaterThan(actionClear));
     expect(driftCleanup, greaterThan(actionClear));
@@ -108,7 +107,7 @@ void main() {
       '.setPending(cleanupUserId, intent)',
     );
     final criticalCleanup = clearMethod.indexOf(
-      'await _runCriticalLocalDataClear(cleanupUserId);',
+      'await _runCriticalLocalDataClear(cleanupUserId, destroyRows: destroyRows);',
     );
 
     expect(barrierWrite, greaterThanOrEqualTo(0));
@@ -135,7 +134,7 @@ void main() {
     expect(source, isNot(contains('.clear(logoutUserId)')));
     expect(source, isNot(contains('.clear(cleanupUserId)')));
     expect(source, isNot(contains('.clear(pending.userId)')));
-    expect(RegExp(r'\.clearIfCurrent\(').allMatches(source), hasLength(3));
+    expect(RegExp(r'\.clearIfCurrent\(').allMatches(source), hasLength(4));
   });
 
   test('troca A para B aguarda cleanup antes do novo ownership local', () {

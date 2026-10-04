@@ -1,6 +1,9 @@
+import 'package:drift/native.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/misc.dart' show Override;
 import 'package:flutter_test/flutter_test.dart';
+import 'package:life_os/core/database/app_database.dart';
+import 'package:life_os/core/database/database_provider.dart';
 import 'package:life_os/core/services/notification_preferences.dart';
 import 'package:life_os/core/services/notification_service.dart';
 import 'package:life_os/features/health/presentation/cycle/cycle_reminder_preferences.dart';
@@ -123,8 +126,11 @@ CycleReminderPreferences _cyclePreferences({bool enabled = true}) {
 Future<ProviderContainer> _preparedContainer({
   required List<Override> overrides,
 }) async {
+  final database = AppDatabase(executor: NativeDatabase.memory());
+  addTearDown(database.close);
   final container = ProviderContainer(
     overrides: [
+      databaseProvider.overrideWithValue(database),
       ...overrides,
       medicationReminderSessionReconcilerProvider.overrideWith((ref) {
         final reconciler = MedicationReminderSessionReconciler(

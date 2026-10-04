@@ -1,7 +1,6 @@
 import 'dart:async';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:drift/native.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
@@ -49,6 +48,7 @@ import 'package:life_os/features/notifications/data/repositories/notifications_r
 import 'package:multiple_result/multiple_result.dart';
 
 import '../../../../helpers/recording_analytics_platform.dart';
+import '../../../../helpers/test_user_database_factory.dart';
 
 class _FocusTimer implements Timer {
   _FocusTimer(this.callback);
@@ -233,7 +233,8 @@ class _AuthRepository extends Fake implements AuthRepository {
   }
 }
 
-class _MemoryBarrierStorage implements AuthCleanupBarrierStorage {
+class _MemoryBarrierStorage
+    implements AuthCleanupBarrierStorage, CycleReminderPreferencesStorage {
   _MemoryBarrierStorage([Map<String, String>? values])
     : values = values ?? <String, String>{};
 
@@ -375,8 +376,22 @@ class _SessionCoordinator extends Fake
 }
 
 class _SessionRestore extends Fake implements CycleReminderSessionRestore {
+  _SessionRestore(this.store, {this.delegate});
+
+  final CycleReminderPreferencesStore store;
+  final CycleReminderSessionRestore? delegate;
+  final List<String> restoredUserIds = [];
+  final List<Map<String, Object>?> loadedPreferences = [];
+  Future<void> lastRestore = Future<void>.value();
+
   @override
-  Future<void> restoreForSession(String userId) async {}
+  Future<void> restoreForSession(String userId) {
+    restoredUserIds.add(userId);
+    return lastRestore = () async {
+      loadedPreferences.add((await store.load(userId))?.toJson());
+      await delegate?.restoreForSession(userId);
+    }();
+  }
 }
 
 class _ScriptedLifecycle extends Fake
@@ -388,6 +403,25 @@ class _ScriptedLifecycle extends Fake
   final List<String>? events;
   int cancellationCalls = 0;
   final List<String> cancelledUserIds = <String>[];
+  final List<String> rebuiltUserIds = [];
+  final List<Map<String, Object>> rebuiltPreferences = [];
+
+  @override
+  Future<CycleReminderRebuildResult> rebuildCycleReminders(
+    String userId,
+    CycleReminderPreferences preferences, {
+    CycleReminderRebuildGuard? shouldContinue,
+  }) async {
+    expect(shouldContinue!(), isTrue);
+    rebuiltUserIds.add(userId);
+    rebuiltPreferences.add(preferences.toJson());
+    return const CycleReminderRebuildResult(
+      eligible: 1,
+      scheduled: 1,
+      failed: 0,
+      cancellationFailed: 0,
+    );
+  }
 
   @override
   Future<int> cancelAllCycleReminders(String userId) async {
@@ -430,8 +464,13 @@ class _ScriptedTokenRotation {
 }
 
 class _ScriptedPreferencesDeletion {
-  _ScriptedPreferencesDeletion({this.failuresRemaining = 0, this.events});
+  _ScriptedPreferencesDeletion(
+    this.store, {
+    this.failuresRemaining = 0,
+    this.events,
+  });
 
+  final CycleReminderPreferencesStore store;
   int failuresRemaining;
   final List<String>? events;
   int calls = 0;
@@ -445,6 +484,7 @@ class _ScriptedPreferencesDeletion {
       failuresRemaining -= 1;
       throw StateError('private preferences deletion failure');
     }
+    await store.delete(userId);
   }
 }
 
@@ -491,22 +531,34 @@ class _SettingsMedicationStore extends NotificationPreferencesStore {
 }
 
 class _SettingsNotifications extends NotificationService {
+  int permissionCalls = 0;
+  int exactCalls = 0;
   @override
-  Future<bool> requestPermissions({String? preferenceKey}) async => true;
+  Future<bool> requestPermissions({String? preferenceKey}) async {
+    permissionCalls++;
+    return true;
+  }
+
   @override
-  Future<bool> requestExactAlarmPermission() async => false;
+  Future<bool> requestExactAlarmPermission() async {
+    exactCalls++;
+    return false;
+  }
 }
 
 class _SettingsMedicationLifecycle implements MedicationReminderLifecycle {
   final started = Completer<void>();
   final release = Completer<void>();
   bool active = false;
+  int rebuildCalls = 0;
+  int cancelCalls = 0;
   bool Function()? guard;
 
   @override
   Future<void> cancelAllMedicationReminders({
     bool Function()? shouldContinue,
   }) async {
+    cancelCalls++;
     if (shouldContinue!()) active = false;
   }
 
@@ -515,7 +567,8 @@ class _SettingsMedicationLifecycle implements MedicationReminderLifecycle {
     bool Function()? shouldContinue,
   }) async {
     guard = shouldContinue;
-    started.complete();
+    rebuildCalls++;
+    if (!started.isCompleted) started.complete();
     await release.future;
     active = shouldContinue!();
     return MedicationReminderRebuildResult(
@@ -531,13 +584,16 @@ class _Harness {
     required this.auth,
     required this.repository,
     required this.firestore,
-    required this.database,
+    required this.databaseFactory,
     required this.mutationGate,
     required this.authority,
     required this.epoch,
     required this.lifecycle,
     required this.rotation,
     required this.preferencesDeletion,
+    required this.cycleStore,
+    required this.cycleRestore,
+    required this.settingsNotifications,
     required this.notificationCleanup,
     required this.coordinator,
     required this.barrierStorage,
@@ -548,13 +604,31 @@ class _Harness {
   final _FirebaseAuth auth;
   final _AuthRepository repository;
   final _ScriptedFirestore firestore;
-  final AppDatabase database;
+  final TestUserDatabaseFactory databaseFactory;
+  AppDatabase get database {
+    final last = databaseFactory.last;
+    if (last == null) {
+      return auth.currentUser == null
+          ? databaseFactory.inspectClosed(_userA.uid, () => null)
+          : databaseFactory.inspect(auth.currentUser!.uid);
+    }
+    if (!last.closed && auth.currentUser?.uid == last.identity!.uid)
+      return last;
+    return databaseFactory.inspectClosed(
+      last.identity!.uid,
+      () => auth.currentUser?.uid,
+    );
+  }
+
   final CycleReminderMutationGate mutationGate;
   final CycleReminderSessionAuthority authority;
   final CycleReminderOperationEpoch epoch;
   final _ScriptedLifecycle lifecycle;
   final _ScriptedTokenRotation rotation;
   final _ScriptedPreferencesDeletion preferencesDeletion;
+  final CycleReminderPreferencesStore cycleStore;
+  final _SessionRestore cycleRestore;
+  final _SettingsNotifications settingsNotifications;
   final _ScriptedNotificationCleanup notificationCleanup;
   final _SessionCoordinator coordinator;
   final _MemoryBarrierStorage barrierStorage;
@@ -612,13 +686,16 @@ class _Harness {
     IPremiumRepository Function(String? uid)? createPremiumRepository,
     FocusPeriodicTimerFactory? focusTimerFactory,
     Future<void> Function(AppDatabase)? seedBeforeAuth,
+    bool restoreCycleSchedules = false,
   }) async {
     final auth = _FirebaseAuth(
       firebaseUser ??
           (firebaseUserId == null ? null : _FirebaseUser(firebaseUserId)),
     );
-    final database = AppDatabase(executor: NativeDatabase.memory());
+    final databaseFactory = TestUserDatabaseFactory();
+    final database = databaseFactory.inspect(firebaseUserId ?? _userA.uid);
     await seedBeforeAuth?.call(database);
+    database.localMutations.bindSessionReader(() => auth.currentUser?.uid);
     final localFirestore = firestore ?? _ScriptedFirestore();
     final repository = _AuthRepository(
       auth,
@@ -629,7 +706,8 @@ class _Harness {
       currentUserFailure: currentUserFailure,
       onGetCurrentUser: onGetCurrentUser == null
           ? null
-          : (userId) => onGetCurrentUser(userId, database),
+          : (userId) =>
+                onGetCurrentUser(userId, databaseFactory.inspect(userId)),
     );
     final authority = CycleReminderSessionAuthority();
     final epoch = CycleReminderOperationEpoch();
@@ -641,7 +719,25 @@ class _Harness {
     final rotation =
         tokenRotation ??
         _ScriptedTokenRotation(failuresRemaining: rotationFailures);
+    final cycleStore = CycleReminderPreferencesStore(_MemoryBarrierStorage());
+    for (final uid in [_userA.uid, _userB.uid]) {
+      await cycleStore.save(
+        uid,
+        CycleReminderPreferences(
+          enabled: true,
+          type: CycleReminderType.personal,
+          hour: uid == _userA.uid ? 16 : 8,
+          minute: 35,
+          frequency: CycleReminderFrequency.specificWeekdays,
+          weekdays: {1, 3, 5},
+          privacyMode: CycleReminderPrivacyMode.custom,
+          customTitle: 'Fixture title',
+          customBody: 'Fixture body',
+        ),
+      );
+    }
     final preferencesDeletion = _ScriptedPreferencesDeletion(
+      cycleStore,
       failuresRemaining: preferenceDeletionFailures,
       events: lifecycleEvents,
     );
@@ -651,6 +747,20 @@ class _Harness {
     final durableStorage = barrierStorage ?? _MemoryBarrierStorage();
     final syncManager = syncManagerOverride ?? _SyncManager();
     final coordinator = _SessionCoordinator(authority, epoch);
+    final cycleRestore = _SessionRestore(
+      cycleStore,
+      delegate: restoreCycleSchedules
+          ? CycleReminderSessionReconciler(
+              loadCyclePreferences: cycleStore.load,
+              loadGlobalNotifications: () async => true,
+              currentUserId: () =>
+                  authority.admittedUserId(auth.currentUser?.uid),
+              lifecycle: lifecycle,
+              operationEpoch: epoch,
+            )
+          : null,
+    );
+    final settingsNotifications = _SettingsNotifications();
     final cleanup = CycleReminderSessionCleanup(
       mutationGate,
       lifecycle,
@@ -685,7 +795,7 @@ class _Harness {
         secureStorageProvider.overrideWithValue(
           secureStorage ?? _SecureStorage(),
         ),
-        databaseProvider.overrideWithValue(database),
+        userDatabaseFactoryProvider.overrideWithValue(databaseFactory),
         if (medicationLifecycle != null) ...[
           medicationReminderLifecycleProvider.overrideWithValue(
             medicationLifecycle,
@@ -693,9 +803,7 @@ class _Harness {
           notificationPreferencesStoreProvider.overrideWithValue(
             medicationPreferences!,
           ),
-          notificationServiceProvider.overrideWithValue(
-            _SettingsNotifications(),
-          ),
+          notificationServiceProvider.overrideWithValue(settingsNotifications),
           notificationPreferencesChangedProvider.overrideWithValue(() {}),
         ],
         if (notificationEffects != null)
@@ -712,9 +820,7 @@ class _Harness {
         cycleReminderOperationEpochProvider.overrideWithValue(epoch),
         cycleReminderMutationGateProvider.overrideWithValue(mutationGate),
         cycleReminderActionCoordinatorProvider.overrideWithValue(coordinator),
-        cycleReminderSessionReconcilerProvider.overrideWithValue(
-          _SessionRestore(),
-        ),
+        cycleReminderSessionReconcilerProvider.overrideWithValue(cycleRestore),
         cycleReminderSessionCleanupProvider.overrideWithValue(cleanup),
         authNotificationCleanupProvider.overrideWithValue(
           notificationCleanup.call,
@@ -744,13 +850,16 @@ class _Harness {
       auth: auth,
       repository: repository,
       firestore: localFirestore,
-      database: database,
+      databaseFactory: databaseFactory,
       mutationGate: mutationGate,
       authority: authority,
       epoch: epoch,
       lifecycle: lifecycle,
       rotation: rotation,
       preferencesDeletion: preferencesDeletion,
+      cycleStore: cycleStore,
+      cycleRestore: cycleRestore,
+      settingsNotifications: settingsNotifications,
       notificationCleanup: notificationCleanup,
       coordinator: coordinator,
       barrierStorage: durableStorage,
@@ -760,8 +869,10 @@ class _Harness {
   }
 
   Future<void> dispose() async {
+    final databases = container.read(sessionDatabaseCoordinatorProvider);
     container.dispose();
-    await database.close();
+    await databases.dispose();
+    await databaseFactory.dispose();
     await auth.close();
   }
 }
@@ -800,6 +911,32 @@ class _SessionPremiumRepository implements IPremiumRepository {
     }
     unawaited(statuses.close());
   }
+}
+
+Future<void> seedSessionRows(AppDatabase db, String uid) async {
+  await db
+      .into(db.taskTable)
+      .insert(
+        TaskTableCompanion.insert(
+          id: '$uid-task',
+          title: 'Fixture',
+          priority: 'normal',
+          date: DateTime(2026, 10, 2),
+        ),
+      );
+  await db
+      .into(db.notificationsTable)
+      .insert(
+        NotificationsTableCompanion.insert(
+          id: '$uid-notification',
+          title: 'Fixture',
+          description: 'Fixture',
+          priority: 'normal',
+          moduleType: 'health',
+          route: '/health',
+          createdAt: DateTime(2026, 10, 2),
+        ),
+      );
 }
 
 void main() {
@@ -853,13 +990,13 @@ void main() {
       expect(harness.state, isA<AuthUnauthenticated>());
       expect(
         await harness.database.select(harness.database.medications).get(),
-        isEmpty,
+        hasLength(1),
       );
     },
   );
 
   test(
-    'logout drains notification effects before destructive cleanup',
+    'logout drains notification effects before non-destructive isolation',
     () async {
       final effects = _ObservedNotificationEffects();
       final harness = await _Harness.create([0], notificationEffects: effects);
@@ -892,7 +1029,7 @@ void main() {
       expect(harness.state, isA<AuthUnauthenticated>());
       expect(
         await harness.database.select(harness.database.taskTable).get(),
-        isEmpty,
+        hasLength(1),
       );
       expect(effects.isCurrent(effects.generation), isFalse);
     },
@@ -961,192 +1098,280 @@ void main() {
     now: () => DateTime(2026, 10, 2, 12),
   );
 
+  test('sign-out failure preserves A and reopens domain writes', () async {
+    final harness = await _Harness.create(
+      [0],
+      failSignOut: true,
+      syncManagerOverride: _SyncManager()..shouldDrain = false,
+    );
+    addTearDown(harness.dispose);
+    final health = healthFor(harness);
+    expect(
+      await health.updatePillStatus(true, expectedUid: _userA.uid),
+      isTrue,
+    );
+    expect(
+      await harness.database.getPendingSyncItems(_userA.uid),
+      hasLength(1),
+    );
+    harness.syncManager.shouldDrain = true;
+    await harness.notifier.logout();
+    expect(harness.state, isA<AuthError>());
+    expect(harness.auth.currentUser?.uid, _userA.uid);
+    expect(harness.repository.signOutCalls, 1);
+    final marker = await harness.readPendingCleanup();
+    expect(marker, isNull);
+    expect(
+      await harness.database.select(harness.database.healthEntries).get(),
+      hasLength(1),
+    );
+    expect(
+      await harness.database.select(harness.database.syncQueueTable).get(),
+      hasLength(1),
+    );
+    expect(
+      await health.updatePillStatus(false, expectedUid: _userA.uid),
+      isTrue,
+    );
+    expect(await harness.readPendingCleanup(), marker);
+    expect(
+      await harness.database.select(harness.database.healthEntries).get(),
+      hasLength(1),
+    );
+    expect(
+      await harness.database.select(harness.database.syncQueueTable).get(),
+      hasLength(2),
+    );
+  });
+
+  test('post-quiesce waiter resumes A after sign-out failure', () async {
+    final checkIns = _CheckInRepository();
+    final harness = await _Harness.create(
+      [0],
+      failSignOut: true,
+      checkInRepository: checkIns,
+      syncManagerOverride: _SyncManager()..shouldDrain = false,
+    );
+    addTearDown(harness.dispose);
+    harness.syncManager.shouldDrain = true;
+    final started = Completer<void>();
+    final release = Completer<void>();
+    checkIns.onDrain = () async {
+      started.complete();
+      await release.future;
+      return true;
+    };
+    final logout = harness.notifier.logout();
+    await started.future;
+    var entered = false;
+    final waiting = harness.database.localMutations.run(() async {
+      entered = true;
+      return healthFor(harness).updatePillStatus(true, expectedUid: _userA.uid);
+    });
+
+    expect(entered, isFalse);
+    release.complete();
+    await logout;
+    expect(await waiting, isTrue);
+    expect(entered, isTrue);
+    expect(harness.state, isA<AuthError>());
+    expect(await harness.readPendingCleanup(), isNull);
+    expect(
+      await harness.database.select(harness.database.healthEntries).get(),
+      hasLength(1),
+    );
+    expect(
+      await harness.database.select(harness.database.syncQueueTable).get(),
+      hasLength(1),
+    );
+  });
+
   test(
-    'sign-out failure after destructive cleanup keeps domain writes sealed',
+    'failed sign-out restores cycle and medication hooks on the same A database',
     () async {
+      final medication = _SettingsMedicationLifecycle()..release.complete();
+      final preferences = _SettingsMedicationStore()..enabled = true;
+      final effects = NotificationRemoteEffectsBarrier();
       final harness = await _Harness.create(
         [0],
         failSignOut: true,
-        syncManagerOverride: _SyncManager()..shouldDrain = false,
+        medicationLifecycle: medication,
+        medicationPreferences: preferences,
+        notificationEffects: effects,
+        restoreCycleSchedules: true,
       );
       addTearDown(harness.dispose);
-      final health = healthFor(harness);
-      expect(
-        await health.updatePillStatus(true, expectedUid: _userA.uid),
-        isTrue,
+      final database = harness.container.read(databaseProvider);
+      await seedSessionRows(database, _userA.uid);
+      final reconciler = harness.container.read(
+        medicationReminderSessionReconcilerProvider,
       );
-      expect(
-        await harness.database.getPendingSyncItems(_userA.uid),
-        hasLength(1),
-      );
-      harness.syncManager.shouldDrain = true;
+      await reconciler.drain();
+      await harness.cycleRestore.lastRestore;
+      final oldSession = reconciler.captureSession();
+      expect(reconciler.isCurrentSession(oldSession), isTrue);
+      expect(medication.rebuildCalls, 1);
+
       await harness.notifier.logout();
+      await reconciler.drain();
+      await harness.cycleRestore.lastRestore;
+
       expect(harness.state, isA<AuthError>());
       expect(harness.auth.currentUser?.uid, _userA.uid);
-      expect(harness.repository.signOutCalls, 1);
-      final marker = await harness.readPendingCleanup();
-      expect(marker?.requiresSignOut, isTrue);
-      expect(
-        await harness.database.select(harness.database.healthEntries).get(),
-        isEmpty,
-      );
-      expect(
-        await harness.database.select(harness.database.syncQueueTable).get(),
-        isEmpty,
-      );
-      await expectLater(
-        health.updatePillStatus(true, expectedUid: _userA.uid),
-        throwsA(isA<LocalMutationUnavailable>()),
-      );
-      expect(await harness.readPendingCleanup(), marker);
-      expect(
-        await harness.database.select(harness.database.healthEntries).get(),
-        isEmpty,
-      );
-      expect(
-        await harness.database.select(harness.database.syncQueueTable).get(),
-        isEmpty,
-      );
-    },
-  );
-
-  test(
-    'post-quiesce waiter completes unavailable when sign-out fails after cleanup',
-    () async {
-      final checkIns = _CheckInRepository();
-      final harness = await _Harness.create(
-        [0],
-        failSignOut: true,
-        checkInRepository: checkIns,
-        syncManagerOverride: _SyncManager()..shouldDrain = false,
-      );
-      addTearDown(harness.dispose);
-      harness.syncManager.shouldDrain = true;
-      final started = Completer<void>();
-      final release = Completer<void>();
-      checkIns.onDrain = () async {
-        started.complete();
-        await release.future;
-        return true;
-      };
-      final logout = harness.notifier.logout();
-      await started.future;
-      var entered = false;
-      final waiting = harness.database.localMutations.run(() async {
-        entered = true;
-        return healthFor(
-          harness,
-        ).updatePillStatus(true, expectedUid: _userA.uid);
-      });
-      final rejected = expectLater(
-        waiting,
-        throwsA(isA<LocalMutationUnavailable>()),
-      );
-      expect(entered, isFalse);
-      release.complete();
-      await logout;
-      await rejected;
-      expect(entered, isFalse);
-      expect(harness.state, isA<AuthError>());
-      expect((await harness.readPendingCleanup())?.requiresSignOut, isTrue);
-      expect(
-        await harness.database.select(harness.database.healthEntries).get(),
-        isEmpty,
-      );
-      expect(
-        await harness.database.select(harness.database.syncQueueTable).get(),
-        isEmpty,
-      );
-    },
-  );
-
-  test(
-    'same-process retry resolves durable logout without reopening old authority',
-    () async {
-      final harness = await _Harness.create(
-        [0, 0, 0],
-        failSignOut: true,
-        syncManagerOverride: _SyncManager()..shouldDrain = false,
-      );
-      addTearDown(harness.dispose);
-      harness.syncManager.shouldDrain = true;
-      final gate = harness.database.localMutations;
-      final old = gate.capture(expectedUid: _userA.uid);
-      await harness.notifier.logout();
-      final marker = await harness.readPendingCleanup();
-      expect(marker?.requiresSignOut, isTrue);
-      await harness.notifier.logout();
-      expect(harness.state, isA<AuthError>());
-      expect(harness.repository.signOutCalls, 2);
-      expect(harness.auth.currentUser?.uid, _userA.uid);
-      expect(await harness.readPendingCleanup(), marker);
-      await expectLater(
-        healthFor(harness).updatePillStatus(true, expectedUid: _userA.uid),
-        throwsA(isA<LocalMutationUnavailable>()),
-      );
-      harness.repository.failSignOut = false;
-      await harness.notifier.logout();
-      expect(harness.repository.signOutCalls, 3);
-      expect(harness.auth.currentUser, isNull);
-      expect(harness.state, isA<AuthUnauthenticated>());
       expect(await harness.readPendingCleanup(), isNull);
-      expect(
-        await harness.database.select(harness.database.healthEntries).get(),
-        isEmpty,
-      );
-      expect(
-        await harness.database.select(harness.database.syncQueueTable).get(),
-        isEmpty,
-      );
-      await expectLater(
-        gate.run(() async {}),
-        throwsA(isA<LocalMutationUnavailable>()),
-      );
+      expect(harness.container.read(databaseProvider), same(database));
+      expect(harness.databaseFactory.openedUserIds, [_userA.uid]);
+      expect(await database.localMutations.run(() async => true), isTrue);
+      expect(await database.select(database.taskTable).get(), hasLength(1));
+      expect(harness.authority.preparedUserId, _userA.uid);
+      expect(harness.coordinator.preparedUserIds, [_userA.uid, _userA.uid]);
+      expect(harness.lifecycle.rebuiltUserIds, [_userA.uid, _userA.uid]);
+      expect(reconciler.isCurrentSession(oldSession), isFalse);
+      expect(reconciler.isCurrentSession(reconciler.captureSession()), isTrue);
+      expect(medication.rebuildCalls, 2);
+      expect(medication.active, isTrue);
+      expect(effects.isCurrent(effects.generation), isTrue);
+      expect(harness.settingsNotifications.permissionCalls, 0);
+      expect(harness.settingsNotifications.exactCalls, 0);
+      expect(harness.preferencesDeletion.userIds, isEmpty);
 
-      final started = Completer<void>();
-      final release = Completer<void>();
-      harness.auth.emit(
-        _FirebaseUser(
-          _userA.uid,
-          onGetIdToken: () async {
-            if (!started.isCompleted) started.complete();
-            await release.future;
-          },
-        ),
-      );
-      await started.future;
-      await expectLater(
-        healthFor(harness).updatePillStatus(true, expectedUid: _userA.uid),
-        throwsA(isA<LocalMutationUnavailable>()),
-      );
-      release.complete();
-      await harness.notifier.checkCurrentUser();
-      expect(harness.state, isA<AuthAuthenticated>());
-      await expectLater(
-        gate.run(
-          () => healthFor(
-            harness,
-          ).updatePillStatus(true, expectedUid: _userA.uid),
-          ticket: old,
-        ),
-        throwsA(isA<LocalMutationUnavailable>()),
-      );
-      expect(
-        await healthFor(
-          harness,
-        ).updatePillStatus(true, expectedUid: _userA.uid),
-        isTrue,
-      );
-      expect(
-        await harness.database.select(harness.database.healthEntries).get(),
-        hasLength(1),
-      );
-      expect(
-        await harness.database.getPendingSyncItems(_userA.uid),
-        hasLength(1),
-      );
+      await harness.container.read(notificationsProvider.future);
+      final settings = harness.container.read(notificationsProvider.notifier);
+      await settings.toggleMedication(false);
+      expect(medication.active, isFalse);
+      await settings.toggleMedication(true);
+      expect(medication.active, isTrue);
+      expect(medication.rebuildCalls, 3);
+      expect(harness.settingsNotifications.permissionCalls, 1);
+      expect(harness.settingsNotifications.exactCalls, 1);
     },
   );
+
+  test(
+    'failed marker clear after sign-out failure restores no session hooks',
+    () async {
+      final medication = _SettingsMedicationLifecycle()..release.complete();
+      final effects = NotificationRemoteEffectsBarrier();
+      final harness = await _Harness.create(
+        [0],
+        failSignOut: true,
+        barrierStorage: _MemoryBarrierStorage()..throwOnDelete = true,
+        medicationLifecycle: medication,
+        medicationPreferences: _SettingsMedicationStore()..enabled = true,
+        notificationEffects: effects,
+        restoreCycleSchedules: true,
+      );
+      addTearDown(harness.dispose);
+      final reconciler = harness.container.read(
+        medicationReminderSessionReconcilerProvider,
+      );
+      await reconciler.drain();
+      await harness.cycleRestore.lastRestore;
+      await harness.notifier.logout();
+      await reconciler.drain();
+      expect(harness.state, isA<AuthError>());
+      expect(harness.auth.currentUser?.uid, _userA.uid);
+      expect(await harness.readPendingCleanup(), isNotNull);
+      await expectLater(
+        harness.databaseFactory.last!.localMutations.run(
+          () async => fail('Sealed session must not admit writes'),
+          waitForReopen: false,
+        ),
+        throwsA(isA<LocalMutationUnavailable>()),
+      );
+      expect(harness.authority.preparedUserId, isNull);
+      expect(harness.coordinator.preparedUserIds, [_userA.uid]);
+      expect(harness.cycleRestore.restoredUserIds, [_userA.uid]);
+      expect(harness.lifecycle.rebuiltUserIds, [_userA.uid]);
+      expect(reconciler.captureSession(), isNull);
+      expect(medication.rebuildCalls, 1);
+      expect(effects.isCurrent(effects.generation), isFalse);
+      expect(harness.settingsNotifications.permissionCalls, 0);
+      expect(harness.settingsNotifications.exactCalls, 0);
+    },
+  );
+
+  test('sign-out retry preserves data and relogin uses a new gate', () async {
+    final harness = await _Harness.create(
+      [0, 0, 0],
+      failSignOut: true,
+      syncManagerOverride: _SyncManager()..shouldDrain = false,
+    );
+    addTearDown(harness.dispose);
+    harness.syncManager.shouldDrain = true;
+    final gate = harness.database.localMutations;
+    final old = gate.capture(expectedUid: _userA.uid);
+    await harness.notifier.logout();
+    final marker = await harness.readPendingCleanup();
+    expect(marker, isNull);
+    await harness.notifier.logout();
+    expect(harness.state, isA<AuthError>());
+    expect(harness.repository.signOutCalls, 2);
+    expect(harness.auth.currentUser?.uid, _userA.uid);
+    expect(await harness.readPendingCleanup(), marker);
+    expect(
+      await healthFor(harness).updatePillStatus(true, expectedUid: _userA.uid),
+      isTrue,
+    );
+    harness.repository.failSignOut = false;
+    await harness.notifier.logout();
+    expect(harness.repository.signOutCalls, 3);
+    expect(harness.auth.currentUser, isNull);
+    expect(harness.state, isA<AuthUnauthenticated>());
+    expect(await harness.readPendingCleanup(), isNull);
+    expect(
+      await harness.database.select(harness.database.healthEntries).get(),
+      hasLength(1),
+    );
+    expect(
+      await harness.database.select(harness.database.syncQueueTable).get(),
+      hasLength(1),
+    );
+    await expectLater(
+      gate.run(() async {}),
+      throwsA(isA<LocalMutationUnavailable>()),
+    );
+
+    final started = Completer<void>();
+    final release = Completer<void>();
+    harness.auth.emit(
+      _FirebaseUser(
+        _userA.uid,
+        onGetIdToken: () async {
+          if (!started.isCompleted) started.complete();
+          await release.future;
+        },
+      ),
+    );
+    await started.future;
+    await expectLater(
+      healthFor(harness).updatePillStatus(true, expectedUid: _userA.uid),
+      throwsA(isA<LocalMutationUnavailable>()),
+    );
+    release.complete();
+    await harness.notifier.checkCurrentUser();
+    expect(harness.state, isA<AuthAuthenticated>());
+    await expectLater(
+      gate.run(
+        () =>
+            healthFor(harness).updatePillStatus(true, expectedUid: _userA.uid),
+        ticket: old,
+      ),
+      throwsA(isA<LocalMutationUnavailable>()),
+    );
+    expect(
+      await healthFor(harness).updatePillStatus(true, expectedUid: _userA.uid),
+      isTrue,
+    );
+    expect(
+      await harness.database.select(harness.database.healthEntries).get(),
+      hasLength(1),
+    );
+    expect(
+      await harness.database.getPendingSyncItems(_userA.uid),
+      hasLength(1),
+    );
+  });
 
   test(
     'restored cold-start session rejects Health writes until prepared',
@@ -1223,12 +1448,25 @@ void main() {
         addTearDown(harness.dispose);
         await started.future;
         expect(await harness.readPendingCleanup(), marker);
-        expect(harness.auth.currentUser?.uid, _userA.uid);
-        expect(harness.coordinator.preparedUserIds, isEmpty);
-        await expectLater(
-          healthFor(harness).updatePillStatus(true, expectedUid: _userA.uid),
-          throwsA(isA<LocalMutationUnavailable>()),
+        expect(
+          harness.auth.currentUser?.uid,
+          intent == AuthCleanupIntent.logout ? null : _userA.uid,
         );
+        expect(harness.coordinator.preparedUserIds, isEmpty);
+        if (intent == AuthCleanupIntent.logout) {
+          expect(
+            await healthFor(
+              harness,
+            ).updatePillStatus(true, expectedUid: _userA.uid),
+            isFalse,
+          );
+          expect(harness.databaseFactory.openedUserIds, isEmpty);
+        } else {
+          await expectLater(
+            healthFor(harness).updatePillStatus(true, expectedUid: _userA.uid),
+            throwsA(isA<LocalMutationUnavailable>()),
+          );
+        }
         expect(
           await harness.database.select(harness.database.healthEntries).get(),
           isEmpty,
@@ -1342,13 +1580,13 @@ void main() {
           expect(harness.state, isA<AuthUnauthenticated>());
           expect(
             await harness.database.select(harness.database.healthEntries).get(),
-            isEmpty,
+            hasLength(1),
           );
           expect(
             await harness.database
                 .select(harness.database.syncQueueTable)
                 .get(),
-            isEmpty,
+            hasLength(1),
           );
         } else {
           expect(await lateAction, isTrue);
@@ -1416,9 +1654,10 @@ void main() {
           await harness.database.select(harness.database.syncQueueTable).get(),
           isEmpty,
         );
-        final fresh = gate.capture(expectedUid: newUid);
+        final freshGate = harness.database.localMutations;
+        final fresh = freshGate.capture(expectedUid: newUid);
         expect(
-          await gate.run(
+          await freshGate.run(
             () =>
                 healthFor(harness).updatePillStatus(true, expectedUid: newUid),
             ticket: fresh,
@@ -1445,16 +1684,9 @@ void main() {
       ], syncManagerOverride: _SyncManager()..shouldDrain = false);
       addTearDown(harness.dispose);
       final ticket = harness.database.localMutations.capture();
-      final seen = Completer<void>();
-      harness.auth.emit(
-        _FirebaseUser(
-          _userA.uid,
-          onGetIdToken: () async {
-            if (!seen.isCompleted) seen.complete();
-          },
-        ),
-      );
-      await seen.future;
+      harness.auth.emit(_FirebaseUser(_userA.uid));
+      await harness.notifier.checkCurrentUser();
+      expect(harness.databaseFactory.openedUserIds, [_userA.uid]);
       expect(
         await harness.database.localMutations.run(
           () => healthFor(
@@ -1854,7 +2086,7 @@ void main() {
     expect(await harness.readPendingCleanup(), isNull);
   });
 
-  test('logout limpa somente depois do replay de Check-ins', () async {
+  test('logout preserves confirmed Check-ins after replay', () async {
     final events = <String>[];
     final checkIns = _CheckInRepository();
     final harness = await _Harness.create(
@@ -1886,7 +2118,7 @@ void main() {
     expect(harness.repository.signOutCalls, 1);
     expect(
       await harness.database.select(harness.database.checkInTable).get(),
-      isEmpty,
+      hasLength(1),
     );
   });
 
@@ -2040,7 +2272,7 @@ void main() {
     }
   });
 
-  test('logout drena antes do cleanup destrutivo', () async {
+  test('logout drains before non-destructive isolation', () async {
     final events = <String>[];
     final harness = await _Harness.create(<int>[0], lifecycleEvents: events);
     addTearDown(harness.dispose);
@@ -2072,11 +2304,11 @@ void main() {
     expect(harness.repository.signOutCalls, 1);
     expect(
       await harness.database.select(harness.database.taskTable).get(),
-      isEmpty,
+      hasLength(1),
     );
     expect(
       await harness.database.select(harness.database.syncQueueTable).get(),
-      isEmpty,
+      hasLength(1),
     );
   });
 
@@ -2178,7 +2410,7 @@ void main() {
   );
 
   test(
-    'falha SQLite preserva barrier e impede signOut ate retry seguro',
+    'logout never deletes rows even when a DELETE trigger would fail',
     () async {
       final harness = await _Harness.create(<int>[0, 0]);
       addTearDown(harness.dispose);
@@ -2200,42 +2432,20 @@ void main() {
 
       await harness.notifier.logout();
 
-      expect(harness.state, isA<AuthError>());
-      expect(harness.repository.signOutCalls, 0);
-      expect(harness.auth.currentUser?.uid, _userA.uid);
-      expect(harness.authority.preparedUserId, isNull);
-      final marker = await harness.readPendingCleanup();
-      expect(marker?.userId, _userA.uid);
-      expect(marker?.requiresSignOut, isTrue);
-      expect(await db.select(db.taskTable).get(), hasLength(1));
-      await expectLater(
-        healthFor(harness).updatePillStatus(true, expectedUid: _userA.uid),
-        throwsA(isA<LocalMutationUnavailable>()),
-      );
-      expect(await db.select(db.healthEntries).get(), isEmpty);
-      expect(await db.select(db.syncQueueTable).get(), isEmpty);
-      expect(await db.select(db.taskTable).get(), hasLength(1));
-      expect(await harness.readPendingCleanup(), marker);
-
-      await db.localMutations.cleanupWrite(
-        () => db.customStatement('DROP TRIGGER fail_cleanup'),
-      );
-      await harness.notifier.logout();
-
       expect(harness.state, isA<AuthUnauthenticated>());
       expect(harness.repository.signOutCalls, 1);
-      expect(await db.select(db.taskTable).get(), isEmpty);
+      expect(harness.auth.currentUser, isNull);
+      expect(harness.authority.preparedUserId, isNull);
       expect(await harness.readPendingCleanup(), isNull);
+      expect(harness.databaseFactory.last!.closed, isTrue);
+      final preserved = harness.database;
+      expect(await preserved.select(preserved.taskTable).get(), hasLength(1));
       await expectLater(
-        db.localMutations.run(
-          () => healthFor(
-            harness,
-          ).updatePillStatus(true, expectedUid: _userA.uid),
-        ),
+        db.localMutations.run(() async {}),
         throwsA(isA<LocalMutationUnavailable>()),
       );
-      expect(await db.select(db.healthEntries).get(), isEmpty);
-      expect(await db.select(db.syncQueueTable).get(), isEmpty);
+      expect(await preserved.select(preserved.healthEntries).get(), isEmpty);
+      expect(await preserved.select(preserved.syncQueueTable).get(), isEmpty);
     },
   );
 
@@ -2293,7 +2503,7 @@ void main() {
     await harness.notifier.logout();
 
     expect(harness.state, isA<AuthError>());
-    expect(harness.repository.signOutCalls, 0);
+    expect(harness.repository.signOutCalls, 1);
     expect(firestore.clearPersistenceCalls, 1);
     expect(firestore.terminateCalls, 1);
   });
@@ -2315,7 +2525,7 @@ void main() {
     await harness.notifier.logout();
 
     expect(harness.state, isA<AuthError>());
-    expect(harness.repository.signOutCalls, 0);
+    expect(harness.repository.signOutCalls, 1);
     expect(firestore.clearPersistenceCalls, 2);
     expect(firestore.terminateCalls, 1);
 
@@ -2358,7 +2568,7 @@ void main() {
       await harness.notifier.logout();
 
       expect(harness.state, isA<AuthError>());
-      expect(harness.repository.signOutCalls, 0);
+      expect(harness.repository.signOutCalls, 1);
       expect(harness.authority.preparedUserId, isNull);
       expect(harness.epoch.isCurrent(_userA.uid, oldGeneration), isFalse);
       expect(harness.coordinator.preparedUserIds, <String>[_userA.uid]);
@@ -2403,8 +2613,8 @@ void main() {
     expect(harness.state, isA<AuthUnauthenticated>());
     expect(harness.lifecycle.cancellationCalls, 1);
     expect(harness.rotation.calls, 1);
-    expect(harness.preferencesDeletion.userIds, <String>[_userA.uid]);
-    expect(harness.notificationCleanup.calls, 2);
+    expect(harness.preferencesDeletion.userIds, isEmpty);
+    expect(harness.notificationCleanup.calls, 1);
     expect(harness.repository.signOutCalls, 1);
     expect(harness.authority.preparedUserId, isNull);
     expect(await harness.readPendingCleanup(), isNull);
@@ -2423,18 +2633,18 @@ void main() {
 
       expect(harness.state, isA<AuthError>());
       expect(harness.notificationCleanup.calls, 1);
-      expect(harness.repository.signOutCalls, 0);
+      expect(harness.repository.signOutCalls, 1);
 
       await harness.notifier.logout();
 
       expect(harness.state, isA<AuthUnauthenticated>());
-      expect(harness.notificationCleanup.calls, 3);
+      expect(harness.notificationCleanup.calls, 2);
       expect(harness.repository.signOutCalls, 1);
     },
   );
 
   test(
-    'falha ao excluir preferências bloqueia logout e retry conclui',
+    'logout never invokes preference deletion even when storage deletion fails',
     () async {
       final harness = await _Harness.create(<int>[
         0,
@@ -2444,18 +2654,18 @@ void main() {
 
       await harness.notifier.logout();
 
-      expect(harness.state, isA<AuthError>());
-      expect(harness.preferencesDeletion.userIds, <String>[_userA.uid]);
-      expect(harness.repository.signOutCalls, 0);
+      expect(harness.state, isA<AuthUnauthenticated>());
+      expect(harness.preferencesDeletion.userIds, isEmpty);
+      expect(harness.repository.signOutCalls, 1);
 
+      harness.auth.user = _FirebaseUser(_userA.uid);
+      await harness.notifier.checkCurrentUser();
       await harness.notifier.logout();
 
       expect(harness.state, isA<AuthUnauthenticated>());
-      expect(harness.preferencesDeletion.userIds, <String>[
-        _userA.uid,
-        _userA.uid,
-      ]);
-      expect(harness.repository.signOutCalls, 1);
+      expect(harness.preferencesDeletion.userIds, isEmpty);
+      expect(harness.repository.signOutCalls, 2);
+      expect(await harness.cycleStore.load(_userA.uid), isNotNull);
     },
   );
 
@@ -2470,7 +2680,7 @@ void main() {
     expect(harness.rotation.calls, 1);
     expect(harness.rotation.tokenVersion, 1);
     expect(harness.lifecycle.cancellationCalls, 0);
-    expect(harness.repository.signOutCalls, 0);
+    expect(harness.repository.signOutCalls, 1);
 
     await harness.notifier.logout();
 
@@ -2515,10 +2725,10 @@ void main() {
     expect(harness.rotation.tokenVersion, 2);
     expect(harness.lifecycle.cancellationCalls, 1);
     expect(harness.repository.signOutCalls, 1);
-    expect(harness.authority.preparedUserId, isNull);
+    expect(harness.authority.preparedUserId, _userA.uid);
     final logout = await harness.readPendingCleanup();
-    expect(logout?.requiresSignOut, isTrue);
-    expect(logout?.revision, isNot(isolation.revision));
+    expect(logout, isNull);
+    expect(logout, isNot(isolation));
     expect(await barrier.clearIfCurrent(isolation), isFalse);
     expect(await harness.readPendingCleanup(), logout);
   });
@@ -2649,7 +2859,9 @@ void main() {
     );
 
     expect(rotation.userIds, <String>[_userA.uid]);
-    expect(harness.preferencesDeletion.userIds, <String>[_userA.uid]);
+    expect(harness.preferencesDeletion.userIds, isEmpty);
+    expect(await harness.cycleStore.load(_userA.uid), isNotNull);
+    expect(await harness.cycleStore.load(_userB.uid), isNotNull);
     expect(harness.coordinator.preparedUserIds, <String>['user-b']);
     expect(events, <String>['rotate:user-a', 'prepare:user-b']);
     expect(await harness.readPendingCleanup(), isNull);
@@ -2674,7 +2886,8 @@ void main() {
 
     expect(rotation.userIds, <String>[_userA.uid]);
     expect(harness.lifecycle.cancellationCalls, 1);
-    expect(harness.preferencesDeletion.userIds, <String>[_userA.uid]);
+    expect(harness.preferencesDeletion.userIds, isEmpty);
+    expect(await harness.cycleStore.load(_userA.uid), isNotNull);
     expect(harness.coordinator.preparedUserIds, isEmpty);
     expect(await harness.readPendingCleanup(), isNull);
   });
@@ -2736,7 +2949,7 @@ void main() {
     expect(harness.rotation.calls, 0);
     expect(harness.lifecycle.cancellationCalls, 0);
     expect(harness.repository.signOutCalls, 0);
-    expect(harness.authority.preparedUserId, isNull);
+    expect(harness.authority.preparedUserId, _userA.uid);
     expect(await harness.readPendingCleanup(), isNull);
     expect(harness.auth.currentUser?.uid, _userA.uid);
     expect(harness.firestore.clearPersistenceCalls, 0);
@@ -2760,8 +2973,12 @@ void main() {
     expect(harness.repository.signOutCalls, 1);
     expect(harness.auth.currentUser, isNull);
     expect(await harness.readPendingCleanup(), isNull);
-    expect(await db.select(db.healthEntries).get(), isEmpty);
-    expect(await db.select(db.syncQueueTable).get(), isEmpty);
+    final preserved = harness.database;
+    expect(await preserved.select(preserved.healthEntries).get(), hasLength(1));
+    expect(
+      await preserved.select(preserved.syncQueueTable).get(),
+      hasLength(2),
+    );
   });
 
   test('falha ao limpar barrier mantém logout fail-closed', () async {
@@ -2811,6 +3028,8 @@ void main() {
       );
       addTearDown(harness.dispose);
 
+      final a = harness.databaseFactory.last!;
+      await seedSessionRows(a, _userA.uid);
       final deletion = harness.notifier.deleteAccount();
       await deleteStarted.future;
       harness.auth.emit(_FirebaseUser(_userB.uid));
@@ -2818,6 +3037,8 @@ void main() {
       await deletion;
 
       expect(harness.repository.deletedExpectedUserIds, <String>[_userA.uid]);
+      expect(await harness.cycleStore.load(_userA.uid), isNull);
+      expect(await harness.cycleStore.load(_userB.uid), isNotNull);
       expect(harness.auth.signOutCalls, 0);
       expect(harness.auth.currentUser?.uid, _userB.uid);
       expect(harness.state, isA<AuthAuthenticated>());
@@ -2831,7 +3052,286 @@ void main() {
         await harness.database.select(harness.database.taskTable).get(),
         hasLength(1),
       );
+      expect(a.closed, isTrue);
+      final deletedA = harness.databaseFactory.inspectClosed(
+        _userA.uid,
+        () => _userA.uid,
+      );
+      expect(await deletedA.select(deletedA.taskTable).get(), isEmpty);
+      expect(await deletedA.select(deletedA.notificationsTable).get(), isEmpty);
       expect(await harness.readPendingCleanup(), isNull);
+    },
+  );
+
+  test(
+    'normal logout closes A but preserves rows and relogin recovers A',
+    () async {
+      final harness = await _Harness.create(
+        [0, 0],
+        syncManagerOverride: _SyncManager()..shouldDrain = false,
+        restoreCycleSchedules: true,
+      );
+      addTearDown(harness.dispose);
+      final a = harness.databaseFactory.last!;
+      await harness.cycleRestore.lastRestore;
+      final preferences = (await harness.cycleStore.load(_userA.uid))!.toJson();
+      expect(harness.lifecycle.rebuiltUserIds, [_userA.uid]);
+      await seedSessionRows(a, _userA.uid);
+      await healthFor(harness).updatePillStatus(true, expectedUid: _userA.uid);
+      final beforeQueue = await a.select(a.syncQueueTable).get();
+      harness.syncManager.shouldDrain = true;
+
+      await harness.notifier.logout();
+      expect(harness.state, isA<AuthUnauthenticated>());
+      expect(a.closed, isTrue);
+      expect(a.closeCalls, 1);
+      expect(
+        a.identity!.fileIn(harness.databaseFactory.directory).existsSync(),
+        isTrue,
+      );
+      expect(harness.notificationCleanup.calls, 1);
+      expect(harness.rotation.userIds, [_userA.uid]);
+      expect(harness.lifecycle.cancelledUserIds, [_userA.uid]);
+      expect(harness.preferencesDeletion.userIds, isEmpty);
+      expect(
+        (await harness.cycleStore.load(_userA.uid))!.toJson(),
+        preferences,
+      );
+      expect(() => harness.container.read(databaseProvider), throwsA(anything));
+      final persisted = harness.database;
+      expect(await persisted.select(persisted.taskTable).get(), hasLength(1));
+      expect(
+        await persisted.select(persisted.notificationsTable).get(),
+        hasLength(1),
+      );
+      expect(
+        await persisted.select(persisted.syncQueueTable).get(),
+        beforeQueue,
+      );
+
+      harness.syncManager.shouldDrain = false;
+      harness.auth.user = _FirebaseUser(_userA.uid);
+      await harness.notifier.checkCurrentUser();
+      await harness.cycleRestore.lastRestore;
+      expect(harness.lifecycle.rebuiltUserIds, [_userA.uid, _userA.uid]);
+      expect(harness.lifecycle.rebuiltPreferences, [preferences, preferences]);
+      final reopened = harness.container.read(databaseProvider);
+      expect(reopened, isNot(same(a)));
+      expect(reopened.identity, a.identity);
+      expect(await reopened.select(reopened.taskTable).get(), hasLength(1));
+      expect(
+        await reopened.select(reopened.notificationsTable).get(),
+        hasLength(1),
+      );
+      expect(await reopened.select(reopened.syncQueueTable).get(), beforeQueue);
+    },
+  );
+
+  test(
+    'spontaneous A to B closes A and relogin restores only each owner rows',
+    () async {
+      final harness = await _Harness.create([
+        0,
+        0,
+      ], syncManagerOverride: _SyncManager()..shouldDrain = false);
+      addTearDown(harness.dispose);
+      final a = harness.databaseFactory.last!;
+      await harness.cycleRestore.lastRestore;
+      final preferencesA = (await harness.cycleStore.load(
+        _userA.uid,
+      ))!.toJson();
+      final preferencesB = (await harness.cycleStore.load(
+        _userB.uid,
+      ))!.toJson();
+      await seedSessionRows(a, _userA.uid);
+      final preparedB = Completer<void>();
+      harness.container.listen<AuthState>(authNotifierProvider, (_, next) {
+        if (next is AuthAuthenticated &&
+            next.user.uid == _userB.uid &&
+            !preparedB.isCompleted) {
+          preparedB.complete();
+        }
+      });
+      harness.auth.emit(_FirebaseUser(_userB.uid));
+      await preparedB.future;
+      await harness.cycleRestore.lastRestore;
+      expect(harness.cycleRestore.loadedPreferences.last, preferencesB);
+      expect(harness.preferencesDeletion.userIds, isEmpty);
+      expect(
+        (await harness.cycleStore.load(_userA.uid))!.toJson(),
+        preferencesA,
+      );
+      expect((harness.state as AuthAuthenticated).user.uid, _userB.uid);
+      final b = harness.container.read(databaseProvider);
+      expect(a.closed, isTrue);
+      expect(b.identity!.uid, _userB.uid);
+      expect(await b.select(b.taskTable).get(), isEmpty);
+      expect(await b.select(b.notificationsTable).get(), isEmpty);
+      await seedSessionRows(b, _userB.uid);
+      harness.auth.emit(_FirebaseUser(_userA.uid));
+      await harness.notifier.checkCurrentUser();
+      await harness.cycleRestore.lastRestore;
+      expect(harness.cycleRestore.loadedPreferences.last, preferencesA);
+      expect(
+        (await harness.cycleStore.load(_userB.uid))!.toJson(),
+        preferencesB,
+      );
+      final reopenedA = harness.container.read(databaseProvider);
+      expect(
+        (await reopenedA.select(reopenedA.taskTable).get()).single.id,
+        'user-a-task',
+      );
+      expect(
+        (await reopenedA.select(reopenedA.notificationsTable).get()).single.id,
+        'user-a-notification',
+      );
+      final persistedB = harness.databaseFactory.inspectClosed(
+        _userB.uid,
+        () => _userB.uid,
+      );
+      expect(
+        (await persistedB.select(persistedB.taskTable).get()).single.id,
+        'user-b-task',
+      );
+    },
+  );
+
+  test(
+    'external sign-out preserves A rows while revoking database access',
+    () async {
+      final harness = await _Harness.create([
+        0,
+      ], syncManagerOverride: _SyncManager()..shouldDrain = false);
+      addTearDown(harness.dispose);
+      final a = harness.databaseFactory.last!;
+      final preferences = (await harness.cycleStore.load(_userA.uid))!.toJson();
+      await seedSessionRows(a, _userA.uid);
+      harness.auth.emit(null);
+      await harness.waitForState<AuthUnauthenticated>();
+      expect(a.closed, isTrue);
+      expect(harness.repository.signOutCalls, 0);
+      expect(harness.rotation.userIds, [_userA.uid]);
+      expect(harness.lifecycle.cancelledUserIds, [_userA.uid]);
+      expect(harness.preferencesDeletion.userIds, isEmpty);
+      expect(
+        (await harness.cycleStore.load(_userA.uid))!.toJson(),
+        preferences,
+      );
+      expect(() => harness.container.read(databaseProvider), throwsA(anything));
+      final persisted = harness.database;
+      expect(await persisted.select(persisted.taskTable).get(), hasLength(1));
+      expect(
+        await persisted.select(persisted.notificationsTable).get(),
+        hasLength(1),
+      );
+    },
+  );
+
+  test(
+    'pending logout with Firebase null preserves unopened A rows on recovery',
+    () async {
+      final storage = _MemoryBarrierStorage();
+      await AuthCleanupBarrierStore(
+        storage,
+      ).setPending(_userA.uid, AuthCleanupIntent.logout);
+      final harness = await _Harness.create(
+        [0],
+        firebaseUserId: null,
+        barrierStorage: storage,
+        waitForAuthentication: false,
+        seedBeforeAuth: (db) => seedSessionRows(db, _userA.uid),
+      );
+      addTearDown(harness.dispose);
+      await harness.waitForState<AuthUnauthenticated>();
+      expect(harness.databaseFactory.openedUserIds, isEmpty);
+      expect(harness.rotation.userIds, [_userA.uid]);
+      expect(harness.lifecycle.cancelledUserIds, [_userA.uid]);
+      expect(harness.preferencesDeletion.userIds, isEmpty);
+      expect(await harness.cycleStore.load(_userA.uid), isNotNull);
+      expect(harness.repository.signOutCalls, 0);
+      expect(await harness.readPendingCleanup(), isNull);
+      final preserved = harness.database;
+      expect(await preserved.select(preserved.taskTable).get(), hasLength(1));
+      expect(
+        await preserved.select(preserved.notificationsTable).get(),
+        hasLength(1),
+      );
+    },
+  );
+
+  test(
+    'external null then B waits for A cleanup before publishing B',
+    () async {
+      final started = Completer<void>();
+      final release = Completer<void>();
+      final harness = await _Harness.create(
+        [0],
+        tokenRotation: _ScriptedTokenRotation(
+          callStarted: started,
+          allowCall: release,
+        ),
+        syncManagerOverride: _SyncManager()..shouldDrain = false,
+      );
+      addTearDown(harness.dispose);
+      final a = harness.databaseFactory.last!;
+      await seedSessionRows(a, _userA.uid);
+      harness.auth.emit(null);
+      await started.future;
+      final preparedB = Completer<void>();
+      harness.container.listen<AuthState>(authNotifierProvider, (_, next) {
+        if (next is AuthAuthenticated &&
+            next.user.uid == _userB.uid &&
+            !preparedB.isCompleted) {
+          preparedB.complete();
+        }
+      });
+      harness.auth.emit(_FirebaseUser(_userB.uid));
+      release.complete();
+      await preparedB.future;
+      expect(a.closed, isTrue);
+      final b = harness.container.read(databaseProvider);
+      expect(b.identity!.uid, _userB.uid);
+      expect(await b.select(b.taskTable).get(), isEmpty);
+      expect(await harness.readPendingCleanup(), isNull);
+      final preservedA = harness.databaseFactory.inspectClosed(
+        _userA.uid,
+        () => _userA.uid,
+      );
+      expect(await preservedA.select(preservedA.taskTable).get(), hasLength(1));
+    },
+  );
+
+  test(
+    'cold Auth cannot publish authenticated before session DB and token are prepared',
+    () async {
+      final started = Completer<void>();
+      final release = Completer<void>();
+      final harness = await _Harness.create(
+        [0],
+        waitForAuthentication: false,
+        firebaseUser: _FirebaseUser(
+          _userA.uid,
+          onGetIdToken: () async {
+            started.complete();
+            await release.future;
+          },
+        ),
+        syncManagerOverride: _SyncManager()..shouldDrain = false,
+      );
+      addTearDown(harness.dispose);
+      await started.future;
+      expect(harness.state, isNot(isA<AuthAuthenticated>()));
+      expect(() => harness.container.read(databaseProvider), throwsA(anything));
+      final published = <String>[];
+      harness.container.listen<AuthState>(authNotifierProvider, (_, next) {
+        if (next is AuthAuthenticated) {
+          published.add(harness.container.read(databaseProvider).identity!.uid);
+        }
+      });
+      release.complete();
+      await harness.waitForState<AuthAuthenticated>();
+      expect(published, [_userA.uid]);
+      expect(harness.databaseFactory.openedUserIds, [_userA.uid]);
     },
   );
 
@@ -2841,13 +3341,22 @@ void main() {
     ], completeDeletionBySigningOut: true);
     addTearDown(harness.dispose);
 
+    final a = harness.databaseFactory.last!;
+    await seedSessionRows(a, _userA.uid);
     await harness.notifier.deleteAccount();
 
     expect(harness.repository.deletedExpectedUserIds, <String>[_userA.uid]);
     expect(harness.lifecycle.cancelledUserIds, <String>[_userA.uid]);
     expect(harness.preferencesDeletion.userIds, <String>[_userA.uid]);
+    expect(await harness.cycleStore.load(_userA.uid), isNull);
+    expect(await harness.cycleStore.load(_userB.uid), isNotNull);
     expect(harness.state, isA<AuthUnauthenticated>());
     expect(harness.auth.currentUser, isNull);
     expect(await harness.readPendingCleanup(), isNull);
+    expect(a.closed, isTrue);
+    final deleted = harness.database;
+    expect(await deleted.select(deleted.taskTable).get(), isEmpty);
+    expect(await deleted.select(deleted.notificationsTable).get(), isEmpty);
+    expect(await deleted.select(deleted.syncQueueTable).get(), isEmpty);
   });
 }

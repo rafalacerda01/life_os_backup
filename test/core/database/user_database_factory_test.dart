@@ -267,4 +267,50 @@ void main() {
       expect(directory.listSync(), isEmpty);
     },
   );
+
+  for (final suffix in ['-wal', '-shm', '-journal']) {
+    test(
+      'orphan $suffix with persisted key fails closed without new main',
+      () async {
+        await keys.getEncryptionKey(a, allowCreate: true);
+        final file = a.fileIn(directory);
+        final sidecar = File('${file.path}$suffix')
+          ..writeAsStringSync('orphan-bytes');
+        await expectLater(open(a), throwsStateError);
+        expect(file.existsSync(), isFalse);
+        expect(sidecar.readAsStringSync(), 'orphan-bytes');
+        expect(storage.writes[a.keyAlias], 1);
+      },
+    );
+  }
+
+  test('valid plaintext backup recovery stays supported', () async {
+    await keys.getEncryptionKey(a, allowCreate: true);
+    final backup = File('${a.fileIn(directory).path}.plaintext-backup');
+    final raw = sqlite3.open(backup.path);
+    raw.execute('CREATE TABLE preserved (value TEXT)');
+    raw.execute("INSERT INTO preserved VALUES ('fixture')");
+    raw.dispose();
+    final db = await open(a);
+    expect(
+      (await db.customSelect('SELECT value FROM preserved').get())
+          .single
+          .data['value'],
+      'fixture',
+    );
+    expect(backup.existsSync(), isFalse);
+  });
+
+  test(
+    'candidate without source or backup retains fail-closed recovery',
+    () async {
+      await keys.getEncryptionKey(a, allowCreate: true);
+      final file = a.fileIn(directory);
+      final candidate = File('${file.path}.encryption-candidate')
+        ..writeAsStringSync('unresolved');
+      await expectLater(open(a), throwsStateError);
+      expect(file.existsSync(), isFalse);
+      expect(candidate.readAsStringSync(), 'unresolved');
+    },
+  );
 }
