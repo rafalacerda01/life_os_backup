@@ -516,6 +516,7 @@ void main() {
     await harness.notifier.login('user@example.invalid', 'bad-password');
 
     expect(harness.state, isA<AuthError>());
+    expect((harness.state as AuthError).scope, AuthErrorScope.publicEntry);
     expect(harness.analytics.events, isEmpty);
 
     harness.repository.failRegistration = true;
@@ -526,6 +527,7 @@ void main() {
     );
 
     expect(harness.state, isA<AuthError>());
+    expect((harness.state as AuthError).scope, AuthErrorScope.publicEntry);
     expect(harness.analytics.events, isEmpty);
   });
 
@@ -536,8 +538,55 @@ void main() {
     await harness.notifier.signInWithGoogle();
 
     expect(harness.state, isA<AuthError>());
+    expect((harness.state as AuthError).scope, AuthErrorScope.publicEntry);
     expect(harness.analytics.events, isEmpty);
   });
+
+  test(
+    'unclassified AuthError defaults to protected and preserves message API',
+    () {
+      final error = AuthState.error('Mensagem segura');
+      expect((error as AuthError).scope, AuthErrorScope.protectedSession);
+      expect(
+        error.maybeWhen(error: (message) => message, orElse: () => ''),
+        'Mensagem segura',
+      );
+    },
+  );
+
+  test('entry failure after prepared session loss remains protected', () async {
+    final harness = _harness(restoreSession: true);
+    final notifier = harness.notifier;
+    await pumpEventQueue(times: 20);
+    expect(harness.state, isA<AuthAuthenticated>());
+    harness.auth.user = null;
+    harness.repository.failLogin = true;
+
+    await notifier.login('user@example.invalid', 'bad-password');
+
+    expect((harness.state as AuthError).scope, AuthErrorScope.protectedSession);
+  });
+
+  test(
+    'reconciliation failure with Firebase session remains protected',
+    () async {
+      final harness = _harness();
+      final notifier = harness.notifier;
+      harness.auth.user = _FirebaseUser(_userB);
+      harness.repository.failLogin = true;
+      harness.repository.currentUserResults.add(
+        const Error(AuthFailure('Mensagem segura')),
+      );
+
+      await notifier.login('user@example.invalid', 'bad-password');
+
+      expect(
+        (harness.state as AuthError).scope,
+        AuthErrorScope.protectedSession,
+      );
+      expect(harness.auth.currentUser?.uid, 'user-b');
+    },
+  );
 
   test('Analytics failure does not break successful login', () async {
     final harness = _harness();
@@ -592,6 +641,7 @@ void main() {
 
       expect(succeeded, isFalse);
       expect(harness.state, isA<AuthError>());
+      expect((harness.state as AuthError).scope, AuthErrorScope.publicEntry);
       expect(
         (harness.state as AuthError).message,
         'Não foi possível solicitar a recuperação de senha. Tente novamente.',

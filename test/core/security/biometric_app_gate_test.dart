@@ -4,6 +4,8 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:go_router/go_router.dart';
+import 'package:life_os/core/router/router.dart';
 import 'package:life_os/core/security/biometric_app_gate.dart';
 import 'package:life_os/core/services/biometric_service.dart';
 import 'package:life_os/features/auth/domain/entities/user_entity.dart';
@@ -111,6 +113,124 @@ void main() {
       AppLifecycleState.resumed,
     );
   });
+
+  testWidgets('public error metadata cannot unlock Firebase preparation', (
+    tester,
+  ) async {
+    final service = _FakeBiometricService();
+    await tester.pumpWidget(
+      _app(
+        authState: const AuthError(
+          'Mensagem segura',
+          scope: AuthErrorScope.publicEntry,
+        ),
+        hasFirebaseUser: true,
+        service: service,
+      ),
+    );
+    await _pumpAsync(tester);
+    expect(find.text('Sensitive router content'), findsNothing);
+    expect(find.text('Protegendo sua sessão...'), findsOneWidget);
+    expect(service.calls, 0);
+  });
+
+  testWidgets(
+    'public error cannot reveal a previously confirmed session after UID loss',
+    (tester) async {
+      final service = _FakeBiometricService();
+      final auth = _FirebaseAuth(hasUser: true);
+      await tester.pumpWidget(
+        _app(
+          authState: const AuthAuthenticated(_user),
+          firebaseAuth: auth,
+          service: service,
+        ),
+      );
+      await _pumpAsync(tester);
+      expect(find.text('Sensitive router content'), findsOneWidget);
+      final context = tester.element(find.byType(BiometricAppGate));
+      final container = ProviderScope.containerOf(context);
+      auth.hasUser = false;
+      (container.read(authNotifierProvider.notifier) as _StaticAuthNotifier)
+          .emit(
+            const AuthError(
+              'Mensagem segura',
+              scope: AuthErrorScope.publicEntry,
+            ),
+          );
+      await tester.pump();
+      expect(find.text('Sensitive router content'), findsNothing);
+      expect(find.text('Protegendo sua sessão...'), findsOneWidget);
+      expect(service.calls, 0);
+    },
+  );
+
+  testWidgets(
+    'public error stays opaque until stale private route finishes redirecting',
+    (tester) async {
+      SharedPreferences.setMockInitialValues({
+        BiometricNotifier.storageKey: true,
+      });
+      final service = _FakeBiometricService();
+      final notifier = _StaticAuthNotifier(const AuthInitial());
+      final redirect = Completer<String?>();
+      var holdRedirect = false;
+      final router = GoRouter(
+        initialLocation: '/home',
+        redirect: (_, _) => holdRedirect ? redirect.future : null,
+        routes: [
+          GoRoute(
+            path: '/home',
+            builder: (_, _) =>
+                const Scaffold(body: Text('Sensitive router content')),
+          ),
+          GoRoute(
+            path: '/login',
+            builder: (_, _) => const Scaffold(body: Text('Public login')),
+          ),
+        ],
+      );
+      addTearDown(router.dispose);
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            authNotifierProvider.overrideWith(() => notifier),
+            firebaseAuthProvider.overrideWithValue(
+              _FirebaseAuth(hasUser: false),
+            ),
+            biometricServiceProvider.overrideWithValue(service),
+            routerProvider.overrideWithValue(router),
+          ],
+          child: MaterialApp.router(
+            routerConfig: router,
+            builder: (_, child) => BiometricAppGate(child: child!),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(router.routerDelegate.currentConfiguration.uri.path, '/home');
+      holdRedirect = true;
+      notifier.emit(
+        const AuthError('Mensagem segura', scope: AuthErrorScope.publicEntry),
+      );
+      router.go('/login');
+      for (var frame = 0; frame < 3; frame++) {
+        await tester.pump();
+        expect(find.text('Sensitive router content'), findsNothing);
+        expect(find.text('Public login'), findsNothing);
+        expect(find.text('Protegendo sua sessão...'), findsOneWidget);
+        expect(router.routerDelegate.currentConfiguration.uri.path, '/home');
+      }
+      holdRedirect = false;
+      redirect.complete(null);
+      await tester.pumpAndSettle();
+      expect(find.text('Public login'), findsOneWidget);
+      expect(find.text('Sensitive router content'), findsNothing);
+      expect(find.text('Protegendo sua sessão...'), findsNothing);
+      expect(service.calls, 0);
+      expect(tester.takeException(), isNull);
+    },
+  );
 
   for (final authState in [const AuthInitial(), const AuthLoading()]) {
     testWidgets('${authState.runtimeType} with restored UID stays opaque', (

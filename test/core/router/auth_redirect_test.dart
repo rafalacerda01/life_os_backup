@@ -14,6 +14,42 @@ const _user = UserEntity(
 );
 
 void main() {
+  const publicError = AuthError(
+    'Erro seguro',
+    scope: AuthErrorScope.publicEntry,
+  );
+  for (final location in ['/login', '/register']) {
+    test('erro público preserva $location', () {
+      expect(
+        authRedirectFor(
+          authState: publicError,
+          hasFirebaseUser: false,
+          location: location,
+        ),
+        isNull,
+      );
+    });
+  }
+  test('erro público não autoriza rota privada sem Firebase', () {
+    expect(
+      authRedirectFor(
+        authState: publicError,
+        hasFirebaseUser: false,
+        location: '/home',
+      ),
+      '/splash',
+    );
+  });
+  test('erro com Firebase não redireciona sessão privada para entrada', () {
+    expect(
+      authRedirectFor(
+        authState: publicError,
+        hasFirebaseUser: true,
+        location: '/home',
+      ),
+      isNull,
+    );
+  });
   for (final authState in [const AuthInitial(), const AuthLoading()]) {
     for (final location in ['/home', '/tasks', '/health/cycle', '/contact']) {
       test('${authState.runtimeType} desvia $location para splash', () {

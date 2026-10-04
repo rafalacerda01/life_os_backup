@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:life_os/core/router/router.dart';
 import 'package:life_os/features/auth/presentation/providers/auth_provider.dart';
 import 'package:life_os/features/auth/presentation/providers/auth_state.dart';
 import 'package:life_os/features/settings/presentation/providers/biometric_provider.dart';
@@ -34,7 +35,9 @@ class _BiometricAppGateState extends ConsumerState<BiometricAppGate>
 
   bool _canRevealPrivateContent(AuthState authState) =>
       authState is AuthAuthenticated ||
-      (authState is AuthError && _hasPreviouslyConfirmedFirebaseSession);
+      (authState is AuthError &&
+          authState.scope == AuthErrorScope.protectedSession &&
+          _hasPreviouslyConfirmedFirebaseSession);
 
   @override
   void initState() {
@@ -139,6 +142,49 @@ class _BiometricAppGateState extends ConsumerState<BiometricAppGate>
         biometricState.isLocked &&
         _lastBiometricStatus != BiometricLockStatus.locked;
     _lastBiometricStatus = biometricState.status;
+
+    if (authState is AuthError &&
+        authState.scope == AuthErrorScope.publicEntry &&
+        !_sessionWasAuthenticated &&
+        ref.read(firebaseAuthProvider).currentUser == null) {
+      final router = ref.watch(routerProvider);
+      return ListenableBuilder(
+        listenable: router.routerDelegate,
+        builder: (context, _) {
+          // Authorize the settled route, not a pending redirect destination.
+          final path = router.routerDelegate.currentConfiguration.uri.path;
+          const publicPaths = {
+            '/splash',
+            '/onboarding',
+            '/login',
+            '/register',
+            '/privacy-policy',
+          };
+          final canRevealPublicRoute =
+              publicPaths.contains(path) &&
+              ref.read(firebaseAuthProvider).currentUser == null;
+          return Stack(
+            children: [
+              // Keep Router alive to complete the redirect without painting or
+              // focusing a stale private route.
+              ExcludeFocus(
+                excluding: !canRevealPublicRoute,
+                child: Offstage(
+                  offstage: !canRevealPublicRoute,
+                  child: widget.child,
+                ),
+              ),
+              if (!canRevealPublicRoute)
+                _BiometricLockScreen(
+                  loading: true,
+                  signOutInProgress: _signOutInProgress,
+                  onSignOut: _signOut,
+                ),
+            ],
+          );
+        },
+      );
+    }
 
     if (authState is! AuthAuthenticated &&
         authState is! AuthUnauthenticated &&

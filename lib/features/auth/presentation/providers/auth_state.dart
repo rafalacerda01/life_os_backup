@@ -8,7 +8,10 @@ abstract class AuthState {
   factory AuthState.loading() => const AuthLoading();
   factory AuthState.authenticated(UserEntity user) => AuthAuthenticated(user);
   factory AuthState.unauthenticated() => const AuthUnauthenticated();
-  factory AuthState.error(String message) => AuthError(message);
+  factory AuthState.error(
+    String message, {
+    AuthErrorScope scope = AuthErrorScope.protectedSession,
+  }) => AuthError(message, scope: scope);
 
   R maybeWhen<R>({
     R Function()? initial,
@@ -21,8 +24,10 @@ abstract class AuthState {
     final state = this;
     if (state is AuthInitial && initial != null) return initial();
     if (state is AuthLoading && loading != null) return loading();
-    if (state is AuthAuthenticated && authenticated != null) return authenticated(state.user);
-    if (state is AuthUnauthenticated && unauthenticated != null) return unauthenticated();
+    if (state is AuthAuthenticated && authenticated != null)
+      return authenticated(state.user);
+    if (state is AuthUnauthenticated && unauthenticated != null)
+      return unauthenticated();
     if (state is AuthError && error != null) return error(state.message);
     return orElse();
   }
@@ -45,7 +50,10 @@ class AuthUnauthenticated extends AuthState {
   const AuthUnauthenticated();
 }
 
+enum AuthErrorScope { protectedSession, publicEntry }
+
 class AuthError extends AuthState {
   final String message;
-  const AuthError(this.message);
+  final AuthErrorScope scope;
+  const AuthError(this.message, {this.scope = AuthErrorScope.protectedSession});
 }

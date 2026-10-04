@@ -536,7 +536,25 @@ class AuthNotifier extends Notifier<AuthState> {
       return;
     }
 
-    state = AuthState.error(message);
+    state = _entryFailureState(message);
+  }
+
+  AuthState _entryFailureState(String message) {
+    final isPublicEntry =
+        ref.read(firebaseAuthProvider).currentUser == null &&
+        _activeLocalSessionUid == null &&
+        !_localCleanupRequired &&
+        !_explicitSignOutInProgress &&
+        !_accountDeletionInProgress &&
+        !_authResultReconciliationInProgress &&
+        _localCleanupInFlight == null &&
+        _durableCleanupRecoveryInFlight == null;
+    return AuthState.error(
+      message,
+      scope: isPublicEntry
+          ? AuthErrorScope.publicEntry
+          : AuthErrorScope.protectedSession,
+    );
   }
 
   Future<void> login(String email, String password) async {
@@ -829,7 +847,7 @@ class AuthNotifier extends Notifier<AuthState> {
         return true;
       },
       (failure) {
-        state = AuthState.error(failure.message);
+        state = _entryFailureState(failure.message);
         return false;
       },
     );
