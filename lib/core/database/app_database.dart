@@ -7,6 +7,7 @@ import 'package:path_provider/path_provider.dart';
 
 import 'package:life_os/core/database/database_encryption.dart';
 import 'package:life_os/core/database/local_mutation_gate.dart';
+import 'package:life_os/core/database/local_database_identity.dart';
 import 'package:life_os/core/db/db_key_manager.dart';
 import 'package:life_os/features/checkin/data/local/checkin_table.dart';
 import 'package:life_os/features/finance/data/local/transaction_table.dart';
@@ -42,12 +43,18 @@ part 'app_database.g.dart';
 class AppDatabase extends _$AppDatabase {
   /// Permite injetar um executor, principalmente para testes.
   AppDatabase({QueryExecutor? executor})
-    : this._(executor ?? _openConnection(), LocalMutationGate());
+    : this._(executor ?? _openConnection(), LocalMutationGate(), null);
 
-  AppDatabase._(QueryExecutor executor, this.localMutations)
+  AppDatabase.forUser({
+    required LocalDatabaseIdentity identity,
+    required QueryExecutor executor,
+  }) : this._(executor, LocalMutationGate(), identity);
+
+  AppDatabase._(QueryExecutor executor, this.localMutations, this.identity)
     : super(executor.interceptWith(LocalMutationInterceptor(localMutations)));
 
   final LocalMutationGate localMutations;
+  final LocalDatabaseIdentity? identity;
 
   @override
   Future<T> transaction<T>(
