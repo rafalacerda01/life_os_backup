@@ -222,9 +222,12 @@ class CycleReminderPreferencesStore {
     return _storage.write(key, jsonEncode(preferences.toJson()));
   }
 
-  Future<void> delete(String userId) {
+  Future<void> delete(String userId) async {
     final key = _keyFor(userId);
-    return _storage.delete(key);
+    await _storage.delete(key);
+    if (await _storage.read(key) != null) {
+      throw StateError('CYCLE_REMINDER_PREFERENCES_NOT_REMOVED');
+    }
   }
 
   String _keyFor(String userId) {

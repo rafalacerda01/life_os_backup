@@ -11,6 +11,7 @@ abstract interface class CycleReminderActionTokenStorage {
   Future<String?> read(String key);
 
   Future<void> write(String key, String value);
+  Future<void> delete(String key);
 }
 
 class SecureCycleReminderActionTokenStorage
@@ -25,6 +26,9 @@ class SecureCycleReminderActionTokenStorage
   @override
   Future<void> write(String key, String value) =>
       _storage.write(key: key, value: value);
+
+  @override
+  Future<void> delete(String key) => _storage.delete(key: key);
 }
 
 abstract interface class CycleReminderActionTokenReader {
@@ -36,6 +40,8 @@ abstract interface class CycleReminderActionTokenReader {
 abstract interface class CycleReminderActionTokenManager
     implements CycleReminderActionTokenReader {
   Future<String> rotate(String userId);
+  Future<void> delete(String userId);
+  bool isDeletionSealed(String userId);
 }
 
 typedef CycleReminderSecureRandomBytes = List<int> Function(int length);
@@ -52,6 +58,22 @@ class CycleReminderActionTokenStore implements CycleReminderActionTokenManager {
   final CycleReminderActionTokenStorage _storage;
   final CycleReminderSecureRandomBytes _randomBytes;
   final Map<String, Future<void>> _operationTails = <String, Future<void>>{};
+  final Set<String> _deletedUserIds = {};
+
+  @override
+  bool isDeletionSealed(String userId) =>
+      _deletedUserIds.contains(_normalizeUserId(userId));
+
+  @override
+  Future<void> delete(String userId) {
+    final uid = _normalizeUserId(userId);
+    _deletedUserIds.add(uid);
+    return _runSerialized(uid, () async {
+      await _storage.delete(_keyFor(uid));
+      if (await _storage.read(_keyFor(uid)) != null)
+        throw StateError('CYCLE_ACTION_TOKEN_NOT_REMOVED');
+    });
+  }
 
   @override
   Future<String?> load(String userId) async {
@@ -82,6 +104,8 @@ class CycleReminderActionTokenStore implements CycleReminderActionTokenManager {
   }
 
   Future<String> _getOrCreate(String userId) async {
+    if (isDeletionSealed(userId))
+      throw StateError('CYCLE_ACTION_TOKEN_DELETION_SEALED');
     final existing = await load(userId);
     if (existing != null) return existing;
 
@@ -89,6 +113,8 @@ class CycleReminderActionTokenStore implements CycleReminderActionTokenManager {
   }
 
   Future<String> _generateAndStore(String userId) async {
+    if (isDeletionSealed(userId))
+      throw StateError('CYCLE_ACTION_TOKEN_DELETION_SEALED');
     final bytes = _randomBytes(_tokenBytes);
     if (bytes.length != _tokenBytes ||
         bytes.any((value) => value < 0 || value > 255)) {

@@ -20,6 +20,9 @@ class _MemoryTokenStorage implements CycleReminderActionTokenStorage {
   }
 
   @override
+  Future<void> delete(String key) async => values.remove(key);
+
+  @override
   Future<void> write(String key, String value) async {
     writeCalls += 1;
     final started = firstWriteStarted;
@@ -40,6 +43,35 @@ class _MemoryTokenStorage implements CycleReminderActionTokenStorage {
 void main() {
   const codec = CycleReminderActionPayloadCodec();
   final token = base64Url.encode(List<int>.filled(32, 7)).replaceAll('=', '');
+
+  test(
+    'delete drains an in-flight token write and rejects queued or late recreation',
+    () async {
+      final storage = _MemoryTokenStorage();
+      final started = Completer<void>();
+      final release = Completer<void>();
+      storage
+        ..firstWriteStarted = started
+        ..writeGate = release.future;
+      final store = CycleReminderActionTokenStore(storage);
+      final creating = store.getOrCreate('user-a');
+      await started.future;
+      final queued = store.rotate('user-a');
+      final rejected = expectLater(queued, throwsStateError);
+      final deletion = store.delete('user-a');
+      release.complete();
+      await creating;
+      await rejected;
+      await deletion;
+      expect(await store.load('user-a'), isNull);
+      await expectLater(store.getOrCreate('user-a'), throwsStateError);
+      await expectLater(store.rotate('user-a'), throwsStateError);
+      final tokenB = await store.getOrCreate('user-b');
+      await store.delete('user-a');
+      expect(await store.load('user-b'), tokenB);
+      expect(storage.writeCalls, 2);
+    },
+  );
 
   test('payload válido usa somente versão, kind e token opaco', () {
     final encoded = codec.encode(CycleReminderActionPayload(token));

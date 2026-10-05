@@ -407,7 +407,8 @@ final cycleReminderSessionCleanupProvider =
         ref.watch(cycleReminderMutationGateProvider),
         ref.watch(cycleReminderNotificationLifecycleProvider),
         rotateActionToken: (userId) async {
-          await tokenStore.rotate(userId);
+          if (!tokenStore.isDeletionSealed(userId))
+            await tokenStore.rotate(userId);
         },
         deletePreferences: preferencesStore.delete,
       );

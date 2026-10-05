@@ -91,9 +91,11 @@ class _AuthRepository extends Fake implements AuthRepository {
   final List<Result<UserEntity, Failure>> currentUserResults = [];
   Result<void, Failure> passwordResetResult = const Success(null);
   int passwordResetCalls = 0;
+  final firstCurrentUserRead = Completer<void>();
 
   @override
   Future<Result<UserEntity, Failure>> getCurrentUser() {
+    if (!firstCurrentUserRead.isCompleted) firstCurrentUserRead.complete();
     final pendingResult = pendingCurrentUserResult;
     if (pendingResult != null) {
       pendingCurrentUserResult = null;
@@ -163,6 +165,17 @@ class _AuthRepository extends Fake implements AuthRepository {
 }
 
 class _SecureStorage extends Fake implements FlutterSecureStorage {
+  @override
+  Future<String?> read({
+    required String key,
+    AppleOptions? iOptions,
+    AndroidOptions? aOptions,
+    LinuxOptions? lOptions,
+    WebOptions? webOptions,
+    AppleOptions? mOptions,
+    WindowsOptions? wOptions,
+  }) async => null;
+
   @override
   Future<void> write({
     required String key,
@@ -241,6 +254,13 @@ class _Harness {
 
   AuthNotifier get notifier => container.read(authNotifierProvider.notifier);
   AuthState get state => container.read(authNotifierProvider);
+
+  Future<AuthNotifier> startNotifier() async {
+    final current = notifier;
+    // Let the new durable-barrier read finish before configuring later results.
+    await repository.firstCurrentUserRead.future;
+    return current;
+  }
 
   Future<void> dispose() async {
     final databases = container.read(sessionDatabaseCoordinatorProvider);
@@ -321,7 +341,7 @@ void main() {
 
     test('login antigo de A reconcilia B sem hidratar como A', () async {
       final harness = _harness();
-      final notifier = harness.notifier;
+      final notifier = await harness.startNotifier();
       harness.repository.operationResult = _user;
       harness.repository.operationFirebaseUser = _FirebaseUser(_userB);
       harness.repository.currentUserResults.add(const Success(_userB));
@@ -338,7 +358,7 @@ void main() {
 
     test('cadastro antigo de A reconcilia B sem publicar A', () async {
       final harness = _harness();
-      final notifier = harness.notifier;
+      final notifier = await harness.startNotifier();
       harness.repository.operationResult = _user;
       harness.repository.operationFirebaseUser = _FirebaseUser(_userB);
       harness.repository.currentUserResults.add(const Success(_userB));
@@ -355,7 +375,7 @@ void main() {
 
     test('Google Sign-In antigo de A reconcilia B sem publicar A', () async {
       final harness = _harness();
-      final notifier = harness.notifier;
+      final notifier = await harness.startNotifier();
       harness.repository.operationResult = _user;
       harness.repository.operationFirebaseUser = _FirebaseUser(_userB);
       harness.repository.currentUserResults.add(const Success(_userB));
@@ -386,7 +406,7 @@ void main() {
       'troca para B durante preparação impede publicação antiga de A',
       () async {
         final harness = _harness();
-        final notifier = harness.notifier;
+        final notifier = await harness.startNotifier();
         harness.repository.operationResult = _user;
         harness.repository.operationFirebaseUser = _FirebaseUser(
           _user,
@@ -426,7 +446,7 @@ void main() {
 
     test('falha antiga de login reconcilia sessão B', () async {
       final harness = _harness();
-      final notifier = harness.notifier;
+      final notifier = await harness.startNotifier();
       final staleResult = Completer<Result<UserEntity, Failure>>();
       harness.repository.pendingLoginResult = staleResult;
 
@@ -447,7 +467,7 @@ void main() {
 
     test('falha antiga de cadastro reconcilia sessão B', () async {
       final harness = _harness();
-      final notifier = harness.notifier;
+      final notifier = await harness.startNotifier();
       final staleResult = Completer<Result<UserEntity, Failure>>();
       harness.repository.pendingRegistrationResult = staleResult;
 
@@ -472,7 +492,7 @@ void main() {
 
     test('falha antiga de Google Sign-In reconcilia sessão B', () async {
       final harness = _harness();
-      final notifier = harness.notifier;
+      final notifier = await harness.startNotifier();
       final staleResult = Completer<Result<UserEntity, Failure>>();
       harness.repository.pendingGoogleResult = staleResult;
 
@@ -580,7 +600,7 @@ void main() {
     'reconciliation failure with Firebase session remains protected',
     () async {
       final harness = _harness();
-      final notifier = harness.notifier;
+      final notifier = await harness.startNotifier();
       harness.auth.user = _FirebaseUser(_userB);
       harness.repository.failLogin = true;
       harness.repository.currentUserResults.add(

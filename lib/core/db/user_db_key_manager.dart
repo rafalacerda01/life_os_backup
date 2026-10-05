@@ -24,6 +24,7 @@ class UserDbKeyManager {
   final _cache = <String, String>{};
   final _cacheRevisions = <String, int>{};
   final _operationTails = <String, Future<void>>{};
+  final Set<String> _deletedAliases = {};
 
   Future<String> getEncryptionKey(
     LocalDatabaseIdentity identity, {
@@ -32,6 +33,9 @@ class UserDbKeyManager {
     final alias = identity.keyAlias;
     final revision = _cacheRevisions[alias] ?? 0;
     try {
+      if (_deletedAliases.contains(alias)) {
+        throw StateError('USER_DATABASE_KEY_DELETION_SEALED');
+      }
       final cached = _cache[alias];
       if (cached != null) return cached;
 
@@ -75,6 +79,7 @@ class UserDbKeyManager {
   }
 
   Future<void> deleteKey(LocalDatabaseIdentity identity) {
+    _deletedAliases.add(identity.keyAlias);
     clearCache(identity);
     return _serialize(identity.keyAlias, () async {
       clearCache(identity);

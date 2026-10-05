@@ -38,6 +38,9 @@ import 'package:life_os/features/dashboard/presentation/providers/dashboard_prov
 import 'package:life_os/features/auth/data/repositories/auth_repository_impl.dart';
 import 'package:life_os/features/auth/data/remote/account_remote_data_source.dart';
 import 'package:life_os/features/auth/data/local/auth_cleanup_barrier.dart';
+import 'package:life_os/features/auth/data/local/account_deletion_cleanup_barrier.dart';
+import 'package:life_os/features/auth/data/local/account_deletion_storage_cleanup.dart';
+import 'package:life_os/core/database/local_database_identity.dart';
 import 'package:life_os/features/auth/data/services/google_sign_in_initializer.dart';
 import 'package:life_os/features/auth/domain/entities/user_entity.dart';
 import 'package:life_os/features/auth/domain/repositories/auth_repository.dart';
@@ -71,6 +74,13 @@ final secureStorageServiceProvider = Provider<SecureStorageService>((ref) {
   final storage = ref.watch(secureStorageProvider);
   return SecureStorageService(storage);
 });
+
+final accountDeletionCleanupBarrierProvider =
+    Provider<AccountDeletionCleanupBarrier>((ref) {
+      return AccountDeletionCleanupBarrier(
+        SecureAuthCleanupBarrierStorage(ref.read(secureStorageProvider)),
+      );
+    });
 
 final accountRemoteDataSourceProvider = Provider<AccountRemoteDataSource>((
   ref,
@@ -256,6 +266,16 @@ class AuthNotifier extends Notifier<AuthState> {
     final uid = firebaseUser.uid;
     if (ref.read(firebaseAuthProvider).currentUser?.uid != uid) return false;
     try {
+      await _recoverAccountDeletionCleanup();
+    } catch (_) {
+      _localCleanupRequired = true;
+      if (!_disposed)
+        state = AuthState.error(
+          'Não foi possível concluir a limpeza da conta. Tente novamente.',
+        );
+      return false;
+    }
+    try {
       await _recoverPendingLocalCleanup();
     } catch (_) {
       try {
@@ -408,6 +428,21 @@ class AuthNotifier extends Notifier<AuthState> {
 
   // --- Métodos de Autenticação e Perfil ---
   Future<void> checkCurrentUser() async {
+    if (_disposed || _accountDeletionInProgress) return;
+    try {
+      await _serializeLocalSession(() async {
+        if (_disposed || _accountDeletionInProgress) return;
+        await _recoverAccountDeletionCleanup();
+      });
+    } catch (_) {
+      _localCleanupRequired = true;
+      if (!_disposed)
+        state = AuthState.error(
+          'Não foi possível concluir a limpeza da conta. Tente novamente.',
+        );
+      return;
+    }
+    if (_disposed || _accountDeletionInProgress) return;
     final restoredUser = ref.read(firebaseAuthProvider).currentUser;
     final result = await _repository.getCurrentUser();
     await result.when(
@@ -467,6 +502,7 @@ class AuthNotifier extends Notifier<AuthState> {
 
     if (!sessionAlreadyPrepared &&
         !await _prepareAuthenticatedSession(firebaseUser)) {
+      if (_disposed || _accountDeletionInProgress) return false;
       final currentUid = ref.read(firebaseAuthProvider).currentUser?.uid;
       if (allowReconciliation &&
           currentUid != null &&
@@ -960,6 +996,8 @@ class AuthNotifier extends Notifier<AuthState> {
       notificationRemoteEffectsBarrierProvider,
     );
     var notificationEffectsSealed = false;
+    PendingAccountDeletion? deletionMarker;
+    var remoteCallStarted = false;
 
     try {
       final providerIds = user.providerData.map((e) => e.providerId).toList();
@@ -1006,13 +1044,51 @@ class AuthNotifier extends Notifier<AuthState> {
         return;
       }
 
+      deletionMarker = await ref
+          .read(accountDeletionCleanupBarrierProvider)
+          .request(expectedUid);
+      if (!_isExpectedFirebaseSession(expectedUid)) {
+        await ref
+            .read(accountDeletionCleanupBarrierProvider)
+            .clearIfCurrent(deletionMarker);
+        await _handleChangedAccountDeletionSession(expectedUid);
+        return;
+      }
+      remoteCallStarted = true;
       final result = await _repository.deleteAccount(expectedUid: expectedUid);
 
       await result.when(
         (success) async {
-          await _finishExpectedAccountDeletion(expectedUid);
+          final confirmed = await ref
+              .read(accountDeletionCleanupBarrierProvider)
+              .confirmIfCurrent(deletionMarker!);
+          await _finishExpectedAccountDeletion(expectedUid, confirmed);
         },
         (failure) async {
+          const nonAmbiguousCodes = {
+            'APP_CHECK_REQUIRED',
+            'APP_CHECK_INVALID',
+            'REAUTHENTICATION_REQUIRED',
+            'UNAUTHENTICATED',
+            'RATE_LIMITED',
+            'CIRCLE_ADMIN_ACTION_REQUIRED',
+            'ACCOUNT_STATE_CONFLICT',
+          };
+          if (!nonAmbiguousCodes.contains(failure.code)) {
+            _localCleanupRequired = true;
+            await _databases.detach(expectedUid: expectedUid);
+            _accountDeletionInProgress = false;
+            if (!_disposed)
+              state = AuthState.error(
+                'Não foi possível confirmar a exclusão. Tente novamente.',
+              );
+            return;
+          }
+          if (!await ref
+              .read(accountDeletionCleanupBarrierProvider)
+              .clearIfCurrent(deletionMarker!)) {
+            throw StateError('ACCOUNT_DELETION_MARKER_CHANGED');
+          }
           if (!_isExpectedFirebaseSession(expectedUid)) {
             await _handleChangedAccountDeletionSession(expectedUid);
             return;
@@ -1022,6 +1098,21 @@ class AuthNotifier extends Notifier<AuthState> {
         },
       );
     } on FirebaseAuthException catch (e) {
+      if (deletionMarker != null) {
+        _localCleanupRequired = true;
+        try {
+          await _databases.detach(expectedUid: expectedUid);
+        } catch (_) {
+          // The durable marker remains authoritative for recovery.
+        }
+        _accountDeletionInProgress = false;
+        if (!_disposed) {
+          state = AuthState.error(
+            'Não foi possível concluir a exclusão. Tente novamente.',
+          );
+        }
+        return;
+      }
       if (!_isExpectedFirebaseSession(expectedUid)) {
         await _handleChangedAccountDeletionSession(expectedUid);
         return;
@@ -1040,6 +1131,26 @@ class AuthNotifier extends Notifier<AuthState> {
         );
       }
     } catch (_) {
+      if (deletionMarker != null) {
+        _localCleanupRequired = true;
+        try {
+          if (!remoteCallStarted) {
+            await ref
+                .read(accountDeletionCleanupBarrierProvider)
+                .clearIfCurrent(deletionMarker);
+          } else {
+            await _databases.detach(expectedUid: expectedUid);
+          }
+        } catch (_) {
+          // Preserve the marker and deny preparation until recovery succeeds.
+        }
+        _accountDeletionInProgress = false;
+        if (!_disposed)
+          state = AuthState.error(
+            'Não foi possível concluir a exclusão. Tente novamente.',
+          );
+        return;
+      }
       if (!_isExpectedFirebaseSession(expectedUid)) {
         await _handleChangedAccountDeletionSession(expectedUid);
         return;
@@ -1064,8 +1175,104 @@ class AuthNotifier extends Notifier<AuthState> {
     return ref.read(firebaseAuthProvider).currentUser?.uid == expectedUid;
   }
 
-  Future<void> _finishExpectedAccountDeletion(String expectedUid) async {
-    await _isolateExpectedAccountSession(expectedUid, deletionConfirmed: true);
+  Future<void> _finishExpectedAccountDeletion(
+    String expectedUid,
+    PendingAccountDeletion marker,
+  ) async {
+    await _serializeLocalSession(
+      () => _completeConfirmedAccountDeletion(marker),
+    );
+    _accountDeletionInProgress = false;
+    if (_disposed) return;
+    _invalidateSessionProviders();
+    final current = ref.read(firebaseAuthProvider).currentUser;
+    if (current != null && current.uid != expectedUid) {
+      await checkCurrentUser();
+    } else {
+      state = AuthState.unauthenticated();
+    }
+  }
+
+  Future<void> _recoverAccountDeletionCleanup() async {
+    final barrier = ref.read(accountDeletionCleanupBarrierProvider);
+    final markers = await barrier.readAll();
+    // Stop on the first failure; never clear another identity as compensation.
+    for (final confirmed in markers) {
+      if (confirmed.phase == AccountDeletionPhase.remoteConfirmed) {
+        await _completeConfirmedAccountDeletion(confirmed);
+      }
+    }
+    final user = ref.read(firebaseAuthProvider).currentUser;
+    if (user == null) return;
+    var marker = await barrier.readForUser(user.uid);
+    if (marker == null) return;
+    if (marker.phase == AccountDeletionPhase.requested) {
+      if (ref.read(firebaseAuthProvider).currentUser?.uid != marker.userId) {
+        // Only the target session can resolve an unconfirmed deletion.
+        return;
+      }
+      try {
+        await user.reload().timeout(const Duration(seconds: 20));
+        if (!await barrier.clearIfCurrent(marker))
+          throw StateError('ACCOUNT_DELETION_MARKER_CHANGED');
+        return;
+      } on FirebaseAuthException catch (error) {
+        if (error.code != 'user-not-found') rethrow;
+        marker = await barrier.confirmIfCurrent(marker);
+      }
+    }
+    await _completeConfirmedAccountDeletion(marker);
+  }
+
+  Future<void> _completeConfirmedAccountDeletion(
+    PendingAccountDeletion marker,
+  ) async {
+    final barrier = ref.read(accountDeletionCleanupBarrierProvider);
+    if (marker.phase != AccountDeletionPhase.remoteConfirmed ||
+        await barrier.readForUser(marker.userId) != marker) {
+      throw StateError('ACCOUNT_DELETION_NOT_CONFIRMED');
+    }
+    final previousDeletion = _accountDeletionInProgress;
+    _accountDeletionInProgress = true;
+    _localCleanupRequired = true;
+    final identity = LocalDatabaseIdentity(marker.userId);
+    try {
+      final attached = _databases.attachedDatabase;
+      final currentUid = ref.read(firebaseAuthProvider).currentUser?.uid;
+      final activeUid = _activeLocalSessionUid;
+      final hasOtherSession =
+          (currentUid != null && currentUid != identity.uid) ||
+          (activeUid != null && activeUid != identity.uid) ||
+          (attached != null && attached.identity != identity);
+      if (!hasOtherSession) {
+        // Drain private effects without deleting stores before the files/key.
+        await _runCriticalLocalDataClear(identity.uid);
+        _activeLocalSessionUid = null;
+      } else {
+        final failed = await ref
+            .read(cycleReminderSessionCleanupProvider)
+            .cancelAfterCurrentMutations(identity.uid);
+        if (failed > 0) throw StateError('ACCOUNT_NATIVE_CLEANUP_FAILED');
+      }
+      await _databases.destroy(
+        identity,
+        () => ref.read(accountDeletionStorageCleanupProvider).destroy(identity),
+      );
+      if (_activeLocalSessionUid == identity.uid) {
+        _activeLocalSessionUid = null;
+      }
+      final auth = ref.read(firebaseAuthProvider);
+      if (auth.currentUser?.uid == identity.uid) {
+        await auth.signOut();
+        if (auth.currentUser?.uid == identity.uid)
+          throw StateError('ACCOUNT_SIGN_OUT_NOT_CONFIRMED');
+      }
+      if (!await barrier.clearIfCurrent(marker))
+        throw StateError('ACCOUNT_DELETION_MARKER_CHANGED');
+      _localCleanupRequired = false;
+    } finally {
+      _accountDeletionInProgress = previousDeletion;
+    }
   }
 
   Future<void> _handleChangedAccountDeletionSession(String expectedUid) async {
@@ -1136,6 +1343,7 @@ class AuthNotifier extends Notifier<AuthState> {
     _databases.observeSession(ref.read(firebaseAuthProvider).currentUser?.uid);
 
     try {
+      await _recoverAccountDeletionCleanup();
       await _recoverPendingLocalCleanup();
       await _clearLocalData();
       if (_disposed) return;

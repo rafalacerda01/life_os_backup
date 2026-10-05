@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
@@ -7,8 +8,14 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:life_os/core/database/app_database.dart';
 import 'package:life_os/core/database/database_provider.dart';
+import 'package:life_os/core/database/local_database_identity.dart';
+import 'package:life_os/core/database/user_database_storage_destroyer.dart';
+import 'package:life_os/core/db/user_db_key_manager.dart';
+import 'package:life_os/features/auth/data/local/account_deletion_cleanup_barrier.dart';
+import 'package:life_os/features/auth/data/local/account_deletion_storage_cleanup.dart';
 import 'package:life_os/core/database/local_mutation_gate.dart';
 import 'package:life_os/core/errors/failure.dart';
+import 'package:life_os/core/router/router.dart';
 import 'package:life_os/core/services/sync_manager.dart';
 import 'package:life_os/core/services/analytics_service.dart';
 import 'package:life_os/core/services/notification_service.dart';
@@ -45,6 +52,7 @@ import 'package:life_os/features/premium/domain/entities/premium_status_entity.d
 import 'package:life_os/features/premium/domain/repositories/i_premium_repository.dart';
 import 'package:life_os/features/premium/presentation/premium_provider.dart';
 import 'package:life_os/features/notifications/data/repositories/notifications_repository.dart';
+import 'package:life_os/features/notifications/domain/providers/notification_engine.dart';
 import 'package:multiple_result/multiple_result.dart';
 
 import '../../../../helpers/recording_analytics_platform.dart';
@@ -106,6 +114,14 @@ class _FirebaseUser extends Fake implements User {
   final Object? tokenError;
   final Future<void> Function()? onGetIdToken;
   int tokenCalls = 0;
+  Object? reloadError;
+  int reloadCalls = 0;
+
+  @override
+  Future<void> reload() async {
+    reloadCalls++;
+    if (reloadError != null) throw reloadError!;
+  }
 
   @override
   List<UserInfo> get providerData => const <UserInfo>[];
@@ -195,6 +211,18 @@ class _AuthRepository extends Fake implements AuthRepository {
   final Failure? currentUserFailure;
   int signOutCalls = 0;
   final List<String> deletedExpectedUserIds = <String>[];
+  Future<void> Function(String)? onDelete;
+  Failure? deletionFailure;
+
+  @override
+  Future<Result<UserEntity, Failure>> signInWithEmailAndPassword(
+    String email,
+    String password,
+  ) async {
+    final user = email == _userB.email ? _userB : _userA;
+    auth.user = _FirebaseUser(user.uid);
+    return Success(user);
+  }
 
   @override
   Future<Result<UserEntity, Failure>> getCurrentUser() async {
@@ -216,8 +244,10 @@ class _AuthRepository extends Fake implements AuthRepository {
     required String expectedUid,
   }) async {
     deletedExpectedUserIds.add(expectedUid);
+    await onDelete?.call(expectedUid);
     deleteStarted?.complete();
     await allowDelete?.future;
+    if (deletionFailure != null) return Error(deletionFailure!);
     if (completeDeletionBySigningOut) auth.emit(null);
     return const Success(null);
   }
@@ -264,9 +294,21 @@ class _MemoryBarrierStorage
 
 class _SecureStorage extends Fake implements FlutterSecureStorage {
   final values = <String, String>{};
+  final deletedKeys = <String>[];
   int writeCalls = 0;
   int deleteCalls = 0;
   Object? writeError;
+
+  @override
+  Future<String?> read({
+    required String key,
+    AppleOptions? iOptions,
+    AndroidOptions? aOptions,
+    LinuxOptions? lOptions,
+    WebOptions? webOptions,
+    AppleOptions? mOptions,
+    WindowsOptions? wOptions,
+  }) async => values[key];
 
   @override
   Future<void> write({
@@ -295,6 +337,7 @@ class _SecureStorage extends Fake implements FlutterSecureStorage {
     WindowsOptions? wOptions,
   }) async {
     deleteCalls += 1;
+    deletedKeys.add(key);
     values.remove(key);
   }
 }
@@ -359,6 +402,7 @@ class _SessionCoordinator extends Fake
   final CycleReminderSessionAuthority authority;
   final CycleReminderOperationEpoch epoch;
   final List<String> preparedUserIds = <String>[];
+  int clearCalls = 0;
   Completer<void>? sessionCleared;
 
   @override
@@ -369,9 +413,27 @@ class _SessionCoordinator extends Fake
 
   @override
   void onSessionCleared() {
+    clearCalls++;
     final previousUserId = authority.clear();
     if (previousUserId != null) epoch.invalidate(previousUserId);
     if (sessionCleared?.isCompleted == false) sessionCleared!.complete();
+  }
+}
+
+class _RecordingBootstrapCoordinator extends NotificationBootstrapCoordinator {
+  int resetCalls = 0;
+  int drainCalls = 0;
+
+  @override
+  void reset() {
+    resetCalls++;
+    super.reset();
+  }
+
+  @override
+  Future<void> resetAndDrain() async {
+    drainCalls++;
+    await super.resetAndDrain();
   }
 }
 
@@ -594,6 +656,8 @@ class _Harness {
     required this.cycleStore,
     required this.cycleRestore,
     required this.settingsNotifications,
+    required this.deletionBarrier,
+    required this.scopedKeyStorage,
     required this.notificationCleanup,
     required this.coordinator,
     required this.barrierStorage,
@@ -629,6 +693,8 @@ class _Harness {
   final CycleReminderPreferencesStore cycleStore;
   final _SessionRestore cycleRestore;
   final _SettingsNotifications settingsNotifications;
+  final AccountDeletionCleanupBarrier deletionBarrier;
+  final _SecureStorage scopedKeyStorage;
   final _ScriptedNotificationCleanup notificationCleanup;
   final _SessionCoordinator coordinator;
   final _MemoryBarrierStorage barrierStorage;
@@ -686,7 +752,15 @@ class _Harness {
     IPremiumRepository Function(String? uid)? createPremiumRepository,
     FocusPeriodicTimerFactory? focusTimerFactory,
     Future<void> Function(AppDatabase)? seedBeforeAuth,
+    Future<void> Function(TestUserDatabaseFactory)? seedDatabasesBeforeAuth,
     bool restoreCycleSchedules = false,
+    _MemoryBarrierStorage? deletionBarrierStorage,
+    Future<void> Function(File)? deleteFile,
+    Future<void> Function(String)? deleteActionToken,
+    Future<void> Function(String)? deleteAiCache,
+    NotificationBootstrapCoordinator? bootstrapCoordinator,
+    AnalyticsService? analyticsService,
+    void Function(ProviderContainer)? beforeAuth,
   }) async {
     final auth = _FirebaseAuth(
       firebaseUser ??
@@ -695,6 +769,7 @@ class _Harness {
     final databaseFactory = TestUserDatabaseFactory();
     final database = databaseFactory.inspect(firebaseUserId ?? _userA.uid);
     await seedBeforeAuth?.call(database);
+    await seedDatabasesBeforeAuth?.call(databaseFactory);
     database.localMutations.bindSessionReader(() => auth.currentUser?.uid);
     final localFirestore = firestore ?? _ScriptedFirestore();
     final repository = _AuthRepository(
@@ -761,6 +836,17 @@ class _Harness {
           : null,
     );
     final settingsNotifications = _SettingsNotifications();
+    final deletionBarrier = AccountDeletionCleanupBarrier(
+      deletionBarrierStorage ?? _MemoryBarrierStorage(),
+    );
+    final scopedKeyStorage = _SecureStorage();
+    final scopedKeys = UserDbKeyManager(storage: scopedKeyStorage);
+    for (final uid in [_userA.uid, _userB.uid]) {
+      await scopedKeys.getEncryptionKey(
+        LocalDatabaseIdentity(uid),
+        allowCreate: true,
+      );
+    }
     final cleanup = CycleReminderSessionCleanup(
       mutationGate,
       lifecycle,
@@ -796,6 +882,21 @@ class _Harness {
           secureStorage ?? _SecureStorage(),
         ),
         userDatabaseFactoryProvider.overrideWithValue(databaseFactory),
+        accountDeletionCleanupBarrierProvider.overrideWithValue(
+          deletionBarrier,
+        ),
+        accountDeletionStorageCleanupProvider.overrideWithValue(
+          AccountDeletionStorageCleanup(
+            destroyer: UserDatabaseStorageDestroyer(
+              directoryProvider: () async => databaseFactory.directory,
+              keyManager: scopedKeys,
+              deleteFile: deleteFile,
+            ),
+            deletePreferences: preferencesDeletion.call,
+            deleteActionToken: deleteActionToken ?? (_) async {},
+            deleteAiCache: deleteAiCache ?? (_) async {},
+          ),
+        ),
         if (medicationLifecycle != null) ...[
           medicationReminderLifecycleProvider.overrideWithValue(
             medicationLifecycle,
@@ -810,6 +911,12 @@ class _Harness {
           notificationRemoteEffectsBarrierProvider.overrideWithValue(
             notificationEffects,
           ),
+        if (bootstrapCoordinator != null)
+          notificationBootstrapCoordinatorProvider.overrideWithValue(
+            bootstrapCoordinator,
+          ),
+        if (analyticsService != null)
+          analyticsServiceProvider.overrideWithValue(analyticsService),
         syncManagerProvider.overrideWithValue(syncManager),
         checkInRepositoryProvider.overrideWithValue(
           checkInRepository ?? _CheckInRepository(),
@@ -834,6 +941,7 @@ class _Harness {
       ],
     );
 
+    beforeAuth?.call(container);
     if (waitForAuthentication) {
       final authenticated = Completer<void>();
       container.listen<AuthState>(authNotifierProvider, (_, next) {
@@ -860,6 +968,8 @@ class _Harness {
       cycleStore: cycleStore,
       cycleRestore: cycleRestore,
       settingsNotifications: settingsNotifications,
+      deletionBarrier: deletionBarrier,
+      scopedKeyStorage: scopedKeyStorage,
       notificationCleanup: notificationCleanup,
       coordinator: coordinator,
       barrierStorage: durableStorage,
@@ -937,6 +1047,17 @@ Future<void> seedSessionRows(AppDatabase db, String uid) async {
           createdAt: DateTime(2026, 10, 2),
         ),
       );
+}
+
+Future<void> seedClosedAccounts(TestUserDatabaseFactory factory) async {
+  for (final uid in [_userA.uid, _userB.uid]) {
+    final db = factory.inspect(uid);
+    await seedSessionRows(db, uid);
+    await db.closeDatabase();
+  }
+  File(
+    '${factory.directory.path}/life_os.sqlite',
+  ).writeAsStringSync('legacy-fixture');
 }
 
 void main() {
@@ -3053,12 +3174,18 @@ void main() {
         hasLength(1),
       );
       expect(a.closed, isTrue);
-      final deletedA = harness.databaseFactory.inspectClosed(
-        _userA.uid,
-        () => _userA.uid,
+      expect(
+        LocalDatabaseIdentity(
+          _userA.uid,
+        ).fileIn(harness.databaseFactory.directory).existsSync(),
+        isFalse,
       );
-      expect(await deletedA.select(deletedA.taskTable).get(), isEmpty);
-      expect(await deletedA.select(deletedA.notificationsTable).get(), isEmpty);
+      expect(
+        harness.scopedKeyStorage.values.containsKey(
+          LocalDatabaseIdentity(_userA.uid).keyAlias,
+        ),
+        isFalse,
+      );
       expect(await harness.readPendingCleanup(), isNull);
     },
   );
@@ -3354,9 +3481,1029 @@ void main() {
     expect(harness.auth.currentUser, isNull);
     expect(await harness.readPendingCleanup(), isNull);
     expect(a.closed, isTrue);
-    final deleted = harness.database;
-    expect(await deleted.select(deleted.taskTable).get(), isEmpty);
-    expect(await deleted.select(deleted.notificationsTable).get(), isEmpty);
-    expect(await deleted.select(deleted.syncQueueTable).get(), isEmpty);
+    expect(
+      LocalDatabaseIdentity(
+        _userA.uid,
+      ).fileIn(harness.databaseFactory.directory).existsSync(),
+      isFalse,
+    );
+    expect(
+      harness.scopedKeyStorage.values.containsKey(
+        LocalDatabaseIdentity(_userA.uid).keyAlias,
+      ),
+      isFalse,
+    );
+    expect(await harness.deletionBarrier.readAll(), isEmpty);
   });
+
+  test(
+    'checkCurrentUser cannot clear requested while remote deletion is in flight',
+    () async {
+      final started = Completer<void>();
+      final release = Completer<void>();
+      final harness = await _Harness.create(
+        [0],
+        deleteStarted: started,
+        allowDelete: release,
+      );
+      addTearDown(harness.dispose);
+      final deletion = harness.notifier.deleteAccount();
+      await started.future;
+      final requested = await harness.deletionBarrier.readForUser(_userA.uid);
+      expect(requested!.phase, AccountDeletionPhase.requested);
+      await harness.notifier.checkCurrentUser();
+      expect(await harness.deletionBarrier.readForUser(_userA.uid), requested);
+      expect((harness.auth.currentUser as _FirebaseUser).reloadCalls, 0);
+      release.complete();
+      await deletion;
+      expect(harness.state, isA<AuthUnauthenticated>());
+      expect(await harness.deletionBarrier.readAll(), isEmpty);
+    },
+  );
+
+  test(
+    'confirmed A recovery with prepared B preserves B database and session effects',
+    () async {
+      final harness = await _Harness.create([0], firebaseUserId: _userB.uid);
+      addTearDown(harness.dispose);
+      final b = harness.container.read(databaseProvider) as TestSessionDatabase;
+      await seedSessionRows(b, _userB.uid);
+      final a = harness.databaseFactory.inspect(_userA.uid);
+      await seedSessionRows(a, _userA.uid);
+      await a.closeDatabase();
+      final keyB = harness
+          .scopedKeyStorage
+          .values[LocalDatabaseIdentity(_userB.uid).keyAlias];
+      await harness.deletionBarrier.confirmIfCurrent(
+        await harness.deletionBarrier.request(_userA.uid),
+      );
+      await harness.notifier.checkCurrentUser();
+      expect(harness.container.read(databaseProvider), same(b));
+      expect(b.closed, isFalse);
+      expect(await b.select(b.taskTable).get(), hasLength(1));
+      expect(await b.select(b.notificationsTable).get(), hasLength(1));
+      expect(harness.databaseFactory.openedUserIds, [_userB.uid]);
+      expect((harness.state as AuthAuthenticated).user.uid, _userB.uid);
+      expect(harness.auth.currentUser!.uid, _userB.uid);
+      expect(harness.auth.signOutCalls, 0);
+      expect(harness.notificationCleanup.calls, 0);
+      expect(
+        harness.scopedKeyStorage.values[LocalDatabaseIdentity(
+          _userB.uid,
+        ).keyAlias],
+        keyB,
+      );
+      expect(
+        LocalDatabaseIdentity(
+          _userA.uid,
+        ).fileIn(harness.databaseFactory.directory).existsSync(),
+        isFalse,
+      );
+      expect(await harness.deletionBarrier.readAll(), isEmpty);
+    },
+  );
+
+  test(
+    'requested is durable before remote call and confirmed before files',
+    () async {
+      late _Harness harness;
+      var sawConfirmed = false;
+      harness = await _Harness.create(
+        [0],
+        deleteFile: (file) async {
+          final marker = await harness.deletionBarrier.readForUser(_userA.uid);
+          expect(marker!.userId, _userA.uid);
+          expect(marker.phase, AccountDeletionPhase.remoteConfirmed);
+          expect(harness.databaseFactory.last!.closed, isTrue);
+          sawConfirmed = true;
+          if (await file.exists()) await file.delete();
+        },
+      );
+      addTearDown(harness.dispose);
+      await seedSessionRows(harness.database, _userA.uid);
+      harness.repository.onDelete = (uid) async {
+        final marker = await harness.deletionBarrier.readForUser(_userA.uid);
+        expect(marker!.userId, uid);
+        expect(marker.phase, AccountDeletionPhase.requested);
+        expect(
+          LocalDatabaseIdentity(
+            uid,
+          ).fileIn(harness.databaseFactory.directory).existsSync(),
+          isTrue,
+        );
+      };
+      await harness.notifier.deleteAccount();
+      expect(sawConfirmed, isTrue);
+      expect(harness.state, isA<AuthUnauthenticated>());
+      expect(await harness.deletionBarrier.readAll(), isEmpty);
+    },
+  );
+
+  test(
+    'non-ambiguous remote failure cancels request and preserves usable A',
+    () async {
+      final harness = await _Harness.create([0]);
+      addTearDown(harness.dispose);
+      final db = harness.database;
+      await seedSessionRows(db, _userA.uid);
+      final key = harness
+          .scopedKeyStorage
+          .values[LocalDatabaseIdentity(_userA.uid).keyAlias];
+      harness.repository.deletionFailure = const ServerFailure(
+        'Tente novamente.',
+        code: 'ACCOUNT_STATE_CONFLICT',
+      );
+      await harness.notifier.deleteAccount();
+      expect(harness.state, isA<AuthError>());
+      expect(harness.auth.currentUser!.uid, _userA.uid);
+      expect(harness.container.read(databaseProvider), same(db));
+      expect(await db.select(db.taskTable).get(), hasLength(1));
+      expect(
+        harness.scopedKeyStorage.values[LocalDatabaseIdentity(
+          _userA.uid,
+        ).keyAlias],
+        key,
+      );
+      expect(await harness.deletionBarrier.readAll(), isEmpty);
+      expect(harness.preferencesDeletion.userIds, isEmpty);
+    },
+  );
+
+  test(
+    'ambiguous remote failure retains requested and detaches without destruction',
+    () async {
+      final harness = await _Harness.create([0]);
+      addTearDown(harness.dispose);
+      await seedSessionRows(harness.database, _userA.uid);
+      harness.repository.deletionFailure = const ServerFailure(
+        'Tente novamente.',
+        code: 'NETWORK_ERROR',
+      );
+      await harness.notifier.deleteAccount();
+      expect(harness.state, isA<AuthError>());
+      expect(
+        (await harness.deletionBarrier.readForUser(_userA.uid))!.phase,
+        AccountDeletionPhase.requested,
+      );
+      expect(
+        LocalDatabaseIdentity(
+          _userA.uid,
+        ).fileIn(harness.databaseFactory.directory).existsSync(),
+        isTrue,
+      );
+      expect(
+        harness.scopedKeyStorage.values.containsKey(
+          LocalDatabaseIdentity(_userA.uid).keyAlias,
+        ),
+        isTrue,
+      );
+      expect(harness.databaseFactory.last!.closed, isTrue);
+      expect(harness.preferencesDeletion.userIds, isEmpty);
+    },
+  );
+
+  test(
+    'requested startup with existing A cancels intent and preserves rows/key',
+    () async {
+      final storage = _MemoryBarrierStorage();
+      await AccountDeletionCleanupBarrier(storage).request(_userA.uid);
+      final user = _FirebaseUser(_userA.uid);
+      final harness = await _Harness.create(
+        [0],
+        firebaseUser: user,
+        deletionBarrierStorage: storage,
+        seedBeforeAuth: (db) async {
+          await seedSessionRows(db, _userA.uid);
+          await db.closeDatabase();
+        },
+      );
+      addTearDown(harness.dispose);
+      expect(user.reloadCalls, 1);
+      expect(harness.state, isA<AuthAuthenticated>());
+      expect(await harness.deletionBarrier.readAll(), isEmpty);
+      final db = harness.container.read(databaseProvider);
+      expect(await db.select(db.taskTable).get(), hasLength(1));
+      expect(
+        harness.scopedKeyStorage.values.containsKey(
+          LocalDatabaseIdentity(_userA.uid).keyAlias,
+        ),
+        isTrue,
+      );
+      expect(harness.preferencesDeletion.userIds, isEmpty);
+    },
+  );
+
+  test(
+    'requested startup with user-not-found confirms and destroys unopened A',
+    () async {
+      final storage = _MemoryBarrierStorage();
+      await AccountDeletionCleanupBarrier(storage).request(_userA.uid);
+      final user = _FirebaseUser(_userA.uid)
+        ..reloadError = FirebaseAuthException(code: 'user-not-found');
+      final harness = await _Harness.create(
+        [0],
+        firebaseUser: user,
+        deletionBarrierStorage: storage,
+        waitForAuthentication: false,
+        seedBeforeAuth: (db) async {
+          await seedSessionRows(db, _userA.uid);
+          await db.closeDatabase();
+        },
+      );
+      addTearDown(harness.dispose);
+      await harness.waitForState<AuthUnauthenticated>();
+      expect(user.reloadCalls, 1);
+      expect(harness.databaseFactory.openedUserIds, isEmpty);
+      expect(
+        LocalDatabaseIdentity(
+          _userA.uid,
+        ).fileIn(harness.databaseFactory.directory).existsSync(),
+        isFalse,
+      );
+      expect(
+        harness.scopedKeyStorage.values.containsKey(
+          LocalDatabaseIdentity(_userA.uid).keyAlias,
+        ),
+        isFalse,
+      );
+      expect(await harness.deletionBarrier.readAll(), isEmpty);
+    },
+  );
+
+  test(
+    'requested startup with A network failure cannot infer remote deletion',
+    () async {
+      final storage = _MemoryBarrierStorage();
+      final requested = await AccountDeletionCleanupBarrier(
+        storage,
+      ).request(_userA.uid);
+      final user = _FirebaseUser(_userA.uid)
+        ..reloadError = FirebaseAuthException(
+          code: 'network-request-failed',
+          message: 'technical-marker',
+        );
+      final harness = await _Harness.create(
+        [0],
+        firebaseUser: user,
+        deletionBarrierStorage: storage,
+        waitForAuthentication: false,
+        seedBeforeAuth: (db) async {
+          await seedSessionRows(db, _userA.uid);
+          await db.closeDatabase();
+        },
+      );
+      addTearDown(harness.dispose);
+      final error = await harness.waitForState<AuthError>();
+      expect(error.message, isNot(contains('technical-marker')));
+      expect(await harness.deletionBarrier.readForUser(_userA.uid), requested);
+      expect(harness.databaseFactory.openedUserIds, isEmpty);
+      expect(
+        LocalDatabaseIdentity(
+          _userA.uid,
+        ).fileIn(harness.databaseFactory.directory).existsSync(),
+        isTrue,
+      );
+      expect(
+        harness.scopedKeyStorage.values.containsKey(
+          LocalDatabaseIdentity(_userA.uid).keyAlias,
+        ),
+        isTrue,
+      );
+      expect(harness.auth.signOutCalls, 0);
+      expect(harness.preferencesDeletion.userIds, isEmpty);
+    },
+  );
+
+  for (final current in [null, _userB.uid]) {
+    test(
+      'requested A with Firebase $current defers without blocking public or B session',
+      () async {
+        final storage = _MemoryBarrierStorage();
+        final requested = await AccountDeletionCleanupBarrier(
+          storage,
+        ).request(_userA.uid);
+        var destroyCalls = 0;
+        late File fileA;
+        late List<int> bytesA;
+        final harness = await _Harness.create(
+          [0],
+          firebaseUserId: current,
+          deletionBarrierStorage: storage,
+          waitForAuthentication: false,
+          seedDatabasesBeforeAuth: (factory) async {
+            for (final uid in [_userA.uid, _userB.uid]) {
+              final db = factory.inspect(uid);
+              await seedSessionRows(db, uid);
+              await db.closeDatabase();
+            }
+            fileA = LocalDatabaseIdentity(_userA.uid).fileIn(factory.directory);
+            bytesA = await fileA.readAsBytes();
+          },
+          deleteFile: (_) async {
+            destroyCalls++;
+            fail('Unconfirmed A must not be destroyed');
+          },
+        );
+        addTearDown(harness.dispose);
+        if (current == null) {
+          await harness.waitForState<AuthUnauthenticated>();
+          expect(harness.databaseFactory.openedUserIds, isEmpty);
+          expect(
+            authRedirectFor(
+              authState: harness.state,
+              hasFirebaseUser: false,
+              location: '/login',
+            ),
+            isNull,
+          );
+          expect(
+            harness.container
+                .read(sessionDatabaseCoordinatorProvider)
+                .attachedDatabase,
+            isNull,
+          );
+        } else {
+          final authenticated = await harness.waitForState<AuthAuthenticated>();
+          expect(authenticated.user.uid, _userB.uid);
+          expect(harness.databaseFactory.openedUserIds, [_userB.uid]);
+          final b = harness.container.read(databaseProvider);
+          expect((await b.select(b.taskTable).get()).single.id, 'user-b-task');
+          expect(await b.select(b.notificationsTable).get(), hasLength(1));
+          await b
+              .into(b.taskTable)
+              .insert(
+                TaskTableCompanion.insert(
+                  id: 'user-b-new-task',
+                  title: 'B remains usable',
+                  priority: 'normal',
+                  date: DateTime(2026, 10, 2),
+                ),
+              );
+          expect(await b.select(b.taskTable).get(), hasLength(2));
+          expect(
+            harness.scopedKeyStorage.values.containsKey(
+              LocalDatabaseIdentity(_userB.uid).keyAlias,
+            ),
+            isTrue,
+          );
+        }
+        expect(
+          await harness.deletionBarrier.readForUser(_userA.uid),
+          requested,
+        );
+        expect(await fileA.readAsBytes(), bytesA);
+        expect(
+          harness.scopedKeyStorage.values.containsKey(
+            LocalDatabaseIdentity(_userA.uid).keyAlias,
+          ),
+          isTrue,
+        );
+        expect(harness.auth.signOutCalls, 0);
+        expect(destroyCalls, 0);
+        expect(harness.scopedKeyStorage.deletedKeys, isEmpty);
+        expect(harness.preferencesDeletion.userIds, isEmpty);
+        expect(await harness.cycleStore.load(_userA.uid), isNotNull);
+      },
+    );
+  }
+
+  test('B logout preserves both accounts while requested A remains', () async {
+    final storage = _MemoryBarrierStorage();
+    final requested = await AccountDeletionCleanupBarrier(
+      storage,
+    ).request(_userA.uid);
+    final harness = await _Harness.create(
+      [0],
+      firebaseUserId: _userB.uid,
+      deletionBarrierStorage: storage,
+      seedDatabasesBeforeAuth: (factory) async {
+        for (final uid in [_userA.uid, _userB.uid]) {
+          final db = factory.inspect(uid);
+          await seedSessionRows(db, uid);
+          await db.closeDatabase();
+        }
+      },
+      deleteFile: (_) async => fail('Logout must not destroy either account'),
+    );
+    addTearDown(harness.dispose);
+    final keys = Map<String, String>.of(harness.scopedKeyStorage.values);
+    final b = harness.container.read(databaseProvider) as TestSessionDatabase;
+    await harness.notifier.logout();
+    expect(harness.state, isA<AuthUnauthenticated>());
+    expect(harness.auth.currentUser, isNull);
+    expect(harness.repository.signOutCalls, 1);
+    expect(b.closed, isTrue);
+    expect(await harness.deletionBarrier.readForUser(_userA.uid), requested);
+    expect(harness.scopedKeyStorage.values, keys);
+    expect(harness.scopedKeyStorage.deletedKeys, isEmpty);
+    expect(harness.databaseFactory.openedUserIds, [_userB.uid]);
+    for (final uid in [_userA.uid, _userB.uid]) {
+      expect(
+        LocalDatabaseIdentity(
+          uid,
+        ).fileIn(harness.databaseFactory.directory).existsSync(),
+        isTrue,
+      );
+      expect(await harness.cycleStore.load(uid), isNotNull);
+    }
+    final persistedB = harness.databaseFactory.inspectClosed(
+      _userB.uid,
+      () => null,
+    );
+    expect(await persistedB.select(persistedB.taskTable).get(), hasLength(1));
+  });
+
+  test(
+    'requested A with null permits login B then resolves only when A returns',
+    () async {
+      final storage = _MemoryBarrierStorage();
+      final requested = await AccountDeletionCleanupBarrier(
+        storage,
+      ).request(_userA.uid);
+      final harness = await _Harness.create(
+        [0],
+        firebaseUserId: null,
+        deletionBarrierStorage: storage,
+        waitForAuthentication: false,
+        analyticsService: AnalyticsService(
+          platform: RecordingAnalyticsPlatform(),
+        ),
+        seedDatabasesBeforeAuth: (factory) async {
+          for (final uid in [_userA.uid, _userB.uid]) {
+            final db = factory.inspect(uid);
+            await seedSessionRows(db, uid);
+            await db.closeDatabase();
+          }
+        },
+        deleteFile: (_) async => fail('Existing A must not be destroyed'),
+      );
+      addTearDown(harness.dispose);
+      await harness.waitForState<AuthUnauthenticated>();
+      await harness.notifier.login(_userB.email, 'test-password');
+      expect((harness.state as AuthAuthenticated).user.uid, _userB.uid);
+      expect(harness.databaseFactory.openedUserIds, [_userB.uid]);
+      expect(await harness.deletionBarrier.readForUser(_userA.uid), requested);
+      final b = harness.container.read(databaseProvider);
+      expect(await b.select(b.taskTable).get(), hasLength(1));
+      await harness.notifier.logout();
+      final userA = _FirebaseUser(_userA.uid);
+      harness.auth.user = userA;
+      await harness.notifier.checkCurrentUser();
+      expect(userA.reloadCalls, 1);
+      expect((harness.state as AuthAuthenticated).user.uid, _userA.uid);
+      expect(await harness.deletionBarrier.readAll(), isEmpty);
+      expect(harness.databaseFactory.openedUserIds, [_userB.uid, _userA.uid]);
+      final a = harness.container.read(databaseProvider);
+      expect(await a.select(a.taskTable).get(), hasLength(1));
+      expect(harness.scopedKeyStorage.deletedKeys, isEmpty);
+    },
+  );
+
+  for (final current in [null, _userB.uid]) {
+    test(
+      'remoteConfirmed startup with Firebase $current destroys A without opening A',
+      () async {
+        final storage = _MemoryBarrierStorage();
+        final barrier = AccountDeletionCleanupBarrier(storage);
+        final confirmed = await barrier.confirmIfCurrent(
+          await barrier.request(_userA.uid),
+        );
+        final bootstrap = _RecordingBootstrapCoordinator();
+        final tokens = _SecureStorage()
+          ..values[SecureStorageService.tokenKey] = 'b-existing-token';
+        final actionTokens = {_userA.uid: 'action-a', _userB.uid: 'action-b'};
+        final aiCache = {_userA.uid: 'consent-a', _userB.uid: 'consent-b'};
+        var filesDeleted = 0;
+        final harness = await _Harness.create(
+          [0],
+          firebaseUserId: current,
+          deletionBarrierStorage: storage,
+          waitForAuthentication: false,
+          secureStorage: tokens,
+          bootstrapCoordinator: bootstrap,
+          seedDatabasesBeforeAuth: (factory) async {
+            for (final uid in [_userA.uid, _userB.uid]) {
+              final db = factory.inspect(uid);
+              await seedSessionRows(db, uid);
+              await db.closeDatabase();
+            }
+          },
+          beforeAuth: (container) {
+            expect(
+              container
+                  .read(sessionDatabaseCoordinatorProvider)
+                  .attachedDatabase,
+              isNull,
+            );
+          },
+          deleteFile: (file) async {
+            expect(await barrier.readForUser(_userA.uid), confirmed);
+            if (current == _userB.uid) {
+              expect(
+                tokens.values[SecureStorageService.tokenKey],
+                'b-existing-token',
+              );
+              expect(tokens.deletedKeys, isEmpty);
+              expect(bootstrap.drainCalls, 0);
+              expect(bootstrap.resetCalls, 0);
+            }
+            filesDeleted++;
+            if (await file.exists()) await file.delete();
+          },
+          deleteActionToken: (uid) async {
+            expect(await barrier.readForUser(_userA.uid), confirmed);
+            actionTokens.remove(uid);
+          },
+          deleteAiCache: (uid) async {
+            expect(await barrier.readForUser(_userA.uid), confirmed);
+            expect(actionTokens.containsKey(uid), isFalse);
+            aiCache.remove(uid);
+          },
+        );
+        addTearDown(harness.dispose);
+        if (current == null) {
+          await harness.waitForState<AuthUnauthenticated>();
+          expect(harness.databaseFactory.openedUserIds, isEmpty);
+        } else {
+          final authenticated = await harness.waitForState<AuthAuthenticated>();
+          expect(authenticated.user.uid, _userB.uid);
+          expect(harness.databaseFactory.openedUserIds, [_userB.uid]);
+          final b = harness.container.read(databaseProvider);
+          expect((await b.select(b.taskTable).get()).single.id, 'user-b-task');
+          expect(await b.select(b.notificationsTable).get(), hasLength(1));
+          expect(harness.auth.currentUser!.uid, _userB.uid);
+          expect(harness.auth.signOutCalls, 0);
+          expect(harness.repository.signOutCalls, 0);
+          expect(harness.notificationCleanup.calls, 0);
+          expect(harness.firestore.clearPersistenceCalls, 0);
+          expect(harness.firestore.terminateCalls, 0);
+          expect(harness.coordinator.clearCalls, 0);
+          expect(harness.coordinator.preparedUserIds, [_userB.uid]);
+          expect(bootstrap.resetCalls, 0);
+          expect(bootstrap.drainCalls, 0);
+          expect(tokens.deletedKeys, isEmpty);
+          expect(tokens.values[SecureStorageService.tokenKey], 'test-token');
+          expect(
+            harness.scopedKeyStorage.deletedKeys,
+            isNot(contains(LocalDatabaseIdentity(_userB.uid).keyAlias)),
+          );
+          expect(
+            harness.scopedKeyStorage.values.containsKey(
+              LocalDatabaseIdentity(_userB.uid).keyAlias,
+            ),
+            isTrue,
+          );
+        }
+        expect(
+          LocalDatabaseIdentity(
+            _userA.uid,
+          ).fileIn(harness.databaseFactory.directory).existsSync(),
+          isFalse,
+        );
+        expect(
+          harness.scopedKeyStorage.values.containsKey(
+            LocalDatabaseIdentity(_userA.uid).keyAlias,
+          ),
+          isFalse,
+        );
+        expect(await harness.cycleStore.load(_userA.uid), isNull);
+        expect(await harness.cycleStore.load(_userB.uid), isNotNull);
+        expect(filesDeleted, 12);
+        expect(actionTokens, {_userB.uid: 'action-b'});
+        expect(aiCache, {_userB.uid: 'consent-b'});
+        expect(await harness.deletionBarrier.readAll(), isEmpty);
+      },
+    );
+  }
+
+  for (final outcome in ['success', 'known failure', 'ambiguous failure']) {
+    test(
+      'multi-account requested A does not prevent delete B $outcome',
+      () async {
+        final storage = _MemoryBarrierStorage();
+        final barrier = AccountDeletionCleanupBarrier(storage);
+        final requestedA = await barrier.request(_userA.uid);
+        final actionTokens = {_userA.uid: 'action-a', _userB.uid: 'action-b'};
+        final aiCache = {_userA.uid: 'consent-a', _userB.uid: 'consent-b'};
+        late _Harness harness;
+        var physicalCalls = 0;
+        PendingAccountDeletion? requestedB;
+        Future<void> requireConfirmedB(String uid) async {
+          expect(uid, _userB.uid);
+          expect(await barrier.readForUser(_userA.uid), requestedA);
+          final marker = (await barrier.readForUser(_userB.uid))!;
+          expect(marker.phase, AccountDeletionPhase.remoteConfirmed);
+          expect(marker.revision, isNot(requestedB!.revision));
+        }
+
+        harness = await _Harness.create(
+          [0],
+          firebaseUserId: _userB.uid,
+          deletionBarrierStorage: storage,
+          seedDatabasesBeforeAuth: seedClosedAccounts,
+          deleteFile: (file) async {
+            await requireConfirmedB(_userB.uid);
+            expect(
+              file.path.startsWith(
+                LocalDatabaseIdentity(
+                  _userB.uid,
+                ).fileIn(harness.databaseFactory.directory).path,
+              ),
+              isTrue,
+            );
+            physicalCalls++;
+            if (await file.exists()) await file.delete();
+          },
+          deleteActionToken: (uid) async {
+            await requireConfirmedB(uid);
+            actionTokens.remove(uid);
+          },
+          deleteAiCache: (uid) async {
+            await requireConfirmedB(uid);
+            aiCache.remove(uid);
+          },
+        );
+        addTearDown(harness.dispose);
+        final directory = harness.databaseFactory.directory;
+        final fileA = LocalDatabaseIdentity(_userA.uid).fileIn(directory);
+        final fileB = LocalDatabaseIdentity(_userB.uid).fileIn(directory);
+        final legacy = File('${directory.path}/life_os.sqlite');
+        final bytesA = await fileA.readAsBytes();
+        harness.scopedKeyStorage.values['db_encryption_key'] =
+            'legacy-key-fixture';
+        final keys = Map<String, String>.of(harness.scopedKeyStorage.values);
+        final prefsA = (await harness.cycleStore.load(_userA.uid))!.toJson();
+        final dbB =
+            harness.container.read(databaseProvider) as TestSessionDatabase;
+        harness.repository.onDelete = (uid) async {
+          expect(uid, _userB.uid);
+          expect(await barrier.readForUser(_userA.uid), requestedA);
+          requestedB = await barrier.readForUser(_userB.uid);
+          expect(requestedB!.phase, AccountDeletionPhase.requested);
+          expect(await barrier.readAll(), [requestedA, requestedB]);
+        };
+        if (outcome != 'success') {
+          harness.repository.deletionFailure = ServerFailure(
+            'Tente novamente.',
+            code: outcome == 'known failure'
+                ? 'ACCOUNT_STATE_CONFLICT'
+                : 'NETWORK_ERROR',
+          );
+        }
+        await harness.notifier.deleteAccount();
+        expect(harness.repository.deletedExpectedUserIds, [_userB.uid]);
+        expect(await barrier.readForUser(_userA.uid), requestedA);
+        expect(await fileA.readAsBytes(), bytesA);
+        expect(
+          harness.scopedKeyStorage.values[LocalDatabaseIdentity(
+            _userA.uid,
+          ).keyAlias],
+          keys[LocalDatabaseIdentity(_userA.uid).keyAlias],
+        );
+        expect((await harness.cycleStore.load(_userA.uid))!.toJson(), prefsA);
+        expect(actionTokens[_userA.uid], 'action-a');
+        expect(aiCache[_userA.uid], 'consent-a');
+        expect(legacy.readAsStringSync(), 'legacy-fixture');
+        expect(
+          harness.scopedKeyStorage.values['db_encryption_key'],
+          'legacy-key-fixture',
+        );
+        expect(harness.databaseFactory.openedUserIds, [_userB.uid]);
+        if (outcome == 'success') {
+          expect(harness.state, isA<AuthUnauthenticated>());
+          expect(harness.auth.currentUser, isNull);
+          expect(harness.auth.signOutCalls, 1);
+          expect(physicalCalls, 12);
+          expect(fileB.existsSync(), isFalse);
+          expect(dbB.closed, isTrue);
+          expect(
+            harness.scopedKeyStorage.values.containsKey(
+              LocalDatabaseIdentity(_userB.uid).keyAlias,
+            ),
+            isFalse,
+          );
+          expect(await harness.cycleStore.load(_userB.uid), isNull);
+          expect(actionTokens.containsKey(_userB.uid), isFalse);
+          expect(aiCache.containsKey(_userB.uid), isFalse);
+          expect(await barrier.readAll(), [requestedA]);
+        } else {
+          expect(harness.state, isA<AuthError>());
+          expect(harness.auth.currentUser!.uid, _userB.uid);
+          expect(harness.auth.signOutCalls, 0);
+          expect(physicalCalls, 0);
+          expect(fileB.existsSync(), isTrue);
+          expect(harness.scopedKeyStorage.values, keys);
+          expect(harness.preferencesDeletion.userIds, isEmpty);
+          expect(await harness.cycleStore.load(_userB.uid), isNotNull);
+          expect(actionTokens[_userB.uid], 'action-b');
+          expect(aiCache[_userB.uid], 'consent-b');
+          if (outcome == 'known failure') {
+            expect(await barrier.readAll(), [requestedA]);
+            expect(dbB.closed, isFalse);
+            expect(harness.container.read(databaseProvider), same(dbB));
+            expect(await dbB.select(dbB.taskTable).get(), hasLength(1));
+            await dbB
+                .into(dbB.taskTable)
+                .insert(
+                  TaskTableCompanion.insert(
+                    id: 'b-after-delete-failure',
+                    title: 'Fixture',
+                    priority: 'normal',
+                    date: DateTime(2026, 10, 2),
+                  ),
+                );
+            expect(await dbB.select(dbB.taskTable).get(), hasLength(2));
+          } else {
+            expect(await barrier.readAll(), [requestedA, requestedB]);
+            expect(dbB.closed, isTrue);
+            final persisted = harness.databaseFactory.inspectClosed(
+              _userB.uid,
+              () => _userB.uid,
+            );
+            expect(
+              await persisted.select(persisted.taskTable).get(),
+              hasLength(1),
+            );
+          }
+        }
+      },
+    );
+  }
+
+  test(
+    'multi-account mixed confirmed A and requested B/C resolves only current B',
+    () async {
+      final storage = _MemoryBarrierStorage();
+      final barrier = AccountDeletionCleanupBarrier(storage);
+      final confirmedA = await barrier.confirmIfCurrent(
+        await barrier.request(_userA.uid),
+      );
+      final requestedB = await barrier.request(_userB.uid);
+      final requestedC = await barrier.request('user-c');
+      final userB = _FirebaseUser(_userB.uid);
+      final secure = _SecureStorage()
+        ..values[SecureStorageService.tokenKey] = 'b-existing-token';
+      final bootstrap = _RecordingBootstrapCoordinator();
+      var physicalCalls = 0;
+      final harness = await _Harness.create(
+        [0],
+        firebaseUserId: _userB.uid,
+        firebaseUser: userB,
+        secureStorage: secure,
+        bootstrapCoordinator: bootstrap,
+        deletionBarrierStorage: storage,
+        seedDatabasesBeforeAuth: seedClosedAccounts,
+        deleteFile: (file) async {
+          expect(await barrier.readAll(), [confirmedA, requestedB, requestedC]);
+          expect(userB.reloadCalls, 0);
+          physicalCalls++;
+          if (await file.exists()) await file.delete();
+        },
+      );
+      addTearDown(harness.dispose);
+      expect((harness.state as AuthAuthenticated).user.uid, _userB.uid);
+      expect(userB.reloadCalls, 1);
+      expect(await barrier.readAll(), [requestedC]);
+      expect(harness.databaseFactory.openedUserIds, [_userB.uid]);
+      final b = harness.container.read(databaseProvider);
+      expect(await b.select(b.taskTable).get(), hasLength(1));
+      expect(
+        harness.scopedKeyStorage.values.containsKey(
+          LocalDatabaseIdentity(_userB.uid).keyAlias,
+        ),
+        isTrue,
+      );
+      expect(await harness.cycleStore.load(_userB.uid), isNotNull);
+      expect(
+        LocalDatabaseIdentity(
+          _userA.uid,
+        ).fileIn(harness.databaseFactory.directory).existsSync(),
+        isFalse,
+      );
+      expect(physicalCalls, 12);
+      expect(harness.auth.signOutCalls, 0);
+      expect(harness.notificationCleanup.calls, 0);
+      expect(harness.firestore.clearPersistenceCalls, 0);
+      expect(harness.coordinator.clearCalls, 0);
+      expect(bootstrap.resetCalls, 0);
+      expect(bootstrap.drainCalls, 0);
+      expect(secure.deletedKeys, isEmpty);
+    },
+  );
+
+  for (final failFirst in [false, true]) {
+    test(
+      'multi-account multiple confirmed restart with first failure $failFirst',
+      () async {
+        final storage = _MemoryBarrierStorage();
+        final barrier = AccountDeletionCleanupBarrier(storage);
+        final confirmedA = await barrier.confirmIfCurrent(
+          await barrier.request(_userA.uid),
+        );
+        final confirmedB = await barrier.confirmIfCurrent(
+          await barrier.request(_userB.uid),
+        );
+        var failA = failFirst;
+        late String pathA;
+        late String pathB;
+        final destroyed = <String>[];
+        final actionTokens = {_userA.uid: 'action-a', _userB.uid: 'action-b'};
+        final aiCache = {_userA.uid: 'consent-a', _userB.uid: 'consent-b'};
+        Future<void> requireOwnConfirmation(String uid) async {
+          expect(
+            await barrier.readForUser(uid),
+            uid == _userA.uid ? confirmedA : confirmedB,
+          );
+          if (uid == _userA.uid) {
+            expect(await barrier.readForUser(_userB.uid), confirmedB);
+          } else {
+            expect(await barrier.readForUser(_userA.uid), isNull);
+          }
+        }
+
+        final harness = await _Harness.create(
+          [0, 0, 0],
+          firebaseUserId: null,
+          deletionBarrierStorage: storage,
+          waitForAuthentication: false,
+          seedDatabasesBeforeAuth: (factory) async {
+            await seedClosedAccounts(factory);
+            pathA = LocalDatabaseIdentity(
+              _userA.uid,
+            ).fileIn(factory.directory).path;
+            pathB = LocalDatabaseIdentity(
+              _userB.uid,
+            ).fileIn(factory.directory).path;
+          },
+          deleteFile: (file) async {
+            final uid = file.path.startsWith(pathA) ? _userA.uid : _userB.uid;
+            expect(
+              file.path.startsWith(uid == _userA.uid ? pathA : pathB),
+              isTrue,
+            );
+            await requireOwnConfirmation(uid);
+            if (failA && uid == _userA.uid)
+              throw StateError('fixture-file-failure');
+            destroyed.add(uid);
+            if (await file.exists()) await file.delete();
+          },
+          deleteActionToken: (uid) async {
+            await requireOwnConfirmation(uid);
+            actionTokens.remove(uid);
+          },
+          deleteAiCache: (uid) async {
+            await requireOwnConfirmation(uid);
+            aiCache.remove(uid);
+          },
+        );
+        addTearDown(harness.dispose);
+        if (failFirst) {
+          await harness.waitForState<AuthError>();
+          expect(await barrier.readAll(), [confirmedA, confirmedB]);
+          expect(destroyed, isEmpty);
+          expect(File(pathA).existsSync(), isTrue);
+          expect(File(pathB).existsSync(), isTrue);
+          expect(
+            harness.scopedKeyStorage.values.containsKey(
+              LocalDatabaseIdentity(_userA.uid).keyAlias,
+            ),
+            isTrue,
+          );
+          expect(
+            harness.scopedKeyStorage.values.containsKey(
+              LocalDatabaseIdentity(_userB.uid).keyAlias,
+            ),
+            isTrue,
+          );
+          expect(await harness.cycleStore.load(_userB.uid), isNotNull);
+          expect(actionTokens[_userB.uid], 'action-b');
+          expect(aiCache[_userB.uid], 'consent-b');
+          failA = false;
+          await harness.notifier.checkCurrentUser();
+        } else {
+          await harness.waitForState<AuthUnauthenticated>();
+        }
+        expect(harness.state, isA<AuthUnauthenticated>());
+        expect(await barrier.readAll(), isEmpty);
+        expect(destroyed, [
+          ...List.filled(12, _userA.uid),
+          ...List.filled(12, _userB.uid),
+        ]);
+        expect(File(pathA).existsSync(), isFalse);
+        expect(File(pathB).existsSync(), isFalse);
+        expect(harness.scopedKeyStorage.values, isEmpty);
+        expect(await harness.cycleStore.load(_userA.uid), isNull);
+        expect(await harness.cycleStore.load(_userB.uid), isNull);
+        expect(actionTokens, isEmpty);
+        expect(aiCache, isEmpty);
+        expect(harness.databaseFactory.openedUserIds, isEmpty);
+        expect(harness.auth.signOutCalls, 0);
+        expect(
+          File(
+            '${harness.databaseFactory.directory.path}/life_os.sqlite',
+          ).readAsStringSync(),
+          'legacy-fixture',
+        );
+        await harness.notifier.checkCurrentUser();
+        expect(destroyed, hasLength(24));
+        expect(harness.databaseFactory.openedUserIds, isEmpty);
+      },
+    );
+  }
+
+  test(
+    'failed physical deletion retains confirmed marker and retry deletes without reopen',
+    () async {
+      var fail = true;
+      final harness = await _Harness.create(
+        [0, 0],
+        deleteFile: (file) async {
+          if (fail && file.path.endsWith('-wal'))
+            throw StateError('technical-file-marker');
+          if (await file.exists()) await file.delete();
+        },
+      );
+      addTearDown(harness.dispose);
+      await seedSessionRows(harness.database, _userA.uid);
+      final wal = File(
+        '${LocalDatabaseIdentity(_userA.uid).fileIn(harness.databaseFactory.directory).path}-wal',
+      );
+      await harness.notifier.deleteAccount();
+      final marker = (await harness.deletionBarrier.readForUser(_userA.uid))!;
+      expect(marker.phase, AccountDeletionPhase.remoteConfirmed);
+      expect(harness.state, isA<AuthError>());
+      expect(
+        (harness.state as AuthError).message,
+        isNot(contains('technical-file-marker')),
+      );
+      expect(
+        harness.scopedKeyStorage.values.containsKey(
+          LocalDatabaseIdentity(_userA.uid).keyAlias,
+        ),
+        isTrue,
+      );
+      wal.writeAsStringSync('fixture');
+      fail = false;
+      await harness.notifier.checkCurrentUser();
+      expect(harness.state, isA<AuthUnauthenticated>());
+      expect(wal.existsSync(), isFalse);
+      expect(harness.databaseFactory.openedUserIds, [_userA.uid]);
+      expect(await harness.deletionBarrier.readAll(), isEmpty);
+    },
+  );
+
+  test(
+    'failed preference deletion retains confirmed marker after key and retries',
+    () async {
+      final harness = await _Harness.create([
+        0,
+        0,
+      ], preferenceDeletionFailures: 1);
+      addTearDown(harness.dispose);
+      await seedSessionRows(harness.database, _userA.uid);
+      await harness.notifier.deleteAccount();
+      expect(
+        (await harness.deletionBarrier.readForUser(_userA.uid))!.phase,
+        AccountDeletionPhase.remoteConfirmed,
+      );
+      expect(
+        harness.scopedKeyStorage.values.containsKey(
+          LocalDatabaseIdentity(_userA.uid).keyAlias,
+        ),
+        isFalse,
+      );
+      expect(await harness.cycleStore.load(_userA.uid), isNotNull);
+      await harness.notifier.checkCurrentUser();
+      expect(harness.state, isA<AuthUnauthenticated>());
+      expect(await harness.cycleStore.load(_userA.uid), isNull);
+      expect(harness.databaseFactory.openedUserIds, [_userA.uid]);
+      expect(await harness.deletionBarrier.readAll(), isEmpty);
+    },
+  );
+
+  for (final explicit in [true, false]) {
+    test(
+      '${explicit ? 'normal logout' : 'external signout'} preserves scoped file/key',
+      () async {
+        final harness = await _Harness.create([0]);
+        addTearDown(harness.dispose);
+        await seedSessionRows(harness.database, _userA.uid);
+        final identity = LocalDatabaseIdentity(_userA.uid);
+        final key = harness.scopedKeyStorage.values[identity.keyAlias];
+        if (explicit) {
+          await harness.notifier.logout();
+        } else {
+          harness.auth.emit(null);
+          await harness.waitForState<AuthUnauthenticated>();
+        }
+        expect(
+          identity.fileIn(harness.databaseFactory.directory).existsSync(),
+          isTrue,
+        );
+        expect(harness.scopedKeyStorage.values[identity.keyAlias], key);
+        expect(await harness.cycleStore.load(_userA.uid), isNotNull);
+        expect(await harness.deletionBarrier.readAll(), isEmpty);
+      },
+    );
+  }
 }

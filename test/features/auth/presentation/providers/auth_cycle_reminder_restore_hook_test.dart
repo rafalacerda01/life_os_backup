@@ -134,7 +134,13 @@ void main() {
     expect(source, isNot(contains('.clear(logoutUserId)')));
     expect(source, isNot(contains('.clear(cleanupUserId)')));
     expect(source, isNot(contains('.clear(pending.userId)')));
-    expect(RegExp(r'\.clearIfCurrent\(').allMatches(source), hasLength(4));
+    expect(
+      RegExp(
+        r'\.read\(authCleanupBarrierProvider\)\s*\.clearIfCurrent\(',
+      ).allMatches(source),
+      hasLength(3),
+    );
+    expect(source, contains('await barrier.clearIfCurrent(pending)'));
   });
 
   test('troca A para B aguarda cleanup antes do novo ownership local', () {

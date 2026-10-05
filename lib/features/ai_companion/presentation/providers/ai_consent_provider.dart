@@ -2,7 +2,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:life_os/core/utils/app_logger.dart';
-import 'package:shared_preferences/shared_preferences.dart';
+import 'package:life_os/core/storage/ai_consent_local_cache.dart';
 
 typedef AiConsentUserIdProvider = String? Function();
 typedef AiConsentDocumentProvider =
@@ -223,13 +223,15 @@ DocumentReference<Map<String, dynamic>> _firestoreConsentDocument(
     .doc('ai_consent');
 
 Future<bool> _writeSharedPreferences(String key, bool value) async {
-  final prefs = await SharedPreferences.getInstance();
-  return prefs.setBool(key, value);
+  return AiConsentLocalCache.instance.write(
+    key.substring(AiConsentLocalCache.keyPrefix.length),
+  );
 }
 
 Future<bool> _removeSharedPreferences(String key) async {
-  final prefs = await SharedPreferences.getInstance();
-  return prefs.remove(key);
+  return AiConsentLocalCache.instance.remove(
+    key.substring(AiConsentLocalCache.keyPrefix.length),
+  );
 }
 
 final aiConsentProvider = AsyncNotifierProvider<AiConsentNotifier, bool>(

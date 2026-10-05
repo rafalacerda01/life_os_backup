@@ -40,6 +40,7 @@ class SessionDatabaseCoordinator {
   SessionDatabasePhase _phase = SessionDatabasePhase.detached;
   int _generation = 0;
   bool _disposed = false;
+  final Set<String> _destroyingUserIds = {};
 
   SessionDatabaseSnapshot get snapshot => SessionDatabaseSnapshot(
     _phase,
@@ -77,7 +78,9 @@ class SessionDatabaseCoordinator {
     Future<void> Function()? beforePublish,
   }) {
     final identity = LocalDatabaseIdentity(expectedUid);
-    if (_disposed || currentUserId() != identity.uid) {
+    if (_disposed ||
+        _destroyingUserIds.contains(identity.uid) ||
+        currentUserId() != identity.uid) {
       return Future.error(const SessionDatabaseUnavailable());
     }
     if (_requestedIdentity != identity) {
@@ -157,8 +160,29 @@ class SessionDatabaseCoordinator {
     _notify();
   }
 
+  /// Explicit remote-confirmed destruction. Never opens the target for recovery.
+  Future<void> destroy(
+    LocalDatabaseIdentity identity,
+    Future<void> Function() destroyStorage,
+  ) {
+    _destroyingUserIds.add(identity.uid);
+    if (_requestedIdentity == identity) {
+      _requestedIdentity = null;
+      _generation++;
+    }
+    final drain = _database?.identity == identity
+        ? _database!.localMutations.sealAndDrainForDetach()
+        : Future<void>.value();
+    return _serialize(() async {
+      await drain;
+      if (_database?.identity == identity) await _closeAttached();
+      await destroyStorage();
+    });
+  }
+
   void _requireRequest(LocalDatabaseIdentity identity, int generation) {
     if (_disposed ||
+        _destroyingUserIds.contains(identity.uid) ||
         _generation != generation ||
         _requestedIdentity != identity ||
         currentUserId() != identity.uid) {
