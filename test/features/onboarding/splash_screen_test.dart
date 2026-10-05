@@ -114,6 +114,112 @@ void main() {
     await tester.pump(const Duration(milliseconds: 1));
   }
 
+  testWidgets(
+    'ícone oficial aparece com entrada curta sem loop durante loading',
+    (tester) async {
+      final harness = await pumpSplash(
+        tester,
+        authState: AuthState.loading(),
+        store: _TestOnboardingStore(),
+      );
+
+      expect(find.byType(Image), findsOneWidget);
+      final image = tester.widget<Image>(find.byType(Image));
+      final assetName = (image.image as AssetImage).assetName;
+      expect(assetName, 'assets/branding/life_os_mark.png');
+      expect(assetName, isNot(contains('ios/Runner')));
+      expect(assetName, isNot(contains('android/app/src/main/res')));
+      expect(image.fit, BoxFit.contain);
+      expect(image.semanticLabel, 'Life OS');
+      expect(
+        tester.getCenter(find.byType(Image)).dx,
+        closeTo(
+          tester.view.physicalSize.width / tester.view.devicePixelRatio / 2,
+          0.01,
+        ),
+      );
+      final fade = tester.widget<FadeTransition>(
+        find
+            .ancestor(
+              of: find.byType(Image),
+              matching: find.byType(FadeTransition),
+            )
+            .first,
+      );
+      final scale = tester.widget<ScaleTransition>(
+        find
+            .ancestor(
+              of: find.byType(Image),
+              matching: find.byType(ScaleTransition),
+            )
+            .first,
+      );
+      expect(fade.opacity.value, 0);
+      expect(scale.scale.value, 0.96);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 649));
+      expect(fade.opacity.value, lessThan(1));
+      expect(scale.scale.value, lessThan(1));
+      await tester.pump(const Duration(milliseconds: 1));
+      expect(fade.opacity.value, 1);
+      expect(scale.scale.value, 1);
+      await tester.pumpAndSettle();
+      await tester.pump(const Duration(seconds: 1));
+      expect(fade.opacity.value, 1);
+      expect(scale.scale.value, 1);
+      expect(tester.binding.hasScheduledFrame, isFalse);
+      expect(find.text('Seu sistema.\nSua vida.\nSeu melhor.'), findsOneWidget);
+      expect(
+        find.byWidgetPredicate(
+          (widget) =>
+              widget is RichText && widget.text.toPlainText() == 'Life OS',
+        ),
+        findsOneWidget,
+      );
+      expect(harness.router.state.uri.path, '/splash');
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets('dispose durante entrada não deixa ticker ou frame ativo', (
+    tester,
+  ) async {
+    await pumpSplash(
+      tester,
+      authState: AuthState.loading(),
+      store: _TestOnboardingStore(),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump(const Duration(seconds: 1));
+
+    expect(tester.binding.transientCallbackCount, 0);
+    expect(tester.binding.hasScheduledFrame, isFalse);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('splash compacta preserva recuperação de erro sem overflow', (
+    tester,
+  ) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(320, 480);
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    await pumpSplash(
+      tester,
+      authState: AuthState.error('technical-error'),
+      store: _TestOnboardingStore(),
+    );
+
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(find.text('Tentar novamente'));
+    expect(find.byType(Image), findsOneWidget);
+    expect(find.text('Não foi possível iniciar sua sessão.'), findsOneWidget);
+    expect(find.text('technical-error'), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('usuário autenticado segue para home sem aguardar flag local', (
     tester,
   ) async {

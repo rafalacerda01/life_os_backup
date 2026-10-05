@@ -63,8 +63,21 @@ void main() {
       findsOneWidget,
     );
 
-    // A Splash utiliza duas RotationTransition.
-    expect(find.byType(RotationTransition), findsNWidgets(2));
+    // O ícone oficial substitui o antigo anel rotativo.
+    final image = tester.widget<Image>(find.byType(Image));
+    expect(
+      (image.image as AssetImage).assetName,
+      'assets/branding/life_os_mark.png',
+    );
+    expect(
+      find.byWidgetPredicate(
+        (widget) =>
+            widget is DecoratedBox &&
+            widget.decoration is BoxDecoration &&
+            (widget.decoration as BoxDecoration).gradient is SweepGradient,
+      ),
+      findsNothing,
+    );
 
     // Slogan.
     expect(find.text('Seu sistema.\nSua vida.\nSeu melhor.'), findsOneWidget);

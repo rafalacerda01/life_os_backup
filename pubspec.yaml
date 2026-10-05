@@ -60,6 +60,8 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+  assets:
+    - assets/branding/life_os_mark.png
 
 hooks:
   user_defines:
