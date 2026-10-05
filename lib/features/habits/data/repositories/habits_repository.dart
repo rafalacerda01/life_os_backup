@@ -166,12 +166,9 @@ class HabitsRepository {
             _db.habits,
           )..where((t) => t.id.equals(habitId))).go();
 
-          // 2. Exclui as notificações locais relacionadas ao hábito.
+          // 2. IDs exatos: formato atual e compatibilidade sem prefixo.
           await (_db.delete(_db.notificationsTable)..where(
-                (t) =>
-                    t.id.equals(habitId) |
-                    t.id.equals('habit_$habitId') |
-                    t.title.like('%$habitTitle%'),
+                (t) => t.id.equals(habitId) | t.id.equals('habit_$habitId'),
               ))
               .go();
         },
