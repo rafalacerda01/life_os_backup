@@ -214,6 +214,170 @@ SyncManager _recordUiEvents(
 }
 
 void main() {
+  group('preserving session detach', () {
+    testWidgets('aborted logout rearms retry for A only', (tester) async {
+      final store = FakeSyncQueueStore([createSyncItem()]);
+      var online = false;
+      final remote = FakeSyncRemoteDataSource(
+        (_, _) async => online
+            ? const SyncOperationResult.success()
+            : const SyncOperationResult.retryable(code: 'NETWORK_ERROR'),
+      );
+      final manager = SyncManager(
+        queueStore: store,
+        remoteDataSource: remote,
+        currentUserId: () => 'user-123',
+      );
+      addTearDown(manager.dispose);
+      await manager.processPendingItems();
+      await manager.prepareForSessionDetach('user-123');
+      await tester.pump(const Duration(seconds: 5));
+      expect(remote.processedItems, hasLength(1));
+      online = true;
+      expect(manager.resumeForPreparedSession('user-123'), isTrue);
+      await tester.pump(const Duration(seconds: 5));
+      await tester.pump();
+      expect(remote.processedItems, hasLength(2));
+      expect(store.items.single.status, SyncQueuePersistenceStatus.succeeded);
+    });
+
+    test(
+      'pause does not inspect, upload or discard pending/rejected rows',
+      () async {
+        final store = FakeSyncQueueStore([
+          createSyncItem(),
+          createSyncItem(id: 2, status: SyncQueuePersistenceStatus.rejected),
+        ]);
+        final before = List<SyncQueueTableData>.of(store.items);
+        final remote = FakeSyncRemoteDataSource(
+          (_, _) async => const SyncOperationResult.success(),
+        );
+        final manager = SyncManager(
+          queueStore: store,
+          remoteDataSource: remote,
+          currentUserId: () => 'user-123',
+        );
+        addTearDown(manager.dispose);
+        expect(await manager.prepareForSessionDetach('user-123'), isTrue);
+        expect(await manager.processPendingItems(), isFalse);
+        expect(store.items, before);
+        expect(store.events, isEmpty);
+        expect(remote.processedItems, isEmpty);
+        expect(await manager.prepareForLocalDataDiscard(), isFalse);
+      },
+    );
+    for (final result in [
+      const SyncOperationResult.success(),
+      const SyncOperationResult.retryable(code: 'NETWORK_ERROR'),
+    ]) {
+      test(
+        'pause fences in-flight ${result.status.name} and stops next item',
+        () async {
+          final started = Completer<void>();
+          final response = Completer<SyncOperationResult>();
+          final store = FakeSyncQueueStore([
+            createSyncItem(),
+            createSyncItem(id: 2),
+          ]);
+          final before = List<SyncQueueTableData>.of(store.items);
+          final remote = FakeSyncRemoteDataSource((_, _) {
+            started.complete();
+            return response.future;
+          });
+          final manager = SyncManager(
+            queueStore: store,
+            remoteDataSource: remote,
+            currentUserId: () => 'user-123',
+          );
+          addTearDown(manager.dispose);
+          final processing = manager.processPendingItems();
+          await started.future;
+          final detach = manager.prepareForSessionDetach('user-123');
+          expect(await detach, isTrue);
+          expect(await manager.processPendingItems(), isFalse);
+          response.complete(result);
+          expect(await processing, isFalse);
+          expect(await detach, isTrue);
+          expect(store.items, before);
+          expect(remote.processedItems, hasLength(1));
+        },
+      );
+    }
+    test(
+      'only the same prepared session resumes after an aborted logout',
+      () async {
+        String? uid = 'user-123';
+        final store = FakeSyncQueueStore([createSyncItem()]);
+        final remote = FakeSyncRemoteDataSource(
+          (_, _) async => const SyncOperationResult.success(),
+        );
+        final manager = SyncManager(
+          queueStore: store,
+          remoteDataSource: remote,
+          currentUserId: () => uid,
+        );
+        addTearDown(manager.dispose);
+        expect(await manager.prepareForSessionDetach('other-user'), isFalse);
+        expect(await manager.prepareForSessionDetach(uid), isTrue);
+        uid = 'other-user';
+        expect(manager.resumeForPreparedSession(uid), isFalse);
+        expect(await manager.processPendingItems(), isFalse);
+        uid = 'user-123';
+        expect(manager.resumeForPreparedSession(uid), isTrue);
+        expect(await manager.processPendingItems(), isTrue);
+        expect(remote.processedItems.single, startsWith('user-123:'));
+        expect(store.items.single.status, SyncQueuePersistenceStatus.succeeded);
+      },
+    );
+    test('dispose fences a late same-UID remote result', () async {
+      final started = Completer<void>();
+      final response = Completer<SyncOperationResult>();
+      final store = FakeSyncQueueStore([createSyncItem()]);
+      final before = store.items.single;
+      final remote = FakeSyncRemoteDataSource((_, _) {
+        started.complete();
+        return response.future;
+      });
+      final manager = SyncManager(
+        queueStore: store,
+        remoteDataSource: remote,
+        currentUserId: () => 'user-123',
+      );
+      final processing = manager.processPendingItems();
+      await started.future;
+      manager.dispose();
+      response.complete(const SyncOperationResult.success());
+      expect(await processing, isFalse);
+      expect(store.items.single, before);
+      expect(manager.resumeForPreparedSession('user-123'), isFalse);
+    });
+    testWidgets('pause cancels A retry and old manager cannot run under B', (
+      tester,
+    ) async {
+      String? uid = 'user-123';
+      final store = FakeSyncQueueStore([createSyncItem()]);
+      final remote = FakeSyncRemoteDataSource(
+        (_, _) async =>
+            const SyncOperationResult.retryable(code: 'NETWORK_ERROR'),
+      );
+      final manager = SyncManager(
+        queueStore: store,
+        remoteDataSource: remote,
+        currentUserId: () => uid,
+      );
+      addTearDown(manager.dispose);
+      await manager.processPendingItems();
+      expect(remote.processedItems, hasLength(1));
+      await manager.prepareForSessionDetach(uid);
+      uid = 'user-b';
+      await tester.pump(const Duration(minutes: 6));
+      expect(await manager.processPendingItems(), isFalse);
+      expect(remote.processedItems, hasLength(1));
+      expect(store.items.single.ownerUid, 'user-123');
+      expect(store.items.single.status, SyncQueuePersistenceStatus.pending);
+    });
+  });
+
   group('SyncManager recovery UI events', () {
     test('first-attempt success emits no recovery feedback', () async {
       final events = <SyncUiEvent>[];

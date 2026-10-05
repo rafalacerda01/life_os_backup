@@ -17,6 +17,9 @@ import 'package:life_os/core/database/local_mutation_gate.dart';
 import 'package:life_os/core/errors/failure.dart';
 import 'package:life_os/core/router/router.dart';
 import 'package:life_os/core/services/sync_manager.dart';
+import 'package:life_os/core/services/sync_queue_store.dart';
+import 'package:life_os/core/services/sync_remote_data_source.dart';
+import 'package:life_os/core/services/sync_operation_result.dart';
 import 'package:life_os/core/services/analytics_service.dart';
 import 'package:life_os/core/services/notification_service.dart';
 import 'package:life_os/core/services/notification_preferences.dart';
@@ -347,6 +350,21 @@ class _SyncManager extends Fake implements SyncManager {
   int calls = 0;
   Future<bool> Function()? onProcess;
   Future<bool> Function()? hasRejected;
+  Future<bool> Function()? onDetach;
+  int detachCalls = 0;
+  int resumeCalls = 0;
+
+  @override
+  Future<bool> prepareForSessionDetach(String expectedUid) {
+    detachCalls++;
+    return onDetach?.call() ?? Future.value(true);
+  }
+
+  @override
+  bool resumeForPreparedSession(String expectedUid) {
+    resumeCalls++;
+    return true;
+  }
 
   @override
   Future<bool> prepareForLocalDataDiscard() async {
@@ -359,6 +377,18 @@ class _SyncManager extends Fake implements SyncManager {
   Future<bool> processPendingItems() {
     calls += 1;
     return onProcess?.call() ?? Future.value(shouldDrain);
+  }
+}
+
+class _RecordingSyncRemote implements SyncRemoteDataSource {
+  final calls = <(String, String)>[];
+  Future<SyncOperationResult> Function(String, SyncQueueTableData)? onProcess;
+
+  @override
+  Future<SyncOperationResult> process(String uid, SyncQueueTableData item) {
+    calls.add((uid, item.docId));
+    return onProcess?.call(uid, item) ??
+        Future.value(const SyncOperationResult.success());
   }
 }
 
@@ -736,6 +766,7 @@ class _Harness {
     Failure? currentUserFailure,
     FlutterSecureStorage? secureStorage,
     _SyncManager? syncManagerOverride,
+    SyncRemoteDataSource? syncRemoteDataSource,
     bool waitForAuthentication = true,
     Completer<void>? deleteStarted,
     Completer<void>? allowDelete,
@@ -917,7 +948,20 @@ class _Harness {
           ),
         if (analyticsService != null)
           analyticsServiceProvider.overrideWithValue(analyticsService),
-        syncManagerProvider.overrideWithValue(syncManager),
+        if (syncRemoteDataSource == null)
+          syncManagerProvider.overrideWithValue(syncManager)
+        else
+          syncManagerProvider.overrideWith((ref) {
+            final manager = SyncManager(
+              queueStore: AppDatabaseSyncQueueStore(
+                ref.watch(databaseProvider),
+              ),
+              remoteDataSource: syncRemoteDataSource,
+              currentUserId: () => auth.currentUser?.uid,
+            );
+            ref.onDispose(manager.dispose);
+            return manager;
+          }),
         checkInRepositoryProvider.overrideWithValue(
           checkInRepository ?? _CheckInRepository(),
         ),
@@ -1060,8 +1104,202 @@ Future<void> seedClosedAccounts(TestUserDatabaseFactory factory) async {
   ).writeAsStringSync('legacy-fixture');
 }
 
+Future<void> seedPendingLocalChange(AppDatabase db) async {
+  await db
+      .into(db.taskTable)
+      .insert(
+        TaskTableCompanion.insert(
+          id: 'pending-task',
+          title: 'Pending task',
+          priority: 'normal',
+          date: DateTime(2026, 9, 24),
+        ),
+      );
+  await db.insertSyncItem(
+    ownerUid: _userA.uid,
+    collection: 'tasks',
+    docId: 'pending-task',
+    operationType: 'create',
+    payloadJson: '{"title":"Pending task"}',
+  );
+}
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+
+  test(
+    'real in-flight A stops before signout and cannot write after detach',
+    () async {
+      final started = Completer<void>();
+      final response = Completer<SyncOperationResult>();
+      final checkInStarted = Completer<void>();
+      final checkIns = _CheckInRepository()
+        ..onDrain = () async {
+          if (!checkInStarted.isCompleted) checkInStarted.complete();
+          return true;
+        };
+      final remote = _RecordingSyncRemote()
+        ..onProcess = (uid, item) {
+          if (!started.isCompleted) started.complete();
+          return response.future;
+        };
+      final harness = await _Harness.create(
+        [0],
+        syncRemoteDataSource: remote,
+        checkInRepository: checkIns,
+      );
+      addTearDown(harness.dispose);
+      await checkInStarted.future;
+      final a = harness.databaseFactory.last!;
+      await seedPendingLocalChange(a);
+      final before = await a.select(a.syncQueueTable).getSingle();
+      final managerA = harness.container.read(syncManagerProvider);
+      final processing = managerA.processPendingItems();
+      await started.future;
+      final logout = harness.notifier.logout();
+      await Future<void>.delayed(Duration.zero);
+      expect(harness.repository.signOutCalls, 0);
+      await logout;
+      expect(response.isCompleted, isFalse);
+      expect(await processing, isFalse);
+      expect(harness.state, isA<AuthUnauthenticated>());
+      expect(a.closed, isTrue);
+      expect(
+        await harness.database
+            .select(harness.database.syncQueueTable)
+            .getSingle(),
+        before,
+      );
+      harness.auth.user = _FirebaseUser(_userB.uid);
+      await harness.notifier.checkCurrentUser();
+      final b = harness.container.read(databaseProvider);
+      expect(await b.select(b.syncQueueTable).get(), isEmpty);
+      response.complete(const SyncOperationResult.success());
+      await Future<void>.delayed(Duration.zero);
+      expect(await managerA.processPendingItems(), isFalse);
+      expect(remote.calls, [(_userA.uid, before.docId)]);
+    },
+  );
+
+  test(
+    'real sync keeps rejected A/B isolated and B can process its own queue',
+    () async {
+      final remote = _RecordingSyncRemote();
+      final harness = await _Harness.create([
+        0,
+        0,
+      ], syncRemoteDataSource: remote);
+      addTearDown(harness.dispose);
+      final a = harness.databaseFactory.last!;
+      await seedPendingLocalChange(a);
+      final aItem = await a.select(a.syncQueueTable).getSingle();
+      await a.markSyncItemRejected(aItem.id, _userA.uid, 'INVALID_PAYLOAD');
+      final aRejected = await a.select(a.syncQueueTable).getSingle();
+      final managerA = harness.container.read(syncManagerProvider);
+      await harness.notifier.logout();
+      expect(harness.state, isA<AuthUnauthenticated>());
+      expect(await managerA.processPendingItems(), isFalse);
+
+      harness.auth.user = _FirebaseUser(_userB.uid);
+      await harness.notifier.checkCurrentUser();
+      final b = harness.container.read(databaseProvider);
+      expect(b.identity!.uid, _userB.uid);
+      expect(await b.select(b.syncQueueTable).get(), isEmpty);
+      await b.insertSyncItem(
+        ownerUid: _userB.uid,
+        collection: 'tasks',
+        docId: 'b-rejected',
+        operationType: 'create',
+        payloadJson: '{}',
+      );
+      final bItem = await b.select(b.syncQueueTable).getSingle();
+      await b.markSyncItemRejected(bItem.id, _userB.uid, 'QUOTA_EXCEEDED');
+      await b.insertSyncItem(
+        ownerUid: _userB.uid,
+        collection: 'tasks',
+        docId: 'b-pending',
+        operationType: 'create',
+        payloadJson: '{}',
+      );
+      expect(
+        await harness.container.read(syncManagerProvider).processPendingItems(),
+        isTrue,
+      );
+      expect(remote.calls, [(_userB.uid, 'b-pending')]);
+      final bRows = await b.select(b.syncQueueTable).get();
+      expect(bRows.map((row) => row.ownerUid), everyElement(_userB.uid));
+      expect(bRows.first.status, SyncQueuePersistenceStatus.rejected);
+      expect(bRows.last.status, SyncQueuePersistenceStatus.succeeded);
+
+      await harness.notifier.logout();
+      harness.auth.user = _FirebaseUser(_userA.uid);
+      await harness.notifier.checkCurrentUser();
+      final reopened = harness.container.read(databaseProvider);
+      expect(await reopened.select(reopened.syncQueueTable).get(), [aRejected]);
+      expect(remote.calls, [(_userB.uid, 'b-pending')]);
+    },
+  );
+
+  test(
+    'real offline A queue is never sent as B and replays only after relogin A',
+    () async {
+      var online = false;
+      final remote = _RecordingSyncRemote()
+        ..onProcess = (uid, item) async => online
+            ? const SyncOperationResult.success()
+            : const SyncOperationResult.retryable(code: 'NETWORK_ERROR');
+      final harness = await _Harness.create([
+        0,
+        0,
+      ], syncRemoteDataSource: remote);
+      addTearDown(harness.dispose);
+      final a = harness.databaseFactory.last!;
+      await seedPendingLocalChange(a);
+      expect(
+        await harness.container.read(syncManagerProvider).processPendingItems(),
+        isFalse,
+      );
+      final aPending = await a.select(a.syncQueueTable).getSingle();
+      await harness.notifier.logout();
+      expect(harness.state, isA<AuthUnauthenticated>());
+      expect(
+        (await harness.database
+            .select(harness.database.syncQueueTable)
+            .getSingle()),
+        aPending,
+      );
+
+      harness.auth.user = _FirebaseUser(_userB.uid);
+      await harness.notifier.checkCurrentUser();
+      final b = harness.container.read(databaseProvider);
+      expect(await b.select(b.syncQueueTable).get(), isEmpty);
+      online = true;
+      await b.insertSyncItem(
+        ownerUid: _userB.uid,
+        collection: 'tasks',
+        docId: 'b-only',
+        operationType: 'create',
+        payloadJson: '{}',
+      );
+      await harness.container.read(syncManagerProvider).processPendingItems();
+      expect(remote.calls.where((call) => call.$1 == _userB.uid), [
+        (_userB.uid, 'b-only'),
+      ]);
+      await harness.notifier.logout();
+      harness.auth.user = _FirebaseUser(_userA.uid);
+      await harness.notifier.checkCurrentUser();
+      await harness.container.read(syncManagerProvider).processPendingItems();
+      final reopened = harness.container.read(databaseProvider);
+      final replayed = await reopened
+          .select(reopened.syncQueueTable)
+          .getSingle();
+      expect(replayed.ownerUid, _userA.uid);
+      expect(replayed.docId, aPending.docId);
+      expect(replayed.payloadJson, aPending.payloadJson);
+      expect(replayed.status, SyncQueuePersistenceStatus.succeeded);
+      expect(remote.calls.last, (_userA.uid, aPending.docId));
+    },
+  );
 
   test(
     'Auth logout drains and invalidates the same medication job started by Settings',
@@ -1240,6 +1478,7 @@ void main() {
     expect(harness.state, isA<AuthError>());
     expect(harness.auth.currentUser?.uid, _userA.uid);
     expect(harness.repository.signOutCalls, 1);
+    expect(harness.syncManager.resumeCalls, 1);
     final marker = await harness.readPendingCleanup();
     expect(marker, isNull);
     expect(
@@ -1896,26 +2135,6 @@ void main() {
     );
   }
 
-  Future<void> seedPendingLocalChange(AppDatabase db) async {
-    await db
-        .into(db.taskTable)
-        .insert(
-          TaskTableCompanion.insert(
-            id: 'pending-task',
-            title: 'Pending task',
-            priority: 'normal',
-            date: DateTime(2026, 9, 24),
-          ),
-        );
-    await db.insertSyncItem(
-      ownerUid: _userA.uid,
-      collection: 'tasks',
-      docId: 'pending-task',
-      operationType: 'create',
-      payloadJson: '{"title":"Pending task"}',
-    );
-  }
-
   Future<void> seedPendingCheckIn(AppDatabase db) async {
     await db.insertCheckIn(
       CheckInTableCompanion.insert(
@@ -2311,96 +2530,76 @@ void main() {
     },
   );
 
-  test('logout com fila pendente preserva sessão, dados e operação', () async {
-    final harness = await _Harness.create(<int>[0]);
+  test('offline pending survives logout without a remote drain', () async {
+    final harness = await _Harness.create([0]);
     addTearDown(harness.dispose);
     await seedPendingLocalChange(harness.database);
     harness.syncManager.shouldDrain = false;
+    final a = harness.databaseFactory.last!;
+    final before = await a.select(a.syncQueueTable).get();
+    final sendsBefore = harness.syncManager.calls;
 
     await harness.notifier.logout();
 
-    expect(harness.state, isA<AuthError>());
-    expect(
-      (harness.state as AuthError).message,
-      contains('alterações pendentes'),
-    );
-    expect(harness.auth.currentUser?.uid, _userA.uid);
-    expect(harness.repository.signOutCalls, 0);
-    expect(harness.auth.signOutCalls, 0);
-    expect(
-      await harness.database.select(harness.database.taskTable).get(),
-      hasLength(1),
-    );
-    final queue = await harness.database
-        .select(harness.database.syncQueueTable)
-        .get();
-    expect(queue, hasLength(1));
-    expect(queue.single.ownerUid, _userA.uid);
-    expect(queue.single.status, SyncQueuePersistenceStatus.pending);
-    expect(harness.lifecycle.cancellationCalls, 0);
-    expect(harness.firestore.clearPersistenceCalls, 0);
-    expect(await harness.readPendingCleanup(), isNull);
-
-    harness.syncManager.shouldDrain = true;
-    await harness.notifier.logout();
     expect(harness.state, isA<AuthUnauthenticated>());
+    expect(harness.auth.currentUser, isNull);
     expect(harness.repository.signOutCalls, 1);
+    expect(a.closed, isTrue);
+    expect(harness.syncManager.calls, sendsBefore);
+    expect(harness.syncManager.detachCalls, 1);
+    final persisted = harness.database;
+    expect(await persisted.select(persisted.taskTable).get(), hasLength(1));
+    expect(await persisted.select(persisted.syncQueueTable).get(), before);
+    expect(await harness.readPendingCleanup(), isNull);
   });
 
-  test('rejected persistido bloqueia logout e segunda tentativa', () async {
-    final harness = await _Harness.create(<int>[0]);
-    addTearDown(harness.dispose);
-    await seedPendingLocalChange(harness.database);
-    final queue = await harness.database
-        .select(harness.database.syncQueueTable)
-        .get();
-    await harness.database.markSyncItemRejected(
-      queue.single.id,
-      _userA.uid,
-      'INVALID_PAYLOAD',
-    );
-    harness.syncManager.hasRejected = () =>
-        harness.database.hasRejectedSyncItems(_userA.uid);
+  for (final code in [
+    'QUOTA_EXCEEDED',
+    'PERMISSION_DENIED',
+    'INVALID_PAYLOAD',
+    'UNSUPPORTED_OPERATION',
+  ]) {
+    test('terminal $code survives successful logout and relogin', () async {
+      final harness = await _Harness.create([0]);
+      addTearDown(harness.dispose);
+      await seedPendingLocalChange(harness.database);
+      final a = harness.databaseFactory.last!;
+      final pending = await a.select(a.syncQueueTable).getSingle();
+      await a.markSyncItemRejected(pending.id, _userA.uid, code);
+      final rejected = await a.select(a.syncQueueTable).getSingle();
+      final sendsBefore = harness.syncManager.calls;
 
-    for (var attempt = 0; attempt < 2; attempt++) {
       await harness.notifier.logout();
 
-      expect(harness.state, isA<AuthError>());
-      expect(
-        (harness.state as AuthError).message,
-        'Há alterações pendentes que ainda não foram sincronizadas. '
-        'Verifique sua conexão e tente sair novamente.',
-      );
-      expect(harness.auth.currentUser?.uid, _userA.uid);
-      expect(harness.repository.signOutCalls, 0);
-      expect(harness.auth.signOutCalls, 0);
-      expect(
-        await harness.database.select(harness.database.taskTable).get(),
-        hasLength(1),
-      );
-      final retained = await harness.database
-          .select(harness.database.syncQueueTable)
-          .get();
-      expect(retained, hasLength(1));
-      expect(retained.single.id, queue.single.id);
-      expect(retained.single.status, SyncQueuePersistenceStatus.rejected);
-      expect(harness.lifecycle.cancellationCalls, 0);
-      expect(harness.firestore.clearPersistenceCalls, 0);
-      expect(harness.notificationCleanup.calls, 0);
-      expect(harness.rotation.calls, 0);
+      expect(harness.state, isA<AuthUnauthenticated>());
+      expect(a.closed, isTrue);
+      expect(harness.repository.signOutCalls, 1);
+      expect(harness.syncManager.calls, sendsBefore);
+      expect(harness.notificationCleanup.calls, 1);
       expect(harness.preferencesDeletion.calls, 0);
-      expect(await harness.readPendingCleanup(), isNull);
-    }
-  });
+      final persisted = harness.database;
+      expect(
+        await persisted.select(persisted.syncQueueTable).getSingle(),
+        rejected,
+      );
+      harness.auth.user = _FirebaseUser(_userA.uid);
+      await harness.notifier.checkCurrentUser();
+      final reopened = harness.container.read(databaseProvider);
+      expect(
+        await reopened.select(reopened.syncQueueTable).getSingle(),
+        rejected,
+      );
+    });
+  }
 
-  test('logout drains before non-destructive isolation', () async {
+  test('logout stops sync before non-destructive isolation', () async {
     final events = <String>[];
     final harness = await _Harness.create(<int>[0], lifecycleEvents: events);
     addTearDown(harness.dispose);
     await seedPendingLocalChange(harness.database);
     events.clear();
-    harness.syncManager.onProcess = () async {
-      events.add('drain');
+    harness.syncManager.onDetach = () async {
+      events.add('stop');
       expect(harness.auth.currentUser?.uid, _userA.uid);
       expect(
         await harness.database.select(harness.database.taskTable).get(),
@@ -2410,17 +2609,13 @@ void main() {
           .select(harness.database.syncQueueTable)
           .get();
       expect(queue.single.status, SyncQueuePersistenceStatus.pending);
-      await harness.database.markSyncItemAsSucceeded(
-        queue.single.id,
-        _userA.uid,
-      );
       return true;
     };
 
     await harness.notifier.logout();
 
     expect(harness.state, isA<AuthUnauthenticated>());
-    expect(events.first, 'drain');
+    expect(events.first, 'stop');
     expect(events, contains('cleanup:${_userA.uid}'));
     expect(harness.repository.signOutCalls, 1);
     expect(
@@ -2455,11 +2650,11 @@ void main() {
     );
   });
 
-  test('troca de UID durante drain impede cleanup e sign-out', () async {
+  test('troca de UID durante pausa impede cleanup e sign-out', () async {
     final harness = await _Harness.create(<int>[0]);
     addTearDown(harness.dispose);
     await seedPendingLocalChange(harness.database);
-    harness.syncManager.onProcess = () async {
+    harness.syncManager.onDetach = () async {
       harness.auth.user = _FirebaseUser(_userB.uid);
       return true;
     };

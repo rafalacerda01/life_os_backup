@@ -8,6 +8,7 @@ import 'package:google_sign_in/google_sign_in.dart';
 import 'package:life_os/core/services/notification_service.dart';
 import 'package:life_os/core/services/firebase_auth_provider.dart';
 import 'package:life_os/core/services/analytics_service.dart';
+import 'package:life_os/core/services/sync_manager.dart';
 import 'package:life_os/core/services/sync_manager_provider.dart';
 import 'package:life_os/core/utils/app_logger.dart';
 import 'package:life_os/core/security/input_sanitizer.dart';
@@ -709,6 +710,7 @@ class AuthNotifier extends Notifier<AuthState> {
     _explicitSignOutInProgress = true;
     PendingAuthCleanup? logoutMarker;
     LocalMutationQuiescence? quiescence;
+    SyncManager? pausedSyncManager;
     var keepMutationGateSealed = false;
 
     try {
@@ -790,28 +792,16 @@ class AuthNotifier extends Notifier<AuthState> {
         return;
       }
 
-      bool queueDrained;
-      try {
-        queueDrained = await ref
-            .read(syncManagerProvider)
-            .prepareForLocalDataDiscard();
-      } catch (_) {
-        queueDrained = false;
-      }
-
-      if (firebaseAuth.currentUser?.uid != logoutUserId) {
+      // Normal logout preserves the account database and every queue status.
+      // Stop retries/in-flight processing; remote success is not an exit gate.
+      final syncManager = ref.read(syncManagerProvider);
+      pausedSyncManager = syncManager;
+      final syncStopped = await syncManager
+          .prepareForSessionDetach(logoutUserId)
+          .timeout(const Duration(seconds: 20));
+      if (!syncStopped || firebaseAuth.currentUser?.uid != logoutUserId) {
         if (!_disposed) {
           state = AuthState.error('Sua sessão mudou. Tente novamente.');
-        }
-        return;
-      }
-
-      if (!queueDrained) {
-        if (!_disposed) {
-          state = AuthState.error(
-            'Há alterações pendentes que ainda não foram sincronizadas. '
-            'Verifique sua conexão e tente sair novamente.',
-          );
         }
         return;
       }
@@ -943,6 +933,12 @@ class AuthNotifier extends Notifier<AuthState> {
         signOutConfirmed: firebaseAuth.currentUser == null,
         keepSealed: keepMutationGateSealed,
       );
+      if (!_disposed &&
+          !_localCleanupRequired &&
+          logoutUserId != null &&
+          firebaseAuth.currentUser?.uid == logoutUserId) {
+        pausedSyncManager?.resumeForPreparedSession(logoutUserId);
+      }
       _explicitSignOutInProgress = false;
     }
   }

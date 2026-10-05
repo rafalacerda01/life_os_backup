@@ -29,17 +29,58 @@ class SyncManager {
   Stream<SyncUiEvent> get uiEvents => _uiEvents.stream;
 
   Future<bool>? _processingFuture;
+  Completer<void>? _processingStop;
   bool _processAgain = false;
   Timer? _retryTimer;
   String? _retryUid;
   int _retryAttempt = 0;
   bool _disposed = false;
+  String? _pausedUid;
+  int _processingGeneration = 0;
 
   SyncManager({
     required this._queueStore,
     required this._remoteDataSource,
     required this._currentUserId,
   });
+
+  /// Stop session work without uploading or discarding the preserved queue.
+  /// An already sent request may finish remotely; its unconfirmed local item
+  /// remains pending for the same owner's idempotent replay after relogin.
+  Future<bool> prepareForSessionDetach(String expectedUid) async {
+    if (_disposed ||
+        expectedUid.isEmpty ||
+        _currentUserId()?.trim() != expectedUid) {
+      return false;
+    }
+    _pausedUid = expectedUid;
+    _processingGeneration++;
+    if (_processingStop?.isCompleted == false) _processingStop!.complete();
+    _processAgain = false;
+    _resetRetry();
+    await _processingFuture;
+    return !_disposed &&
+        _pausedUid == expectedUid &&
+        _currentUserId()?.trim() == expectedUid;
+  }
+
+  /// Only an aborted exit with the same prepared session can resume this manager.
+  bool resumeForPreparedSession(String expectedUid) {
+    if (_disposed ||
+        _pausedUid != expectedUid ||
+        _currentUserId()?.trim() != expectedUid)
+      return false;
+    _pausedUid = null;
+    _processingGeneration++;
+    _scheduleRetry(expectedUid);
+    return true;
+  }
+
+  bool _canProcess(String uid, int generation) =>
+      !_disposed &&
+      _pausedUid == null &&
+      _processingGeneration == generation &&
+      _currentUserId()?.trim() == uid;
 
   Future<bool> prepareForLocalDataDiscard() async {
     final initialUid = _currentUserId()?.trim();
@@ -85,7 +126,7 @@ class SyncManager {
   }
 
   Future<bool> processPendingItems() {
-    if (_disposed) return Future.value(false);
+    if (_disposed || _pausedUid != null) return Future.value(false);
 
     final currentUid = _currentUserId()?.trim();
     if (_recoveryUid != currentUid) _resetRecovery();
@@ -105,17 +146,24 @@ class SyncManager {
     _retryTimer?.cancel();
     _retryTimer = null;
 
+    final stop = Completer<void>();
+    _processingStop = stop;
     late final Future<bool> operation;
-    operation = _processPendingItems().whenComplete(() {
-      if (identical(_processingFuture, operation)) {
-        _processingFuture = null;
-      }
-    });
+    operation = _processPendingItems(_processingGeneration, stop.future)
+        .whenComplete(() {
+          if (identical(_processingFuture, operation)) {
+            _processingFuture = null;
+            _processingStop = null;
+          }
+        });
     _processingFuture = operation;
     return operation;
   }
 
-  Future<bool> _processPendingItems() async {
+  Future<bool> _processPendingItems(
+    int generation,
+    Future<void> stopped,
+  ) async {
     final initialUid = _currentUserId()?.trim();
 
     if (initialUid == null || initialUid.isEmpty) {
@@ -133,7 +181,7 @@ class SyncManager {
         AppLogger.w('Não foi possível concluir a manutenção da fila de sync.');
       }
 
-      if (_currentUserId()?.trim() != initialUid) {
+      if (!_canProcess(initialUid, generation)) {
         _resetRetry();
         return false;
       }
@@ -141,6 +189,7 @@ class SyncManager {
       do {
         _processAgain = false;
         final pendingItems = await _queueStore.getPendingSyncItems(initialUid);
+        if (!_canProcess(initialUid, generation)) return false;
         if (pendingItems.any(
           (item) =>
               item.ownerUid?.trim() == initialUid && item.attemptCount > 0,
@@ -152,7 +201,7 @@ class SyncManager {
           final currentUid = _currentUserId()?.trim();
           final ownerUid = item.ownerUid?.trim();
 
-          if (currentUid == null || currentUid != initialUid) {
+          if (!_canProcess(initialUid, generation)) {
             _resetRetry();
             return false;
           }
@@ -164,14 +213,24 @@ class SyncManager {
           SyncOperationResult result;
 
           try {
-            result = await _remoteDataSource.process(ownerUid, item);
+            // A session exit ends this loop without waiting for connectivity.
+            // Future.any still observes a late remote error; the generation
+            // check below prevents late acknowledgements or another send.
+            result = await Future.any<SyncOperationResult>([
+              _remoteDataSource.process(ownerUid, item),
+              stopped.then(
+                (_) => const SyncOperationResult.retryable(
+                  code: 'SESSION_STOPPED',
+                ),
+              ),
+            ]);
           } catch (_) {
             result = const SyncOperationResult.retryable(
               code: 'UNEXPECTED_SYNC_ERROR',
             );
           }
 
-          if (_currentUserId()?.trim() != ownerUid) {
+          if (!_canProcess(ownerUid, generation)) {
             _resetRetry();
             return false;
           }
@@ -215,13 +274,16 @@ class SyncManager {
       _processAgain = false;
     }
 
-    final sameUser = _currentUserId()?.trim() == initialUid;
+    final sameUser = _canProcess(initialUid, generation);
     _resetRetry();
     return sameUser;
   }
 
   void _beginRecovery(String uid) {
-    if (_disposed || _currentUserId()?.trim() != uid || _recoveryUid == uid) {
+    if (_disposed ||
+        _pausedUid != null ||
+        _currentUserId()?.trim() != uid ||
+        _recoveryUid == uid) {
       return;
     }
     _recoveryUid = uid;
@@ -231,6 +293,7 @@ class SyncManager {
   Future<void> _maybeEmitRecoveryCompleted(String uid) async {
     final store = _queueStore;
     if (_disposed ||
+        _pausedUid != null ||
         _recoveryUid != uid ||
         !_recoveryResumed ||
         _currentUserId()?.trim() != uid ||
@@ -240,10 +303,15 @@ class SyncManager {
     try {
       final hasRejected = await (store as SyncQueueDiscardSafetyStore)
           .hasRejectedSyncItems(uid);
-      if (_disposed || _currentUserId()?.trim() != uid || hasRejected) return;
+      if (_disposed ||
+          _pausedUid != null ||
+          _currentUserId()?.trim() != uid ||
+          hasRejected)
+        return;
       final pending = await store.getPendingSyncItems(uid);
       if (_disposed ||
           _currentUserId()?.trim() != uid ||
+          _pausedUid != null ||
           _processAgain ||
           pending.isNotEmpty) {
         return;
@@ -257,7 +325,8 @@ class SyncManager {
   }
 
   void _emitUiEvent(SyncUiEventType type, String uid) {
-    if (_disposed || _currentUserId()?.trim() != uid) return;
+    if (_disposed || _pausedUid != null || _currentUserId()?.trim() != uid)
+      return;
     _uiEvents.add(SyncUiEvent(type: type, ownerUid: uid));
   }
 
@@ -267,7 +336,7 @@ class SyncManager {
   }
 
   void _scheduleRetry(String uid) {
-    if (_disposed || _currentUserId()?.trim() != uid) {
+    if (_disposed || _pausedUid != null || _currentUserId()?.trim() != uid) {
       _resetRetry();
       return;
     }
@@ -280,7 +349,7 @@ class SyncManager {
     if (_retryAttempt < _retryDelays.length - 1) _retryAttempt++;
     _retryTimer = Timer(delay, () {
       _retryTimer = null;
-      if (_disposed || _currentUserId()?.trim() != uid) {
+      if (_disposed || _pausedUid != null || _currentUserId()?.trim() != uid) {
         _resetRetry();
         return;
       }
@@ -298,6 +367,8 @@ class SyncManager {
   void dispose() {
     if (_disposed) return;
     _disposed = true;
+    _processingGeneration++;
+    if (_processingStop?.isCompleted == false) _processingStop!.complete();
     _resetRetry();
     _resetRecovery();
     unawaited(_uiEvents.close());
