@@ -146,8 +146,8 @@ class _BlockingDao extends NotificationDao {
   }
 
   @override
-  Future<void> deleteNotification(String id) async {
-    await super.deleteNotification(id);
+  Future<void> dismissNotification(String id, String ownerUid) async {
+    await super.dismissNotification(id, ownerUid);
     await pause('delete');
   }
 }
@@ -162,7 +162,7 @@ void main() {
   late NotificationsRepository repository;
   final day = DateTime(2026, 10, 3, 12);
   final notification = NotificationModel(
-    id: 'notification-a',
+    id: 'health_med_notification-a',
     title: 'Private fixture',
     description: 'Fixture',
     priority: 'normal',
@@ -170,9 +170,10 @@ void main() {
     route: '/health',
     isRead: false,
     isCompleted: false,
+    dueDate: day,
     createdAt: day,
   );
-  const path = 'users/user-a/notifications/notification-a';
+  const path = 'users/user-a/notifications/health_med_notification-a';
 
   setUp(() {
     db = AppDatabase(executor: NativeDatabase.memory());
@@ -232,9 +233,15 @@ void main() {
           await repository.deleteNotification(notification.id);
       }
       await barrier.sealAndDrain();
-      expect(operation == 'delete' ? firestore.deletes : firestore.writes, [
-        path,
-      ]);
+      if (operation == 'delete') {
+        expect(firestore.deletes, isEmpty);
+        final item = (await db.getPendingSyncItems('user-a')).single;
+        expect(item.collection, 'notifications');
+        expect(item.docId, notification.id);
+        expect(item.operationType, 'delete');
+      } else {
+        expect(firestore.writes, [path]);
+      }
     });
   }
 

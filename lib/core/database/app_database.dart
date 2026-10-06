@@ -19,6 +19,7 @@ import 'package:life_os/features/study/data/models/local/study_table.dart';
 import 'package:life_os/features/tasks/data/models/local/task_table.dart';
 import 'package:life_os/features/notifications/data/daos/notification_dao.dart';
 import 'package:life_os/features/notifications/data/tables/notifications_table.dart';
+import 'package:life_os/features/notifications/data/tables/notification_dismissals.dart';
 
 part 'app_database.g.dart';
 
@@ -36,6 +37,7 @@ part 'app_database.g.dart';
     FocusLogs,
     CheckInTable,
     NotificationsTable,
+    NotificationDismissals,
     SyncQueueTable,
   ],
   daos: [NotificationDao],
@@ -73,7 +75,7 @@ class AppDatabase extends _$AppDatabase {
   // =========================================================================
 
   @override
-  int get schemaVersion => 8;
+  int get schemaVersion => 9;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -137,6 +139,19 @@ class AppDatabase extends _$AppDatabase {
           "UPDATE sync_queue_table SET status = 'succeeded' "
           'WHERE is_synced = 1',
         );
+      }
+      if (from < 9) {
+        // Pre-v6 databases receive this column with createTable above.
+        if (from >= 6 &&
+            (await customSelect(
+              "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'notifications_table'",
+            ).get()).isNotEmpty) {
+          await migrator.addColumn(
+            notificationsTable,
+            notificationsTable.occurrenceKey,
+          );
+        }
+        await migrator.createTable(notificationDismissals);
       }
     },
   );

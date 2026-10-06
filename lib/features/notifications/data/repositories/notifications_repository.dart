@@ -1,72 +1,35 @@
 import 'dart:async';
 import 'package:life_os/core/database/app_database.dart';
+import 'package:life_os/core/database/local_mutation_gate.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:life_os/core/database/database_provider.dart';
+import 'package:life_os/core/services/sync_manager_provider.dart';
+import 'notification_remote_effects_barrier.dart';
+export 'notification_remote_effects_barrier.dart';
 import 'package:life_os/core/utils/app_logger.dart';
 import 'package:life_os/features/notifications/data/daos/notification_dao.dart';
 import 'package:life_os/features/notifications/domain/models/notification_model.dart';
 
-final notificationRemoteEffectsBarrierProvider =
-    Provider<NotificationRemoteEffectsBarrier>((ref) {
-      return NotificationRemoteEffectsBarrier();
-    });
-
-/// Tracks local continuations and SDK writes until they actually settle.
-class NotificationRemoteEffectsBarrier {
-  final Set<Future<void>> _inFlight = {};
-  int _generation = 0;
-  bool _sealed = false;
-
-  int get generation => _generation;
-
-  bool isCurrent(int generation) => !_sealed && generation == _generation;
-
-  Future<T> track<T>(Future<T> Function() action) {
-    final result = Future<T>.sync(action);
-    late final Future<void> tracked;
-    tracked = result
-        .then<void>((_) {}, onError: (Object _, StackTrace _) {})
-        .whenComplete(() => _inFlight.remove(tracked));
-    _inFlight.add(tracked);
-    return result;
-  }
-
-  Future<void> sealAndDrain() async {
-    _sealed = true;
-    _generation += 1;
-    while (_inFlight.isNotEmpty) {
-      await Future.wait(_inFlight.toList());
-    }
-  }
-
-  bool resume() {
-    if (!_sealed) return true;
-    if (_inFlight.isNotEmpty) return false;
-    _generation += 1;
-    _sealed = false;
-    return true;
-  }
-}
-
 /// Repository Offline-First da Central de Notificações.
 ///
 /// A UI lê do Drift. O Firestore é utilizado para sincronização remota.
-/// A implementação aproveita o cache/offline queue do próprio SDK do
-/// Firestore, sem criar uma segunda Sync Queue paralela.
+/// Dispensas usam o Drift e a SyncQueue; demais efeitos preservam seu barrier.
 class NotificationsRepository {
   final FirebaseFirestore firestore;
   final FirebaseAuth auth;
   final NotificationDao? localDao;
   final Future<void> Function(String expectedUid, String id)? remoteDelete;
   final NotificationRemoteEffectsBarrier remoteEffects;
+  final Future<void> Function()? replayDeletes;
 
   NotificationsRepository({
     FirebaseFirestore? firestore,
     FirebaseAuth? auth,
     this.localDao,
     this.remoteDelete,
+    this.replayDeletes,
     NotificationRemoteEffectsBarrier? remoteEffects,
   }) : firestore = firestore ?? FirebaseFirestore.instance,
        auth = auth ?? FirebaseAuth.instance,
@@ -207,13 +170,33 @@ class NotificationsRepository {
     });
   }
 
+  /// User action: dismiss only the current occurrence, durably and offline.
   Future<void> deleteNotification(String id) {
     final expectedUid = auth.currentUser?.uid.trim();
     final generation = remoteEffects.generation;
     return remoteEffects.track(() async {
       final dao = localDao;
       if (dao == null) return;
+      if (!_canSend(expectedUid, generation)) {
+        throw const LocalMutationUnavailable();
+      }
+      await dao.dismissNotification(id, expectedUid!);
+      if (_canSend(expectedUid, generation)) {
+        // Queue processing has its own session fence and never gates logout.
+        unawaited(
+          replayDeletes?.call().catchError((Object _, StackTrace _) {}),
+        );
+      }
+    });
+  }
 
+  /// Derived invalid state/category disabled, without a user dismissal.
+  Future<void> deleteDerivedNotification(String id) {
+    final expectedUid = auth.currentUser?.uid.trim();
+    final generation = remoteEffects.generation;
+    return remoteEffects.track(() async {
+      final dao = localDao;
+      if (dao == null) return;
       await dao.deleteNotification(id);
       if (_canSend(expectedUid, generation)) {
         unawaited(
@@ -295,6 +278,8 @@ class NotificationsRepository {
     if (auth.currentUser?.uid != expectedUid) return;
 
     try {
+      if (await localDao?.getNotificationById(id) == null) return;
+      if (auth.currentUser?.uid != expectedUid) return;
       await firestore
           .collection('users')
           .doc(expectedUid)
@@ -339,5 +324,8 @@ final notificationsRepositoryProvider = Provider<NotificationsRepository>((
     auth: FirebaseAuth.instance,
     localDao: db.notificationDao,
     remoteEffects: ref.watch(notificationRemoteEffectsBarrierProvider),
+    replayDeletes: () async {
+      await ref.read(syncManagerProvider).processPendingItems();
+    },
   );
 });

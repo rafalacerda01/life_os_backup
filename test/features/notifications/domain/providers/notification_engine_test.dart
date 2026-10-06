@@ -75,9 +75,9 @@ class _TrackingNotificationsRepository extends NotificationsRepository {
   }
 
   @override
-  Future<void> deleteNotification(String id) async {
+  Future<void> deleteDerivedNotification(String id) async {
     deletedIds.add(id);
-    await super.deleteNotification(id);
+    await super.deleteDerivedNotification(id);
   }
 }
 

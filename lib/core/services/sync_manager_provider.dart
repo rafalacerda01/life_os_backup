@@ -1,3 +1,4 @@
+import 'package:life_os/features/notifications/data/repositories/notification_remote_effects_barrier.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:life_os/core/database/database_provider.dart';
@@ -16,7 +17,12 @@ final syncManagerProvider = Provider<SyncManager>((ref) {
 
   final manager = SyncManager(
     queueStore: AppDatabaseSyncQueueStore(database),
-    remoteDataSource: FirestoreSyncRemoteDataSource(firestore, auth),
+    remoteDataSource: FirestoreSyncRemoteDataSource(
+      firestore,
+      auth,
+      beforeNotificationDelete: () =>
+          ref.read(notificationRemoteEffectsBarrierProvider).drainCurrent(),
+    ),
     currentUserId: () => auth.currentUser?.uid,
   );
   ref.onDispose(manager.dispose);

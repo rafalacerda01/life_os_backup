@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'package:drift/drift.dart' show Value;
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
@@ -1126,6 +1127,66 @@ Future<void> seedPendingLocalChange(AppDatabase db) async {
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+
+  test(
+    'notification dismissal pending does not block real Auth logout/relogin',
+    () async {
+      final remote = _RecordingSyncRemote()
+        ..onProcess = (uid, item) async =>
+            const SyncOperationResult.retryable(code: 'NETWORK_ERROR');
+      final harness = await _Harness.create([0], syncRemoteDataSource: remote);
+      addTearDown(harness.dispose);
+      final a = harness.databaseFactory.last!;
+      await a
+          .into(a.notificationsTable)
+          .insert(
+            NotificationsTableCompanion.insert(
+              id: 'habit_dismissed',
+              title: 'Fixture',
+              description: 'Fixture',
+              priority: 'today',
+              moduleType: 'habits',
+              route: '/',
+              dueDate: Value(DateTime(2026, 10, 5)),
+              createdAt: DateTime(2026, 10, 5),
+            ),
+          );
+      final notifications = NotificationsRepository(
+        localDao: a.notificationDao,
+        auth: harness.auth,
+        firestore: harness.firestore,
+      );
+      await notifications.deleteNotification('habit_dismissed');
+      final dismissal = await a.select(a.notificationDismissals).getSingle();
+      final pending = await a.select(a.syncQueueTable).getSingle();
+      await harness.notifier.logout();
+      expect(harness.state, isA<AuthUnauthenticated>());
+      expect(remote.calls, isEmpty);
+      expect(
+        await harness.database
+            .select(harness.database.notificationDismissals)
+            .getSingle(),
+        dismissal,
+      );
+      expect(
+        await harness.database
+            .select(harness.database.syncQueueTable)
+            .getSingle(),
+        pending,
+      );
+      harness.auth.user = _FirebaseUser(_userA.uid);
+      await harness.notifier.checkCurrentUser();
+      final reopened = harness.container.read(databaseProvider);
+      expect(
+        await reopened.select(reopened.notificationDismissals).getSingle(),
+        dismissal,
+      );
+      expect(
+        await reopened.notificationDao.getNotificationById('habit_dismissed'),
+        isNull,
+      );
+    },
+  );
 
   test(
     'real in-flight A stops before signout and cannot write after detach',
@@ -3665,6 +3726,26 @@ void main() {
 
     final a = harness.databaseFactory.last!;
     await seedSessionRows(a, _userA.uid);
+    await a
+        .into(a.notificationsTable)
+        .insert(
+          NotificationsTableCompanion.insert(
+            id: 'habit_account-delete',
+            title: 'Fixture',
+            description: 'Fixture',
+            priority: 'today',
+            moduleType: 'habits',
+            route: '/',
+            dueDate: Value(DateTime(2026, 10, 5)),
+            createdAt: DateTime(2026, 10, 5),
+          ),
+        );
+    await a.notificationDao.dismissNotification(
+      'habit_account-delete',
+      _userA.uid,
+    );
+    expect(await a.select(a.notificationDismissals).get(), hasLength(1));
+    expect(await a.select(a.syncQueueTable).get(), hasLength(1));
     await harness.notifier.deleteAccount();
 
     expect(harness.repository.deletedExpectedUserIds, <String>[_userA.uid]);

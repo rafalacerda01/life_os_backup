@@ -1,11 +1,16 @@
+import 'dart:convert';
 import 'package:drift/drift.dart';
+import 'package:life_os/features/notifications/domain/models/notification_occurrence.dart';
+import 'package:life_os/features/notifications/data/tables/notification_dismissals.dart';
 import 'package:life_os/core/database/app_database.dart';
 import 'package:life_os/core/database/local_mutation_gate.dart';
 import 'package:life_os/features/notifications/data/tables/notifications_table.dart';
 
 part 'notification_dao.g.dart';
 
-@DriftAccessor(tables: [NotificationsTable])
+@DriftAccessor(
+  tables: [NotificationsTable, NotificationDismissals, SyncQueueTable],
+)
 class NotificationDao extends DatabaseAccessor<AppDatabase>
     with _$NotificationDaoMixin {
   NotificationDao(super.db);
@@ -33,7 +38,7 @@ class NotificationDao extends DatabaseAccessor<AppDatabase>
     NotificationsTableCompanion incoming, {
     LocalMutationTicket? admission,
   }) => attachedDatabase.localMutations.run(
-    () => _upsertPreservingState(incoming),
+    () => attachedDatabase.transaction(() => _upsertPreservingState(incoming)),
     ticket: admission,
     waitForReopen: false,
   );
@@ -41,11 +46,29 @@ class NotificationDao extends DatabaseAccessor<AppDatabase>
   Future<bool> _upsertPreservingState(
     NotificationsTableCompanion incoming,
   ) async {
+    final key = NotificationOccurrence.key(
+      id: incoming.id.value,
+      moduleType: incoming.moduleType.value,
+      dueDate: incoming.dueDate.value,
+    );
+    if (key != null && await isDismissed(incoming.id.value, key)) return false;
+    if (key == null &&
+        await (select(notificationDismissals)
+                  ..where((t) => t.notificationId.equals(incoming.id.value))
+                  ..limit(1))
+                .getSingleOrNull() !=
+            null) {
+      // A malformed/legacy document cannot prove that it is a new occurrence.
+      return false;
+    }
+    // Old keys stay inert for new occurrences and protect against late hydration.
     final existing = await getNotificationById(incoming.id.value);
 
     // Notificação ainda não existe.
     if (existing == null) {
-      await into(notificationsTable).insert(incoming);
+      await into(
+        notificationsTable,
+      ).insert(incoming.copyWith(occurrenceKey: Value(key)));
       return true;
     }
 
@@ -89,6 +112,7 @@ class NotificationDao extends DatabaseAccessor<AppDatabase>
         existing.moduleType != incomingModuleType ||
         existing.route != incomingRoute ||
         existing.dueDate != incomingDueDate ||
+        existing.occurrenceKey != key ||
         existing.isRead != nextIsRead ||
         existing.isCompleted != nextIsCompleted;
 
@@ -106,6 +130,7 @@ class NotificationDao extends DatabaseAccessor<AppDatabase>
         moduleType: Value(incomingModuleType),
         route: Value(incomingRoute),
         dueDate: Value(incomingDueDate),
+        occurrenceKey: Value(key),
 
         isRead: Value(nextIsRead),
         isCompleted: Value(nextIsCompleted),
@@ -139,6 +164,56 @@ class NotificationDao extends DatabaseAccessor<AppDatabase>
         () async =>
             (delete(notificationsTable)..where((t) => t.id.equals(id))).go(),
       );
+
+  Future<bool> isDismissed(String id, String occurrenceKey) async =>
+      await (select(notificationDismissals)..where(
+            (t) =>
+                t.notificationId.equals(id) &
+                t.occurrenceKey.equals(occurrenceKey),
+          ))
+          .getSingleOrNull() !=
+      null;
+
+  /// The dismissal, local removal and outbox intent commit together, before I/O.
+  Future<void> dismissNotification(
+    String id,
+    String ownerUid,
+  ) => attachedDatabase.transaction(() async {
+    final existing = await getNotificationById(id);
+    // Repeating a dismissal of an already absent card is a no-op.
+    if (existing == null) return;
+    final key =
+        existing.occurrenceKey ??
+        NotificationOccurrence.key(
+          id: id,
+          moduleType: existing.moduleType,
+          dueDate: existing.dueDate,
+        );
+    if (key == null) {
+      throw UnsupportedError('Notification occurrence contract unavailable');
+    }
+    if (!await isDismissed(id, key)) {
+      await attachedDatabase.transactionWithSync(
+        ownerUid: ownerUid,
+        collection: 'notifications',
+        docId: id,
+        operationType: 'delete',
+        payloadJson: jsonEncode({'occurrenceKey': key}),
+        localOperation: () async {
+          await into(notificationDismissals).insert(
+            NotificationDismissalsCompanion.insert(
+              notificationId: id,
+              occurrenceKey: key,
+              dismissedAt: DateTime.now(),
+            ),
+          );
+          await deleteNotification(id);
+        },
+      );
+    } else {
+      await deleteNotification(id);
+    }
+  }, admission: attachedDatabase.localMutations.capture(expectedUid: ownerUid));
 
   bool _sameLocalDay(DateTime? a, DateTime? b) {
     if (a == null || b == null) return a == b;

@@ -1,6 +1,7 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:drift/drift.dart' hide JsonKey;
 import 'package:life_os/core/database/app_database.dart';
+import 'notification_occurrence.dart';
 
 class NotificationModel {
   final String id;
@@ -55,7 +56,9 @@ class NotificationModel {
       route: data.route,
       isRead: data.isRead,
       isCompleted: data.isCompleted,
-      dueDate: data.dueDate,
+      dueDate:
+          NotificationOccurrence.preciseDueDate(data.occurrenceKey, data.id) ??
+          data.dueDate,
       createdAt: data.createdAt,
     );
   }
@@ -71,6 +74,13 @@ class NotificationModel {
       isRead: Value(model.isRead),
       isCompleted: Value(model.isCompleted),
       dueDate: Value(model.dueDate),
+      occurrenceKey: Value(
+        NotificationOccurrence.key(
+          id: model.id,
+          moduleType: model.moduleType,
+          dueDate: model.dueDate,
+        ),
+      ),
       createdAt: model.createdAt,
     );
   }

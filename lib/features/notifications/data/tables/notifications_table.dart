@@ -13,6 +13,8 @@ class NotificationsTable extends Table {
   BoolColumn get isCompleted => boolean().withDefault(const Constant(false))();
   DateTimeColumn get dueDate => dateTime().nullable()();
   DateTimeColumn get createdAt => dateTime()();
+  // Local only: Drift DateTime storage rounds dates to seconds.
+  TextColumn get occurrenceKey => text().nullable()();
 
   @override
   Set<Column> get primaryKey => {id};

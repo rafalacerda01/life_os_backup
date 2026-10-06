@@ -566,7 +566,7 @@ class NotificationModuleReconciler {
       if (!notification.id.startsWith(prefix)) continue;
       if (validIds.contains(notification.id)) continue;
 
-      await repository.deleteNotification(notification.id);
+      await repository.deleteDerivedNotification(notification.id);
     }
   }
 

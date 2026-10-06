@@ -8,6 +8,8 @@ import 'package:http/http.dart' as http;
 import 'package:life_os/core/database/app_database.dart';
 
 import 'sync_operation_result.dart';
+import 'package:life_os/features/notifications/domain/models/notification_occurrence.dart';
+import 'package:life_os/features/notifications/domain/models/notification_model.dart';
 
 abstract interface class SyncRemoteDataSource {
   Future<SyncOperationResult> process(String uid, SyncQueueTableData item);
@@ -28,10 +30,12 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
   _idTokenProvider;
   final SyncAppCheckTokenProvider _appCheckTokenProvider;
   final Duration _requestTimeout;
+  final Future<void> Function()? beforeNotificationDelete;
 
   FirestoreSyncRemoteDataSource(
     this._firestore,
     this._auth, {
+    this.beforeNotificationDelete,
     http.Client Function()? clientFactory,
     Future<String?> Function(User user, bool forceRefresh)? idTokenProvider,
     SyncAppCheckTokenProvider? appCheckTokenProvider,
@@ -77,6 +81,48 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
     }
 
     try {
+      if (collection == 'notifications' && operationType == 'delete') {
+        if (item.ownerUid?.trim() != uid || _auth.currentUser?.uid != uid) {
+          return const SyncOperationResult.retryable(code: 'SESSION_STOPPED');
+        }
+        final expectedKey = _decodePayload(item.payloadJson)['occurrenceKey'];
+        if (!NotificationOccurrence.isKeyForId(expectedKey, docId)) {
+          return const SyncOperationResult.invalidPayload(
+            message: 'Notification delete requires its occurrenceKey',
+          );
+        }
+        await beforeNotificationDelete?.call();
+        if (_auth.currentUser?.uid != uid) {
+          return const SyncOperationResult.retryable(code: 'SESSION_STOPPED');
+        }
+        final ref = _firestore
+            .collection('users')
+            .doc(uid)
+            .collection('notifications')
+            .doc(docId);
+        await _firestore.runTransaction((transaction) async {
+          if (_auth.currentUser?.uid != uid)
+            throw const _NotificationSessionChanged();
+          final snapshot = await transaction.get(ref);
+          if (_auth.currentUser?.uid != uid)
+            throw const _NotificationSessionChanged();
+          if (!snapshot.exists) return;
+          final remote = NotificationModel.fromFirestore(snapshot);
+          final remoteKey = NotificationOccurrence.key(
+            id: docId,
+            moduleType: remote.moduleType,
+            dueDate: remote.dueDate,
+          );
+          if (remoteKey == null) {
+            throw const FormatException(
+              'Remote notification has no occurrence contract',
+            );
+          }
+          // A different occurrence makes this old operation logically obsolete.
+          if (remoteKey == expectedKey) transaction.delete(ref);
+        });
+        return const SyncOperationResult.success();
+      }
       // ----------------------------------------------------------------------
       // CREATE DE HÁBITO
       // Obrigatoriamente passa pelo backend para enforcement de quota.
@@ -294,6 +340,8 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
       }
 
       return _mapFirebaseError(error);
+    } on _NotificationSessionChanged {
+      return const SyncOperationResult.retryable(code: 'SESSION_STOPPED');
     } on FormatException catch (error) {
       return SyncOperationResult.invalidPayload(message: error.message);
     } catch (error) {
@@ -1153,4 +1201,8 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
         );
     }
   }
+}
+
+class _NotificationSessionChanged implements Exception {
+  const _NotificationSessionChanged();
 }

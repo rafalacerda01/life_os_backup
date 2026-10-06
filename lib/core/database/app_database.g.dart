@@ -4616,6 +4616,17 @@ class $NotificationsTableTable extends NotificationsTable
     type: DriftSqlType.dateTime,
     requiredDuringInsert: true,
   );
+  static const VerificationMeta _occurrenceKeyMeta = const VerificationMeta(
+    'occurrenceKey',
+  );
+  @override
+  late final GeneratedColumn<String> occurrenceKey = GeneratedColumn<String>(
+    'occurrence_key',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+  );
   @override
   List<GeneratedColumn> get $columns => [
     id,
@@ -4628,6 +4639,7 @@ class $NotificationsTableTable extends NotificationsTable
     isCompleted,
     dueDate,
     createdAt,
+    occurrenceKey,
   ];
   @override
   String get aliasedName => _alias ?? actualTableName;
@@ -4718,6 +4730,15 @@ class $NotificationsTableTable extends NotificationsTable
     } else if (isInserting) {
       context.missing(_createdAtMeta);
     }
+    if (data.containsKey('occurrence_key')) {
+      context.handle(
+        _occurrenceKeyMeta,
+        occurrenceKey.isAcceptableOrUnknown(
+          data['occurrence_key']!,
+          _occurrenceKeyMeta,
+        ),
+      );
+    }
     return context;
   }
 
@@ -4767,6 +4788,10 @@ class $NotificationsTableTable extends NotificationsTable
         DriftSqlType.dateTime,
         data['${effectivePrefix}created_at'],
       )!,
+      occurrenceKey: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}occurrence_key'],
+      ),
     );
   }
 
@@ -4788,6 +4813,7 @@ class NotificationsTableData extends DataClass
   final bool isCompleted;
   final DateTime? dueDate;
   final DateTime createdAt;
+  final String? occurrenceKey;
   const NotificationsTableData({
     required this.id,
     required this.title,
@@ -4799,6 +4825,7 @@ class NotificationsTableData extends DataClass
     required this.isCompleted,
     this.dueDate,
     required this.createdAt,
+    this.occurrenceKey,
   });
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
@@ -4815,6 +4842,9 @@ class NotificationsTableData extends DataClass
       map['due_date'] = Variable<DateTime>(dueDate);
     }
     map['created_at'] = Variable<DateTime>(createdAt);
+    if (!nullToAbsent || occurrenceKey != null) {
+      map['occurrence_key'] = Variable<String>(occurrenceKey);
+    }
     return map;
   }
 
@@ -4832,6 +4862,9 @@ class NotificationsTableData extends DataClass
           ? const Value.absent()
           : Value(dueDate),
       createdAt: Value(createdAt),
+      occurrenceKey: occurrenceKey == null && nullToAbsent
+          ? const Value.absent()
+          : Value(occurrenceKey),
     );
   }
 
@@ -4851,6 +4884,7 @@ class NotificationsTableData extends DataClass
       isCompleted: serializer.fromJson<bool>(json['isCompleted']),
       dueDate: serializer.fromJson<DateTime?>(json['dueDate']),
       createdAt: serializer.fromJson<DateTime>(json['createdAt']),
+      occurrenceKey: serializer.fromJson<String?>(json['occurrenceKey']),
     );
   }
   @override
@@ -4867,6 +4901,7 @@ class NotificationsTableData extends DataClass
       'isCompleted': serializer.toJson<bool>(isCompleted),
       'dueDate': serializer.toJson<DateTime?>(dueDate),
       'createdAt': serializer.toJson<DateTime>(createdAt),
+      'occurrenceKey': serializer.toJson<String?>(occurrenceKey),
     };
   }
 
@@ -4881,6 +4916,7 @@ class NotificationsTableData extends DataClass
     bool? isCompleted,
     Value<DateTime?> dueDate = const Value.absent(),
     DateTime? createdAt,
+    Value<String?> occurrenceKey = const Value.absent(),
   }) => NotificationsTableData(
     id: id ?? this.id,
     title: title ?? this.title,
@@ -4892,6 +4928,9 @@ class NotificationsTableData extends DataClass
     isCompleted: isCompleted ?? this.isCompleted,
     dueDate: dueDate.present ? dueDate.value : this.dueDate,
     createdAt: createdAt ?? this.createdAt,
+    occurrenceKey: occurrenceKey.present
+        ? occurrenceKey.value
+        : this.occurrenceKey,
   );
   NotificationsTableData copyWithCompanion(NotificationsTableCompanion data) {
     return NotificationsTableData(
@@ -4911,6 +4950,9 @@ class NotificationsTableData extends DataClass
           : this.isCompleted,
       dueDate: data.dueDate.present ? data.dueDate.value : this.dueDate,
       createdAt: data.createdAt.present ? data.createdAt.value : this.createdAt,
+      occurrenceKey: data.occurrenceKey.present
+          ? data.occurrenceKey.value
+          : this.occurrenceKey,
     );
   }
 
@@ -4926,7 +4968,8 @@ class NotificationsTableData extends DataClass
           ..write('isRead: $isRead, ')
           ..write('isCompleted: $isCompleted, ')
           ..write('dueDate: $dueDate, ')
-          ..write('createdAt: $createdAt')
+          ..write('createdAt: $createdAt, ')
+          ..write('occurrenceKey: $occurrenceKey')
           ..write(')'))
         .toString();
   }
@@ -4943,6 +4986,7 @@ class NotificationsTableData extends DataClass
     isCompleted,
     dueDate,
     createdAt,
+    occurrenceKey,
   );
   @override
   bool operator ==(Object other) =>
@@ -4957,7 +5001,8 @@ class NotificationsTableData extends DataClass
           other.isRead == this.isRead &&
           other.isCompleted == this.isCompleted &&
           other.dueDate == this.dueDate &&
-          other.createdAt == this.createdAt);
+          other.createdAt == this.createdAt &&
+          other.occurrenceKey == this.occurrenceKey);
 }
 
 class NotificationsTableCompanion
@@ -4972,6 +5017,7 @@ class NotificationsTableCompanion
   final Value<bool> isCompleted;
   final Value<DateTime?> dueDate;
   final Value<DateTime> createdAt;
+  final Value<String?> occurrenceKey;
   final Value<int> rowid;
   const NotificationsTableCompanion({
     this.id = const Value.absent(),
@@ -4984,6 +5030,7 @@ class NotificationsTableCompanion
     this.isCompleted = const Value.absent(),
     this.dueDate = const Value.absent(),
     this.createdAt = const Value.absent(),
+    this.occurrenceKey = const Value.absent(),
     this.rowid = const Value.absent(),
   });
   NotificationsTableCompanion.insert({
@@ -4997,6 +5044,7 @@ class NotificationsTableCompanion
     this.isCompleted = const Value.absent(),
     this.dueDate = const Value.absent(),
     required DateTime createdAt,
+    this.occurrenceKey = const Value.absent(),
     this.rowid = const Value.absent(),
   }) : id = Value(id),
        title = Value(title),
@@ -5016,6 +5064,7 @@ class NotificationsTableCompanion
     Expression<bool>? isCompleted,
     Expression<DateTime>? dueDate,
     Expression<DateTime>? createdAt,
+    Expression<String>? occurrenceKey,
     Expression<int>? rowid,
   }) {
     return RawValuesInsertable({
@@ -5029,6 +5078,7 @@ class NotificationsTableCompanion
       if (isCompleted != null) 'is_completed': isCompleted,
       if (dueDate != null) 'due_date': dueDate,
       if (createdAt != null) 'created_at': createdAt,
+      if (occurrenceKey != null) 'occurrence_key': occurrenceKey,
       if (rowid != null) 'rowid': rowid,
     });
   }
@@ -5044,6 +5094,7 @@ class NotificationsTableCompanion
     Value<bool>? isCompleted,
     Value<DateTime?>? dueDate,
     Value<DateTime>? createdAt,
+    Value<String?>? occurrenceKey,
     Value<int>? rowid,
   }) {
     return NotificationsTableCompanion(
@@ -5057,6 +5108,7 @@ class NotificationsTableCompanion
       isCompleted: isCompleted ?? this.isCompleted,
       dueDate: dueDate ?? this.dueDate,
       createdAt: createdAt ?? this.createdAt,
+      occurrenceKey: occurrenceKey ?? this.occurrenceKey,
       rowid: rowid ?? this.rowid,
     );
   }
@@ -5094,6 +5146,9 @@ class NotificationsTableCompanion
     if (createdAt.present) {
       map['created_at'] = Variable<DateTime>(createdAt.value);
     }
+    if (occurrenceKey.present) {
+      map['occurrence_key'] = Variable<String>(occurrenceKey.value);
+    }
     if (rowid.present) {
       map['rowid'] = Variable<int>(rowid.value);
     }
@@ -5113,6 +5168,299 @@ class NotificationsTableCompanion
           ..write('isCompleted: $isCompleted, ')
           ..write('dueDate: $dueDate, ')
           ..write('createdAt: $createdAt, ')
+          ..write('occurrenceKey: $occurrenceKey, ')
+          ..write('rowid: $rowid')
+          ..write(')'))
+        .toString();
+  }
+}
+
+class $NotificationDismissalsTable extends NotificationDismissals
+    with TableInfo<$NotificationDismissalsTable, NotificationDismissal> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  $NotificationDismissalsTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _notificationIdMeta = const VerificationMeta(
+    'notificationId',
+  );
+  @override
+  late final GeneratedColumn<String> notificationId = GeneratedColumn<String>(
+    'notification_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _occurrenceKeyMeta = const VerificationMeta(
+    'occurrenceKey',
+  );
+  @override
+  late final GeneratedColumn<String> occurrenceKey = GeneratedColumn<String>(
+    'occurrence_key',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _dismissedAtMeta = const VerificationMeta(
+    'dismissedAt',
+  );
+  @override
+  late final GeneratedColumn<DateTime> dismissedAt = GeneratedColumn<DateTime>(
+    'dismissed_at',
+    aliasedName,
+    false,
+    type: DriftSqlType.dateTime,
+    requiredDuringInsert: true,
+  );
+  @override
+  List<GeneratedColumn> get $columns => [
+    notificationId,
+    occurrenceKey,
+    dismissedAt,
+  ];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'notification_dismissals';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<NotificationDismissal> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('notification_id')) {
+      context.handle(
+        _notificationIdMeta,
+        notificationId.isAcceptableOrUnknown(
+          data['notification_id']!,
+          _notificationIdMeta,
+        ),
+      );
+    } else if (isInserting) {
+      context.missing(_notificationIdMeta);
+    }
+    if (data.containsKey('occurrence_key')) {
+      context.handle(
+        _occurrenceKeyMeta,
+        occurrenceKey.isAcceptableOrUnknown(
+          data['occurrence_key']!,
+          _occurrenceKeyMeta,
+        ),
+      );
+    } else if (isInserting) {
+      context.missing(_occurrenceKeyMeta);
+    }
+    if (data.containsKey('dismissed_at')) {
+      context.handle(
+        _dismissedAtMeta,
+        dismissedAt.isAcceptableOrUnknown(
+          data['dismissed_at']!,
+          _dismissedAtMeta,
+        ),
+      );
+    } else if (isInserting) {
+      context.missing(_dismissedAtMeta);
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {notificationId, occurrenceKey};
+  @override
+  NotificationDismissal map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return NotificationDismissal(
+      notificationId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}notification_id'],
+      )!,
+      occurrenceKey: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}occurrence_key'],
+      )!,
+      dismissedAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.dateTime,
+        data['${effectivePrefix}dismissed_at'],
+      )!,
+    );
+  }
+
+  @override
+  $NotificationDismissalsTable createAlias(String alias) {
+    return $NotificationDismissalsTable(attachedDatabase, alias);
+  }
+}
+
+class NotificationDismissal extends DataClass
+    implements Insertable<NotificationDismissal> {
+  final String notificationId;
+  final String occurrenceKey;
+  final DateTime dismissedAt;
+  const NotificationDismissal({
+    required this.notificationId,
+    required this.occurrenceKey,
+    required this.dismissedAt,
+  });
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['notification_id'] = Variable<String>(notificationId);
+    map['occurrence_key'] = Variable<String>(occurrenceKey);
+    map['dismissed_at'] = Variable<DateTime>(dismissedAt);
+    return map;
+  }
+
+  NotificationDismissalsCompanion toCompanion(bool nullToAbsent) {
+    return NotificationDismissalsCompanion(
+      notificationId: Value(notificationId),
+      occurrenceKey: Value(occurrenceKey),
+      dismissedAt: Value(dismissedAt),
+    );
+  }
+
+  factory NotificationDismissal.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return NotificationDismissal(
+      notificationId: serializer.fromJson<String>(json['notificationId']),
+      occurrenceKey: serializer.fromJson<String>(json['occurrenceKey']),
+      dismissedAt: serializer.fromJson<DateTime>(json['dismissedAt']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'notificationId': serializer.toJson<String>(notificationId),
+      'occurrenceKey': serializer.toJson<String>(occurrenceKey),
+      'dismissedAt': serializer.toJson<DateTime>(dismissedAt),
+    };
+  }
+
+  NotificationDismissal copyWith({
+    String? notificationId,
+    String? occurrenceKey,
+    DateTime? dismissedAt,
+  }) => NotificationDismissal(
+    notificationId: notificationId ?? this.notificationId,
+    occurrenceKey: occurrenceKey ?? this.occurrenceKey,
+    dismissedAt: dismissedAt ?? this.dismissedAt,
+  );
+  NotificationDismissal copyWithCompanion(
+    NotificationDismissalsCompanion data,
+  ) {
+    return NotificationDismissal(
+      notificationId: data.notificationId.present
+          ? data.notificationId.value
+          : this.notificationId,
+      occurrenceKey: data.occurrenceKey.present
+          ? data.occurrenceKey.value
+          : this.occurrenceKey,
+      dismissedAt: data.dismissedAt.present
+          ? data.dismissedAt.value
+          : this.dismissedAt,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('NotificationDismissal(')
+          ..write('notificationId: $notificationId, ')
+          ..write('occurrenceKey: $occurrenceKey, ')
+          ..write('dismissedAt: $dismissedAt')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hash(notificationId, occurrenceKey, dismissedAt);
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is NotificationDismissal &&
+          other.notificationId == this.notificationId &&
+          other.occurrenceKey == this.occurrenceKey &&
+          other.dismissedAt == this.dismissedAt);
+}
+
+class NotificationDismissalsCompanion
+    extends UpdateCompanion<NotificationDismissal> {
+  final Value<String> notificationId;
+  final Value<String> occurrenceKey;
+  final Value<DateTime> dismissedAt;
+  final Value<int> rowid;
+  const NotificationDismissalsCompanion({
+    this.notificationId = const Value.absent(),
+    this.occurrenceKey = const Value.absent(),
+    this.dismissedAt = const Value.absent(),
+    this.rowid = const Value.absent(),
+  });
+  NotificationDismissalsCompanion.insert({
+    required String notificationId,
+    required String occurrenceKey,
+    required DateTime dismissedAt,
+    this.rowid = const Value.absent(),
+  }) : notificationId = Value(notificationId),
+       occurrenceKey = Value(occurrenceKey),
+       dismissedAt = Value(dismissedAt);
+  static Insertable<NotificationDismissal> custom({
+    Expression<String>? notificationId,
+    Expression<String>? occurrenceKey,
+    Expression<DateTime>? dismissedAt,
+    Expression<int>? rowid,
+  }) {
+    return RawValuesInsertable({
+      if (notificationId != null) 'notification_id': notificationId,
+      if (occurrenceKey != null) 'occurrence_key': occurrenceKey,
+      if (dismissedAt != null) 'dismissed_at': dismissedAt,
+      if (rowid != null) 'rowid': rowid,
+    });
+  }
+
+  NotificationDismissalsCompanion copyWith({
+    Value<String>? notificationId,
+    Value<String>? occurrenceKey,
+    Value<DateTime>? dismissedAt,
+    Value<int>? rowid,
+  }) {
+    return NotificationDismissalsCompanion(
+      notificationId: notificationId ?? this.notificationId,
+      occurrenceKey: occurrenceKey ?? this.occurrenceKey,
+      dismissedAt: dismissedAt ?? this.dismissedAt,
+      rowid: rowid ?? this.rowid,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (notificationId.present) {
+      map['notification_id'] = Variable<String>(notificationId.value);
+    }
+    if (occurrenceKey.present) {
+      map['occurrence_key'] = Variable<String>(occurrenceKey.value);
+    }
+    if (dismissedAt.present) {
+      map['dismissed_at'] = Variable<DateTime>(dismissedAt.value);
+    }
+    if (rowid.present) {
+      map['rowid'] = Variable<int>(rowid.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('NotificationDismissalsCompanion(')
+          ..write('notificationId: $notificationId, ')
+          ..write('occurrenceKey: $occurrenceKey, ')
+          ..write('dismissedAt: $dismissedAt, ')
           ..write('rowid: $rowid')
           ..write(')'))
         .toString();
@@ -5900,6 +6248,8 @@ abstract class _$AppDatabase extends GeneratedDatabase {
   late final $CheckInTableTable checkInTable = $CheckInTableTable(this);
   late final $NotificationsTableTable notificationsTable =
       $NotificationsTableTable(this);
+  late final $NotificationDismissalsTable notificationDismissals =
+      $NotificationDismissalsTable(this);
   late final $SyncQueueTableTable syncQueueTable = $SyncQueueTableTable(this);
   late final Index idxTransactionsDate = Index(
     'idx_transactions_date',
@@ -5949,6 +6299,7 @@ abstract class _$AppDatabase extends GeneratedDatabase {
     focusLogs,
     checkInTable,
     notificationsTable,
+    notificationDismissals,
     syncQueueTable,
     idxTransactionsDate,
     idxTransactionsCategory,
@@ -8547,6 +8898,7 @@ typedef $$NotificationsTableTableCreateCompanionBuilder =
       Value<bool> isCompleted,
       Value<DateTime?> dueDate,
       required DateTime createdAt,
+      Value<String?> occurrenceKey,
       Value<int> rowid,
     });
 typedef $$NotificationsTableTableUpdateCompanionBuilder =
@@ -8561,6 +8913,7 @@ typedef $$NotificationsTableTableUpdateCompanionBuilder =
       Value<bool> isCompleted,
       Value<DateTime?> dueDate,
       Value<DateTime> createdAt,
+      Value<String?> occurrenceKey,
       Value<int> rowid,
     });
 
@@ -8620,6 +8973,11 @@ class $$NotificationsTableTableFilterComposer
 
   ColumnFilters<DateTime> get createdAt => $composableBuilder(
     column: $table.createdAt,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get occurrenceKey => $composableBuilder(
+    column: $table.occurrenceKey,
     builder: (column) => ColumnFilters(column),
   );
 }
@@ -8682,6 +9040,11 @@ class $$NotificationsTableTableOrderingComposer
     column: $table.createdAt,
     builder: (column) => ColumnOrderings(column),
   );
+
+  ColumnOrderings<String> get occurrenceKey => $composableBuilder(
+    column: $table.occurrenceKey,
+    builder: (column) => ColumnOrderings(column),
+  );
 }
 
 class $$NotificationsTableTableAnnotationComposer
@@ -8728,6 +9091,11 @@ class $$NotificationsTableTableAnnotationComposer
 
   GeneratedColumn<DateTime> get createdAt =>
       $composableBuilder(column: $table.createdAt, builder: (column) => column);
+
+  GeneratedColumn<String> get occurrenceKey => $composableBuilder(
+    column: $table.occurrenceKey,
+    builder: (column) => column,
+  );
 }
 
 class $$NotificationsTableTableTableManager
@@ -8780,6 +9148,7 @@ class $$NotificationsTableTableTableManager
                 Value<bool> isCompleted = const Value.absent(),
                 Value<DateTime?> dueDate = const Value.absent(),
                 Value<DateTime> createdAt = const Value.absent(),
+                Value<String?> occurrenceKey = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => NotificationsTableCompanion(
                 id: id,
@@ -8792,6 +9161,7 @@ class $$NotificationsTableTableTableManager
                 isCompleted: isCompleted,
                 dueDate: dueDate,
                 createdAt: createdAt,
+                occurrenceKey: occurrenceKey,
                 rowid: rowid,
               ),
           createCompanionCallback:
@@ -8806,6 +9176,7 @@ class $$NotificationsTableTableTableManager
                 Value<bool> isCompleted = const Value.absent(),
                 Value<DateTime?> dueDate = const Value.absent(),
                 required DateTime createdAt,
+                Value<String?> occurrenceKey = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => NotificationsTableCompanion.insert(
                 id: id,
@@ -8818,6 +9189,7 @@ class $$NotificationsTableTableTableManager
                 isCompleted: isCompleted,
                 dueDate: dueDate,
                 createdAt: createdAt,
+                occurrenceKey: occurrenceKey,
                 rowid: rowid,
               ),
           withReferenceMapper: (p0) => p0
@@ -8847,6 +9219,193 @@ typedef $$NotificationsTableTableProcessedTableManager =
         >,
       ),
       NotificationsTableData,
+      PrefetchHooks Function()
+    >;
+typedef $$NotificationDismissalsTableCreateCompanionBuilder =
+    NotificationDismissalsCompanion Function({
+      required String notificationId,
+      required String occurrenceKey,
+      required DateTime dismissedAt,
+      Value<int> rowid,
+    });
+typedef $$NotificationDismissalsTableUpdateCompanionBuilder =
+    NotificationDismissalsCompanion Function({
+      Value<String> notificationId,
+      Value<String> occurrenceKey,
+      Value<DateTime> dismissedAt,
+      Value<int> rowid,
+    });
+
+class $$NotificationDismissalsTableFilterComposer
+    extends Composer<_$AppDatabase, $NotificationDismissalsTable> {
+  $$NotificationDismissalsTableFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<String> get notificationId => $composableBuilder(
+    column: $table.notificationId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get occurrenceKey => $composableBuilder(
+    column: $table.occurrenceKey,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<DateTime> get dismissedAt => $composableBuilder(
+    column: $table.dismissedAt,
+    builder: (column) => ColumnFilters(column),
+  );
+}
+
+class $$NotificationDismissalsTableOrderingComposer
+    extends Composer<_$AppDatabase, $NotificationDismissalsTable> {
+  $$NotificationDismissalsTableOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<String> get notificationId => $composableBuilder(
+    column: $table.notificationId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get occurrenceKey => $composableBuilder(
+    column: $table.occurrenceKey,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<DateTime> get dismissedAt => $composableBuilder(
+    column: $table.dismissedAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+}
+
+class $$NotificationDismissalsTableAnnotationComposer
+    extends Composer<_$AppDatabase, $NotificationDismissalsTable> {
+  $$NotificationDismissalsTableAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<String> get notificationId => $composableBuilder(
+    column: $table.notificationId,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get occurrenceKey => $composableBuilder(
+    column: $table.occurrenceKey,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<DateTime> get dismissedAt => $composableBuilder(
+    column: $table.dismissedAt,
+    builder: (column) => column,
+  );
+}
+
+class $$NotificationDismissalsTableTableManager
+    extends
+        RootTableManager<
+          _$AppDatabase,
+          $NotificationDismissalsTable,
+          NotificationDismissal,
+          $$NotificationDismissalsTableFilterComposer,
+          $$NotificationDismissalsTableOrderingComposer,
+          $$NotificationDismissalsTableAnnotationComposer,
+          $$NotificationDismissalsTableCreateCompanionBuilder,
+          $$NotificationDismissalsTableUpdateCompanionBuilder,
+          (
+            NotificationDismissal,
+            BaseReferences<
+              _$AppDatabase,
+              $NotificationDismissalsTable,
+              NotificationDismissal
+            >,
+          ),
+          NotificationDismissal,
+          PrefetchHooks Function()
+        > {
+  $$NotificationDismissalsTableTableManager(
+    _$AppDatabase db,
+    $NotificationDismissalsTable table,
+  ) : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $$NotificationDismissalsTableFilterComposer(
+                $db: db,
+                $table: table,
+              ),
+          createOrderingComposer: () =>
+              $$NotificationDismissalsTableOrderingComposer(
+                $db: db,
+                $table: table,
+              ),
+          createComputedFieldComposer: () =>
+              $$NotificationDismissalsTableAnnotationComposer(
+                $db: db,
+                $table: table,
+              ),
+          updateCompanionCallback:
+              ({
+                Value<String> notificationId = const Value.absent(),
+                Value<String> occurrenceKey = const Value.absent(),
+                Value<DateTime> dismissedAt = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => NotificationDismissalsCompanion(
+                notificationId: notificationId,
+                occurrenceKey: occurrenceKey,
+                dismissedAt: dismissedAt,
+                rowid: rowid,
+              ),
+          createCompanionCallback:
+              ({
+                required String notificationId,
+                required String occurrenceKey,
+                required DateTime dismissedAt,
+                Value<int> rowid = const Value.absent(),
+              }) => NotificationDismissalsCompanion.insert(
+                notificationId: notificationId,
+                occurrenceKey: occurrenceKey,
+                dismissedAt: dismissedAt,
+                rowid: rowid,
+              ),
+          withReferenceMapper: (p0) => p0
+              .map((e) => (e.readTable(table), BaseReferences(db, table, e)))
+              .toList(),
+          prefetchHooksCallback: null,
+        ),
+      );
+}
+
+typedef $$NotificationDismissalsTableProcessedTableManager =
+    ProcessedTableManager<
+      _$AppDatabase,
+      $NotificationDismissalsTable,
+      NotificationDismissal,
+      $$NotificationDismissalsTableFilterComposer,
+      $$NotificationDismissalsTableOrderingComposer,
+      $$NotificationDismissalsTableAnnotationComposer,
+      $$NotificationDismissalsTableCreateCompanionBuilder,
+      $$NotificationDismissalsTableUpdateCompanionBuilder,
+      (
+        NotificationDismissal,
+        BaseReferences<
+          _$AppDatabase,
+          $NotificationDismissalsTable,
+          NotificationDismissal
+        >,
+      ),
+      NotificationDismissal,
       PrefetchHooks Function()
     >;
 typedef $$SyncQueueTableTableCreateCompanionBuilder =
@@ -9222,6 +9781,11 @@ class $AppDatabaseManager {
       $$CheckInTableTableTableManager(_db, _db.checkInTable);
   $$NotificationsTableTableTableManager get notificationsTable =>
       $$NotificationsTableTableTableManager(_db, _db.notificationsTable);
+  $$NotificationDismissalsTableTableManager get notificationDismissals =>
+      $$NotificationDismissalsTableTableManager(
+        _db,
+        _db.notificationDismissals,
+      );
   $$SyncQueueTableTableTableManager get syncQueueTable =>
       $$SyncQueueTableTableTableManager(_db, _db.syncQueueTable);
 }
