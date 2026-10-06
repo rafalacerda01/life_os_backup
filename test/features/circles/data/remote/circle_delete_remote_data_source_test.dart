@@ -1,3 +1,4 @@
+import 'package:life_os/core/database/remote_send_permit.dart';
 import 'dart:async';
 import 'dart:convert';
 
@@ -19,6 +20,7 @@ CircleDeleteRemoteDataSource source(
   Duration timeout = const Duration(seconds: 30),
 }) {
   return CircleDeleteRemoteDataSource(
+    captureRemoteSend: () => RemoteSendPermit(() => true),
     client: client,
     idTokenProvider: tokenProvider ?? () async => _token,
     appCheckTokenProvider: appCheckTokenProvider ?? () async => _appCheckToken,
@@ -250,6 +252,7 @@ void main() {
   test('rejeita configuração HTTP', () {
     expect(
       () => CircleDeleteRemoteDataSource(
+        captureRemoteSend: () => RemoteSendPermit(() => true),
         client: MockClient((_) async => http.Response('{}', 200)),
         idTokenProvider: () async => _token,
         url: 'http://example.test/api/circles/delete',

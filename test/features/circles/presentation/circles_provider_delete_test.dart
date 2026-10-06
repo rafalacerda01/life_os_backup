@@ -1,5 +1,6 @@
 // ignore_for_file: subtype_of_sealed_class
 
+import 'package:life_os/core/database/remote_send_permit.dart';
 import 'dart:async';
 import 'dart:convert';
 
@@ -27,6 +28,7 @@ class FakeCirclesRepository extends CirclesRepository {
   final CircleEntity circle;
   Stream<CircleEntity?>? circleStream;
   Future<void> Function(String circleId)? deleteAction;
+  Future<void> Function(String circleId)? leaveAction;
   Object? deleteError;
   int deleteCalls = 0;
   int leaveCalls = 0;
@@ -48,6 +50,7 @@ class FakeCirclesRepository extends CirclesRepository {
   @override
   Future<void> leaveCircle(String circleId) async {
     leaveCalls += 1;
+    await leaveAction?.call(circleId);
   }
 }
 
@@ -68,6 +71,45 @@ CircleEntity fixtureCircle() {
 Future<void> settleStream() => Future<void>.delayed(Duration.zero);
 
 void main() {
+  for (final action in ['leave', 'delete']) {
+    test(
+      'late $action completion cannot clear a rebuilt session Circle',
+      () async {
+        final entered = Completer<void>();
+        final release = Completer<void>();
+        final repository = FakeCirclesRepository(fixtureCircle());
+        Future<void> pending(String _) {
+          entered.complete();
+          return release.future;
+        }
+
+        if (action == 'leave')
+          repository.leaveAction = pending;
+        else
+          repository.deleteAction = pending;
+        final container = ProviderContainer(
+          overrides: [circlesRepositoryProvider.overrideWithValue(repository)],
+        );
+        addTearDown(container.dispose);
+        final notifier = container.read(circlesProvider.notifier);
+        await notifier.joinCircle('circle-1');
+        await settleStream();
+        final old = action == 'leave'
+            ? notifier.leaveCircle('circle-1')
+            : notifier.deleteCircle('circle-1');
+        final rejected = expectLater(old, throwsA(isA<RemoteSessionStopped>()));
+        await entered.future;
+        container.invalidate(circlesProvider);
+        final next = container.read(circlesProvider.notifier);
+        await next.joinCircle('circle-1');
+        await settleStream();
+        release.complete();
+        await rejected;
+        expect(container.read(circlesProvider).joinedCircle?.id, 'circle-1');
+      },
+    );
+  }
+
   test('erro de delete mantém Circle local visível', () async {
     final repository = FakeCirclesRepository(fixtureCircle())
       ..deleteError = StateError('backend failed');
@@ -163,6 +205,7 @@ void main() {
     '404 idempotente do gateway permite ao provider limpar Circle',
     () async {
       final gateway = CircleDeleteRemoteDataSource(
+        captureRemoteSend: () => RemoteSendPermit(() => true),
         client: MockClient(
           (_) async =>
               http.Response(jsonEncode({'code': 'CIRCLE_NOT_FOUND'}), 404),

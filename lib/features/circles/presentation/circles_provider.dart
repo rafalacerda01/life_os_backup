@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:life_os/core/database/remote_send_permit.dart';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:life_os/core/utils/app_logger.dart';
@@ -42,10 +43,13 @@ class CirclesNotifier extends Notifier<CirclesState> {
   StreamSubscription<CircleEntity?>? _subscription;
   String? _subscribedCircleId;
   int _subscriptionGeneration = 0;
+  int _lifecycleGeneration = 0;
 
   @override
   CirclesState build() {
+    _lifecycleGeneration++;
     ref.onDispose(() {
+      _lifecycleGeneration++;
       _subscription?.cancel();
     });
 
@@ -114,8 +118,10 @@ class CirclesNotifier extends Notifier<CirclesState> {
   }
 
   Future<void> leaveCircle(String circleId) async {
+    final generation = _lifecycleGeneration;
     try {
       await ref.read(circlesRepositoryProvider).leaveCircle(circleId);
+      _requireOperationSession(generation);
       clearJoinedCircle();
     } catch (error, stackTrace) {
       AppLogger.e('Erro ao sair do círculo', error, stackTrace);
@@ -137,8 +143,10 @@ class CirclesNotifier extends Notifier<CirclesState> {
   }
 
   Future<void> deleteCircle(String circleId) async {
+    final generation = _lifecycleGeneration;
     try {
       await ref.read(circlesRepositoryProvider).deleteCircle(circleId);
+      _requireOperationSession(generation);
     } catch (error, stackTrace) {
       AppLogger.e('Erro ao deletar círculo', error, stackTrace);
       rethrow;
@@ -156,6 +164,7 @@ class CirclesNotifier extends Notifier<CirclesState> {
       }
     }
 
+    _requireOperationSession(generation);
     state = state.copyWith(
       availableCircles: state.availableCircles
           .where((circle) => circle.id != circleId)
@@ -165,5 +174,11 @@ class CirclesNotifier extends Notifier<CirclesState> {
           : state.joinedCircle,
       isLoading: false,
     );
+  }
+
+  void _requireOperationSession(int generation) {
+    if (!ref.mounted || generation != _lifecycleGeneration) {
+      throw const RemoteSessionStopped();
+    }
   }
 }

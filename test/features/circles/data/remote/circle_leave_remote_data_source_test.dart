@@ -1,3 +1,4 @@
+import 'package:life_os/core/database/remote_send_permit.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'package:flutter_test/flutter_test.dart';
@@ -11,6 +12,7 @@ CircleLeaveRemoteDataSource source(
   Future<String?> Function()? appCheck,
   Duration timeout = const Duration(seconds: 30),
 }) => CircleLeaveRemoteDataSource(
+  captureRemoteSend: () => RemoteSendPermit(() => true),
   client: client,
   idTokenProvider: auth ?? () async => 'auth-token',
   appCheckTokenProvider: appCheck ?? () async => 'app-token',
@@ -172,6 +174,7 @@ void main() {
     test('unapproved endpoint is rejected before any token load', () {
       expect(
         () => CircleLeaveRemoteDataSource(
+          captureRemoteSend: () => RemoteSendPermit(() => true),
           url: url,
           client: MockClient((_) async => http.Response('{}', 200)),
         ),

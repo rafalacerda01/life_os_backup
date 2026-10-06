@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:firebase_app_check/firebase_app_check.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:http/http.dart' as http;
+import 'package:life_os/core/database/remote_send_permit.dart';
 
 typedef CircleIdTokenProvider = Future<String?> Function();
 typedef CircleAppCheckTokenProvider = Future<String?> Function();
@@ -42,14 +43,18 @@ class CircleDeleteRemoteDataSource implements CircleDeleteGateway {
   final Uri _url;
   final Duration _timeout;
   final bool _ownsClient;
+  final RemoteSendPermit Function() _captureRemoteSend;
 
   CircleDeleteRemoteDataSource({
+    required RemoteSendPermit Function() captureRemoteSend,
     http.Client? client,
     CircleIdTokenProvider? idTokenProvider,
     CircleAppCheckTokenProvider? appCheckTokenProvider,
     String url = defaultUrl,
     Duration timeout = defaultTimeout,
   }) : _client = client ?? http.Client(),
+       // ignore: prefer_initializing_formals
+       _captureRemoteSend = captureRemoteSend,
        _idTokenProvider = idTokenProvider ?? _firebaseIdTokenProvider,
        _appCheckTokenProvider =
            appCheckTokenProvider ?? _firebaseAppCheckTokenProvider,
@@ -76,21 +81,31 @@ class CircleDeleteRemoteDataSource implements CircleDeleteGateway {
       );
     }
 
+    final RemoteSendPermit permit;
+    try {
+      permit = _captureRemoteSend();
+    } on RemoteSessionStopped {
+      throw _sessionStopped(isAmbiguous: false);
+    }
+    _requireSession(permit, isAmbiguous: false);
     final token = await _loadToken();
+    _requireSession(permit, isAmbiguous: false);
     final appCheckToken = await _loadAppCheckToken();
+    _requireSession(permit, isAmbiguous: false);
     http.Response response;
     try {
+      final headers = {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer $token',
+        'X-Firebase-AppCheck': appCheckToken,
+      };
+      final body = jsonEncode({'circleId': normalizedCircleId});
+      _requireSession(permit, isAmbiguous: false);
       response = await _client
-          .post(
-            _url,
-            headers: {
-              'Content-Type': 'application/json',
-              'Authorization': 'Bearer $token',
-              'X-Firebase-AppCheck': appCheckToken,
-            },
-            body: jsonEncode({'circleId': normalizedCircleId}),
-          )
+          .post(_url, headers: headers, body: body)
           .timeout(_timeout);
+    } on CircleDeleteRemoteException {
+      rethrow;
     } on TimeoutException {
       throw const CircleDeleteRemoteException(
         statusCode: null,
@@ -114,6 +129,8 @@ class CircleDeleteRemoteDataSource implements CircleDeleteGateway {
       );
     }
 
+    // A sent request can finish remotely; its result belongs to the old session.
+    _requireSession(permit, isAmbiguous: true);
     if (response.statusCode == 404 && _hasCode(response, 'CIRCLE_NOT_FOUND')) {
       return;
     }
@@ -138,6 +155,18 @@ class CircleDeleteRemoteDataSource implements CircleDeleteGateway {
       );
     }
   }
+
+  void _requireSession(RemoteSendPermit permit, {required bool isAmbiguous}) {
+    if (!permit.isCurrent) throw _sessionStopped(isAmbiguous: isAmbiguous);
+  }
+
+  CircleDeleteRemoteException _sessionStopped({required bool isAmbiguous}) =>
+      CircleDeleteRemoteException(
+        statusCode: null,
+        message: 'Sua sessão mudou. Tente novamente.',
+        code: 'SESSION_STOPPED',
+        isAmbiguous: isAmbiguous,
+      );
 
   void close() {
     if (_ownsClient) _client.close();

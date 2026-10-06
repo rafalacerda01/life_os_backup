@@ -8,6 +8,7 @@ import 'package:http/http.dart' as http;
 import 'package:life_os/core/database/app_database.dart';
 
 import 'sync_operation_result.dart';
+import '../database/remote_send_permit.dart';
 import 'package:life_os/features/notifications/domain/models/notification_occurrence.dart';
 import 'package:life_os/features/notifications/domain/models/notification_model.dart';
 
@@ -15,9 +16,20 @@ abstract interface class SyncRemoteDataSource {
   Future<SyncOperationResult> process(String uid, SyncQueueTableData item);
 }
 
+/// Allows a manager to pass its captured processing generation to producers.
+abstract interface class SessionBoundSyncRemoteDataSource
+    implements SyncRemoteDataSource {
+  Future<SyncOperationResult> processForSession(
+    String uid,
+    SyncQueueTableData item, {
+    required bool Function() canSend,
+  });
+}
+
 typedef SyncAppCheckTokenProvider = Future<String?> Function();
 
-class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
+class FirestoreSyncRemoteDataSource
+    implements SessionBoundSyncRemoteDataSource {
   static final RegExp _uuidV4Pattern = RegExp(
     r'^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$',
     caseSensitive: false,
@@ -30,17 +42,21 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
   _idTokenProvider;
   final SyncAppCheckTokenProvider _appCheckTokenProvider;
   final Duration _requestTimeout;
+  final RemoteSendPermit Function(String uid)? _captureRemoteSend;
   final Future<void> Function()? beforeNotificationDelete;
 
   FirestoreSyncRemoteDataSource(
     this._firestore,
     this._auth, {
     this.beforeNotificationDelete,
+    RemoteSendPermit Function(String uid)? captureRemoteSend,
     http.Client Function()? clientFactory,
     Future<String?> Function(User user, bool forceRefresh)? idTokenProvider,
     SyncAppCheckTokenProvider? appCheckTokenProvider,
     Duration requestTimeout = const Duration(seconds: 15),
   }) : _clientFactory = clientFactory ?? http.Client.new,
+       // ignore: prefer_initializing_formals
+       _captureRemoteSend = captureRemoteSend,
        // ignore: prefer_initializing_formals
        _idTokenProvider = idTokenProvider,
        _appCheckTokenProvider =
@@ -55,10 +71,18 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
   );
 
   @override
-  Future<SyncOperationResult> process(
+  Future<SyncOperationResult> process(String uid, SyncQueueTableData item) =>
+      processForSession(uid, item, canSend: () => true);
+
+  @override
+  Future<SyncOperationResult> processForSession(
     String uid,
-    SyncQueueTableData item,
-  ) async {
+    SyncQueueTableData item, {
+    required bool Function() canSend,
+  }) async {
+    final permit = RemoteSendPermit(
+      () => canSend() && _auth.currentUser?.uid == uid,
+    );
     final collection = item.collection.trim();
     final docId = item.docId.trim();
     final operationType = item.operationType.trim().toLowerCase();
@@ -91,60 +115,91 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
             message: 'Notification delete requires its occurrenceKey',
           );
         }
-        await beforeNotificationDelete?.call();
-        if (_auth.currentUser?.uid != uid) {
-          return const SyncOperationResult.retryable(code: 'SESSION_STOPPED');
-        }
-        final ref = _firestore
-            .collection('users')
-            .doc(uid)
-            .collection('notifications')
-            .doc(docId);
-        await _firestore.runTransaction((transaction) async {
-          if (_auth.currentUser?.uid != uid)
-            throw const _NotificationSessionChanged();
-          final snapshot = await transaction.get(ref);
-          if (_auth.currentUser?.uid != uid)
-            throw const _NotificationSessionChanged();
-          if (!snapshot.exists) return;
-          final remote = NotificationModel.fromFirestore(snapshot);
-          final remoteKey = NotificationOccurrence.key(
-            id: docId,
-            moduleType: remote.moduleType,
-            dueDate: remote.dueDate,
-          );
-          if (remoteKey == null) {
-            throw const FormatException(
-              'Remote notification has no occurrence contract',
+        final sessionPermit = _captureOperationPermit(uid, permit);
+        try {
+          sessionPermit.requireCurrent();
+          await beforeNotificationDelete?.call();
+          final ref = _firestore
+              .collection('users')
+              .doc(uid)
+              .collection('notifications')
+              .doc(docId);
+          // No await between final admission and starting the transaction.
+          sessionPermit.requireCurrent();
+          await _firestore.runTransaction((transaction) async {
+            // Firestore retries this callback; retain the original admission.
+            // This also checks immediately before the first remote read.
+            sessionPermit.requireCurrent();
+            final snapshot = await transaction.get(ref);
+            sessionPermit.requireCurrent();
+            if (!snapshot.exists) return;
+            final remote = NotificationModel.fromFirestore(snapshot);
+            final remoteKey = NotificationOccurrence.key(
+              id: docId,
+              moduleType: remote.moduleType,
+              dueDate: remote.dueDate,
             );
-          }
-          // A different occurrence makes this old operation logically obsolete.
-          if (remoteKey == expectedKey) transaction.delete(ref);
-        });
-        return const SyncOperationResult.success();
+            if (remoteKey == null) {
+              throw const FormatException(
+                'Remote notification has no occurrence contract',
+              );
+            }
+            // A different occurrence makes this old operation logically obsolete.
+            if (remoteKey == expectedKey) {
+              sessionPermit.requireCurrent();
+              transaction.delete(ref);
+            }
+          });
+          sessionPermit.requireCurrent();
+          return const SyncOperationResult.success();
+        } catch (_) {
+          // A failed await must not turn canceled work into a permanent reject.
+          sessionPermit.requireCurrent();
+          rethrow;
+        }
       }
       // ----------------------------------------------------------------------
       // CREATE DE HÁBITO
       // Obrigatoriamente passa pelo backend para enforcement de quota.
       // ----------------------------------------------------------------------
       if (collection == 'habits' && operationType == 'create') {
-        return _createHabitServerSide(expectedUid: uid, item: item);
+        return _createHabitServerSide(
+          expectedUid: uid,
+          item: item,
+          permit: permit,
+        );
       }
 
       if (collection == 'habits' && operationType == 'update') {
-        return _updateHabitServerSide(expectedUid: uid, item: item);
+        return _updateHabitServerSide(
+          expectedUid: uid,
+          item: item,
+          permit: permit,
+        );
       }
 
       if (collection == 'tasks' && operationType == 'create') {
-        return _createTaskServerSide(expectedUid: uid, item: item);
+        return _createTaskServerSide(
+          expectedUid: uid,
+          item: item,
+          permit: permit,
+        );
       }
 
       if (collection == 'tasks' && operationType == 'update') {
-        return _updateTaskServerSide(expectedUid: uid, item: item);
+        return _updateTaskServerSide(
+          expectedUid: uid,
+          item: item,
+          permit: permit,
+        );
       }
 
       if (collection == 'tasks' && operationType == 'delete') {
-        return _deleteTaskServerSide(expectedUid: uid, item: item);
+        return _deleteTaskServerSide(
+          expectedUid: uid,
+          item: item,
+          permit: permit,
+        );
       }
 
       // ----------------------------------------------------------------------
@@ -153,11 +208,19 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
       // ----------------------------------------------------------------------
 
       if (collection == 'goals' && operationType == 'create') {
-        return _createGoalServerSide(expectedUid: uid, item: item);
+        return _createGoalServerSide(
+          expectedUid: uid,
+          item: item,
+          permit: permit,
+        );
       }
 
       if (collection == 'goals' && operationType == 'delete') {
-        return _deleteGoalServerSide(expectedUid: uid, item: item);
+        return _deleteGoalServerSide(
+          expectedUid: uid,
+          item: item,
+          permit: permit,
+        );
       }
 
       // ----------------------------------------------------------------------
@@ -166,23 +229,43 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
       // ----------------------------------------------------------------------
 
       if (collection == 'subjects' && operationType == 'create') {
-        return _createSubjectServerSide(expectedUid: uid, item: item);
+        return _createSubjectServerSide(
+          expectedUid: uid,
+          item: item,
+          permit: permit,
+        );
       }
 
       if (collection == 'subjects' && operationType == 'delete') {
-        return _deleteSubjectServerSide(expectedUid: uid, item: item);
+        return _deleteSubjectServerSide(
+          expectedUid: uid,
+          item: item,
+          permit: permit,
+        );
       }
 
       if (collection == 'study_activity' && operationType == 'create') {
-        return _applyStudyActivityServerSide(expectedUid: uid, item: item);
+        return _applyStudyActivityServerSide(
+          expectedUid: uid,
+          item: item,
+          permit: permit,
+        );
       }
 
       if (collection == 'study_progress_reset' && operationType == 'create') {
-        return _applyStudyProgressResetServerSide(expectedUid: uid, item: item);
+        return _applyStudyProgressResetServerSide(
+          expectedUid: uid,
+          item: item,
+          permit: permit,
+        );
       }
 
       if (collection == 'review_queue' && operationType == 'update') {
-        return _applyStudyReviewServerSide(expectedUid: uid, item: item);
+        return _applyStudyReviewServerSide(
+          expectedUid: uid,
+          item: item,
+          permit: permit,
+        );
       }
 
       // ----------------------------------------------------------------------
@@ -191,11 +274,19 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
       // ----------------------------------------------------------------------
 
       if (collection == 'medications' && operationType == 'create') {
-        return _createMedicationServerSide(expectedUid: uid, item: item);
+        return _createMedicationServerSide(
+          expectedUid: uid,
+          item: item,
+          permit: permit,
+        );
       }
 
       if (collection == 'medications' && operationType == 'delete') {
-        return _deleteMedicationServerSide(expectedUid: uid, item: item);
+        return _deleteMedicationServerSide(
+          expectedUid: uid,
+          item: item,
+          permit: permit,
+        );
       }
 
       // ----------------------------------------------------------------------
@@ -204,11 +295,19 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
       // ----------------------------------------------------------------------
 
       if (collection == 'transactions' && operationType == 'create') {
-        return _createTransactionServerSide(expectedUid: uid, item: item);
+        return _createTransactionServerSide(
+          expectedUid: uid,
+          item: item,
+          permit: permit,
+        );
       }
 
       if (collection == 'transactions' && operationType == 'delete') {
-        return _deleteTransactionServerSide(expectedUid: uid, item: item);
+        return _deleteTransactionServerSide(
+          expectedUid: uid,
+          item: item,
+          permit: permit,
+        );
       }
       // ----------------------------------------------------------------------
       // DELETE DE HÁBITO
@@ -216,7 +315,11 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
       // pois precisa manter habitsCount consistente.
       // ----------------------------------------------------------------------
       if (collection == 'batch' && operationType == 'batch_delete') {
-        return _deleteHabitServerSide(expectedUid: uid, item: item);
+        return _deleteHabitServerSide(
+          expectedUid: uid,
+          item: item,
+          permit: permit,
+        );
       }
 
       // ----------------------------------------------------------------------
@@ -340,7 +443,7 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
       }
 
       return _mapFirebaseError(error);
-    } on _NotificationSessionChanged {
+    } on RemoteSessionStopped {
       return const SyncOperationResult.retryable(code: 'SESSION_STOPPED');
     } on FormatException catch (error) {
       return SyncOperationResult.invalidPayload(message: error.message);
@@ -468,6 +571,7 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
   }
 
   Future<SyncOperationResult> _createTransactionServerSide({
+    required RemoteSendPermit permit,
     required String expectedUid,
     required SyncQueueTableData item,
   }) async {
@@ -489,7 +593,7 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
       );
     }
 
-    return _postToSyncBackend(expectedUid, {
+    return _postToSyncBackend(expectedUid, permit, {
       'operation': 'create_transaction',
       'transactionId': item.docId,
       'title': title,
@@ -501,16 +605,18 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
   }
 
   Future<SyncOperationResult> _deleteTransactionServerSide({
+    required RemoteSendPermit permit,
     required String expectedUid,
     required SyncQueueTableData item,
   }) async {
-    return _postToSyncBackend(expectedUid, {
+    return _postToSyncBackend(expectedUid, permit, {
       'operation': 'delete_transaction',
       'transactionId': item.docId,
     });
   }
 
   Future<SyncOperationResult> _createMedicationServerSide({
+    required RemoteSendPermit permit,
     required String expectedUid,
     required SyncQueueTableData item,
   }) async {
@@ -530,7 +636,7 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
       );
     }
 
-    return _postToSyncBackend(expectedUid, {
+    return _postToSyncBackend(expectedUid, permit, {
       'operation': 'create_medication',
       'medicationId': item.docId,
       'name': name,
@@ -541,16 +647,18 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
   }
 
   Future<SyncOperationResult> _deleteMedicationServerSide({
+    required RemoteSendPermit permit,
     required String expectedUid,
     required SyncQueueTableData item,
   }) async {
-    return _postToSyncBackend(expectedUid, {
+    return _postToSyncBackend(expectedUid, permit, {
       'operation': 'delete_medication',
       'medicationId': item.docId,
     });
   }
 
   Future<SyncOperationResult> _createSubjectServerSide({
+    required RemoteSendPermit permit,
     required String expectedUid,
     required SyncQueueTableData item,
   }) async {
@@ -568,7 +676,7 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
       );
     }
 
-    return _postToSyncBackend(expectedUid, {
+    return _postToSyncBackend(expectedUid, permit, {
       'operation': 'create_subject',
       'subjectId': item.docId,
       'title': title,
@@ -578,16 +686,18 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
   }
 
   Future<SyncOperationResult> _deleteSubjectServerSide({
+    required RemoteSendPermit permit,
     required String expectedUid,
     required SyncQueueTableData item,
   }) async {
-    return _postToSyncBackend(expectedUid, {
+    return _postToSyncBackend(expectedUid, permit, {
       'operation': 'delete_subject',
       'subjectId': item.docId,
     });
   }
 
   Future<SyncOperationResult> _applyStudyActivityServerSide({
+    required RemoteSendPermit permit,
     required String expectedUid,
     required SyncQueueTableData item,
   }) async {
@@ -630,7 +740,7 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
       );
     }
 
-    return _postToSyncBackend(expectedUid, {
+    return _postToSyncBackend(expectedUid, permit, {
       'operation': 'apply_study_activity',
       'mutationId': item.docId,
       'subjectId': subjectId,
@@ -641,6 +751,7 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
   }
 
   Future<SyncOperationResult> _applyStudyProgressResetServerSide({
+    required RemoteSendPermit permit,
     required String expectedUid,
     required SyncQueueTableData item,
   }) async {
@@ -659,7 +770,7 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
       );
     }
 
-    return _postToSyncBackend(expectedUid, {
+    return _postToSyncBackend(expectedUid, permit, {
       'operation': 'apply_study_progress_reset',
       'mutationId': item.docId,
       'occurredAt': occurredAt,
@@ -667,6 +778,7 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
   }
 
   Future<SyncOperationResult> _applyStudyReviewServerSide({
+    required RemoteSendPermit permit,
     required String expectedUid,
     required SyncQueueTableData item,
   }) async {
@@ -700,7 +812,7 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
       );
     }
 
-    return _postToSyncBackend(expectedUid, {
+    return _postToSyncBackend(expectedUid, permit, {
       'operation': 'apply_study_review',
       'cardId': item.docId,
       'subjectId': subjectId,
@@ -710,6 +822,7 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
   }
 
   Future<SyncOperationResult> _createGoalServerSide({
+    required RemoteSendPermit permit,
     required String expectedUid,
     required SyncQueueTableData item,
   }) async {
@@ -729,7 +842,7 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
       );
     }
 
-    return _postToSyncBackend(expectedUid, {
+    return _postToSyncBackend(expectedUid, permit, {
       'operation': 'create_goal',
       'goalId': item.docId,
       'title': title,
@@ -740,16 +853,18 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
   }
 
   Future<SyncOperationResult> _deleteGoalServerSide({
+    required RemoteSendPermit permit,
     required String expectedUid,
     required SyncQueueTableData item,
   }) async {
-    return _postToSyncBackend(expectedUid, {
+    return _postToSyncBackend(expectedUid, permit, {
       'operation': 'delete_goal',
       'goalId': item.docId,
     });
   }
 
   Future<SyncOperationResult> _createTaskServerSide({
+    required RemoteSendPermit permit,
     required String expectedUid,
     required SyncQueueTableData item,
   }) async {
@@ -765,7 +880,7 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
       );
     }
 
-    return _postToSyncBackend(expectedUid, {
+    return _postToSyncBackend(expectedUid, permit, {
       'operation': 'create_task',
       'taskId': item.docId,
       'title': title,
@@ -775,6 +890,7 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
   }
 
   Future<SyncOperationResult> _updateTaskServerSide({
+    required RemoteSendPermit permit,
     required String expectedUid,
     required SyncQueueTableData item,
   }) async {
@@ -787,7 +903,7 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
       );
     }
 
-    return _postToSyncBackend(expectedUid, {
+    return _postToSyncBackend(expectedUid, permit, {
       'operation': 'update_task',
       'taskId': item.docId,
       'isCompleted': isCompleted,
@@ -795,16 +911,18 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
   }
 
   Future<SyncOperationResult> _deleteTaskServerSide({
+    required RemoteSendPermit permit,
     required String expectedUid,
     required SyncQueueTableData item,
   }) async {
-    return _postToSyncBackend(expectedUid, {
+    return _postToSyncBackend(expectedUid, permit, {
       'operation': 'delete_task',
       'taskId': item.docId,
     });
   }
 
   Future<SyncOperationResult> _createHabitServerSide({
+    required RemoteSendPermit permit,
     required String expectedUid,
     required SyncQueueTableData item,
   }) async {
@@ -819,7 +937,7 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
       );
     }
 
-    return _postToSyncBackend(expectedUid, {
+    return _postToSyncBackend(expectedUid, permit, {
       'operation': 'create_habit',
       'habitId': item.docId,
       'title': title,
@@ -828,6 +946,7 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
   }
 
   Future<SyncOperationResult> _updateHabitServerSide({
+    required RemoteSendPermit permit,
     required String expectedUid,
     required SyncQueueTableData item,
   }) async {
@@ -851,7 +970,7 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
         );
       }
 
-      return _postToSyncBackend(expectedUid, {
+      return _postToSyncBackend(expectedUid, permit, {
         'operation': 'update_habit_completion',
         'habitId': item.docId,
         'completedDates': completedDates,
@@ -865,7 +984,7 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
       );
     }
 
-    return _postToSyncBackend(expectedUid, {
+    return _postToSyncBackend(expectedUid, permit, {
       'operation': 'update_habit',
       'habitId': item.docId,
       'completedDates': completedDates,
@@ -873,6 +992,7 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
   }
 
   Future<SyncOperationResult> _deleteHabitServerSide({
+    required RemoteSendPermit permit,
     required String expectedUid,
     required SyncQueueTableData item,
   }) async {
@@ -898,57 +1018,75 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
       );
     }
 
-    return _postToSyncBackend(expectedUid, {
+    return _postToSyncBackend(expectedUid, permit, {
       'operation': 'delete_habit',
       'habitId': item.docId,
     });
   }
 
+  /// Compose account admission with the manager's captured execution generation.
+  /// Capture once before preflight and retain it across transaction/HTTP retries.
+  RemoteSendPermit _captureOperationPermit(
+    String expectedUid,
+    RemoteSendPermit operationPermit,
+  ) => (_captureRemoteSend?.call(expectedUid) ?? RemoteSendPermit(() => false))
+      .and(() => operationPermit.isCurrent);
+
   Future<SyncOperationResult> _postToSyncBackend(
     String expectedUid,
+    RemoteSendPermit operationPermit,
     Map<String, dynamic> payload,
   ) async {
-    final token = await _getIdToken(
-      expectedUid: expectedUid,
-      forceRefresh: false,
-    );
-
-    if (token == null || token.trim().isEmpty) {
-      return const SyncOperationResult.retryable(
-        code: 'AUTHENTICATION_REQUIRED',
+    http.Client? client;
+    try {
+      // All backend operations share prepared-session admission; direct
+      // Firestore paths retain their existing contracts.
+      final permit = _captureOperationPermit(expectedUid, operationPermit);
+      permit.requireCurrent();
+      final token = await _getIdToken(
+        expectedUid: expectedUid,
+        forceRefresh: false,
       );
-    }
 
-    String? rawAppCheckToken;
-    try {
-      rawAppCheckToken = await _appCheckTokenProvider();
-    } catch (_) {
-      return const SyncOperationResult.retryable(code: 'APP_CHECK_REQUIRED');
-    }
+      permit.requireCurrent();
+      if (token == null || token.trim().isEmpty) {
+        return const SyncOperationResult.retryable(
+          code: 'AUTHENTICATION_REQUIRED',
+        );
+      }
 
-    final appCheckToken = rawAppCheckToken?.trim();
-    if (appCheckToken == null || appCheckToken.isEmpty) {
-      return const SyncOperationResult.retryable(code: 'APP_CHECK_REQUIRED');
-    }
+      String? rawAppCheckToken;
+      try {
+        rawAppCheckToken = await _appCheckTokenProvider();
+      } catch (_) {
+        return const SyncOperationResult.retryable(code: 'APP_CHECK_REQUIRED');
+      }
 
-    final client = _clientFactory();
+      permit.requireCurrent();
+      final appCheckToken = rawAppCheckToken?.trim();
+      if (appCheckToken == null || appCheckToken.isEmpty) {
+        return const SyncOperationResult.retryable(code: 'APP_CHECK_REQUIRED');
+      }
 
-    try {
+      final requestClient = _clientFactory();
+      client = requestClient;
       Future<http.Response> send(String idToken) {
-        return client
-            .post(
-              Uri.parse(_backendSyncUrl),
-              headers: {
-                'Content-Type': 'application/json',
-                'Authorization': 'Bearer $idToken',
-                'X-Firebase-AppCheck': appCheckToken,
-              },
-              body: jsonEncode(payload),
-            )
+        final url = Uri.parse(_backendSyncUrl);
+        final headers = {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer $idToken',
+          'X-Firebase-AppCheck': appCheckToken,
+        };
+        final body = jsonEncode(payload);
+        // No await between this check and starting the HTTP request.
+        permit.requireCurrent();
+        return requestClient
+            .post(url, headers: headers, body: body)
             .timeout(_requestTimeout);
       }
 
       var response = await send(token);
+      permit.requireCurrent();
 
       if (response.statusCode == 401) {
         final backendCode = _extractBackendCode(response.body);
@@ -961,6 +1099,7 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
           forceRefresh: true,
         );
 
+        permit.requireCurrent();
         if (refreshedToken == null || refreshedToken.trim().isEmpty) {
           return const SyncOperationResult.retryable(
             code: 'AUTHENTICATION_REQUIRED',
@@ -968,6 +1107,7 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
         }
 
         response = await send(refreshedToken);
+        permit.requireCurrent();
       }
 
       if (response.statusCode >= 200 && response.statusCode < 300) {
@@ -1052,15 +1192,17 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
         message: _extractBackendMessage(response.body),
         code: 'BACKEND_${response.statusCode}',
       );
-    } on http.ClientException catch (error) {
-      return SyncOperationResult.retryable(
-        message: error.message,
-        code: 'NETWORK_ERROR',
-      );
+    } on RemoteSessionStopped {
+      return const SyncOperationResult.retryable(code: 'SESSION_STOPPED');
+    } on http.ClientException {
+      return const SyncOperationResult.retryable(code: 'NETWORK_ERROR');
     } on TimeoutException {
       return const SyncOperationResult.retryable(code: 'SYNC_TIMEOUT');
+    } catch (_) {
+      // Token/client exceptions may contain credentials; never persist them.
+      return const SyncOperationResult.retryable(code: 'REMOTE_SEND_FAILED');
     } finally {
-      client.close();
+      client?.close();
     }
   }
 
@@ -1201,8 +1343,4 @@ class FirestoreSyncRemoteDataSource implements SyncRemoteDataSource {
         );
     }
   }
-}
-
-class _NotificationSessionChanged implements Exception {
-  const _NotificationSessionChanged();
 }

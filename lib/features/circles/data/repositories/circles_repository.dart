@@ -4,6 +4,10 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:life_os/core/utils/app_logger.dart';
+import 'package:life_os/core/database/database_provider.dart';
+import 'package:life_os/core/database/session_database_coordinator.dart';
+import 'package:life_os/core/database/local_mutation_gate.dart';
+import 'package:life_os/core/database/remote_send_permit.dart';
 import 'package:life_os/features/premium/data/repositories/google_play_premium_repository.dart';
 import 'package:life_os/features/circles/data/remote/circle_delete_remote_data_source.dart';
 import 'package:life_os/features/circles/data/remote/circle_leave_remote_data_source.dart';
@@ -11,9 +15,27 @@ import 'package:life_os/features/circles/domain/entities/challenge_entity.dart';
 import 'package:life_os/features/circles/domain/entities/circle_entity.dart';
 
 final circlesRepositoryProvider = Provider((ref) {
-  final deleteRemote = CircleDeleteRemoteDataSource();
+  final databases = ref.watch(sessionDatabaseCoordinatorProvider);
+  RemoteSendPermit captureRemoteSend() {
+    try {
+      final database = databases.requirePrepared();
+      return database.localMutations.captureRemoteSend(
+        expectedUid: database.identity!.uid,
+      );
+    } on LocalMutationUnavailable {
+      throw const RemoteSessionStopped();
+    } on SessionDatabaseUnavailable {
+      throw const RemoteSessionStopped();
+    }
+  }
+
+  final deleteRemote = CircleDeleteRemoteDataSource(
+    captureRemoteSend: captureRemoteSend,
+  );
   ref.onDispose(deleteRemote.close);
-  final leaveRemote = CircleLeaveRemoteDataSource();
+  final leaveRemote = CircleLeaveRemoteDataSource(
+    captureRemoteSend: captureRemoteSend,
+  );
   ref.onDispose(leaveRemote.close);
   return CirclesRepository(
     FirebaseFirestore.instance,
@@ -52,7 +74,14 @@ class CirclesRepository {
     this._auth,
     this._deleteRemote, {
     CircleLeaveGateway? leaveRemote,
-  }) : _leaveRemote = leaveRemote ?? CircleLeaveRemoteDataSource();
+    RemoteSendPermit Function()? captureRemoteSend,
+  }) : _leaveRemote =
+           leaveRemote ??
+           CircleLeaveRemoteDataSource(
+             // Direct construction must supply session authority or a gateway.
+             captureRemoteSend:
+                 captureRemoteSend ?? () => throw const RemoteSessionStopped(),
+           );
 
   String _normalizeMemberName(Object? value, String? fallbackValue) {
     final normalized = value is String ? value.trim() : '';

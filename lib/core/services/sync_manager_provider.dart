@@ -20,6 +20,8 @@ final syncManagerProvider = Provider<SyncManager>((ref) {
     remoteDataSource: FirestoreSyncRemoteDataSource(
       firestore,
       auth,
+      captureRemoteSend: (uid) =>
+          database.localMutations.captureRemoteSend(expectedUid: uid),
       beforeNotificationDelete: () =>
           ref.read(notificationRemoteEffectsBarrierProvider).drainCurrent(),
     ),

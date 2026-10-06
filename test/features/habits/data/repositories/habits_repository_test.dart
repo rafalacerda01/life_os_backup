@@ -1,5 +1,6 @@
 // ignore_for_file: subtype_of_sealed_class
 
+import 'package:life_os/core/database/remote_send_permit.dart';
 import 'dart:convert';
 
 import 'package:drift/native.dart';
@@ -331,6 +332,7 @@ void main() {
         queueStore: AppDatabaseSyncQueueStore(a),
         currentUserId: () => activeUser?.uid,
         remoteDataSource: FirestoreSyncRemoteDataSource(
+          captureRemoteSend: (_) => RemoteSendPermit(() => true),
           remote,
           auth,
           idTokenProvider: (user, _) async => 'test-token-${user.uid}',

@@ -14,6 +14,7 @@ import 'package:life_os/core/services/notification_preferences.dart';
 import 'package:life_os/core/services/sync_manager.dart';
 import 'package:life_os/core/services/sync_queue_store.dart';
 import 'package:life_os/core/services/sync_remote_data_source.dart';
+import 'package:life_os/core/services/sync_operation_result.dart';
 import 'package:life_os/features/notifications/data/repositories/notifications_repository.dart';
 import 'package:life_os/features/notifications/domain/models/notification_model.dart';
 import 'package:life_os/features/notifications/domain/models/notification_occurrence.dart';
@@ -46,6 +47,11 @@ class _Store extends Fake implements FirebaseFirestore {
   final documents = <String, Map<String, dynamic>>{};
   final transactions = <String>[];
   final deletes = <String>[];
+  int transactionStarts = 0;
+  final attemptReads = <int>[];
+  final attemptDeletes = <int>[];
+  Completer<void>? responseStarted;
+  Completer<void>? responseRelease;
   bool offline = false;
   bool loseResponse = false;
   String? failureCode;
@@ -66,6 +72,7 @@ class _Store extends Fake implements FirebaseFirestore {
     Duration timeout = const Duration(seconds: 30),
     int maxAttempts = 5,
   }) async {
+    transactionStarts++;
     if (offline || failureCode != null) {
       throw FirebaseException(
         plugin: 'cloud_firestore',
@@ -86,6 +93,8 @@ class _Store extends Fake implements FirebaseFirestore {
       documents.remove(path);
       deletes.add(path);
     }
+    if (responseStarted?.isCompleted == false) responseStarted!.complete();
+    await responseRelease?.future;
     if (loseResponse) {
       loseResponse = false;
       throw FirebaseException(
@@ -161,13 +170,18 @@ class _QuerySnapshot extends Fake
 }
 
 class _Transaction extends Fake implements Transaction {
-  _Transaction(this.store);
+  _Transaction(this.store) : attempt = store.attemptReads.length {
+    store.attemptReads.add(0);
+    store.attemptDeletes.add(0);
+  }
+  final int attempt;
   final _Store store;
   final pendingDeletes = <String>[];
   @override
   Future<DocumentSnapshot<T>> get<T extends Object?>(
     DocumentReference<T> ref,
   ) async {
+    store.attemptReads[attempt]++;
     store.transactions.add(ref.path);
     final data = store.documents[ref.path];
     final snapshot = _Snapshot(
@@ -182,6 +196,7 @@ class _Transaction extends Fake implements Transaction {
 
   @override
   Transaction delete(DocumentReference ref) {
+    store.attemptDeletes[attempt]++;
     pendingDeletes.add(ref.path);
     return this;
   }
@@ -232,15 +247,24 @@ void main() {
   SyncManager manager({
     AppDatabase? database,
     NotificationRemoteEffectsBarrier? effects,
+    Future<void> Function()? beforeDelete,
+    Completer<SyncOperationResult>? producerResult,
   }) {
+    final currentDatabase = database ?? db;
+    final source = FirestoreSyncRemoteDataSource(
+      remote,
+      auth,
+      captureRemoteSend: (uid) =>
+          currentDatabase.localMutations.captureRemoteSend(expectedUid: uid),
+      beforeNotificationDelete:
+          beforeDelete ?? (effects ?? barrier).drainCurrent,
+    );
     final value = SyncManager(
-      queueStore: AppDatabaseSyncQueueStore(database ?? db),
+      queueStore: AppDatabaseSyncQueueStore(currentDatabase),
       currentUserId: () => auth.currentUser?.uid,
-      remoteDataSource: FirestoreSyncRemoteDataSource(
-        remote,
-        auth,
-        beforeNotificationDelete: (effects ?? barrier).drainCurrent,
-      ),
+      remoteDataSource: producerResult == null
+          ? source
+          : _ObservedNotificationRemote(source, producerResult),
     );
     managers.add(value);
     return value;
@@ -269,9 +293,258 @@ void main() {
       remote.readRelease!.complete();
     if (remote.writeRelease?.isCompleted == false)
       remote.writeRelease!.complete();
+    if (remote.responseRelease?.isCompleted == false)
+      remote.responseRelease!.complete();
     await barrier.sealAndDrain();
     await db.close();
   });
+
+  for (final stop in ['quiesce', 'manager', 'aba', 'a-to-b']) {
+    test('notification barrier + $stop starts zero transactions', () async {
+      final model = card('habit_barrier-$stop', 'habits', monday);
+      await seed(model);
+      await repository.deleteNotification(model.id);
+      final before = await db.select(db.syncQueueTable).getSingle();
+      final entered = Completer<void>();
+      final release = Completer<void>();
+      final result = Completer<SyncOperationResult>();
+      final sync = manager(
+        beforeDelete: () {
+          entered.complete();
+          return release.future;
+        },
+        producerResult: result,
+      );
+      final processing = sync.processPendingItems();
+      await entered.future;
+      LocalMutationQuiescence? quiescence;
+      if (stop == 'manager') {
+        expect(await sync.prepareForSessionDetach('user-a'), true);
+        expect(release.isCompleted, false);
+      } else {
+        quiescence = db.localMutations.beginQuiesce('user-a');
+        if (stop == 'aba' || stop == 'a-to-b') {
+          expect(await sync.prepareForSessionDetach('user-a'), true);
+          auth.user = null;
+          db.localMutations.observeSession(null);
+          quiescence.finish(signOutConfirmed: true);
+          auth.user = _User(stop == 'aba' ? 'user-a' : 'user-b');
+          db.localMutations.observeSession(auth.currentUser?.uid);
+          if (stop == 'aba') db.localMutations.openPreparedSession();
+        }
+      }
+      release.complete();
+      expect((await result.future).code, 'SESSION_STOPPED');
+      expect(await processing, false);
+      expect(remote.transactionStarts, 0);
+      expect(remote.transactions, isEmpty);
+      expect(remote.deletes, isEmpty);
+      expect(remote.documents.containsKey(path(model.id)), true);
+      final pending = await db.select(db.syncQueueTable).getSingle();
+      expect(pending.status, SyncQueuePersistenceStatus.pending);
+      expect(pending.ownerUid, before.ownerUid);
+      expect(pending.payloadJson, before.payloadJson);
+      quiescence?.finish(signOutConfirmed: false);
+    });
+  }
+
+  for (final failure in ['read', 'transaction']) {
+    test(
+      'notification failed $failure await after quiesce stays SESSION_STOPPED',
+      () async {
+        final model = card('habit_failed-$failure', 'habits', monday);
+        await seed(model);
+        await repository.deleteNotification(model.id);
+        LocalMutationQuiescence? quiescence;
+        void invalidateAndFail() {
+          quiescence = db.localMutations.beginQuiesce('user-a');
+          throw FirebaseException(
+            plugin: 'cloud_firestore',
+            code: 'permission-denied',
+          );
+        }
+
+        if (failure == 'read')
+          remote.afterRead = invalidateAndFail;
+        else
+          remote.conflictBeforeCommit = invalidateAndFail;
+        final result = Completer<SyncOperationResult>();
+        final processing = manager(
+          producerResult: result,
+        ).processPendingItems();
+        expect((await result.future).code, 'SESSION_STOPPED');
+        expect(await processing, false);
+        expect(auth.currentUser?.uid, 'user-a');
+        expect(remote.deletes, isEmpty);
+        expect(remote.documents.containsKey(path(model.id)), true);
+        final pending = await db.select(db.syncQueueTable).getSingle();
+        expect(pending.status, SyncQueuePersistenceStatus.pending);
+        expect(pending.lastErrorCode, 'SESSION_STOPPED');
+        quiescence?.finish(signOutConfirmed: false);
+      },
+    );
+  }
+
+  test('notification permit allows a valid delete and its ACK', () async {
+    final model = card('habit_authorized', 'habits', monday);
+    await seed(model);
+    await repository.deleteNotification(model.id);
+    expect(await manager().processPendingItems(), true);
+    expect(remote.transactionStarts, 1);
+    expect(remote.attemptReads, [1]);
+    expect(remote.attemptDeletes, [1]);
+    expect(remote.deletes, [path(model.id)]);
+    expect(
+      (await db.select(db.syncQueueTable).getSingle()).status,
+      SyncQueuePersistenceStatus.succeeded,
+    );
+  });
+
+  for (final stop in ['manager', 'quiesce']) {
+    test(
+      'notification pending transaction read + $stop cannot delete or ACK',
+      () async {
+        final model = card('habit_read-$stop', 'habits', monday);
+        await seed(model);
+        await repository.deleteNotification(model.id);
+        final started = remote.readStarted = Completer<void>();
+        final release = remote.readRelease = Completer<void>();
+        final result = Completer<SyncOperationResult>();
+        final sync = manager(producerResult: result);
+        final processing = sync.processPendingItems();
+        await started.future;
+        LocalMutationQuiescence? quiescence;
+        if (stop == 'manager') {
+          expect(await sync.prepareForSessionDetach('user-a'), true);
+          expect(release.isCompleted, false);
+        } else {
+          quiescence = db.localMutations.beginQuiesce('user-a');
+        }
+        // Firebase still reports A; the generation must stop this attempt.
+        expect(auth.currentUser?.uid, 'user-a');
+        release.complete();
+        expect((await result.future).code, 'SESSION_STOPPED');
+        expect(await processing, false);
+        expect(remote.transactionStarts, 1);
+        expect(remote.attemptReads, [1]);
+        expect(remote.attemptDeletes, [0]);
+        expect(remote.documents.containsKey(path(model.id)), true);
+        expect(
+          (await db.select(db.syncQueueTable).getSingle()).status,
+          SyncQueuePersistenceStatus.pending,
+        );
+        quiescence?.finish(signOutConfirmed: false);
+      },
+    );
+  }
+
+  test(
+    'notification already committed before stop has no late local ACK',
+    () async {
+      final model = card('habit_late-commit', 'habits', monday);
+      await seed(model);
+      await repository.deleteNotification(model.id);
+      final before = await db.select(db.syncQueueTable).getSingle();
+      final started = remote.responseStarted = Completer<void>();
+      final release = remote.responseRelease = Completer<void>();
+      final result = Completer<SyncOperationResult>();
+      final sync = manager(producerResult: result);
+      final processing = sync.processPendingItems();
+      await started.future;
+      expect(remote.deletes, [path(model.id)]);
+      expect(await sync.prepareForSessionDetach('user-a'), true);
+      expect(release.isCompleted, false);
+      expect(await processing, false);
+      release.complete();
+      expect((await result.future).code, 'SESSION_STOPPED');
+      expect(await db.select(db.syncQueueTable).getSingle(), before);
+      expect(remote.transactionStarts, 1);
+    },
+  );
+
+  for (final stop in ['quiesce', 'manager', 'aba', 'a-to-b']) {
+    test(
+      'notification transaction retry + $stop retains original permit',
+      () async {
+        final model = card('habit_retry-$stop', 'habits', monday);
+        await seed(model);
+        await repository.deleteNotification(model.id);
+        final result = Completer<SyncOperationResult>();
+        final sync = manager(producerResult: result);
+        LocalMutationQuiescence? quiescence;
+        Future<bool>? stopping;
+        remote.conflictBeforeCommit = () {
+          if (stop == 'manager') {
+            stopping = sync.prepareForSessionDetach('user-a');
+          } else {
+            quiescence = db.localMutations.beginQuiesce('user-a');
+            if (stop == 'aba' || stop == 'a-to-b') {
+              auth.user = null;
+              db.localMutations.observeSession(null);
+              quiescence!.finish(signOutConfirmed: true);
+              auth.user = _User(stop == 'aba' ? 'user-a' : 'user-b');
+              db.localMutations.observeSession(auth.currentUser?.uid);
+              if (stop == 'aba') db.localMutations.openPreparedSession();
+            }
+          }
+        };
+        final processing = sync.processPendingItems();
+        expect((await result.future).code, 'SESSION_STOPPED');
+        expect(await processing, false);
+        if (stopping != null) expect(await stopping, true);
+        expect(remote.transactionStarts, 1);
+        // First buffered delete is rolled back after the version conflict.
+        // The new attempt rejects before its first read or buffered delete.
+        expect(remote.attemptReads, [1, 0]);
+        expect(remote.attemptDeletes, [1, 0]);
+        expect(remote.deletes, isEmpty);
+        expect(remote.documents.containsKey(path(model.id)), true);
+        expect(
+          (await db.select(db.syncQueueTable).getSingle()).status,
+          SyncQueuePersistenceStatus.pending,
+        );
+        quiescence?.finish(signOutConfirmed: false);
+      },
+    );
+  }
+
+  test(
+    'notification canceled preflight stays pending and replays with new admission',
+    () async {
+      final model = card('habit_replay-permit', 'habits', monday);
+      await seed(model);
+      await repository.deleteNotification(model.id);
+      final entered = Completer<void>(), release = Completer<void>();
+      final result = Completer<SyncOperationResult>();
+      final sync = manager(
+        beforeDelete: () {
+          entered.complete();
+          return release.future;
+        },
+        producerResult: result,
+      );
+      final processing = sync.processPendingItems();
+      await entered.future;
+      final quiescence = db.localMutations.beginQuiesce('user-a');
+      expect(await sync.prepareForSessionDetach('user-a'), true);
+      quiescence.finish(signOutConfirmed: false);
+      release.complete();
+      expect((await result.future).code, 'SESSION_STOPPED');
+      expect(await processing, false);
+      expect(remote.transactionStarts, 0);
+      expect(
+        (await db.select(db.syncQueueTable).getSingle()).status,
+        SyncQueuePersistenceStatus.pending,
+      );
+      expect(await manager().processPendingItems(), true);
+      expect(remote.transactionStarts, 1);
+      expect(remote.deletes, [path(model.id)]);
+      expect(
+        (await db.select(db.syncQueueTable).getSingle()).status,
+        SyncQueuePersistenceStatus.succeeded,
+      );
+    },
+  );
 
   for (final (id, module) in [
     ('habit_entity', 'habits'),
@@ -986,4 +1259,24 @@ void main() {
       expect(await db.select(db.notificationDismissals).get(), isEmpty);
     },
   );
+}
+
+/// Observe the producer after Future.any has already released its manager.
+class _ObservedNotificationRemote implements SessionBoundSyncRemoteDataSource {
+  _ObservedNotificationRemote(this.source, this.result);
+  final FirestoreSyncRemoteDataSource source;
+  final Completer<SyncOperationResult> result;
+  @override
+  Future<SyncOperationResult> process(String uid, SyncQueueTableData item) =>
+      processForSession(uid, item, canSend: () => true);
+  @override
+  Future<SyncOperationResult> processForSession(
+    String uid,
+    SyncQueueTableData item, {
+    required bool Function() canSend,
+  }) async {
+    final value = await source.processForSession(uid, item, canSend: canSend);
+    if (!result.isCompleted) result.complete(value);
+    return value;
+  }
 }

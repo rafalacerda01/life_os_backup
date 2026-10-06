@@ -1,5 +1,7 @@
 import 'dart:async';
 import 'dart:io';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 import 'package:drift/drift.dart' show Value;
 
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -768,6 +770,7 @@ class _Harness {
     FlutterSecureStorage? secureStorage,
     _SyncManager? syncManagerOverride,
     SyncRemoteDataSource? syncRemoteDataSource,
+    SyncRemoteDataSource Function(Ref ref)? createSyncRemoteDataSource,
     bool waitForAuthentication = true,
     Completer<void>? deleteStarted,
     Completer<void>? allowDelete,
@@ -949,7 +952,7 @@ class _Harness {
           ),
         if (analyticsService != null)
           analyticsServiceProvider.overrideWithValue(analyticsService),
-        if (syncRemoteDataSource == null)
+        if (syncRemoteDataSource == null && createSyncRemoteDataSource == null)
           syncManagerProvider.overrideWithValue(syncManager)
         else
           syncManagerProvider.overrideWith((ref) {
@@ -957,7 +960,9 @@ class _Harness {
               queueStore: AppDatabaseSyncQueueStore(
                 ref.watch(databaseProvider),
               ),
-              remoteDataSource: syncRemoteDataSource,
+              remoteDataSource:
+                  createSyncRemoteDataSource?.call(ref) ??
+                  syncRemoteDataSource!,
               currentUserId: () => auth.currentUser?.uid,
             );
             ref.onDispose(manager.dispose);
@@ -1127,6 +1132,104 @@ Future<void> seedPendingLocalChange(AppDatabase db) async {
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+
+  for (final abort in [false, true]) {
+    test(
+      'real Auth ${abort ? "signOut failure" : "logout and same UID relogin"} fences gateway preflight and permits new Sync',
+      () async {
+        final entered = Completer<void>();
+        final release = Completer<String?>();
+        final oldFinished = Completer<void>();
+        var first = true, httpCalls = 0;
+        final harness = await _Harness.create(
+          [0, 0],
+          failSignOut: abort,
+          createSyncRemoteDataSource: (ref) {
+            final db = ref.watch(databaseProvider);
+            final auth = ref.read(firebaseAuthProvider);
+            final source = FirestoreSyncRemoteDataSource(
+              ref.read(firestoreProvider),
+              auth,
+              captureRemoteSend: (uid) =>
+                  db.localMutations.captureRemoteSend(expectedUid: uid),
+              clientFactory: () => MockClient((_) async {
+                httpCalls++;
+                return http.Response('{}', 200);
+              }),
+              idTokenProvider: (_, _) async => 'private-A-id-token',
+              appCheckTokenProvider: () {
+                if (first) {
+                  first = false;
+                  entered.complete();
+                  return release.future;
+                }
+                return Future.value('private-new-app-check');
+              },
+            );
+            return _ObservedRemoteProducer(source, oldFinished);
+          },
+        );
+        addTearDown(harness.dispose);
+        final db = harness.container.read(databaseProvider);
+        final oldPermit = db.localMutations.captureRemoteSend(
+          expectedUid: _userA.uid,
+        );
+        await db.insertSyncItem(
+          ownerUid: _userA.uid,
+          collection: 'tasks',
+          docId: 'pending-task',
+          operationType: 'delete',
+          payloadJson: '{}',
+        );
+        final before = await db.select(db.syncQueueTable).getSingle();
+        final oldManager = harness.container.read(syncManagerProvider);
+        final processing = oldManager.processPendingItems();
+        await entered.future;
+        await harness.notifier.logout();
+        expect(release.isCompleted, false);
+        expect(await processing, false);
+        expect(oldPermit.isCurrent, false);
+        expect(httpCalls, 0);
+        if (abort) {
+          expect(harness.state, isA<AuthError>());
+          expect(harness.auth.currentUser?.uid, _userA.uid);
+          expect(
+            db.localMutations
+                .captureRemoteSend(expectedUid: _userA.uid)
+                .isCurrent,
+            true,
+          );
+        } else {
+          expect(harness.state, isA<AuthUnauthenticated>());
+          harness.auth.user = _FirebaseUser(_userA.uid);
+          // Keep the old preflight blocked while the new session is prepared.
+        }
+        release.complete('private-old-app-check');
+        await oldFinished.future;
+        expect(httpCalls, 0);
+        expect(
+          (await harness.database
+              .select(harness.database.syncQueueTable)
+              .getSingle()),
+          before,
+        );
+        if (!abort) await harness.notifier.checkCurrentUser();
+        expect(
+          await harness.container
+              .read(syncManagerProvider)
+              .processPendingItems(),
+          true,
+        );
+        expect(httpCalls, 1);
+        final currentDb = harness.container.read(databaseProvider);
+        final pending = await currentDb
+            .select(currentDb.syncQueueTable)
+            .getSingle();
+        expect(pending.ownerUid, _userA.uid);
+        expect(pending.status, SyncQueuePersistenceStatus.succeeded);
+      },
+    );
+  }
 
   test(
     'notification dismissal pending does not block real Auth logout/relogin',
@@ -4781,5 +4884,26 @@ void main() {
         expect(await harness.deletionBarrier.readAll(), isEmpty);
       },
     );
+  }
+}
+
+class _ObservedRemoteProducer implements SessionBoundSyncRemoteDataSource {
+  _ObservedRemoteProducer(this.source, this.finished);
+  final FirestoreSyncRemoteDataSource source;
+  final Completer<void> finished;
+  @override
+  Future<SyncOperationResult> process(String uid, SyncQueueTableData item) =>
+      processForSession(uid, item, canSend: () => true);
+  @override
+  Future<SyncOperationResult> processForSession(
+    String uid,
+    SyncQueueTableData item, {
+    required bool Function() canSend,
+  }) async {
+    try {
+      return await source.processForSession(uid, item, canSend: canSend);
+    } finally {
+      if (!finished.isCompleted) finished.complete();
+    }
   }
 }

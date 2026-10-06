@@ -1,6 +1,7 @@
 // ignore_for_file: subtype_of_sealed_class, must_be_immutable
 
 import 'dart:async';
+import 'package:life_os/core/database/remote_send_permit.dart';
 import 'dart:convert';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -484,6 +485,7 @@ void main() {
     required SyncAppCheckTokenProvider appCheckTokenProvider,
   }) {
     return FirestoreSyncRemoteDataSource(
+      captureRemoteSend: (_) => RemoteSendPermit(() => true),
       _RecordingFirestore(
         _RecordingUsersCollectionReference(
           _RecordingUserDocumentReference(
@@ -505,7 +507,11 @@ void main() {
     usersCollection = _RecordingUsersCollectionReference(userDoc);
     final firestore = _RecordingFirestore(usersCollection);
 
-    remote = FirestoreSyncRemoteDataSource(firestore, _FakeFirebaseAuth());
+    remote = FirestoreSyncRemoteDataSource(
+      captureRemoteSend: (_) => RemoteSendPermit(() => true),
+      firestore,
+      _FakeFirebaseAuth(),
+    );
   });
 
   SyncQueueTableData focusItem({
@@ -745,7 +751,11 @@ void main() {
 
   FirestoreSyncRemoteDataSource transactionalStudyRemote(
     _TransactionalStudyFirestore firestore,
-  ) => FirestoreSyncRemoteDataSource(firestore, _FakeFirebaseAuth());
+  ) => FirestoreSyncRemoteDataSource(
+    captureRemoteSend: (_) => RemoteSendPermit(() => true),
+    firestore,
+    _FakeFirebaseAuth(),
+  );
 
   test(
     'review_queue create grava card e incrementa contadores atomicamente',
@@ -1009,6 +1019,7 @@ void main() {
       return _jsonResponse(200);
     });
     final dataSource = FirestoreSyncRemoteDataSource(
+      captureRemoteSend: (_) => RemoteSendPermit(() => true),
       _RecordingFirestore(
         _RecordingUsersCollectionReference(
           _RecordingUserDocumentReference(
@@ -1183,6 +1194,7 @@ void main() {
     var clientFactoryCalls = 0;
     var tokenProviderCalls = 0;
     final dataSource = FirestoreSyncRemoteDataSource(
+      captureRemoteSend: (_) => RemoteSendPermit(() => true),
       _RecordingFirestore(
         _RecordingUsersCollectionReference(
           _RecordingUserDocumentReference(
@@ -1205,7 +1217,7 @@ void main() {
     final result = await dataSource.process('user-123', createTaskItem());
 
     expect(result.shouldRetry, isTrue);
-    expect(result.code, 'AUTHENTICATION_REQUIRED');
+    expect(result.code, 'SESSION_STOPPED');
     expect(clientFactoryCalls, 0);
     expect(tokenProviderCalls, 0);
   });
@@ -1223,6 +1235,7 @@ void main() {
       return _jsonResponse(401);
     });
     final dataSource = FirestoreSyncRemoteDataSource(
+      captureRemoteSend: (_) => RemoteSendPermit(() => true),
       _RecordingFirestore(
         _RecordingUsersCollectionReference(
           _RecordingUserDocumentReference(
@@ -1243,7 +1256,7 @@ void main() {
     final result = await dataSource.process('user-123', createTaskItem());
 
     expect(result.shouldRetry, isTrue);
-    expect(result.code, 'AUTHENTICATION_REQUIRED');
+    expect(result.code, 'SESSION_STOPPED');
     expect(requestCount, 1);
     expect(tokenUsers, ['user-123']);
     expect(forceRefreshCalls, [false]);
@@ -1264,6 +1277,7 @@ void main() {
       return _jsonResponse(requestCount == 1 ? 401 : 200);
     });
     final dataSource = FirestoreSyncRemoteDataSource(
+      captureRemoteSend: (_) => RemoteSendPermit(() => true),
       _RecordingFirestore(
         _RecordingUsersCollectionReference(
           _RecordingUserDocumentReference(
@@ -1306,6 +1320,7 @@ void main() {
       return _jsonResponse(401);
     });
     final dataSource = FirestoreSyncRemoteDataSource(
+      captureRemoteSend: (_) => RemoteSendPermit(() => true),
       _RecordingFirestore(
         _RecordingUsersCollectionReference(
           _RecordingUserDocumentReference(
@@ -1336,6 +1351,7 @@ void main() {
     final neverCompletes = Completer<http.StreamedResponse>();
     final client = _RecordingHttpClient((request) => neverCompletes.future);
     final dataSource = FirestoreSyncRemoteDataSource(
+      captureRemoteSend: (_) => RemoteSendPermit(() => true),
       _RecordingFirestore(
         _RecordingUsersCollectionReference(
           _RecordingUserDocumentReference(
@@ -1367,6 +1383,7 @@ void main() {
       return _jsonResponse(200);
     });
     final dataSource = FirestoreSyncRemoteDataSource(
+      captureRemoteSend: (_) => RemoteSendPermit(() => true),
       _RecordingFirestore(
         _RecordingUsersCollectionReference(
           _RecordingUserDocumentReference(
@@ -1464,6 +1481,7 @@ void main() {
       return _jsonResponse(200);
     });
     final dataSource = FirestoreSyncRemoteDataSource(
+      captureRemoteSend: (_) => RemoteSendPermit(() => true),
       _RecordingFirestore(
         _RecordingUsersCollectionReference(
           _RecordingUserDocumentReference(
@@ -1495,6 +1513,7 @@ void main() {
       return _jsonResponse(200);
     });
     final dataSource = FirestoreSyncRemoteDataSource(
+      captureRemoteSend: (_) => RemoteSendPermit(() => true),
       _RecordingFirestore(
         _RecordingUsersCollectionReference(
           _RecordingUserDocumentReference(
@@ -1528,6 +1547,7 @@ void main() {
       return _jsonResponse(200);
     });
     final dataSource = FirestoreSyncRemoteDataSource(
+      captureRemoteSend: (_) => RemoteSendPermit(() => true),
       _RecordingFirestore(
         _RecordingUsersCollectionReference(
           _RecordingUserDocumentReference(
@@ -1561,6 +1581,7 @@ void main() {
       var attempts = 0;
       final payloads = <Map<String, dynamic>>[];
       final dataSource = FirestoreSyncRemoteDataSource(
+        captureRemoteSend: (_) => RemoteSendPermit(() => true),
         _RecordingFirestore(
           _RecordingUsersCollectionReference(
             _RecordingUserDocumentReference(
@@ -1592,6 +1613,7 @@ void main() {
   test('UUID competitivo inválido não inicia request remoto', () async {
     var clientCreated = false;
     final source = FirestoreSyncRemoteDataSource(
+      captureRemoteSend: (_) => RemoteSendPermit(() => true),
       _RecordingFirestore(
         _RecordingUsersCollectionReference(
           _RecordingUserDocumentReference(
@@ -1758,6 +1780,7 @@ void main() {
       return _jsonResponse(200);
     });
     final source = FirestoreSyncRemoteDataSource(
+      captureRemoteSend: (_) => RemoteSendPermit(() => true),
       firestore,
       _FakeFirebaseAuth(_FakeFirebaseUser('user-123')),
       clientFactory: () => client,

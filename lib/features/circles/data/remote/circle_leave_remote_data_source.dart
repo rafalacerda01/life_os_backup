@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:firebase_app_check/firebase_app_check.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:http/http.dart' as http;
+import 'package:life_os/core/database/remote_send_permit.dart';
 
 abstract interface class CircleLeaveGateway {
   Future<void> leaveCircle(String circleId);
@@ -40,14 +41,18 @@ class CircleLeaveRemoteDataSource implements CircleLeaveGateway {
   final Uri _url;
   final Duration _timeout;
   final bool _ownsClient;
+  final RemoteSendPermit Function() _captureRemoteSend;
 
   CircleLeaveRemoteDataSource({
+    required RemoteSendPermit Function() captureRemoteSend,
     http.Client? client,
     Future<String?> Function()? idTokenProvider,
     Future<String?> Function()? appCheckTokenProvider,
     String url = defaultUrl,
     Duration timeout = const Duration(seconds: 30),
   }) : _client = client ?? http.Client(),
+       // ignore: prefer_initializing_formals
+       _captureRemoteSend = captureRemoteSend,
        _ownsClient = client == null,
        _idTokenProvider = idTokenProvider ?? _firebaseIdToken,
        _appCheckTokenProvider = appCheckTokenProvider ?? _firebaseAppCheckToken,
@@ -68,16 +73,25 @@ class CircleLeaveRemoteDataSource implements CircleLeaveGateway {
         isAmbiguous: false,
       );
     }
+    final RemoteSendPermit permit;
+    try {
+      permit = _captureRemoteSend();
+    } on RemoteSessionStopped {
+      throw _sessionStopped(isAmbiguous: false);
+    }
+    _requireSession(permit, isAmbiguous: false);
     final token = await _token(
       _idTokenProvider,
       'UNAUTHENTICATED',
       'UNAUTHENTICATED',
     );
+    _requireSession(permit, isAmbiguous: false);
     final appCheck = await _token(
       _appCheckTokenProvider,
       'APP_CHECK_REQUIRED',
       'APP_CHECK_INVALID',
     );
+    _requireSession(permit, isAmbiguous: false);
     http.Response response;
     try {
       final request = http.Request('POST', _url)
@@ -88,10 +102,13 @@ class CircleLeaveRemoteDataSource implements CircleLeaveGateway {
           'X-Firebase-AppCheck': appCheck,
         })
         ..body = jsonEncode({'circleId': circleId});
+      _requireSession(permit, isAmbiguous: false);
       response = await _client
           .send(request)
           .then(http.Response.fromStream)
           .timeout(_timeout);
+    } on CircleLeaveRemoteException {
+      rethrow;
     } on TimeoutException {
       throw const CircleLeaveRemoteException(
         code: 'CIRCLE_LEAVE_TIMEOUT',
@@ -103,6 +120,8 @@ class CircleLeaveRemoteDataSource implements CircleLeaveGateway {
         isAmbiguous: true,
       );
     }
+    // A sent request can finish remotely; its result belongs to the old session.
+    _requireSession(permit, isAmbiguous: true);
     if (response.statusCode < 200 || response.statusCode >= 300) {
       String code = response.statusCode >= 500
           ? 'CIRCLE_LEAVE_SERVER_ERROR'
@@ -153,6 +172,16 @@ class CircleLeaveRemoteDataSource implements CircleLeaveGateway {
     }
     return value.trim();
   }
+
+  void _requireSession(RemoteSendPermit permit, {required bool isAmbiguous}) {
+    if (!permit.isCurrent) throw _sessionStopped(isAmbiguous: isAmbiguous);
+  }
+
+  CircleLeaveRemoteException _sessionStopped({required bool isAmbiguous}) =>
+      CircleLeaveRemoteException(
+        code: 'SESSION_STOPPED',
+        isAmbiguous: isAmbiguous,
+      );
 
   void close() {
     if (_ownsClient) _client.close();

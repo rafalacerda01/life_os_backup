@@ -2,6 +2,8 @@ import 'dart:async';
 
 import 'package:drift/drift.dart';
 
+import 'remote_send_permit.dart';
+
 class LocalMutationUnavailable implements Exception {
   const LocalMutationUnavailable();
 
@@ -36,6 +38,7 @@ class LocalMutationGate {
   String? Function()? _currentUserId;
   String? _observedUserId;
   int _generation = 0;
+  int _remoteSendGeneration = 0;
   int _active = 0;
   bool _sealed = false;
   bool _detaching = false;
@@ -52,6 +55,27 @@ class LocalMutationGate {
       _generation++;
       _sealed = true;
     }
+  }
+
+  /// Independent of local write leases, which may drain during quiescence.
+  /// Aborting logout opens new admissions without reviving old remote work.
+  RemoteSendPermit captureRemoteSend({required String expectedUid}) {
+    if (_currentUserId != null) observeSession(_currentUserId!());
+    final generation = _generation;
+    final remoteGeneration = _remoteSendGeneration;
+    final permit = RemoteSendPermit(() {
+      if (_currentUserId != null) observeSession(_currentUserId!());
+      return !_sealed &&
+          !_detaching &&
+          _quiescence == null &&
+          generation == _generation &&
+          remoteGeneration == _remoteSendGeneration &&
+          expectedUid.isNotEmpty &&
+          (ownerUid == null || ownerUid == expectedUid) &&
+          (_currentUserId == null || _currentUserId!() == expectedUid);
+    });
+    permit.requireCurrent();
+    return permit;
   }
 
   LocalMutationTicket capture({String? expectedUid}) {
@@ -189,6 +213,7 @@ class LocalMutationGate {
         _currentUserId?.call() != expectedUid) {
       throw const LocalMutationUnavailable();
     }
+    _remoteSendGeneration++;
     return _quiescence = LocalMutationQuiescence._(
       this,
       LocalMutationTicket._(this, _generation, expectedUid),

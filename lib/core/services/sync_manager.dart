@@ -217,7 +217,13 @@ class SyncManager {
             // Future.any still observes a late remote error; the generation
             // check below prevents late acknowledgements or another send.
             result = await Future.any<SyncOperationResult>([
-              _remoteDataSource.process(ownerUid, item),
+              _remoteDataSource is SessionBoundSyncRemoteDataSource
+                  ? _remoteDataSource.processForSession(
+                      ownerUid,
+                      item,
+                      canSend: () => _canProcess(ownerUid, generation),
+                    )
+                  : _remoteDataSource.process(ownerUid, item),
               stopped.then(
                 (_) => const SyncOperationResult.retryable(
                   code: 'SESSION_STOPPED',
