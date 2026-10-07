@@ -10,6 +10,22 @@ import 'package:life_os/core/utils/app_logger.dart';
 
 class CheckInRepository {
   static const _defaultRemoteWriteTimeout = Duration(seconds: 10);
+  static final _dailyIdPattern = RegExp(r'^[0-9]{4}-[0-9]{2}-[0-9]{2}$');
+
+  // The ID is a local civil day; remote upload timestamps are only metadata.
+  static DateTime? _checkInDateFromId(String id) {
+    if (id.length != 10 || !_dailyIdPattern.hasMatch(id)) return null;
+    final year = int.parse(id.substring(0, 4));
+    final month = int.parse(id.substring(5, 7));
+    final day = int.parse(id.substring(8, 10));
+    if (year < 1) return null;
+
+    final date = DateTime(year, month, day);
+    // DateTime normalizes invalid dates, so reject any calendar rollover.
+    if (date.year != year || date.month != month || date.day != day)
+      return null;
+    return date;
+  }
 
   final AppDatabase _db;
   final FirebaseFirestore _firestore;
@@ -154,6 +170,14 @@ class CheckInRepository {
           }
           if (local != null && !local.isSynced) continue;
 
+          final createdAt = _checkInDateFromId(doc.id);
+          if (createdAt == null) {
+            AppLogger.w(
+              'SYNC Check-ins: documento com ID diário inválido ignorado.',
+            );
+            continue;
+          }
+
           final data = doc.data();
 
           final energy = (data['energy'] as num?)?.toDouble() ?? 0.0;
@@ -161,12 +185,6 @@ class CheckInRepository {
           final focus = (data['focus'] as num?)?.toDouble() ?? 0.0;
 
           final motivation = (data['motivation'] as num?)?.toDouble() ?? 0.0;
-
-          final updatedAt = data['updatedAt'];
-
-          final createdAt = updatedAt is Timestamp
-              ? updatedAt.toDate()
-              : DateTime.now();
 
           await _db
               .into(_db.checkInTable)

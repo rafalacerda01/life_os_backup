@@ -3,13 +3,15 @@
 import 'dart:async';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:drift/drift.dart';
+import 'package:drift/drift.dart' show Value;
 import 'package:drift/native.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:life_os/core/database/app_database.dart';
 import 'package:life_os/core/database/local_mutation_gate.dart';
 import 'package:life_os/features/checkin/data/repositories/checkin_repository.dart';
+import 'package:life_os/features/ai_companion/data/models/ai_insight.dart';
+import 'package:life_os/features/ai_companion/data/services/ai_insight_context_builder.dart';
 
 class _User extends Fake implements User {
   _User(this.uid);
@@ -139,7 +141,12 @@ void main() {
 
   tearDown(() async => db.close());
 
-  Future<void> seed(String id, double energy, {bool isSynced = false}) {
+  Future<void> seed(
+    String id,
+    double energy, {
+    bool isSynced = false,
+    DateTime? createdAt,
+  }) {
     return db
         .insertCheckIn(
           CheckInTableCompanion(
@@ -147,7 +154,7 @@ void main() {
             energy: Value(energy),
             focus: const Value(3),
             motivation: const Value(4),
-            createdAt: Value(DateTime.utc(2026, 9, 24, 10)),
+            createdAt: Value(createdAt ?? DateTime.utc(2026, 9, 24, 10)),
             isSynced: Value(isSynced),
           ),
         )
@@ -156,6 +163,7 @@ void main() {
 
   test('pull não sobrescreve check-in local pendente do mesmo ID', () async {
     await seed('2026-09-24', 5);
+    final original = await db.select(db.checkInTable).getSingle();
     firestore.remoteDocs['2026-09-24'] = {
       'energy': 1,
       'focus': 1,
@@ -168,6 +176,8 @@ void main() {
     final local = await db.select(db.checkInTable).getSingle();
     expect(local.energy, 5);
     expect(local.focus, 3);
+    expect(local.motivation, 4);
+    expect(local.createdAt, original.createdAt);
     expect(local.isSynced, isFalse);
   });
 
@@ -366,6 +376,208 @@ void main() {
       release.complete();
       expect(await uploading, isFalse);
       expect((await db.select(db.checkInTable).getSingle()).isSynced, isFalse);
+    },
+  );
+  for (final metadata in <String, Object?>{
+    'late UTC upload': Timestamp.fromDate(DateTime.utc(2026, 9, 22, 23, 50)),
+    'missing timestamp': null,
+    'future timestamp': Timestamp.fromDate(DateTime.utc(2100, 1, 1)),
+    'non-timestamp metadata': 'PRIVATE_REMOTE_METADATA',
+  }.entries) {
+    test('hydration uses ID civil date with ${metadata.key}', () async {
+      firestore.remoteDocs['2026-09-15'] = {
+        'energy': 2,
+        'focus': 3,
+        'motivation': 4,
+        if (metadata.value != null) 'updatedAt': metadata.value,
+      };
+      await repository.syncCheckinsFromFirebaseToLocal();
+      final local = await db.select(db.checkInTable).getSingle();
+      expect(local.id, '2026-09-15');
+      expect(local.createdAt.year, 2026);
+      expect(local.createdAt.month, 9);
+      expect(local.createdAt.day, 15);
+      expect(local.createdAt.isUtc, isFalse);
+      expect(local.createdAt, DateTime(2026, 9, 15));
+      expect(local.energy, 2);
+      expect(local.focus, 3);
+      expect(local.motivation, 4);
+      expect(local.isSynced, isTrue);
+    });
+  }
+
+  test('history orders civil days independently of upload order', () async {
+    firestore.remoteDocs.addAll({
+      '2026-09-15': {
+        'energy': 1,
+        'updatedAt': Timestamp.fromDate(DateTime.utc(2100, 1, 1)),
+      },
+      '2026-09-22': {
+        'energy': 2,
+        'updatedAt': Timestamp.fromDate(DateTime.utc(2000, 1, 1)),
+      },
+      '2026-09-16': {
+        'energy': 3,
+        'updatedAt': Timestamp.fromDate(DateTime.utc(2026, 9, 22)),
+      },
+    });
+    await repository.syncCheckinsFromFirebaseToLocal();
+    final history = await repository.watchCheckIns().first;
+    expect(history.map((entry) => entry.id), [
+      '2026-09-22',
+      '2026-09-16',
+      '2026-09-15',
+    ]);
+    expect(history.map((entry) => entry.createdAt), [
+      DateTime(2026, 9, 22),
+      DateTime(2026, 9, 16),
+      DateTime(2026, 9, 15),
+    ]);
+  });
+
+  for (final invalidId in [
+    'legacy-uuid',
+    '2026-9-15',
+    '2026-09-5',
+    '2026-02-30',
+    '2025-02-29',
+    '2026-00-15',
+    '2026-13-01',
+    '2026-09-00',
+    '2026-09-31',
+    '0000-01-01',
+    ' 2026-09-15',
+    '2026-09-15 ',
+    '2026-09-15\n',
+    '2026-09-15T00:00:00Z',
+  ]) {
+    test(
+      'invalid civil ID ${invalidId.replaceAll('\n', r'\n')} is skipped without aborting valid docs',
+      () async {
+        firestore.remoteDocs.addAll({
+          '2026-09-14': {'energy': 2},
+          invalidId: {
+            'energy': 'PRIVATE_INVALID_PAYLOAD',
+            'updatedAt': Timestamp.fromDate(DateTime.utc(2026, 9, 22)),
+          },
+          '2026-09-16': {'energy': 4},
+        });
+        await repository.syncCheckinsFromFirebaseToLocal();
+        final history = await repository.watchCheckIns().first;
+        expect(history.map((entry) => entry.id), ['2026-09-16', '2026-09-14']);
+        expect(history.map((entry) => entry.createdAt), [
+          DateTime(2026, 9, 16),
+          DateTime(2026, 9, 14),
+        ]);
+      },
+    );
+  }
+
+  test('valid leap day is hydrated as a local civil date', () async {
+    firestore.remoteDocs['2024-02-29'] = {'energy': 3};
+    await repository.syncCheckinsFromFirebaseToLocal();
+    expect(
+      (await db.select(db.checkInTable).getSingle()).createdAt,
+      DateTime(2024, 2, 29),
+    );
+  });
+
+  test(
+    'rehydration repairs a synced row previously dated by upload time',
+    () async {
+      await seed(
+        '2026-09-15',
+        3,
+        isSynced: true,
+        createdAt: DateTime(2026, 9, 22),
+      );
+      firestore.remoteDocs['2026-09-15'] = {
+        'energy': 4,
+        'updatedAt': Timestamp.fromDate(DateTime.utc(2026, 9, 22)),
+      };
+      await repository.syncCheckinsFromFirebaseToLocal();
+      final local = await db.select(db.checkInTable).getSingle();
+      expect(local.createdAt, DateTime(2026, 9, 15));
+      expect(local.energy, 4);
+      expect(local.isSynced, isTrue);
+    },
+  );
+
+  test(
+    'ACK for an old pending check-in preserves its original civil date',
+    () async {
+      final originalDate = DateTime(2026, 9, 15);
+      await seed('2026-09-15', 4, createdAt: originalDate);
+      expect(await repository.syncPendingCheckIns(), isTrue);
+      final local = await db.select(db.checkInTable).getSingle();
+      expect(local.id, '2026-09-15');
+      expect(local.createdAt, originalDate);
+      expect(local.isSynced, isTrue);
+      expect(firestore.lastUid, 'user-a');
+      expect(
+        firestore.writes['2026-09-15']!.keys,
+        unorderedEquals(['energy', 'focus', 'motivation', 'updatedAt']),
+      );
+      expect(firestore.writes['2026-09-15']!['updatedAt'], isA<FieldValue>());
+    },
+  );
+
+  test(
+    'hydration upload date cannot contaminate AI daily or seven-day context',
+    () async {
+      final builder = AIInsightContextBuilder(
+        db,
+        currentUserIdProvider: () => auth.currentUser?.uid,
+        clock: () => DateTime(2026, 9, 22, 12),
+      );
+      firestore.remoteDocs['2026-09-15'] = {
+        'energy': 1,
+        'focus': 1,
+        'motivation': 1,
+        'updatedAt': Timestamp.fromDate(DateTime.utc(2026, 9, 22)),
+      };
+      await repository.syncCheckinsFromFirebaseToLocal();
+      final dailyWithoutCurrent = await builder.buildContext(
+        AIInsightIntent.dailyOverview,
+        expectedUserId: 'user-a',
+      );
+      expect(dailyWithoutCurrent, isNot(contains('checkin')));
+      final weeklyWithoutCurrent = await builder.buildContext(
+        AIInsightIntent.weeklyOverview,
+        expectedUserId: 'user-a',
+      );
+      expect(weeklyWithoutCurrent['checkin'], {'entries_last_7_days': 0});
+      expect(
+        (await builder.buildLocalSummary(expectedUserId: 'user-a')).energy,
+        isNull,
+      );
+
+      firestore.remoteDocs['2026-09-16'] = {
+        'energy': 5,
+        'focus': 4,
+        'motivation': 3,
+        'updatedAt': Timestamp.fromDate(DateTime.utc(2026, 9, 22)),
+      };
+      await repository.syncCheckinsFromFirebaseToLocal();
+      final daily = await builder.buildContext(
+        AIInsightIntent.dailyOverview,
+        expectedUserId: 'user-a',
+      );
+      expect(daily, isNot(contains('checkin')));
+      final weekly = await builder.buildContext(
+        AIInsightIntent.weeklyOverview,
+        expectedUserId: 'user-a',
+      );
+      expect(weekly['checkin'], {
+        'entries_last_7_days': 1,
+        'average_energy': 5.0,
+        'average_focus': 4.0,
+        'average_motivation': 3.0,
+      });
+      expect(
+        (await builder.buildLocalSummary(expectedUserId: 'user-a')).energy,
+        isNull,
+      );
     },
   );
 }
