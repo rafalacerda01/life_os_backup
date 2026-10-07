@@ -77,6 +77,7 @@ class FocusState {
   final int durationRemaining;
   final bool isRunning;
   final bool isBreak;
+  final bool targetLocked;
   final String? activeTargetId;
   final String? activeTargetTitle;
   final FocusTargetType? activeTargetType;
@@ -85,6 +86,7 @@ class FocusState {
     required this.durationRemaining,
     required this.isRunning,
     required this.isBreak,
+    this.targetLocked = false,
     this.activeTargetId,
     this.activeTargetTitle,
     this.activeTargetType,
@@ -94,6 +96,7 @@ class FocusState {
     int? durationRemaining,
     bool? isRunning,
     bool? isBreak,
+    bool? targetLocked,
     Object? activeTargetId = _keepCurrentTargetValue,
     Object? activeTargetTitle = _keepCurrentTargetValue,
     Object? activeTargetType = _keepCurrentTargetValue,
@@ -102,6 +105,7 @@ class FocusState {
       durationRemaining: durationRemaining ?? this.durationRemaining,
       isRunning: isRunning ?? this.isRunning,
       isBreak: isBreak ?? this.isBreak,
+      targetLocked: targetLocked ?? this.targetLocked,
       activeTargetId: identical(activeTargetId, _keepCurrentTargetValue)
           ? this.activeTargetId
           : activeTargetId as String?,
@@ -141,7 +145,9 @@ class FocusNotifier extends Notifier<FocusState> {
   }
 
   void selectTarget(String id, String title, FocusTargetType targetType) {
-    if (state.isRunning || _isStartingVerifiedSession) return;
+    if (state.targetLocked || state.isRunning || _isStartingVerifiedSession) {
+      return;
+    }
 
     state = state.copyWith(
       activeTargetId: id,
@@ -183,6 +189,7 @@ class FocusNotifier extends Notifier<FocusState> {
 
     _isStartingVerifiedSession = true;
     final generation = ++_startGeneration;
+    state = state.copyWith(targetLocked: true);
     unawaited(_startVerifiedThenLocal(cycle!, generation));
   }
 
@@ -262,7 +269,9 @@ class FocusNotifier extends Notifier<FocusState> {
       );
       _startLocalTimer(cycle);
     } finally {
-      _isStartingVerifiedSession = false;
+      if (generation == _startGeneration) {
+        _isStartingVerifiedSession = false;
+      }
     }
   }
 
@@ -276,7 +285,10 @@ class FocusNotifier extends Notifier<FocusState> {
   void _startLocalTimer(_FocusCycleContext? cycle) {
     _activeCycle = cycle;
     final startingRemaining = state.durationRemaining;
-    state = state.copyWith(isRunning: true);
+    state = state.copyWith(
+      isRunning: true,
+      targetLocked: !state.isBreak && cycle != null,
+    );
 
     _timer = ref.read(focusPeriodicTimerFactoryProvider)(
       const Duration(seconds: 1),
@@ -398,6 +410,7 @@ class FocusNotifier extends Notifier<FocusState> {
 
     _cycleCanBeVerified = false;
     _startGeneration++;
+    _isStartingVerifiedSession = false;
     final sessionId = _takeVerifiedSession();
     if (sessionId != null) {
       _beginPendingVerifiedInvalidation(sessionId);
@@ -407,6 +420,7 @@ class FocusNotifier extends Notifier<FocusState> {
   void resetTimer() {
     _timer?.cancel();
     _startGeneration++;
+    _isStartingVerifiedSession = false;
     final sessionId = _takeVerifiedSession();
     if (sessionId != null) {
       _beginPendingVerifiedInvalidation(sessionId);
@@ -416,12 +430,14 @@ class FocusNotifier extends Notifier<FocusState> {
     state = state.copyWith(
       durationRemaining: state.isBreak ? 300 : _timerDurationInSeconds,
       isRunning: false,
+      targetLocked: false,
     );
   }
 
   void toggleSessionType() {
     _timer?.cancel();
     _startGeneration++;
+    _isStartingVerifiedSession = false;
     final sessionId = _takeVerifiedSession();
     if (sessionId != null) {
       _beginPendingVerifiedInvalidation(sessionId);
@@ -433,6 +449,7 @@ class FocusNotifier extends Notifier<FocusState> {
       durationRemaining: nextIsBreak ? 300 : _timerDurationInSeconds,
       isRunning: false,
       isBreak: nextIsBreak,
+      targetLocked: false,
     );
   }
 

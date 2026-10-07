@@ -229,9 +229,10 @@ class FocusScreen extends ConsumerWidget {
 
   Widget _buildTargetCard(BuildContext context, FocusState focusState) {
     final hasTarget = focusState.activeTargetId != null;
+    final isTargetLocked = focusState.targetLocked || focusState.isRunning;
 
     return GestureDetector(
-      onTap: focusState.isRunning
+      onTap: isTargetLocked
           ? null
           : () {
               Navigator.push(
@@ -324,8 +325,10 @@ class FocusScreen extends ConsumerWidget {
                 color: Colors.white.withValues(alpha: 0.05),
                 borderRadius: BorderRadius.circular(10),
               ),
-              child: const Icon(
-                Icons.chevron_right_rounded,
+              child: Icon(
+                isTargetLocked
+                    ? Icons.lock_outline_rounded
+                    : Icons.chevron_right_rounded,
                 color: Colors.white54,
                 size: 20,
               ),

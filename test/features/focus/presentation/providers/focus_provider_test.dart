@@ -335,6 +335,8 @@ void main() {
     configureTarget(notifier, FocusTargetType.task);
 
     notifier.startTimer();
+    expect(container.read(focusProvider).targetLocked, isTrue);
+    expect(container.read(focusProvider).isRunning, isFalse);
     notifier.selectTarget('subject-1', 'Subject', FocusTargetType.subject);
 
     expect(container.read(focusProvider).activeTargetId, 'task-1');
@@ -351,6 +353,7 @@ void main() {
     await pumpEventQueue();
 
     expect(container.read(focusProvider).isRunning, isTrue);
+    expect(container.read(focusProvider).targetLocked, isTrue);
   });
 
   test('TASK full session starts and finishes verified exactly once', () async {
@@ -925,5 +928,230 @@ void main() {
     expect(remoteDataSource.finishCalls, 0);
     expect(focusRepository.saveCalls, 1);
     expect(tasksRepository.toggleCalls, 1);
+  });
+  for (final targetType in FocusTargetType.values) {
+    for (final elapsedTicks in [0, 1]) {
+      test(
+        '${targetType.value} paused after $elapsedTicks ticks keeps its target through completion',
+        () async {
+          final notifier = container.read(focusProvider.notifier);
+          configureTarget(notifier, targetType);
+          final originalId = targetType == FocusTargetType.task
+              ? 'task-1'
+              : 'subject-1';
+          final otherType = targetType == FocusTargetType.task
+              ? FocusTargetType.subject
+              : FocusTargetType.task;
+          expect(container.read(focusProvider).targetLocked, isFalse);
+
+          await startAndFlush(notifier);
+          expect(container.read(focusProvider).targetLocked, isTrue);
+          if (elapsedTicks > 0) timer.fireAtTick(elapsedTicks);
+          notifier.pauseTimer();
+          expect(container.read(focusProvider).isRunning, isFalse);
+          expect(container.read(focusProvider).targetLocked, isTrue);
+
+          notifier.selectTarget('other-target', 'Other target', otherType);
+          final paused = container.read(focusProvider);
+          expect(paused.activeTargetId, originalId);
+          expect(paused.activeTargetTitle, 'Target');
+          expect(paused.activeTargetType, targetType);
+          expect(paused.targetLocked, isTrue);
+
+          await startAndFlush(notifier);
+          expect(container.read(focusProvider).targetLocked, isTrue);
+          finishCurrentTimer(60 - elapsedTicks);
+          await pumpEventQueue();
+
+          expect(focusRepository.saveCalls, 1);
+          expect(focusRepository.lastTargetId, originalId);
+          expect(focusRepository.lastTargetType, targetType.value);
+          expect(focusRepository.lastDurationSeconds, 60);
+          expect(remoteDataSource.startCalls, 1);
+          expect(remoteDataSource.finishCalls, 0);
+          if (targetType == FocusTargetType.task) {
+            expect(tasksRepository.toggleCalls, 1);
+            expect(tasksRepository.lastTaskId, originalId);
+            expect(studyRepository.addStudyTimeCalls, 0);
+          } else {
+            expect(studyRepository.addStudyTimeCalls, 1);
+            expect(studyRepository.lastSubjectId, originalId);
+            expect(studyRepository.lastElapsedSeconds, 60);
+            expect(tasksRepository.toggleCalls, 0);
+          }
+          expect(container.read(focusProvider).isBreak, isTrue);
+          expect(container.read(focusProvider).targetLocked, isFalse);
+        },
+      );
+    }
+  }
+
+  test(
+    'reset releases the paused target and the next cycle belongs to B',
+    () async {
+      final notifier = container.read(focusProvider.notifier);
+      configureTarget(notifier, FocusTargetType.task);
+      await startAndFlush(notifier);
+      timer.fire();
+      notifier.pauseTimer();
+      expect(container.read(focusProvider).targetLocked, isTrue);
+
+      notifier.resetTimer();
+      expect(container.read(focusProvider).targetLocked, isFalse);
+      notifier.selectTarget('subject-B', 'Subject B', FocusTargetType.subject);
+      expect(container.read(focusProvider).activeTargetId, 'subject-B');
+      await startAndFlush(notifier);
+      expect(container.read(focusProvider).targetLocked, isTrue);
+      expect(remoteDataSource.lastTargetId, 'subject-B');
+      finishCurrentTimer(60);
+      await pumpEventQueue();
+
+      expect(focusRepository.saveCalls, 1);
+      expect(focusRepository.lastTargetId, 'subject-B');
+      expect(focusRepository.lastTargetType, 'SUBJECT');
+      expect(studyRepository.lastSubjectId, 'subject-B');
+      expect(tasksRepository.toggleCalls, 0);
+      expect(container.read(focusProvider).targetLocked, isFalse);
+    },
+  );
+
+  test(
+    'reset during pending start unlocks and late response cannot restore A',
+    () async {
+      final startCompleter = Completer<FocusStartResponse>();
+      remoteDataSource.startOperation =
+          ({
+            required targetId,
+            required targetType,
+            required plannedDurationSeconds,
+          }) => startCompleter.future;
+      final notifier = container.read(focusProvider.notifier);
+      configureTarget(notifier, FocusTargetType.task);
+      notifier.startTimer();
+      expect(container.read(focusProvider).targetLocked, isTrue);
+
+      notifier.resetTimer();
+      expect(container.read(focusProvider).targetLocked, isFalse);
+      notifier.selectTarget('subject-B', 'Subject B', FocusTargetType.subject);
+      expect(container.read(focusProvider).activeTargetId, 'subject-B');
+      startCompleter.complete(
+        FocusStartResponse(
+          sessionId: 'late-target-A',
+          plannedDurationSeconds: 60,
+          startedAt: DateTime.utc(2026, 8, 17, 12),
+          expiresAt: DateTime.utc(2026, 8, 17, 13),
+          reused: false,
+        ),
+      );
+      await pumpEventQueue();
+      expect(container.read(focusProvider).targetLocked, isFalse);
+      expect(container.read(focusProvider).isRunning, isFalse);
+      expect(container.read(focusProvider).activeTargetId, 'subject-B');
+      expect(container.read(focusProvider).activeTargetTitle, 'Subject B');
+      expect(remoteDataSource.cancelledSessionIds, ['late-target-A']);
+      expect(focusRepository.saveCalls, 0);
+
+      notifier.selectTarget('subject-B', 'Subject B', FocusTargetType.subject);
+      expect(container.read(focusProvider).activeTargetId, 'subject-B');
+      expect(container.read(focusProvider).targetLocked, isFalse);
+      remoteDataSource.startOperation = null;
+      await startAndFlush(notifier);
+      expect(container.read(focusProvider).targetLocked, isTrue);
+      expect(container.read(focusProvider).activeTargetId, 'subject-B');
+      expect(remoteDataSource.lastTargetId, 'subject-B');
+    },
+  );
+
+  test(
+    'completion and break release selection for the next work cycle',
+    () async {
+      final notifier = container.read(focusProvider.notifier);
+      configureTarget(notifier, FocusTargetType.task);
+      await startAndFlush(notifier);
+      finishCurrentTimer(60);
+      await pumpEventQueue();
+      expect(container.read(focusProvider).isBreak, isTrue);
+      expect(container.read(focusProvider).targetLocked, isFalse);
+
+      notifier.startTimer();
+      expect(container.read(focusProvider).targetLocked, isFalse);
+      notifier.pauseTimer();
+      expect(container.read(focusProvider).targetLocked, isFalse);
+      notifier.toggleSessionType();
+      expect(container.read(focusProvider).isBreak, isFalse);
+      expect(container.read(focusProvider).targetLocked, isFalse);
+      notifier.selectTarget('subject-B', 'Subject B', FocusTargetType.subject);
+      expect(container.read(focusProvider).activeTargetId, 'subject-B');
+    },
+  );
+
+  test('local-only work also locks its target during pause', () async {
+    final notifier = container.read(focusProvider.notifier);
+    configureTarget(notifier, FocusTargetType.task, minutes: 2);
+    notifier.startTimer();
+    expect(container.read(focusProvider).targetLocked, isTrue);
+    timer.fire();
+    notifier.pauseTimer();
+    notifier.selectTarget('subject-B', 'Subject B', FocusTargetType.subject);
+    expect(container.read(focusProvider).activeTargetId, 'task-1');
+    expect(container.read(focusProvider).targetLocked, isTrue);
+    expect(remoteDataSource.startCalls, 0);
+  });
+  test('late invalidated START cannot release a newer pending START', () async {
+    final oldStart = Completer<FocusStartResponse>();
+    final newStart = Completer<FocusStartResponse>();
+    remoteDataSource.startOperation =
+        ({
+          required targetId,
+          required targetType,
+          required plannedDurationSeconds,
+        }) => targetId == 'task-1' ? oldStart.future : newStart.future;
+    final notifier = container.read(focusProvider.notifier);
+    configureTarget(notifier, FocusTargetType.task);
+    notifier.startTimer();
+    notifier.resetTimer();
+    notifier.selectTarget('subject-B', 'Subject B', FocusTargetType.subject);
+    notifier.startTimer();
+    expect(remoteDataSource.startCalls, 2);
+    expect(container.read(focusProvider).targetLocked, isTrue);
+
+    oldStart.complete(
+      FocusStartResponse(
+        sessionId: 'old-A',
+        plannedDurationSeconds: 60,
+        startedAt: DateTime.utc(2026, 8, 17, 12),
+        expiresAt: DateTime.utc(2026, 8, 17, 13),
+        reused: false,
+      ),
+    );
+    await pumpEventQueue();
+    expect(container.read(focusProvider).activeTargetId, 'subject-B');
+    expect(container.read(focusProvider).targetLocked, isTrue);
+    expect(container.read(focusProvider).isRunning, isFalse);
+    notifier.startTimer();
+    notifier.selectTarget('task-C', 'Task C', FocusTargetType.task);
+    expect(remoteDataSource.startCalls, 2);
+    expect(container.read(focusProvider).activeTargetId, 'subject-B');
+    expect(remoteDataSource.cancelledSessionIds, ['old-A']);
+
+    newStart.complete(
+      FocusStartResponse(
+        sessionId: 'new-B',
+        plannedDurationSeconds: 60,
+        startedAt: DateTime.utc(2026, 8, 17, 12),
+        expiresAt: DateTime.utc(2026, 8, 17, 13),
+        reused: false,
+      ),
+    );
+    await pumpEventQueue();
+    expect(container.read(focusProvider).targetLocked, isTrue);
+    expect(container.read(focusProvider).isRunning, isTrue);
+    finishCurrentTimer(60);
+    await pumpEventQueue();
+    expect(focusRepository.lastTargetId, 'subject-B');
+    expect(studyRepository.lastSubjectId, 'subject-B');
+    expect(tasksRepository.toggleCalls, 0);
+    expect(remoteDataSource.finishedSessionIds, ['new-B']);
+    expect(container.read(focusProvider).targetLocked, isFalse);
   });
 }
