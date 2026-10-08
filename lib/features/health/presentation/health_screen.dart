@@ -84,13 +84,9 @@ class HealthScreen extends ConsumerWidget {
     }
   }
 
-  Future<void> _addWater(
-    BuildContext context,
-    WidgetRef ref,
-    int currentAmount,
-  ) async {
+  Future<void> _addWater(BuildContext context, WidgetRef ref) async {
     try {
-      await ref.read(healthRepositoryProvider).addWater(currentAmount);
+      await ref.read(healthRepositoryProvider).addWater();
     } catch (e, stack) {
       AppLogger.e('Erro ao registrar hidratação', e, stack);
 
@@ -1017,7 +1013,7 @@ class HealthScreen extends ConsumerWidget {
             width: double.infinity,
             height: 46,
             child: OutlinedButton.icon(
-              onPressed: () => _addWater(context, ref, health.waterIntakeMl),
+              onPressed: () => _addWater(context, ref),
               style: OutlinedButton.styleFrom(
                 side: BorderSide(
                   color: _hydrationColor.withValues(alpha: 0.42),

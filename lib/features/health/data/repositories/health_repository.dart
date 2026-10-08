@@ -786,28 +786,57 @@ class HealthRepository {
     );
   }
 
-  Future addWater(int currentWater) async {
-    final safeCurrentWater = currentWater.clamp(0, _maxWaterIntakeMl);
-
-    final newWaterAmount = (safeCurrentWater + _waterIncrementMl).clamp(
-      0,
-      _maxWaterIntakeMl,
-    );
+  Future<void> addWater() async {
+    final ownerUid = _getUserId();
+    if (ownerUid == null || ownerUid.trim().isEmpty) {
+      AppLogger.w('Tentativa de atualizar saúde sem usuário autenticado.');
+      return;
+    }
 
     final now = _now();
+    final docId = DateFormat('yyyy-MM-dd').format(now);
+    final admission = _db.localMutations.capture(expectedUid: ownerUid);
 
-    // 🛡️ CORREÇÃO APLICADA AQUI (Envolvendo com Value(...))
-    await _performDualWrite(
-      HealthEntriesCompanion(
-        docId: Value(_getTodayDocId()),
-        waterIntakeMl: Value(newWaterAmount),
-        date: Value(now),
-      ),
-      <String, dynamic>{
-        'waterIntakeMl': newWaterAmount,
-        'date': now.toIso8601String(),
+    await _db.transaction(
+      () async {
+        _requireCurrentUser(ownerUid);
+        final existing = await (_db.select(
+          _db.healthEntries,
+        )..where((table) => table.docId.equals(docId))).getSingleOrNull();
+        _requireCurrentUser(ownerUid);
+
+        final currentWater = (existing?.waterIntakeMl ?? 0).clamp(
+          0,
+          _maxWaterIntakeMl,
+        );
+        final newWaterAmount = (currentWater + _waterIncrementMl).clamp(
+          0,
+          _maxWaterIntakeMl,
+        );
+        await _upsertHealthEntry(
+          docId: docId,
+          waterIntakeMl: newWaterAmount,
+          date: now,
+        );
+        _requireCurrentUser(ownerUid);
+
+        await _db.insertSyncItem(
+          ownerUid: ownerUid,
+          collection: 'health_info',
+          docId: docId,
+          operationType: 'update',
+          payloadJson: jsonEncode(<String, dynamic>{
+            'waterIntakeMl': newWaterAmount,
+            'date': now.toIso8601String(),
+          }),
+        );
+        _requireCurrentUser(ownerUid);
       },
+      admission: admission,
+      waitForReopen: false,
     );
+
+    if (_isCurrentUser(ownerUid)) _schedulePendingHealthSync();
   }
 
   Future<bool?> getPillStatusForToday({required String expectedUid}) async {

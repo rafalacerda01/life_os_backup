@@ -10,6 +10,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:life_os/core/database/app_database.dart';
+import 'package:life_os/core/database/local_mutation_gate.dart';
 import 'package:life_os/core/services/notification_preferences.dart';
 import 'package:life_os/core/services/notification_service.dart';
 import 'package:life_os/core/services/sync_manager.dart';
@@ -181,6 +182,7 @@ class _NoopRemoteDataSource implements SyncRemoteDataSource {
 
 class FakeSyncManager extends SyncManager {
   int calls = 0;
+  Future<void> Function()? onProcess;
 
   FakeSyncManager()
     : super(
@@ -192,6 +194,7 @@ class FakeSyncManager extends SyncManager {
   @override
   Future<bool> processPendingItems() async {
     calls += 1;
+    await onProcess?.call();
     return true;
   }
 }
@@ -300,8 +303,54 @@ class _RecordingMedicationLifecycle implements MedicationReminderLifecycle {
   }
 }
 
+class _WaterTestDatabase extends AppDatabase {
+  _WaterTestDatabase() : super(executor: NativeDatabase.memory());
+
+  Future<void> Function()? beforeTransaction;
+  Future<void> Function()? beforeEnqueue;
+  Future<void> Function()? afterEnqueue;
+
+  @override
+  Future<T> transaction<T>(
+    Future<T> Function() action, {
+    bool requireNew = false,
+    LocalMutationTicket? admission,
+    bool waitForReopen = true,
+  }) => super.transaction(
+    () async {
+      await beforeTransaction?.call();
+      return action();
+    },
+    requireNew: requireNew,
+    admission: admission,
+    waitForReopen: waitForReopen,
+  );
+
+  @override
+  Future<int> insertSyncItem({
+    required String ownerUid,
+    required String collection,
+    required String docId,
+    required String operationType,
+    required String payloadJson,
+    int? createdAt,
+  }) async {
+    await beforeEnqueue?.call();
+    final id = await super.insertSyncItem(
+      ownerUid: ownerUid,
+      collection: collection,
+      docId: docId,
+      operationType: operationType,
+      payloadJson: payloadJson,
+      createdAt: createdAt,
+    );
+    await afterEnqueue?.call();
+    return id;
+  }
+}
+
 void main() {
-  late AppDatabase db;
+  late _WaterTestDatabase db;
   late FakeFirebaseAuth auth;
   late FakeFirebaseUser user;
   late _RecordingFirestore firestore;
@@ -349,7 +398,7 @@ void main() {
 
   setUp(() {
     SharedPreferences.setMockInitialValues(<String, Object>{});
-    db = AppDatabase(executor: NativeDatabase.memory());
+    db = _WaterTestDatabase();
     user = FakeFirebaseUser();
     auth = FakeFirebaseAuth(user);
     syncManager = FakeSyncManager();
@@ -510,7 +559,7 @@ void main() {
   });
 
   test('addWater salva localmente e enfileira o payload correto', () async {
-    await repository.addWater(500);
+    await repository.addWater();
 
     final healthRow = await db.select(db.healthEntries).getSingle();
     final pending = (await db.getPendingSyncItems(
@@ -518,9 +567,360 @@ void main() {
     )).cast<SyncQueueTableData>();
     final payload = jsonDecode(pending.single.payloadJson) as Map;
 
-    expect(healthRow.waterIntakeMl, 750);
-    expect(payload, {'waterIntakeMl': 750, 'date': '2026-08-21T10:00:00.000Z'});
+    expect(healthRow.docId, '2026-08-21');
+    expect(healthRow.waterIntakeMl, 250);
+    expect(pending.single.ownerUid, 'user-123');
+    expect(pending.single.collection, 'health_info');
+    expect(pending.single.operationType, 'update');
+    expect(pending.single.docId, healthRow.docId);
+    expect(payload, {'waterIntakeMl': 250, 'date': '2026-08-21T10:00:00.000Z'});
     expect(syncManager.calls, 1);
+  });
+
+  group('addWater lê o total no Drift e confirma a intenção atomicamente', () {
+    Future<List<int>> queuedTotals() async =>
+        (await db.getPendingSyncItems('user-123'))
+            .map(
+              (item) =>
+                  (jsonDecode(item.payloadJson) as Map)['waterIntakeMl'] as int,
+            )
+            .toList();
+
+    test('row com 1000 confirma 1250 no Drift e no payload', () async {
+      await seedHealth(water: 1000);
+      await repository.addWater();
+
+      expect(
+        (await db.select(db.healthEntries).getSingle()).waterIntakeMl,
+        1250,
+      );
+      expect(await queuedTotals(), [1250]);
+    });
+
+    test(
+      'duas ações sequenciais dispensam rebuild e enfileiram 1250 e 1500',
+      () async {
+        await seedHealth(water: 1000);
+        await repository.addWater();
+        expect(
+          (await db.select(db.healthEntries).getSingle()).waterIntakeMl,
+          1250,
+        );
+        await repository.addWater();
+
+        expect(
+          (await db.select(db.healthEntries).getSingle()).waterIntakeMl,
+          1500,
+        );
+        expect(await queuedTotals(), [1250, 1500]);
+        expect(syncManager.calls, 2);
+      },
+    );
+
+    test('Future.wait serializa duas ações sem perder incremento', () async {
+      await seedHealth(water: 1000);
+      await Future.wait([repository.addWater(), repository.addWater()]);
+
+      expect(
+        (await db.select(db.healthEntries).getSingle()).waterIntakeMl,
+        1500,
+      );
+      expect(await queuedTotals(), [1250, 1500]);
+      final items = await db.getPendingSyncItems('user-123');
+      expect(items.first.id, lessThan(items.last.id));
+      expect(syncManager.calls, 2);
+    });
+
+    for (final amount in [999900, 1000000]) {
+      test('clamp de $amount confirma no máximo 1000000', () async {
+        await seedHealth(water: amount);
+        await repository.addWater();
+
+        expect(
+          (await db.select(db.healthEntries).getSingle()).waterIntakeMl,
+          1000000,
+        );
+        expect(await queuedTotals(), [1000000]);
+      });
+    }
+
+    test('preserva humor, pílula e JSON de ciclo', () async {
+      const cycleJson =
+          '{"isEnabled":true,"cycleLengthDays":28,"periodLengthDays":5}';
+      await seedHealth(water: 1000, cycleJson: cycleJson);
+      final before = await db.select(db.healthEntries).getSingle();
+      clock.value = clock.value.add(const Duration(hours: 1));
+      await repository.addWater();
+
+      final after = await db.select(db.healthEntries).getSingle();
+      expect(after.waterIntakeMl, 1250);
+      expect(after.mood, before.mood);
+      expect(after.hasTakenPillToday, before.hasTakenPillToday);
+      expect(after.menstrualCycleJson, before.menstrualCycleJson);
+      expect(after.date.toUtc(), clock.value.toUtc());
+      final payload = jsonDecode(
+        (await db.getPendingSyncItems('user-123')).single.payloadJson,
+      );
+      expect(payload, {
+        'waterIntakeMl': 1250,
+        'date': clock.value.toIso8601String(),
+      });
+    });
+
+    for (final seeded in [false, true]) {
+      test(
+        'erro SQL na SyncQueue reverte ${seeded ? 'incremento' : 'nova row'}',
+        () async {
+          if (seeded) await seedHealth(water: 1000);
+          final before = await db.select(db.healthEntries).get();
+          await db.customStatement('''
+          CREATE TEMP TRIGGER reject_water_sync
+          BEFORE INSERT ON ${db.syncQueueTable.actualTableName}
+          BEGIN SELECT RAISE(ABORT, 'water-sync-insert-failed'); END
+        ''');
+
+          await expectLater(
+            repository.addWater(),
+            throwsA(
+              predicate(
+                (error) =>
+                    error.toString().contains('water-sync-insert-failed'),
+              ),
+            ),
+          );
+
+          expect(await db.select(db.healthEntries).get(), before);
+          expect(await db.select(db.syncQueueTable).get(), isEmpty);
+          expect(syncManager.calls, 0);
+        },
+      );
+    }
+
+    test('solicita sync somente depois de confirmar row e fila', () async {
+      await seedHealth(water: 1000);
+      db.beforeEnqueue = () async {
+        expect(syncManager.calls, 0);
+        expect(
+          (await db.select(db.healthEntries).getSingle()).waterIntakeMl,
+          1250,
+        );
+        expect(await db.select(db.syncQueueTable).get(), isEmpty);
+      };
+      db.afterEnqueue = () async {
+        expect(syncManager.calls, 0);
+      };
+      final processed = Completer<(HealthEntry, List<SyncQueueTableData>)>();
+      syncManager.onProcess = () async {
+        try {
+          processed.complete((
+            await db.select(db.healthEntries).getSingle(),
+            (await db.getPendingSyncItems(
+              'user-123',
+            )).cast<SyncQueueTableData>(),
+          ));
+        } catch (error, stack) {
+          processed.completeError(error, stack);
+        }
+      };
+
+      await repository.addWater();
+      final (row, items) = await processed.future;
+      expect(row.waterIntakeMl, 1250);
+      expect(items, hasLength(1));
+      expect(jsonDecode(items.single.payloadJson)['waterIntakeMl'], 1250);
+    });
+
+    for (final afterEnqueue in [false, true]) {
+      test(
+        'UID muda ${afterEnqueue ? 'após' : 'antes'} do enqueue: rollback integral',
+        () async {
+          await seedHealth(water: 1000);
+          final before = await db.select(db.healthEntries).getSingle();
+          final reached = Completer<void>();
+          final release = Completer<void>();
+          addTearDown(() {
+            if (!release.isCompleted) release.complete();
+          });
+          Future<void> checkpoint() async {
+            expect(
+              (await db.select(db.healthEntries).getSingle()).waterIntakeMl,
+              1250,
+            );
+            expect(
+              await db.select(db.syncQueueTable).get(),
+              hasLength(afterEnqueue ? 1 : 0),
+            );
+            reached.complete();
+            await release.future;
+          }
+
+          if (afterEnqueue) {
+            db.afterEnqueue = checkpoint;
+          } else {
+            db.beforeEnqueue = checkpoint;
+          }
+          final mutation = repository.addWater();
+          final rejected = expectLater(mutation, throwsA(isA<Exception>()));
+          await reached.future;
+          auth.user = FakeFirebaseUser('user-b');
+          release.complete();
+          await rejected;
+
+          expect(await db.select(db.healthEntries).getSingle(), before);
+          expect(await db.select(db.syncQueueTable).get(), isEmpty);
+          expect(syncManager.calls, 0);
+        },
+      );
+    }
+
+    test('UID muda antes da leitura: nenhuma escrita da ação antiga', () async {
+      await seedHealth(water: 1000);
+      db.localMutations.bindSessionReader(() => auth.currentUser?.uid);
+      db.localMutations.openPreparedSession();
+      final reached = Completer<void>();
+      final release = Completer<void>();
+      addTearDown(() {
+        if (!release.isCompleted) release.complete();
+      });
+      db.beforeTransaction = () async {
+        reached.complete();
+        await release.future;
+      };
+      final mutation = repository.addWater();
+      final rejected = expectLater(mutation, throwsA(isA<Exception>()));
+      await reached.future;
+      auth.user = FakeFirebaseUser('user-b');
+      release.complete();
+      await rejected;
+
+      expect(
+        (await db.select(db.healthEntries).getSingle()).waterIntakeMl,
+        1000,
+      );
+      expect(await db.select(db.syncQueueTable).get(), isEmpty);
+      expect(syncManager.calls, 0);
+    });
+
+    test('mesmo UID em nova geração não revive ação antiga', () async {
+      await seedHealth(water: 1000);
+      db.localMutations.bindSessionReader(() => auth.currentUser?.uid);
+      db.localMutations.openPreparedSession();
+      final reached = Completer<void>();
+      final release = Completer<void>();
+      addTearDown(() {
+        if (!release.isCompleted) release.complete();
+      });
+      db.beforeTransaction = () async {
+        reached.complete();
+        await release.future;
+      };
+      final mutation = repository.addWater();
+      final rejected = expectLater(
+        mutation,
+        throwsA(isA<LocalMutationUnavailable>()),
+      );
+      await reached.future;
+      auth.user = FakeFirebaseUser('user-b');
+      db.localMutations.observeSession('user-b');
+      auth.user = user;
+      db.localMutations.observeSession(user.uid);
+      db.localMutations.openPreparedSession();
+      release.complete();
+      await rejected;
+
+      expect(
+        (await db.select(db.healthEntries).getSingle()).waterIntakeMl,
+        1000,
+      );
+      expect(await db.select(db.syncQueueTable).get(), isEmpty);
+      expect(syncManager.calls, 0);
+    });
+
+    test('quiescence rejeita nova ação sem esperar reabrir', () async {
+      await seedHealth(water: 1000);
+      db.localMutations.bindSessionReader(() => auth.currentUser?.uid);
+      db.localMutations.openPreparedSession();
+      final quiescence = db.localMutations.beginQuiesce(user.uid);
+      try {
+        await expectLater(
+          repository.addWater(),
+          throwsA(isA<LocalMutationUnavailable>()),
+        );
+        expect(
+          (await db.select(db.healthEntries).getSingle()).waterIntakeMl,
+          1000,
+        );
+        expect(await db.select(db.syncQueueTable).get(), isEmpty);
+        expect(syncManager.calls, 0);
+      } finally {
+        quiescence.finish(signOutConfirmed: false);
+      }
+    });
+
+    test('sessão selada rejeita ação sem alteração ou fila', () async {
+      await seedHealth(water: 1000);
+      db.localMutations.bindSessionReader(() => auth.currentUser?.uid);
+
+      await expectLater(
+        repository.addWater(),
+        throwsA(isA<LocalMutationUnavailable>()),
+      );
+
+      expect(
+        (await db.select(db.healthEntries).getSingle()).waterIntakeMl,
+        1000,
+      );
+      expect(await db.select(db.syncQueueTable).get(), isEmpty);
+      expect(syncManager.calls, 0);
+    });
+
+    test('sem usuário não grava row ou fila', () async {
+      auth.user = null;
+      await repository.addWater();
+
+      expect(await db.select(db.healthEntries).get(), isEmpty);
+      expect(await db.select(db.syncQueueTable).get(), isEmpty);
+      expect(syncManager.calls, 0);
+    });
+
+    test(
+      'virada do dia respeita captura e não reutiliza água de ontem',
+      () async {
+        clock.value = DateTime(2026, 8, 21, 23, 59);
+        await seedHealth(water: 1000);
+        final capturedDate = clock.value;
+        final reached = Completer<void>();
+        final release = Completer<void>();
+        addTearDown(() {
+          if (!release.isCompleted) release.complete();
+        });
+        db.beforeTransaction = () async {
+          reached.complete();
+          await release.future;
+        };
+        final mutation = repository.addWater();
+        await reached.future;
+        clock.value = DateTime(2026, 8, 22, 0, 1);
+        release.complete();
+        await mutation;
+        db.beforeTransaction = null;
+        await repository.addWater();
+
+        final rows = await db.select(db.healthEntries).get();
+        final yesterday = rows.singleWhere((row) => row.docId == '2026-08-21');
+        final today = rows.singleWhere((row) => row.docId == '2026-08-22');
+        expect(yesterday.waterIntakeMl, 1250);
+        expect(yesterday.date, capturedDate);
+        expect(today.waterIntakeMl, 250);
+        expect(today.date, clock.value);
+        final pending = await db.getPendingSyncItems('user-123');
+        expect(pending.map((item) => item.docId), ['2026-08-21', '2026-08-22']);
+        expect(pending.map((item) => jsonDecode(item.payloadJson)), [
+          {'waterIntakeMl': 1250, 'date': capturedDate.toIso8601String()},
+          {'waterIntakeMl': 250, 'date': clock.value.toIso8601String()},
+        ]);
+      },
+    );
   });
 
   group('updatePillStatus expectedUid', () {
@@ -1043,7 +1443,7 @@ void main() {
           };
           final pull = repository.syncHealthFromFirebase();
           await started.future;
-          await repository.addWater(1000);
+          await repository.addWater();
           final item = await db.select(db.syncQueueTable).getSingle();
           expect(item.collection, 'health_info');
           expect(item.docId, '2026-08-21');
@@ -1433,7 +1833,7 @@ void main() {
     'resposta parcial preserva ausentes e aplica zero e false explícitos',
     () async {
       await repository.updateMood('Radiante');
-      await repository.addWater(750);
+      await repository.addWater();
       await repository.updatePillStatus(true, expectedUid: 'user-123');
 
       await settleHealthWritesBeforePull();
@@ -1489,7 +1889,7 @@ void main() {
     'ciclo persiste no dia seguinte sem carregar métricas diárias antigas',
     () async {
       await repository.updateMood('Radiante');
-      await repository.addWater(750);
+      await repository.addWater();
       await repository.updatePillStatus(true, expectedUid: 'user-123');
       await repository.updateCycleSettings({
         'isEnabled': true,
@@ -1513,7 +1913,7 @@ void main() {
   test('mesmo stream acompanha o dia atual em cada emissão Drift', () async {
     clock.value = DateTime(2026, 8, 21, 23, 59);
     await repository.updateMood('Radiante');
-    await repository.addWater(1250);
+    await repository.addWater();
     await repository.updatePillStatus(true, expectedUid: 'user-123');
     await repository.updateCycleSettings({
       'isEnabled': true,
@@ -1527,7 +1927,7 @@ void main() {
     addTearDown(iterator.cancel);
     expect(await iterator.moveNext(), isTrue);
     expect(iterator.current.mood, 'Radiante');
-    expect(iterator.current.waterIntakeMl, 1500);
+    expect(iterator.current.waterIntakeMl, 250);
     expect(iterator.current.hasTakenPillToday, isTrue);
 
     clock.value = DateTime(2026, 8, 22, 0, 1);
