@@ -3,6 +3,7 @@
 import 'dart:async';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:drift/drift.dart' show Value;
 import 'package:drift/native.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -131,6 +132,15 @@ class _BlockingDao extends NotificationDao {
     );
     await pause('save');
     return result;
+  }
+
+  @override
+  Future<bool> upsertFromRemote(
+    NotificationsTableCompanion incoming, {
+    LocalMutationTicket? admission,
+  }) async {
+    await pause('hydrate');
+    return super.upsertFromRemote(incoming, admission: admission);
   }
 
   @override
@@ -304,6 +314,371 @@ void main() {
       await barrier.sealAndDrain();
       expect(await dao.getNotificationById(notification.id), isNotNull);
       expect(firestore.documents, isEmpty);
+    },
+  );
+
+  const states = [(false, false), (true, false), (false, true), (true, true)];
+  for (final (localRead, localCompleted) in states) {
+    for (final (remoteRead, remoteCompleted) in states) {
+      test('same occurrence merges local $localRead/$localCompleted '
+          'with remote $remoteRead/$remoteCompleted without echo', () async {
+        await db
+            .into(db.notificationsTable)
+            .insert(
+              NotificationModel.toCompanion(
+                notification.copyWith(
+                  isRead: localRead,
+                  isCompleted: localCompleted,
+                ),
+              ),
+            );
+        firestore.documents[path] = notification
+            .copyWith(
+              isRead: remoteRead,
+              isCompleted: remoteCompleted,
+              createdAt: day.add(const Duration(days: 2)),
+            )
+            .toFirestore();
+
+        await repository.syncNotificationsFromFirebaseToLocal();
+
+        final result = (await dao.getNotificationById(notification.id))!;
+        expect(result.isRead, localRead || remoteRead);
+        expect(result.isCompleted, localCompleted || remoteCompleted);
+        expect(result.createdAt, day);
+        expect(result.dueDate, day);
+        expect(firestore.writes, isEmpty);
+        expect(firestore.deletes, isEmpty);
+        expect(await db.select(db.syncQueueTable).get(), isEmpty);
+      });
+    }
+  }
+
+  for (final oldState in [false, true]) {
+    for (final (remoteRead, remoteCompleted) in states) {
+      test('new occurrence honors remote $remoteRead/$remoteCompleted '
+          'without inheriting old $oldState/$oldState', () async {
+        await db
+            .into(db.notificationsTable)
+            .insert(
+              NotificationModel.toCompanion(
+                notification.copyWith(isRead: oldState, isCompleted: oldState),
+              ),
+            );
+        final next = notification.copyWith(
+          dueDate: day.add(const Duration(days: 1)),
+          createdAt: day.add(const Duration(days: 2)),
+          isRead: remoteRead,
+          isCompleted: remoteCompleted,
+        );
+        firestore.documents[path] = next.toFirestore();
+
+        await repository.syncNotificationsFromFirebaseToLocal();
+
+        final result = (await dao.getNotificationById(notification.id))!;
+        expect(result.isRead, remoteRead);
+        expect(result.isCompleted, remoteCompleted);
+        expect(result.dueDate, next.dueDate);
+        expect(
+          result.occurrenceKey,
+          NotificationModel.toCompanion(next).occurrenceKey.value,
+        );
+        expect(result.createdAt, day);
+        expect(firestore.writes, isEmpty);
+      });
+    }
+  }
+
+  for (final (label, shift) in [
+    ('different hour', const Duration(hours: 1)),
+    ('one microsecond', const Duration(microseconds: 1)),
+  ]) {
+    for (final remoteRead in [false, true]) {
+      test('distinct occurrence on same day ($label) honors remote '
+          '$remoteRead/false without inheritance', () async {
+        final previous = notification.copyWith(
+          id: 'exam_matematica',
+          moduleType: 'studies',
+          dueDate: DateTime(2026, 10, 10, 9),
+          isRead: true,
+          isCompleted: true,
+        );
+        final next = previous.copyWith(
+          dueDate: previous.dueDate!.add(shift),
+          isRead: remoteRead,
+          isCompleted: false,
+        );
+        final oldCompanion = NotificationModel.toCompanion(previous);
+        final nextCompanion = NotificationModel.toCompanion(next);
+        expect(
+          oldCompanion.occurrenceKey.value,
+          isNot(nextCompanion.occurrenceKey.value),
+        );
+        await db.into(db.notificationsTable).insert(oldCompanion);
+        firestore.documents['users/user-a/notifications/${next.id}'] = next
+            .toFirestore();
+
+        await repository.syncNotificationsFromFirebaseToLocal();
+
+        final result = (await dao.getNotificationById(next.id))!;
+        expect(result.isRead, remoteRead);
+        expect(result.isCompleted, isFalse);
+        expect(result.occurrenceKey, nextCompanion.occurrenceKey.value);
+        expect(NotificationModel.fromDrift(result).dueDate, next.dueDate);
+        expect(result.createdAt, previous.createdAt);
+        expect(firestore.writes, isEmpty);
+      });
+    }
+  }
+
+  test('exact occurrence key preserves flags despite Drift rounding', () async {
+    final precise = notification.copyWith(
+      dueDate: day.add(const Duration(microseconds: 123)),
+      isRead: true,
+      isCompleted: true,
+    );
+    await db
+        .into(db.notificationsTable)
+        .insert(NotificationModel.toCompanion(precise));
+    final stored = (await dao.getNotificationById(precise.id))!;
+    expect(stored.dueDate, isNot(precise.dueDate));
+    firestore.documents[path] = precise
+        .copyWith(isRead: false, isCompleted: false)
+        .toFirestore();
+
+    await repository.syncNotificationsFromFirebaseToLocal();
+
+    final result = (await dao.getNotificationById(precise.id))!;
+    expect(result.isRead, isTrue);
+    expect(result.isCompleted, isTrue);
+    expect(result.occurrenceKey, stored.occurrenceKey);
+    expect(NotificationModel.fromDrift(result).dueDate, precise.dueDate);
+    expect(firestore.writes, isEmpty);
+  });
+
+  for (final shift in [
+    const Duration(hours: 1),
+    const Duration(microseconds: 1),
+  ]) {
+    test(
+      'local generation still preserves same-day flags after $shift',
+      () async {
+        final previous = notification.copyWith(isRead: true, isCompleted: true);
+        await db
+            .into(db.notificationsTable)
+            .insert(NotificationModel.toCompanion(previous));
+        final next = notification.copyWith(
+          dueDate: day.add(shift),
+          title: 'Updated derived content',
+        );
+
+        await repository.saveLocalNotification(next);
+        await barrier.sealAndDrain();
+
+        final result = (await dao.getNotificationById(next.id))!;
+        expect(result.title, next.title);
+        expect(result.isRead, isTrue);
+        expect(result.isCompleted, isTrue);
+        expect(
+          result.occurrenceKey,
+          NotificationModel.toCompanion(next).occurrenceKey.value,
+        );
+      },
+    );
+  }
+
+  for (final completed in [false, true]) {
+    test(
+      'new same-day habit occurrence keeps derived completion $completed',
+      () async {
+        final previous = notification.copyWith(
+          id: 'habit_remote',
+          moduleType: 'habits',
+          priority: 'completed',
+          isRead: true,
+          isCompleted: true,
+        );
+        await db
+            .into(db.notificationsTable)
+            .insert(NotificationModel.toCompanion(previous));
+        final next = previous.copyWith(
+          dueDate: day.add(const Duration(hours: 1)),
+          priority: completed ? 'completed' : 'today',
+          isRead: false,
+          isCompleted: completed,
+        );
+        firestore.documents['users/user-a/notifications/${next.id}'] = next
+            .toFirestore();
+
+        await repository.syncNotificationsFromFirebaseToLocal();
+
+        final result = (await dao.getNotificationById(next.id))!;
+        expect(result.isRead, completed);
+        expect(result.isCompleted, completed);
+        expect(firestore.writes, isEmpty);
+      },
+    );
+  }
+
+  for (final remoteRead in [false, true]) {
+    test(
+      'legacy null key does not prove identity; honors remote $remoteRead/false',
+      () async {
+        final previous = notification.copyWith(
+          dueDate: day.add(const Duration(microseconds: 123)),
+          isRead: true,
+          isCompleted: true,
+        );
+        await db
+            .into(db.notificationsTable)
+            .insert(
+              NotificationModel.toCompanion(
+                previous,
+              ).copyWith(occurrenceKey: const Value(null)),
+            );
+        final next = previous.copyWith(isRead: remoteRead, isCompleted: false);
+        firestore.documents[path] = next.toFirestore();
+
+        await repository.syncNotificationsFromFirebaseToLocal();
+
+        final result = (await dao.getNotificationById(next.id))!;
+        expect(result.isRead, remoteRead);
+        expect(result.isCompleted, isFalse);
+        expect(
+          result.occurrenceKey,
+          NotificationModel.toCompanion(next).occurrenceKey.value,
+        );
+        expect(result.createdAt, previous.createdAt);
+        expect(firestore.writes, isEmpty);
+      },
+    );
+  }
+
+  test('two null keys do not establish a shared legacy occurrence', () async {
+    final legacy = notification.copyWith(
+      moduleType: 'general',
+      isRead: true,
+      isCompleted: true,
+    );
+    final incoming = legacy.copyWith(isRead: false, isCompleted: false);
+    expect(NotificationModel.toCompanion(legacy).occurrenceKey.value, isNull);
+    expect(NotificationModel.toCompanion(incoming).occurrenceKey.value, isNull);
+    await db
+        .into(db.notificationsTable)
+        .insert(NotificationModel.toCompanion(legacy));
+    firestore.documents[path] = incoming.toFirestore();
+
+    await repository.syncNotificationsFromFirebaseToLocal();
+
+    final result = (await dao.getNotificationById(legacy.id))!;
+    expect(result.isRead, isFalse);
+    expect(result.isCompleted, isFalse);
+    expect(result.occurrenceKey, isNull);
+    expect(result.createdAt, legacy.createdAt);
+    expect(firestore.writes, isEmpty);
+  });
+
+  for (final (localRead, localCompleted) in states.skip(1)) {
+    test(
+      'local generation preserves manual $localRead/$localCompleted',
+      () async {
+        await db
+            .into(db.notificationsTable)
+            .insert(
+              NotificationModel.toCompanion(
+                notification.copyWith(
+                  isRead: localRead,
+                  isCompleted: localCompleted,
+                ),
+              ),
+            );
+
+        await repository.saveLocalNotification(
+          notification.copyWith(title: 'Updated derived content'),
+        );
+        await barrier.sealAndDrain();
+
+        final result = (await dao.getNotificationById(notification.id))!;
+        expect(result.title, 'Updated derived content');
+        expect(result.isRead, localRead);
+        expect(result.isCompleted, localCompleted);
+        expect(firestore.documents[path]!['isRead'], localRead);
+        expect(firestore.documents[path]!['isCompleted'], localCompleted);
+      },
+    );
+  }
+
+  test(
+    'hydration merges the local state changed after reading remote',
+    () async {
+      await seed();
+      firestore.documents[path] = notification.toFirestore();
+      dao.block = 'hydrate';
+
+      final hydration = repository.syncNotificationsFromFirebaseToLocal();
+      await dao.started.future;
+      // The remote false/false snapshot is already parsed; no upsert has begun.
+      await dao.markAsCompleted(notification.id);
+      dao.release.complete();
+      await hydration;
+
+      final result = (await dao.getNotificationById(notification.id))!;
+      expect(result.isRead, isTrue);
+      expect(result.isCompleted, isTrue);
+      expect(firestore.writes, isEmpty);
+    },
+  );
+
+  test('habit remote read survives the derived reopening branch', () async {
+    final habit = notification.copyWith(
+      id: 'habit_remote',
+      moduleType: 'habits',
+      priority: 'completed',
+    );
+    await db
+        .into(db.notificationsTable)
+        .insert(NotificationModel.toCompanion(habit));
+    firestore.documents['users/user-a/notifications/${habit.id}'] = habit
+        .copyWith(priority: 'today', isRead: true)
+        .toFirestore();
+
+    await repository.syncNotificationsFromFirebaseToLocal();
+
+    final result = (await dao.getNotificationById(habit.id))!;
+    expect(result.isRead, isTrue);
+    expect(result.isCompleted, isFalse);
+    expect(firestore.writes, isEmpty);
+  });
+
+  test(
+    'habit remote hydration is monotonic while local undo still reopens',
+    () async {
+      final habit = notification.copyWith(
+        id: 'habit_remote',
+        moduleType: 'habits',
+        priority: 'completed',
+        isRead: true,
+        isCompleted: true,
+      );
+      await db
+          .into(db.notificationsTable)
+          .insert(NotificationModel.toCompanion(habit));
+      firestore.documents['users/user-a/notifications/${habit.id}'] = habit
+          .copyWith(isRead: false, isCompleted: false)
+          .toFirestore();
+
+      await repository.syncNotificationsFromFirebaseToLocal();
+      var result = (await dao.getNotificationById(habit.id))!;
+      expect(result.isRead, isTrue);
+      expect(result.isCompleted, isTrue);
+      expect(firestore.writes, isEmpty);
+
+      await repository.saveLocalNotification(
+        habit.copyWith(priority: 'today', isRead: false, isCompleted: false),
+      );
+      result = (await dao.getNotificationById(habit.id))!;
+      expect(result.isRead, isFalse);
+      expect(result.isCompleted, isFalse);
     },
   );
 

@@ -227,16 +227,8 @@ class NotificationsRepository {
 
       for (final doc in snapshot.docs) {
         final remote = NotificationModel.fromFirestore(doc);
-        final local = await dao.getNotificationById(remote.id);
-
-        final merged = remote.copyWith(
-          isRead: local?.isRead == true || remote.isRead,
-          isCompleted: local?.isCompleted == true || remote.isCompleted,
-          createdAt: local?.createdAt ?? remote.createdAt,
-        );
-
-        await dao.upsertPreservingState(
-          NotificationModel.toCompanion(merged),
+        await dao.upsertFromRemote(
+          NotificationModel.toCompanion(remote),
           admission: admission,
         );
       }

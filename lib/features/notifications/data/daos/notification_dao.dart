@@ -8,6 +8,8 @@ import 'package:life_os/features/notifications/data/tables/notifications_table.d
 
 part 'notification_dao.g.dart';
 
+enum _NotificationUpsertOrigin { localDerived, remoteHydration }
+
 @DriftAccessor(
   tables: [NotificationsTable, NotificationDismissals, SyncQueueTable],
 )
@@ -37,14 +39,36 @@ class NotificationDao extends DatabaseAccessor<AppDatabase>
   Future<bool> upsertPreservingState(
     NotificationsTableCompanion incoming, {
     LocalMutationTicket? admission,
+  }) => _upsertWithOrigin(
+    incoming,
+    _NotificationUpsertOrigin.localDerived,
+    admission: admission,
+  );
+
+  /// Hidrata o estado remoto com merge monotônico na mesma ocorrência.
+  /// Uma nova ocorrência recebe seus próprios flags, sem herdar os anteriores.
+  Future<bool> upsertFromRemote(
+    NotificationsTableCompanion incoming, {
+    LocalMutationTicket? admission,
+  }) => _upsertWithOrigin(
+    incoming,
+    _NotificationUpsertOrigin.remoteHydration,
+    admission: admission,
+  );
+
+  Future<bool> _upsertWithOrigin(
+    NotificationsTableCompanion incoming,
+    _NotificationUpsertOrigin origin, {
+    LocalMutationTicket? admission,
   }) => attachedDatabase.localMutations.run(
-    () => attachedDatabase.transaction(() => _upsertPreservingState(incoming)),
+    () => attachedDatabase.transaction(() => _upsert(incoming, origin)),
     ticket: admission,
     waitForReopen: false,
   );
 
-  Future<bool> _upsertPreservingState(
+  Future<bool> _upsert(
     NotificationsTableCompanion incoming,
+    _NotificationUpsertOrigin origin,
   ) async {
     final key = NotificationOccurrence.key(
       id: incoming.id.value,
@@ -86,8 +110,8 @@ class NotificationDao extends DatabaseAccessor<AppDatabase>
     final wasDerivedHabitCompletion =
         isHabitNotification && existing.priority == 'completed';
 
-    final bool nextIsRead;
-    final bool nextIsCompleted;
+    bool nextIsRead;
+    bool nextIsCompleted;
 
     if (!sameEventDay) {
       nextIsRead = isDerivedHabitCompletion;
@@ -103,6 +127,20 @@ class NotificationDao extends DatabaseAccessor<AppDatabase>
       // Interações manuais da Central permanecem preservadas.
       nextIsRead = existing.isRead;
       nextIsCompleted = existing.isCompleted;
+    }
+
+    if (origin == _NotificationUpsertOrigin.remoteHydration) {
+      // Uma key exata comprova a mesma ocorrência, inclusive microssegundos.
+      // Sem key legada, dueDate arredondada pelo Drift não prova equivalência.
+      final sameOccurrence = key != null && existing.occurrenceKey == key;
+      nextIsRead =
+          isDerivedHabitCompletion ||
+          incoming.isRead.value ||
+          (sameOccurrence && existing.isRead);
+      nextIsCompleted =
+          isDerivedHabitCompletion ||
+          incomingIsCompleted ||
+          (sameOccurrence && existing.isCompleted);
     }
 
     final changed =
