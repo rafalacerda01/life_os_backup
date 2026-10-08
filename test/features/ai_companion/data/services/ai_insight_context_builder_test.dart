@@ -1,21 +1,77 @@
 import 'dart:convert';
 
-import 'package:drift/drift.dart' show Value;
+import 'package:drift/drift.dart'
+    show Value, QueryInterceptor, QueryExecutor, ApplyInterceptor;
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
+import 'package:life_os/core/database/local_mutation_gate.dart';
 import 'package:life_os/core/database/app_database.dart';
 import 'package:life_os/features/ai_companion/data/models/ai_insight.dart';
 import 'package:life_os/features/ai_companion/data/repositories/ai_companion_repository.dart';
 import 'package:life_os/features/ai_companion/data/services/ai_insight_context_builder.dart';
 
+class _FlashcardQueryObserver extends QueryInterceptor {
+  final reads =
+      <({String sql, List<Object?> args, List<Map<String, Object?>> rows})>[];
+  Future<void> Function()? afterRead;
+
+  @override
+  Future<List<Map<String, Object?>>> runSelect(
+    QueryExecutor executor,
+    String statement,
+    List<Object?> args,
+  ) async {
+    final rows = await executor.runSelect(statement, args);
+    if (statement.toLowerCase().contains('from flashcards')) {
+      reads.add((sql: statement, args: List.of(args), rows: rows));
+      await afterRead?.call();
+    }
+    return rows;
+  }
+}
+
+class _SnapshotDatabase extends AppDatabase {
+  _SnapshotDatabase(QueryExecutor executor) : super(executor: executor);
+  bool insideSnapshot = false;
+  Future<void> Function()? afterSnapshot;
+
+  @override
+  Future<T> transaction<T>(
+    Future<T> Function() action, {
+    bool requireNew = false,
+    LocalMutationTicket? admission,
+    bool waitForReopen = true,
+  }) async {
+    final result = await super.transaction(
+      () async {
+        insideSnapshot = true;
+        try {
+          return await action();
+        } finally {
+          insideSnapshot = false;
+        }
+      },
+      requireNew: requireNew,
+      admission: admission,
+      waitForReopen: waitForReopen,
+    );
+    await afterSnapshot?.call();
+    return result;
+  }
+}
+
 void main() {
-  late AppDatabase db;
+  late _SnapshotDatabase db;
+  late _FlashcardQueryObserver observer;
   String? uid;
   late AIInsightContextBuilder builder;
   final now = DateTime(2026, 9, 22, 12);
 
   setUp(() {
-    db = AppDatabase(executor: NativeDatabase.memory());
+    observer = _FlashcardQueryObserver();
+    db = _SnapshotDatabase(NativeDatabase.memory().interceptWith(observer));
     uid = 'user-a';
     builder = AIInsightContextBuilder(
       db,
@@ -78,6 +134,416 @@ void main() {
         ),
       );
 
+  Future<void> stats({
+    int reviewQueue = 15,
+    String id = 'main',
+    int streak = 3,
+    double progress = 0.75,
+  }) => db
+      .into(db.studyStats)
+      .insert(
+        StudyStatsCompanion.insert(
+          id: id,
+          streak: streak,
+          reviewQueue: reviewQueue,
+          progress: progress,
+        ),
+      );
+
+  Future<void> subject() => db
+      .into(db.subjects)
+      .insert(
+        SubjectsCompanion.insert(
+          id: 'SECRET_SUBJECT_ID',
+          title: 'SECRET_SUBJECT_TITLE',
+          cardsToReview: 99,
+          streakDays: 3,
+          progress: 0.75,
+          hasExam: false,
+        ),
+      );
+
+  Future<void> card(String id, {DateTime? reviewed}) => db
+      .into(db.flashcards)
+      .insert(
+        FlashcardsCompanion.insert(
+          id: id,
+          subjectId: 'SECRET_SUBJECT_ID',
+          question: 'SECRET_QUESTION',
+          answer: 'SECRET_ANSWER',
+          lastReviewed: Value(reviewed?.millisecondsSinceEpoch),
+        ),
+      );
+
+  int reviews(Map<String, Object?> context, AIInsightIntent intent) =>
+      intent == AIInsightIntent.dailyOverview
+      ? (context['study'] as Map)['review_queue'] as int
+      : (context['current'] as Map)['study_review_queue'] as int;
+
+  const studyIntents = [
+    AIInsightIntent.dailyOverview,
+    AIInsightIntent.weeklyOverview,
+  ];
+  for (final intent in studyIntents) {
+    test(
+      '${intent.wireValue}: stale cache 15 and subject cache 99 yield three due cards',
+      () async {
+        await stats();
+        await subject();
+        await card('SECRET_NEVER_REVIEWED');
+        await card(
+          'SECRET_REVIEWED_YESTERDAY',
+          reviewed: DateTime(2026, 9, 21, 12),
+        );
+        await card(
+          'SECRET_JUST_BEFORE_MIDNIGHT',
+          reviewed: DateTime(2026, 9, 21, 23, 59, 59, 999),
+        );
+        await card('SECRET_REVIEWED_TODAY', reviewed: now);
+        await card('SECRET_MIDNIGHT', reviewed: DateTime(2026, 9, 22));
+        await card('SECRET_FUTURE', reviewed: DateTime(2026, 9, 23));
+        observer.afterRead = () async {
+          expect(db.insideSnapshot, isTrue);
+        };
+
+        final context = await builder.buildContext(
+          intent,
+          expectedUserId: 'user-a',
+        );
+
+        expect(reviews(context, intent), 3);
+        if (intent == AIInsightIntent.dailyOverview) {
+          expect(context['study'], {
+            'streak': 3,
+            'review_queue': 3,
+            'progress_percent': 75.0,
+          });
+        } else {
+          expect((context['current'] as Map)['study_streak'], 3);
+          expect((context['current'] as Map)['study_progress_percent'], 75.0);
+        }
+        final read = observer.reads.single;
+        expect(read.sql.toUpperCase(), contains('COUNT(*)'));
+        expect(read.args, [DateTime(2026, 9, 22).millisecondsSinceEpoch]);
+        expect(read.rows.single.keys, ['due_count']);
+      },
+    );
+
+    test(
+      '${intent.wireValue}: no cards reports zero despite stale cache',
+      () async {
+        await stats();
+        final context = await builder.buildContext(
+          intent,
+          expectedUserId: 'user-a',
+        );
+        expect(reviews(context, intent), 0);
+      },
+    );
+
+    test(
+      '${intent.wireValue}: zero cache does not suppress due cards',
+      () async {
+        await stats(reviewQueue: 0);
+        await subject();
+        await card('SECRET_DUE_CARD');
+        final context = await builder.buildContext(
+          intent,
+          expectedUserId: 'user-a',
+        );
+        expect(reviews(context, intent), 1);
+      },
+    );
+
+    test('${intent.wireValue}: wire JSON contains aggregates only', () async {
+      await stats();
+      await subject();
+      await card('SECRET_FLASHCARD_ID');
+      var calls = 0;
+      final client = MockClient((request) async {
+        calls++;
+        final body = jsonDecode(request.body) as Map;
+        expect(body.keys.toSet(), {'version', 'intent', 'context'});
+        expect(body['intent'], intent.wireValue);
+        expect(
+          reviews(Map<String, Object?>.from(body['context'] as Map), intent),
+          1,
+        );
+        for (final marker in [
+          'SECRET_',
+          'question',
+          'answer',
+          'subject_id',
+          'subjectId',
+          'last_reviewed',
+          'lastReviewed',
+          'user-a',
+        ]) {
+          expect(request.body, isNot(contains(marker)));
+        }
+        return http.Response(
+          jsonEncode({
+            'version': 2,
+            'intent': intent.wireValue,
+            'insight': {
+              'headline': 'Resumo',
+              'summary': 'Seguro',
+              'recommendation': 'Revisar',
+            },
+          }),
+          200,
+        );
+      });
+      addTearDown(client.close);
+      final repository = AICompanionRepository(
+        client: client,
+        idTokenProvider: () async => 'test-id-token',
+        appCheckTokenProvider: () async => 'test-app-check',
+        currentUserIdProvider: () => uid,
+      );
+      final context = await builder.buildContext(
+        intent,
+        expectedUserId: 'user-a',
+      );
+      await repository.requestInsight(
+        intent,
+        context,
+        expectedUserId: 'user-a',
+      );
+      expect(calls, 1);
+    });
+
+    for (final otherStats in [false, true]) {
+      test(
+        '${intent.wireValue}: absent main stats keeps study optional (other stats $otherStats)',
+        () async {
+          if (otherStats) await stats(id: 'other');
+          await subject();
+          await card('SECRET_DUE_CARD');
+          final context = await builder.buildContext(
+            intent,
+            expectedUserId: 'user-a',
+          );
+          if (intent == AIInsightIntent.dailyOverview) {
+            expect(context, isNot(contains('study')));
+          } else {
+            final current = context['current'] as Map;
+            expect(current, isNot(contains('study_streak')));
+            expect(current, isNot(contains('study_review_queue')));
+            expect(current, isNot(contains('study_progress_percent')));
+          }
+          expect(observer.reads, isEmpty);
+        },
+      );
+    }
+
+    test(
+      '${intent.wireValue}: review count reuses the single captured clock instant',
+      () async {
+        await stats();
+        await subject();
+        await card('SECRET_TODAY_CARD', reviewed: DateTime(2026, 9, 22));
+        var clockCalls = 0;
+        builder = AIInsightContextBuilder(
+          db,
+          currentUserIdProvider: () => uid,
+          clock: () {
+            clockCalls++;
+            return clockCalls == 1
+                ? DateTime(2026, 9, 22, 23, 59)
+                : DateTime(2026, 9, 23, 0, 1);
+          },
+        );
+
+        final context = await builder.buildContext(
+          intent,
+          expectedUserId: 'user-a',
+        );
+
+        expect(reviews(context, intent), 0);
+        expect(clockCalls, 1);
+        expect(observer.reads.single.args, [
+          DateTime(2026, 9, 22).millisecondsSinceEpoch,
+        ]);
+      },
+    );
+  }
+
+  for (final (label, reviewed, expected) in [
+    ('never', null, 1),
+    ('yesterday', DateTime(2026, 9, 21, 23, 59, 59, 999), 1),
+    ('today', now, 0),
+    ('exact midnight', DateTime(2026, 9, 22), 0),
+  ]) {
+    test('review boundary $label uses the official due predicate', () async {
+      await stats();
+      await subject();
+      await card('SECRET_CARD', reviewed: reviewed);
+      final context = await builder.buildContext(
+        AIInsightIntent.dailyOverview,
+        expectedUserId: 'user-a',
+      );
+      expect(reviews(context, AIInsightIntent.dailyOverview), expected);
+    });
+  }
+
+  test(
+    'a card reviewed today is due again on the next local day in both contracts',
+    () async {
+      await stats();
+      await subject();
+      await card('SECRET_CARD', reviewed: now);
+      var currentTime = now;
+      builder = AIInsightContextBuilder(
+        db,
+        currentUserIdProvider: () => uid,
+        clock: () => currentTime,
+      );
+      for (final intent in studyIntents) {
+        expect(
+          reviews(
+            await builder.buildContext(intent, expectedUserId: 'user-a'),
+            intent,
+          ),
+          0,
+        );
+      }
+      currentTime = DateTime(2026, 9, 23);
+      for (final intent in studyIntents) {
+        expect(
+          reviews(
+            await builder.buildContext(intent, expectedUserId: 'user-a'),
+            intent,
+          ),
+          1,
+        );
+      }
+    },
+  );
+
+  test(
+    'finance context keeps its fields even when study data is present',
+    () async {
+      await stats();
+      await subject();
+      await card('SECRET_CARD');
+      await transaction(now, 10, 'expense', 'Outros');
+      final context = await builder.buildContext(
+        AIInsightIntent.financeMonthSummary,
+        expectedUserId: 'user-a',
+      );
+      expect(context, {
+        'finance': {
+          'income': 0.0,
+          'expense': 10.0,
+          'balance': -10.0,
+          'transaction_count': 1,
+          'top_expense_categories': [
+            {'category': 'Outros', 'amount': 10.0},
+          ],
+        },
+      });
+      expect(observer.reads, isEmpty);
+    },
+  );
+
+  test(
+    'study streak and progress retain their bounds while review count is dynamic',
+    () async {
+      await stats(reviewQueue: -7, streak: 1000001, progress: 2);
+      await subject();
+      await card('SECRET_CARD');
+      final context = await builder.buildContext(
+        AIInsightIntent.dailyOverview,
+        expectedUserId: 'user-a',
+      );
+      expect(context['study'], {
+        'streak': 1000000,
+        'review_queue': 1,
+        'progress_percent': 100.0,
+      });
+    },
+  );
+
+  for (final phase in ['count', 'after snapshot']) {
+    test('session switch $phase fails closed before remote request', () async {
+      await stats();
+      await subject();
+      await card('SECRET_CARD');
+      if (phase == 'count') {
+        observer.afterRead = () async {
+          uid = 'user-b';
+        };
+      } else {
+        db.afterSnapshot = () async {
+          uid = null;
+        };
+      }
+      var calls = 0;
+      final client = MockClient((_) async {
+        calls++;
+        return http.Response('{}', 200);
+      });
+      addTearDown(client.close);
+      final repository = AICompanionRepository(
+        client: client,
+        idTokenProvider: () async => 'test-id-token',
+        appCheckTokenProvider: () async => 'test-app-check',
+        currentUserIdProvider: () => uid,
+      );
+      Future<void> request() async {
+        final context = await builder.buildContext(
+          AIInsightIntent.dailyOverview,
+          expectedUserId: 'user-a',
+        );
+        await repository.requestInsight(
+          AIInsightIntent.dailyOverview,
+          context,
+          expectedUserId: 'user-a',
+        );
+      }
+
+      await expectLater(request(), throwsA(isA<AIAuthenticationException>()));
+      expect(calls, 0);
+    });
+  }
+
+  for (final invalidUid in ['user-b', null]) {
+    test(
+      'initial session $invalidUid prevents building and remote request',
+      () async {
+        var calls = 0;
+        final client = MockClient((_) async {
+          calls++;
+          return http.Response('{}', 200);
+        });
+        addTearDown(client.close);
+        final repository = AICompanionRepository(
+          client: client,
+          idTokenProvider: () async => 'test-id-token',
+          appCheckTokenProvider: () async => 'test-app-check',
+          currentUserIdProvider: () => uid,
+        );
+        uid = invalidUid;
+        Future<void> request() async {
+          final context = await builder.buildContext(
+            AIInsightIntent.dailyOverview,
+            expectedUserId: 'user-a',
+          );
+          await repository.requestInsight(
+            AIInsightIntent.dailyOverview,
+            context,
+            expectedUserId: 'user-a',
+          );
+        }
+
+        await expectLater(request(), throwsA(isA<AIAuthenticationException>()));
+        expect(calls, 0);
+        expect(observer.reads, isEmpty);
+      },
+    );
+  }
+
   test('empty daily summary is local and zero-valued', () async {
     final context = await builder.buildContext(
       AIInsightIntent.dailyOverview,
@@ -123,6 +589,10 @@ void main() {
               progress: 0.75,
             ),
           );
+      await subject();
+      for (var index = 0; index < 7; index++) {
+        await card('SECRET_FLASHCARD_ID_$index');
+      }
       await db
           .into(db.healthEntries)
           .insert(
@@ -167,6 +637,11 @@ void main() {
       expect(context['goals'], {'active': 1, 'average_progress_percent': 50.0});
       final serialized = jsonEncode(context);
       for (final marker in [
+        'SECRET_QUESTION',
+        'SECRET_ANSWER',
+        'SECRET_SUBJECT_TITLE',
+        'SECRET_SUBJECT_ID',
+        'SECRET_FLASHCARD_ID',
         'SECRET_TASK_TITLE',
         'SECRET_HABIT_TITLE',
         'SECRET_GOAL_TITLE',

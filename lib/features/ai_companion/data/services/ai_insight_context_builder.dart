@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import 'package:drift/drift.dart' show Variable;
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:intl/intl.dart';
 import 'package:life_os/core/database/app_database.dart';
@@ -132,11 +133,26 @@ class AIInsightContextBuilder {
               ),
       };
       final study = studyStats.where((row) => row.id == 'main').firstOrNull;
+      // Mesmo predicado de StudyRepository, com o dia local capturado acima.
+      final dueReviewCount =
+          study == null || intent == AIInsightIntent.financeMonthSummary
+          ? 0
+          : (await _database
+                    .customSelect(
+                      'SELECT COUNT(*) AS due_count FROM flashcards '
+                      'WHERE last_reviewed IS NULL OR last_reviewed < ?',
+                      variables: [
+                        Variable.withInt(today.millisecondsSinceEpoch),
+                      ],
+                      readsFrom: {_database.flashcards},
+                    )
+                    .getSingle())
+                .read<int>('due_count');
       final currentStudy = study == null
           ? null
           : <String, Object?>{
               'streak': _count(study.streak),
-              'review_queue': _count(study.reviewQueue),
+              'review_queue': _count(dueReviewCount),
               'progress_percent': _percent(study.progress * 100),
             };
 
