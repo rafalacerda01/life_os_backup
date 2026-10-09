@@ -11,6 +11,7 @@ export 'notification_remote_effects_barrier.dart';
 import 'package:life_os/core/utils/app_logger.dart';
 import 'package:life_os/features/notifications/data/daos/notification_dao.dart';
 import 'package:life_os/features/notifications/domain/models/notification_model.dart';
+import 'package:life_os/features/notifications/domain/models/notification_occurrence.dart';
 
 /// Repository Offline-First da Central de Notificações.
 ///
@@ -138,11 +139,17 @@ class NotificationsRepository {
       final dao = localDao;
       if (dao == null) return;
 
-      await dao.markAsRead(id);
-      if (_canSend(expectedUid, generation)) {
+      final occurrenceKey = await dao.markAsRead(id);
+      if (occurrenceKey != null && _canSend(expectedUid, generation)) {
         unawaited(
           remoteEffects.track(
-            () => _updateFirestoreState(expectedUid!, id, {'isRead': true}),
+            () => _updateFirestoreState(
+              expectedUid!,
+              generation,
+              id,
+              occurrenceKey,
+              {'isRead': true},
+            ),
           ),
         );
       }
@@ -156,14 +163,17 @@ class NotificationsRepository {
       final dao = localDao;
       if (dao == null) return;
 
-      await dao.markAsCompleted(id);
-      if (_canSend(expectedUid, generation)) {
+      final occurrenceKey = await dao.markAsCompleted(id);
+      if (occurrenceKey != null && _canSend(expectedUid, generation)) {
         unawaited(
           remoteEffects.track(
-            () => _updateFirestoreState(expectedUid!, id, {
-              'isRead': true,
-              'isCompleted': true,
-            }),
+            () => _updateFirestoreState(
+              expectedUid!,
+              generation,
+              id,
+              occurrenceKey,
+              {'isRead': true, 'isCompleted': true},
+            ),
           ),
         );
       }
@@ -264,23 +274,41 @@ class NotificationsRepository {
 
   Future<void> _updateFirestoreState(
     String expectedUid,
+    int generation,
     String id,
+    String occurrenceKey,
     Map<String, Object?> data,
   ) async {
-    if (auth.currentUser?.uid != expectedUid) return;
+    if (!_canSend(expectedUid, generation)) return;
 
     try {
-      if (await localDao?.getNotificationById(id) == null) return;
-      if (auth.currentUser?.uid != expectedUid) return;
-      await firestore
+      final reference = firestore
           .collection('users')
           .doc(expectedUid)
           .collection('notifications')
-          .doc(id)
-          .set({
-            ...data,
-            'updatedAt': FieldValue.serverTimestamp(),
-          }, SetOptions(merge: true));
+          .doc(id);
+      await firestore.runTransaction<void>((transaction) async {
+        if (!_canSend(expectedUid, generation)) return;
+        final snapshot = await transaction.get(reference);
+        if (!snapshot.exists) return;
+        final remote = snapshot.data();
+        final moduleType = remote?['moduleType'];
+        final dueDate = remote?['dueDate'];
+        if (moduleType is! String || dueDate is! Timestamp) return;
+        final remoteKey = NotificationOccurrence.key(
+          id: id,
+          moduleType: moduleType,
+          dueDate: dueDate.toDate(),
+        );
+        if (remoteKey != occurrenceKey || !_canSend(expectedUid, generation)) {
+          return;
+        }
+        // Only remote state is touched: SDK retries re-read identity and fences.
+        transaction.update(reference, {
+          ...data,
+          'updatedAt': FieldValue.serverTimestamp(),
+        });
+      });
     } catch (_) {
       AppLogger.e('Erro ao sincronizar estado da notificação');
     }

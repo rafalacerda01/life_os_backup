@@ -7,12 +7,14 @@ import 'package:drift/drift.dart' show Value;
 import 'package:drift/native.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:life_os/core/database/app_database.dart';
+import 'package:flutter/foundation.dart' show mapEquals;
+import 'package:life_os/core/database/app_database.dart' hide Transaction;
 import 'package:life_os/core/database/local_mutation_gate.dart';
 import 'package:life_os/core/services/notification_preferences.dart';
 import 'package:life_os/features/notifications/data/daos/notification_dao.dart';
 import 'package:life_os/features/notifications/data/repositories/notifications_repository.dart';
 import 'package:life_os/features/notifications/domain/models/notification_model.dart';
+import 'package:life_os/features/notifications/domain/models/notification_occurrence.dart';
 import 'package:life_os/features/notifications/domain/providers/notification_engine.dart';
 
 class _User extends Fake implements User {
@@ -37,6 +39,47 @@ class _Firestore extends Fake implements FirebaseFirestore {
   Completer<void>? readRelease;
   final readStarted = Completer<void>();
   Object? writeError;
+  Future<void> Function()? afterTransactionRead;
+  Future<void> Function(int attempt)? beforeTransactionCommit;
+  final transactionReads = <String>[];
+  final registeredUpdates = <String>[];
+  int transactionAttempts = 0;
+
+  @override
+  Future<T> runTransaction<T>(
+    TransactionHandler<T> transactionHandler, {
+    Duration timeout = const Duration(seconds: 30),
+    int maxAttempts = 5,
+  }) async {
+    for (var attempt = 1; attempt <= maxAttempts; attempt++) {
+      transactionAttempts++;
+      final transaction = _Transaction(this);
+      final result = await transactionHandler(transaction);
+      await beforeTransactionCommit?.call(attempt);
+      if (transaction.observed.entries.any(
+        (entry) => !mapEquals(documents[entry.key], entry.value),
+      ))
+        continue;
+      if (transaction.updates.isNotEmpty) {
+        if (!writeStarted.isCompleted) writeStarted.complete();
+        await writeRelease?.future;
+        if (transaction.observed.entries.any(
+          (entry) => !mapEquals(documents[entry.key], entry.value),
+        ))
+          continue;
+        if (writeError != null) throw writeError!;
+        for (final entry in transaction.updates.entries) {
+          if (!documents.containsKey(entry.key)) {
+            throw StateError('update cannot create a missing document');
+          }
+          documents[entry.key] = {...documents[entry.key]!, ...entry.value};
+          writes.add(entry.key);
+        }
+      }
+      return result;
+    }
+    throw StateError('transaction conflict exhausted');
+  }
 
   @override
   CollectionReference<Map<String, dynamic>> collection(String path) =>
@@ -83,7 +126,9 @@ class _Document extends Fake
     if (!owner.writeStarted.isCompleted) owner.writeStarted.complete();
     await owner.writeRelease?.future;
     if (owner.writeError != null) throw owner.writeError!;
-    owner.documents[path] = Map.of(data);
+    owner.documents[path] = options?.merge == true
+        ? {...?owner.documents[path], ...data}
+        : Map.of(data);
   }
 
   @override
@@ -91,6 +136,58 @@ class _Document extends Fake
     owner.deletes.add(path);
     owner.documents.remove(path);
   }
+}
+
+class _Transaction extends Fake implements Transaction {
+  _Transaction(this.owner);
+  final _Firestore owner;
+  final observed = <String, Map<String, dynamic>?>{};
+  final updates = <String, Map<String, dynamic>>{};
+
+  @override
+  Future<DocumentSnapshot<T>> get<T extends Object?>(
+    DocumentReference<T> documentReference,
+  ) async {
+    if (updates.isNotEmpty) throw StateError('all reads must precede writes');
+    final current = owner.documents[documentReference.path];
+    final snapshot = current == null
+        ? null
+        : Map<String, dynamic>.from(current);
+    observed[documentReference.path] = snapshot;
+    owner.transactionReads.add(documentReference.path);
+    await owner.afterTransactionRead?.call();
+    return _DocumentSnapshot(documentReference.path, snapshot)
+        as DocumentSnapshot<T>;
+  }
+
+  @override
+  Transaction update(DocumentReference reference, Map<String, dynamic> data) {
+    if (!observed.containsKey(reference.path) ||
+        observed[reference.path] == null) {
+      throw StateError('update requires a read of an existing document');
+    }
+    if (data.keys.any(
+      (key) => !{'isRead', 'isCompleted', 'updatedAt'}.contains(key),
+    )) {
+      throw StateError('only notification state may be updated');
+    }
+    updates[reference.path] = Map.from(data);
+    owner.registeredUpdates.add(reference.path);
+    return this;
+  }
+}
+
+class _DocumentSnapshot extends Fake
+    implements DocumentSnapshot<Map<String, dynamic>> {
+  _DocumentSnapshot(this.path, this.values);
+  final String path;
+  final Map<String, dynamic>? values;
+  @override
+  String get id => path.split('/').last;
+  @override
+  bool get exists => values != null;
+  @override
+  Map<String, dynamic>? data() => values;
 }
 
 class _Snapshot extends Fake implements QuerySnapshot<Map<String, dynamic>> {
@@ -114,6 +211,16 @@ class _BlockingDao extends NotificationDao {
   String? block;
   final started = Completer<void>();
   final release = Completer<void>();
+  Future<void> Function(NotificationsTableData?)? afterLocalRead;
+  int readMarks = 0;
+  int completedMarks = 0;
+
+  @override
+  Future<NotificationsTableData?> getNotificationById(String id) async {
+    final row = await super.getNotificationById(id);
+    await afterLocalRead?.call(row);
+    return row;
+  }
 
   Future<void> pause(String operation) async {
     if (block != operation) return;
@@ -144,15 +251,19 @@ class _BlockingDao extends NotificationDao {
   }
 
   @override
-  Future<void> markAsRead(String id) async {
-    await super.markAsRead(id);
+  Future<String?> markAsRead(String id) async {
+    readMarks++;
+    final key = await super.markAsRead(id);
     await pause('read');
+    return key;
   }
 
   @override
-  Future<void> markAsCompleted(String id) async {
-    await super.markAsCompleted(id);
+  Future<String?> markAsCompleted(String id) async {
+    completedMarks++;
+    final key = await super.markAsCompleted(id);
     await pause('complete');
+    return key;
   }
 
   @override
@@ -209,6 +320,406 @@ void main() {
       .insert(NotificationModel.toCompanion(notification))
       .then((_) {});
 
+  Future<void> mark(String operation, String id) => operation == 'read'
+      ? repository.markAsReadLocal(id)
+      : repository.markAsCompletedLocal(id);
+
+  group('VERIFY-02 occurrence flags', () {
+    for (final operation in ['read', 'complete']) {
+      for (final (id, moduleType) in [
+        ('habit_occurrence', 'habits'),
+        ('exam_occurrence', 'studies'),
+        ('health_med_occurrence', 'health'),
+      ]) {
+        for (final shift in [
+          const Duration(days: 1),
+          const Duration(microseconds: 1),
+        ]) {
+          test(
+            '$operation $moduleType D1-D2 shift $shift preserves remote flags',
+            () async {
+              final d1 = notification.copyWith(id: id, moduleType: moduleType);
+              final d2 = d1.copyWith(dueDate: day.add(shift));
+              final remotePath = 'users/user-a/notifications/$id';
+              await dao.upsertFromRemote(NotificationModel.toCompanion(d1));
+              firestore.documents[remotePath] = d1
+                  .toFirestore()
+                  .cast<String, dynamic>();
+              dao.block = operation;
+              final action = mark(operation, id);
+              await dao.started.future;
+              final local = (await dao.getNotificationById(id))!;
+              expect(local.isRead, isTrue);
+              expect(local.isCompleted, operation == 'complete');
+              final replacement = d2.toFirestore().cast<String, dynamic>();
+              firestore.documents[remotePath] = replacement;
+              dao.release.complete();
+              await action;
+              await barrier.drainCurrent();
+              expect(firestore.documents[remotePath], replacement);
+              expect(firestore.writes, isEmpty);
+              expect(firestore.deletes, isEmpty);
+              expect(await db.select(db.syncQueueTable).get(), isEmpty);
+            },
+          );
+        }
+
+        test(
+          '$operation same $moduleType occurrence synchronizes exactly once',
+          () async {
+            final current = notification.copyWith(
+              id: id,
+              moduleType: moduleType,
+              dueDate: day.add(const Duration(microseconds: 123)),
+            );
+            final remotePath = 'users/user-a/notifications/$id';
+            await dao.upsertFromRemote(NotificationModel.toCompanion(current));
+            firestore.documents[remotePath] = current
+                .toFirestore()
+                .cast<String, dynamic>();
+            final before = Map<String, dynamic>.from(
+              firestore.documents[remotePath]!,
+            );
+            await mark(operation, id);
+            await barrier.drainCurrent();
+            final result = firestore.documents[remotePath]!;
+            expect(result['isRead'], isTrue);
+            expect(result['isCompleted'], operation == 'complete');
+            expect(result['dueDate'], before['dueDate']);
+            expect(result['moduleType'], moduleType);
+            expect(result['title'], before['title']);
+            expect(firestore.writes, [remotePath]);
+            expect(firestore.transactionReads, [remotePath]);
+            expect(firestore.transactionAttempts, 1);
+          },
+        );
+      }
+
+      test('$operation missing remote document is never created', () async {
+        await seed();
+        await mark(operation, notification.id);
+        await barrier.drainCurrent();
+        expect(firestore.documents, isEmpty);
+        expect(firestore.writes, isEmpty);
+        expect(
+          (await dao.getNotificationById(notification.id))!.isRead,
+          isTrue,
+        );
+      });
+
+      for (final key in <String?>[
+        null,
+        'invalid',
+        '[1,"wrong-id","health",1]',
+        '[1,"health_med_notification-a","health",9223372036854775807]',
+        NotificationOccurrence.key(
+          id: notification.id,
+          moduleType: 'health',
+          dueDate: day,
+        )!.replaceFirst('[', '[ '),
+      ]) {
+        test(
+          '$operation local legacy/malformed key $key stays offline',
+          () async {
+            await db
+                .into(db.notificationsTable)
+                .insert(
+                  NotificationModel.toCompanion(
+                    notification,
+                  ).copyWith(occurrenceKey: Value(key)),
+                );
+            firestore.documents[path] = notification
+                .toFirestore()
+                .cast<String, dynamic>();
+            final before = Map<String, dynamic>.from(
+              firestore.documents[path]!,
+            );
+            await mark(operation, notification.id);
+            await barrier.drainCurrent();
+            final local = (await dao.getNotificationById(notification.id))!;
+            expect(local.isRead, isTrue);
+            expect(local.isCompleted, operation == 'complete');
+            expect(firestore.documents[path], before);
+            expect(firestore.writes, isEmpty);
+            expect(firestore.transactionReads, isEmpty);
+          },
+        );
+      }
+
+      for (final remoteIdentity in <Map<String, dynamic>>[
+        {'moduleType': 'studies', 'dueDate': Timestamp.fromDate(day)},
+        {'moduleType': 'health'},
+        {'moduleType': 42, 'dueDate': Timestamp.fromDate(day)},
+        {'moduleType': 'health', 'dueDate': '2026-10-03'},
+        {'moduleType': 'health', 'dueDate': null},
+        {'dueDate': Timestamp.fromDate(day)},
+        {'moduleType': 'health', 'dueDate': day},
+      ]) {
+        test(
+          '$operation rejects malformed/incompatible remote $remoteIdentity',
+          () async {
+            await seed();
+            firestore.documents[path] = {
+              'isRead': false,
+              'isCompleted': false,
+              ...remoteIdentity,
+            };
+            final before = Map<String, dynamic>.from(
+              firestore.documents[path]!,
+            );
+            await mark(operation, notification.id);
+            await barrier.drainCurrent();
+            expect(firestore.documents[path], before);
+            expect(firestore.writes, isEmpty);
+          },
+        );
+      }
+
+      test(
+        '$operation captures D1 even if Drift hydrates D2 before continuation',
+        () async {
+          await seed();
+          firestore.documents[path] = notification
+              .toFirestore()
+              .cast<String, dynamic>();
+          dao.block = operation;
+          final action = mark(operation, notification.id);
+          await dao.started.future;
+          final d2 = notification.copyWith(
+            dueDate: day.add(const Duration(microseconds: 1)),
+          );
+          await dao.upsertFromRemote(NotificationModel.toCompanion(d2));
+          firestore.documents[path] = d2.toFirestore().cast<String, dynamic>();
+          dao.release.complete();
+          await action;
+          await barrier.drainCurrent();
+          final local = (await dao.getNotificationById(notification.id))!;
+          expect(
+            local.occurrenceKey,
+            NotificationModel.toCompanion(d2).occurrenceKey.value,
+          );
+          expect(local.isRead, isFalse);
+          expect(local.isCompleted, isFalse);
+          expect(firestore.documents[path]!['isRead'], isFalse);
+          expect(firestore.documents[path]!['isCompleted'], isFalse);
+          expect(firestore.writes, isEmpty);
+        },
+      );
+
+      test('$operation Firestore failure preserves local flags', () async {
+        await seed();
+        firestore.documents[path] = notification
+            .toFirestore()
+            .cast<String, dynamic>();
+        firestore.writeError = StateError('offline');
+        await expectLater(mark(operation, notification.id), completes);
+        await barrier.drainCurrent();
+        final local = (await dao.getNotificationById(notification.id))!;
+        expect(local.isRead, isTrue);
+        expect(local.isCompleted, operation == 'complete');
+        expect(firestore.documents[path]!['isRead'], isFalse);
+        expect(firestore.documents[path]!['isCompleted'], isFalse);
+      });
+    }
+  });
+
+  group('VERIFY-02 transactional concurrency', () {
+    for (final operation in ['read', 'complete']) {
+      test(
+        '$operation occurrence capture and local flags exclude interleaved hydration',
+        () async {
+          await seed();
+          final captured = Completer<void>();
+          final release = Completer<void>();
+          addTearDown(() {
+            if (!release.isCompleted) release.complete();
+          });
+          dao.afterLocalRead = (row) {
+            dao.afterLocalRead = null;
+            expect(
+              row!.occurrenceKey,
+              NotificationModel.toCompanion(notification).occurrenceKey.value,
+            );
+            captured.complete();
+            return release.future;
+          };
+          final action = mark(operation, notification.id);
+          await captured.future;
+          final d2 = notification.copyWith(
+            dueDate: day.add(const Duration(microseconds: 1)),
+          );
+          firestore.documents[path] = d2.toFirestore().cast<String, dynamic>();
+          var hydrated = false;
+          final hydration = dao
+              .upsertFromRemote(NotificationModel.toCompanion(d2))
+              .then((_) => hydrated = true);
+          await pumpEventQueue();
+          expect(hydrated, isFalse);
+          release.complete();
+          await action;
+          await hydration;
+          await barrier.drainCurrent();
+          final local = (await dao.getNotificationById(notification.id))!;
+          expect(
+            local.occurrenceKey,
+            NotificationModel.toCompanion(d2).occurrenceKey.value,
+          );
+          expect(local.isRead, isFalse);
+          expect(local.isCompleted, isFalse);
+          expect(firestore.writes, isEmpty);
+        },
+      );
+
+      for (final concurrentChange in ['D2', 'same occurrence', 'delete']) {
+        test(
+          '$operation optimistic retry after $concurrentChange never commits stale state',
+          () async {
+            await seed();
+            firestore.documents[path] = notification
+                .toFirestore()
+                .cast<String, dynamic>();
+            final readAndRegistered = Completer<void>();
+            final release = Completer<void>();
+            addTearDown(() {
+              if (!release.isCompleted) release.complete();
+            });
+            firestore.beforeTransactionCommit = (attempt) async {
+              if (attempt == 1) {
+                readAndRegistered.complete();
+                await release.future;
+              }
+            };
+            await mark(operation, notification.id);
+            await readAndRegistered.future;
+            expect(firestore.registeredUpdates, [path]);
+            expect(firestore.writes, isEmpty);
+            if (concurrentChange == 'delete') {
+              firestore.documents.remove(path);
+            } else if (concurrentChange == 'D2') {
+              firestore.documents[path] = notification
+                  .copyWith(dueDate: day.add(const Duration(microseconds: 1)))
+                  .toFirestore()
+                  .cast<String, dynamic>();
+            } else {
+              firestore.documents[path] = {
+                ...firestore.documents[path]!,
+                'title': 'Concurrent content',
+                'isCompleted': true,
+              };
+            }
+            final concurrent = firestore.documents[path] == null
+                ? null
+                : Map<String, dynamic>.from(firestore.documents[path]!);
+            release.complete();
+            await barrier.drainCurrent();
+            expect(firestore.transactionAttempts, 2);
+            expect(firestore.transactionReads, [path, path]);
+            expect(dao.readMarks, operation == 'read' ? 1 : 0);
+            expect(dao.completedMarks, operation == 'complete' ? 1 : 0);
+            if (concurrentChange == 'same occurrence') {
+              expect(firestore.writes, [path]);
+              expect(firestore.documents[path]!['title'], 'Concurrent content');
+              expect(firestore.documents[path]!['isRead'], isTrue);
+              expect(firestore.documents[path]!['isCompleted'], isTrue);
+            } else {
+              expect(firestore.writes, isEmpty);
+              expect(firestore.documents[path], concurrent);
+            }
+            expect(await db.select(db.syncQueueTable).get(), isEmpty);
+          },
+        );
+      }
+
+      for (final transition in ['UID B', 'logout', 'A-null-A']) {
+        test(
+          '$operation after transactional read rejects $transition before update',
+          () async {
+            await seed();
+            firestore.documents[path] = notification
+                .toFirestore()
+                .cast<String, dynamic>();
+            final original = Map<String, dynamic>.from(
+              firestore.documents[path]!,
+            );
+            final captured = Completer<void>();
+            final release = Completer<void>();
+            addTearDown(() {
+              if (!release.isCompleted) release.complete();
+            });
+            firestore.afterTransactionRead = () {
+              firestore.afterTransactionRead = null;
+              captured.complete();
+              return release.future;
+            };
+            await mark(operation, notification.id);
+            await captured.future;
+            var drained = false;
+            Future<void>? drain;
+            if (transition != 'UID B') {
+              drain = barrier.sealAndDrain().then((_) => drained = true);
+              expect(barrier.resume(), isFalse);
+              auth.user = null;
+              if (transition == 'A-null-A') auth.user = _User('user-a');
+            } else {
+              auth.user = _User('user-b');
+            }
+            expect(drained, isFalse);
+            release.complete();
+            if (drain != null) {
+              await drain;
+            } else {
+              await barrier.drainCurrent();
+            }
+            expect(firestore.registeredUpdates, isEmpty);
+            expect(firestore.writes, isEmpty);
+            expect(firestore.documents[path], original);
+            expect(firestore.documents.keys, [path]);
+            if (transition == 'A-null-A') {
+              expect(barrier.resume(), isTrue);
+              await mark(operation, notification.id);
+              await barrier.drainCurrent();
+              expect(firestore.writes, [path]);
+            }
+          },
+        );
+      }
+
+      test(
+        '$operation barrier waits for already registered SDK update',
+        () async {
+          await seed();
+          firestore.documents[path] = notification
+              .toFirestore()
+              .cast<String, dynamic>();
+          final release = Completer<void>();
+          firestore.writeRelease = release;
+          addTearDown(() {
+            if (!release.isCompleted) release.complete();
+          });
+          await mark(operation, notification.id);
+          await firestore.writeStarted.future;
+          expect(firestore.registeredUpdates, [path]);
+          var drained = false;
+          final drain = barrier.sealAndDrain().then((_) => drained = true);
+          auth.user = _User('user-b');
+          expect(drained, isFalse);
+          expect(barrier.resume(), isFalse);
+          release.complete();
+          await drain;
+          expect(drained, isTrue);
+          expect(firestore.writes, [path]);
+          expect(firestore.documents.keys, [path]);
+          expect(firestore.documents[path]!['isRead'], isTrue);
+          expect(
+            firestore.documents[path]!['isCompleted'],
+            operation == 'complete',
+          );
+          expect(barrier.resume(), isTrue);
+        },
+      );
+    }
+  });
+
   for (final operation in ['save', 'read', 'complete', 'delete']) {
     test('$operation A to B during local await never targets B', () async {
       if (operation != 'save') await seed();
@@ -232,6 +743,11 @@ void main() {
   for (final operation in ['save', 'read', 'complete', 'delete']) {
     test('$operation in stable session targets only captured A', () async {
       if (operation != 'save') await seed();
+      if (operation == 'read' || operation == 'complete') {
+        firestore.documents[path] = notification
+            .toFirestore()
+            .cast<String, dynamic>();
+      }
       switch (operation) {
         case 'save':
           await repository.saveLocalNotification(notification);
@@ -242,7 +758,7 @@ void main() {
         case 'delete':
           await repository.deleteNotification(notification.id);
       }
-      await barrier.sealAndDrain();
+      await barrier.drainCurrent();
       if (operation == 'delete') {
         expect(firestore.deletes, isEmpty);
         final item = (await db.getPendingSyncItems('user-a')).single;

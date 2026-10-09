@@ -181,21 +181,50 @@ class NotificationDao extends DatabaseAccessor<AppDatabase>
     return true;
   }
 
-  Future<void> markAsRead(String id) => attachedDatabase.localMutations.run(
-    () async => (update(notificationsTable)..where((t) => t.id.equals(id)))
-        .write(const NotificationsTableCompanion(isRead: Value(true))),
+  Future<String?> markAsRead(String id) => _markOccurrenceState(
+    id,
+    const NotificationsTableCompanion(isRead: Value(true)),
   );
 
-  Future<void> markAsCompleted(String id) =>
-      attachedDatabase.localMutations.run(
-        () async =>
-            (update(notificationsTable)..where((t) => t.id.equals(id))).write(
-              const NotificationsTableCompanion(
-                isRead: Value(true),
-                isCompleted: Value(true),
-              ),
-            ),
-      );
+  Future<String?> markAsCompleted(String id) => _markOccurrenceState(
+    id,
+    const NotificationsTableCompanion(
+      isRead: Value(true),
+      isCompleted: Value(true),
+    ),
+  );
+
+  /// Return the exact occurrence affected by the flags, without an interleaving
+  /// hydration between its capture and the local update. Legacy rows stay local.
+  Future<String?> _markOccurrenceState(
+    String id,
+    NotificationsTableCompanion state,
+  ) => attachedDatabase.localMutations.run(
+    () => attachedDatabase.transaction(() async {
+      final existing = await getNotificationById(id);
+      if (existing == null) return null;
+      String? key;
+      try {
+        key = NotificationOccurrence.key(
+          id: id,
+          moduleType: existing.moduleType,
+          dueDate: NotificationOccurrence.preciseDueDate(
+            existing.occurrenceKey,
+            id,
+          ),
+        );
+        if (key != existing.occurrenceKey) key = null;
+      } on ArgumentError {
+        // An out-of-range legacy key cannot establish an occurrence identity.
+        key = null;
+      }
+      await (update(
+        notificationsTable,
+      )..where((t) => t.id.equals(id))).write(state);
+      return key;
+    }),
+    waitForReopen: false,
+  );
 
   Future<void> deleteNotification(String id) =>
       attachedDatabase.localMutations.run(
