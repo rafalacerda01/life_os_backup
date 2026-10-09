@@ -61,6 +61,7 @@ class _CheckInDocument extends Fake
       throw FirebaseException(plugin: 'cloud_firestore', code: 'unavailable');
     }
     owner.writes[id] = Map<String, dynamic>.from(data);
+    owner.remoteDocs[id] = {...?owner.remoteDocs[id], ...data};
   }
 }
 
@@ -77,10 +78,13 @@ class _CheckInsCollection extends Fake
   @override
   Future<QuerySnapshot<Map<String, dynamic>>> get([GetOptions? options]) async {
     await owner.beforeGet?.call();
-    return _RemoteSnapshot([
+    final snapshot = _RemoteSnapshot([
       for (final entry in owner.remoteDocs.entries)
-        _RemoteDocument(entry.key, entry.value),
+        _RemoteDocument(entry.key, Map<String, dynamic>.from(entry.value)),
     ]);
+    owner.lastSnapshot = snapshot;
+    await owner.afterSnapshotCaptured?.call();
+    return snapshot;
   }
 }
 
@@ -115,7 +119,9 @@ class _Firestore extends Fake implements FirebaseFirestore {
   final writes = <String, Map<String, dynamic>>{};
   final failSetIds = <String>{};
   Future<void> Function()? beforeGet;
+  Future<void> Function()? afterSnapshotCaptured;
   Future<void> Function(String id)? beforeSet;
+  _RemoteSnapshot? lastSnapshot;
   String? lastUid;
   int setCalls = 0;
 
@@ -160,6 +166,289 @@ void main() {
         )
         .then((_) {});
   }
+
+  Future<({Future<void> pull, Completer<void> release})>
+  holdCapturedPull() async {
+    final captured = Completer<void>();
+    final release = Completer<void>();
+    firestore.afterSnapshotCaptured = () {
+      firestore.afterSnapshotCaptured = null;
+      captured.complete();
+      return release.future;
+    };
+    final pull = repository.syncCheckinsFromFirebaseToLocal();
+    addTearDown(() async {
+      if (!release.isCompleted) release.complete();
+      await pull;
+    });
+    await captured.future;
+    return (pull: pull, release: release);
+  }
+
+  group('pull protects local revisions', () {
+    const id = '2026-09-24';
+    final storedDate = DateTime(2026, 9, 24, 10);
+
+    void remote(double energy, {String checkInId = id}) {
+      firestore.remoteDocs[checkInId] = {
+        'energy': energy,
+        'focus': 3.0,
+        'motivation': 4.0,
+      };
+    }
+
+    test('confirmed domain save survives a captured V0 snapshot', () async {
+      final today = DateTime.now();
+      final todayId =
+          '${today.year.toString().padLeft(4, '0')}-'
+          '${today.month.toString().padLeft(2, '0')}-'
+          '${today.day.toString().padLeft(2, '0')}';
+      await seed(todayId, 2, isSynced: true, createdAt: today);
+      remote(2, checkInId: todayId);
+      final held = await holdCapturedPull();
+
+      await repository.saveDailyMetrics(energy: 5, focus: 3, motivation: 4);
+      expect(await repository.syncPendingCheckIns(), isTrue);
+      final confirmed = await db.select(db.checkInTable).getSingle();
+      expect(confirmed.id, todayId);
+      expect(confirmed.energy, 5);
+      expect(confirmed.isSynced, isTrue);
+      expect(firestore.remoteDocs[todayId]!['energy'], 5);
+      expect(firestore.lastSnapshot!.docs.single.data()['energy'], 2);
+
+      held.release.complete();
+      await held.pull;
+
+      expect(await db.select(db.checkInTable).getSingle(), confirmed);
+      expect(firestore.remoteDocs[todayId]!['energy'], 5);
+      expect(await db.getPendingCheckIns(), isEmpty);
+    });
+
+    test('row created and confirmed during GET is preserved', () async {
+      remote(2);
+      final held = await holdCapturedPull();
+      await seed(id, 5, createdAt: storedDate);
+      expect(await repository.syncPendingCheckIns(), isTrue);
+      final confirmed = await db.select(db.checkInTable).getSingle();
+
+      held.release.complete();
+      await held.pull;
+
+      expect(await db.select(db.checkInTable).getSingle(), confirmed);
+      expect(firestore.remoteDocs[id]!['energy'], 5);
+      expect(firestore.lastSnapshot!.docs.single.data()['energy'], 2);
+    });
+
+    test('two confirmed edits during one pull preserve the latest', () async {
+      await seed(id, 2, isSynced: true, createdAt: storedDate);
+      remote(2);
+      final held = await holdCapturedPull();
+      for (final energy in [3.0, 5.0]) {
+        await seed(id, energy, createdAt: storedDate);
+        expect(await repository.syncPendingCheckIns(), isTrue);
+      }
+      final confirmed = await db.select(db.checkInTable).getSingle();
+      held.release.complete();
+      await held.pull;
+
+      expect(await db.select(db.checkInTable).getSingle(), confirmed);
+      expect(confirmed.energy, 5);
+      expect(firestore.remoteDocs[id]!['energy'], 5);
+      expect(firestore.setCalls, 2);
+    });
+
+    test('ABA edits with identical stored timestamps are protected', () async {
+      await seed(id, 2, isSynced: true, createdAt: storedDate);
+      final baseline = await db.select(db.checkInTable).getSingle();
+      remote(9);
+      final held = await holdCapturedPull();
+      for (final energy in [5.0, 2.0]) {
+        await seed(id, energy, createdAt: storedDate);
+        expect(await repository.syncPendingCheckIns(), isTrue);
+      }
+      expect(await db.select(db.checkInTable).getSingle(), baseline);
+      held.release.complete();
+      await held.pull;
+
+      expect(await db.select(db.checkInTable).getSingle(), baseline);
+      expect(firestore.remoteDocs[id]!['energy'], 2);
+      expect(firestore.lastSnapshot!.docs.single.data()['energy'], 9);
+    });
+
+    test('identical confirmed replacement still counts as an edit', () async {
+      await seed(id, 2, isSynced: true, createdAt: storedDate);
+      final baseline = await db.select(db.checkInTable).getSingle();
+      remote(9);
+      final held = await holdCapturedPull();
+      await seed(id, 2, createdAt: storedDate);
+      expect(await repository.syncPendingCheckIns(), isTrue);
+      expect(await db.select(db.checkInTable).getSingle(), baseline);
+      held.release.complete();
+      await held.pull;
+
+      expect(await db.select(db.checkInTable).getSingle(), baseline);
+    });
+
+    test('edit remains pending while its upload is held', () async {
+      await seed(id, 2, isSynced: true, createdAt: storedDate);
+      remote(2);
+      final held = await holdCapturedPull();
+      await seed(id, 5, createdAt: storedDate);
+      final uploadStarted = Completer<void>();
+      final uploadRelease = Completer<void>();
+      firestore.beforeSet = (_) {
+        uploadStarted.complete();
+        return uploadRelease.future;
+      };
+      final uploading = repository.syncPendingCheckIns();
+      addTearDown(() async {
+        if (!uploadRelease.isCompleted) uploadRelease.complete();
+        await uploading;
+      });
+      await uploadStarted.future;
+      held.release.complete();
+      await held.pull;
+
+      final pending = (await db.getPendingCheckIns()).single as CheckInEntry;
+      expect(pending.energy, 5);
+      expect(pending.createdAt, storedDate);
+      expect(firestore.remoteDocs[id]!['energy'], 2);
+      uploadRelease.complete();
+      expect(await uploading, isTrue);
+      expect(firestore.remoteDocs[id]!['energy'], 5);
+    });
+
+    test('failed upload and unrelated pending row survive the pull', () async {
+      await seed(id, 2, isSynced: true, createdAt: storedDate);
+      remote(2);
+      final held = await holdCapturedPull();
+      await seed(id, 5, createdAt: storedDate);
+      firestore.failSetIds.add(id);
+      expect(await repository.syncPendingCheckIns(), isFalse);
+      await seed('2026-09-23', 4);
+      final pending = await db.getPendingCheckIns();
+      held.release.complete();
+      await held.pull;
+
+      expect(await db.getPendingCheckIns(), unorderedEquals(pending));
+      expect(firestore.remoteDocs[id]!['energy'], 2);
+      expect(firestore.writes, isEmpty);
+    });
+
+    test(
+      'unchanged synced row permits hydration and keeps civil date',
+      () async {
+        await seed(id, 2, isSynced: true, createdAt: storedDate);
+        remote(9);
+        firestore.remoteDocs[id]!['updatedAt'] = Timestamp.fromDate(
+          DateTime.utc(2100, 1, 1),
+        );
+        final held = await holdCapturedPull();
+        held.release.complete();
+        await held.pull;
+
+        final local = await db.select(db.checkInTable).getSingle();
+        expect(local.energy, 9);
+        expect(local.createdAt, DateTime(2026, 9, 24));
+        expect(local.createdAt.isUtc, isFalse);
+        expect(local.isSynced, isTrue);
+        expect(firestore.writes, isEmpty);
+      },
+    );
+
+    test('UID switch rejects a previously captured snapshot', () async {
+      await seed(id, 2, isSynced: true, createdAt: storedDate);
+      final original = await db.select(db.checkInTable).getSingle();
+      remote(9);
+      final held = await holdCapturedPull();
+      auth.currentUser = _User('user-b');
+      held.release.complete();
+      await held.pull;
+
+      expect(await db.select(db.checkInTable).getSingle(), original);
+      expect(firestore.writes, isEmpty);
+    });
+
+    test('reopening the same UID cannot revive an old pull ticket', () async {
+      db.localMutations.bindSessionReader(() => auth.currentUser?.uid);
+      db.localMutations.openPreparedSession();
+      await seed(id, 2, isSynced: true, createdAt: storedDate);
+      final original = await db.select(db.checkInTable).getSingle();
+      remote(9);
+      final held = await holdCapturedPull();
+      final barrier = db.localMutations.beginQuiesce('user-a');
+      await barrier.drain();
+      auth.currentUser = null;
+      db.localMutations.observeSession(null);
+      barrier.finish(signOutConfirmed: true);
+      auth.currentUser = _User('user-a');
+      db.localMutations.observeSession('user-a');
+      db.localMutations.openPreparedSession();
+      held.release.complete();
+      await held.pull;
+
+      expect(await db.select(db.checkInTable).getSingle(), original);
+      await repository.syncCheckinsFromFirebaseToLocal();
+      expect((await db.select(db.checkInTable).getSingle()).energy, 9);
+    });
+
+    test('application failure rolls back every hydrated row', () async {
+      await seed(id, 2, isSynced: true, createdAt: storedDate);
+      await seed('2026-09-23', 4);
+      final original = await db.select(db.checkInTable).get();
+      final pending = await db.getPendingCheckIns();
+      remote(9);
+      firestore.remoteDocs['2026-09-25'] = {'energy': 'invalid'};
+      final held = await holdCapturedPull();
+      held.release.complete();
+      await held.pull;
+
+      expect(await db.select(db.checkInTable).get(), unorderedEquals(original));
+      expect(await db.getPendingCheckIns(), unorderedEquals(pending));
+      remote(3, checkInId: '2026-09-25');
+      await repository.syncCheckinsFromFirebaseToLocal();
+      final rows = await db.select(db.checkInTable).get();
+      expect(rows.singleWhere((row) => row.id == id).energy, 9);
+      expect(await db.getPendingCheckIns(), unorderedEquals(pending));
+    });
+
+    test('in-place value change is protected even with stable rowid', () async {
+      await seed(id, 2, isSynced: true, createdAt: storedDate);
+      remote(9);
+      final held = await holdCapturedPull();
+      await (db.update(db.checkInTable)..where((row) => row.id.equals(id)))
+          .write(const CheckInTableCompanion(energy: Value(5)));
+      held.release.complete();
+      await held.pull;
+
+      final local = await db.select(db.checkInTable).getSingle();
+      expect(local.energy, 5);
+      expect(local.createdAt, storedDate);
+      expect(local.isSynced, isTrue);
+    });
+
+    test(
+      'rolled-back replacement does not prevent legitimate hydration',
+      () async {
+        await seed(id, 2, isSynced: true, createdAt: storedDate);
+        final original = await db.select(db.checkInTable).getSingle();
+        remote(9);
+        final held = await holdCapturedPull();
+        await expectLater(
+          db.transaction(() async {
+            await seed(id, 5, isSynced: true, createdAt: storedDate);
+            throw StateError('local write failed');
+          }),
+          throwsStateError,
+        );
+        expect(await db.select(db.checkInTable).getSingle(), original);
+        held.release.complete();
+        await held.pull;
+
+        expect((await db.select(db.checkInTable).getSingle()).energy, 9);
+      },
+    );
+  });
 
   test('pull não sobrescreve check-in local pendente do mesmo ID', () async {
     await seed('2026-09-24', 5);

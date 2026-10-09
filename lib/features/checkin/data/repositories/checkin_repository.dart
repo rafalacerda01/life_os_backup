@@ -137,6 +137,19 @@ class CheckInRepository {
   // Firebase -> Drift
   // ===========================================================================
 
+  Future<Map<String, ({int rowId, CheckInEntry entry})>>
+  _readLocalCheckInRevisions() async {
+    final table = _db.checkInTable;
+    final rows = await _db.select(table).addColumns([table.rowId]).get();
+    return {
+      for (final row in rows)
+        row.readTable(table).id: (
+          rowId: row.read(table.rowId)!,
+          entry: row.readTable(table),
+        ),
+    };
+  }
+
   Future<void> syncCheckinsFromFirebaseToLocal() async {
     final user = _auth.currentUser;
 
@@ -150,6 +163,15 @@ class CheckInRepository {
     try {
       AppLogger.i('SYNC Check-ins: iniciando download do Firebase...');
 
+      // Domain saves use INSERT OR REPLACE, so rowid changes even for an
+      // identical edit or an ABA edit within the same stored timestamp.
+      // The full row also detects in-place changes (including upload ACKs).
+      final baseline = await _db.transaction(
+        _readLocalCheckInRevisions,
+        admission: ticket,
+        waitForReopen: false,
+      );
+      if (!_isCurrentUser(expectedUid)) return;
       final snapshot = await _firestore
           .collection('users')
           .doc(expectedUid)
@@ -158,17 +180,15 @@ class CheckInRepository {
 
       if (!_isCurrentUser(expectedUid)) return;
       await _db.transaction(admission: ticket, waitForReopen: false, () async {
+        final current = await _readLocalCheckInRevisions();
         for (final doc in snapshot.docs) {
           if (!_isCurrentUser(expectedUid)) {
             throw StateError('CHECKIN_SESSION_CHANGED');
           }
-          final local = await (_db.select(
-            _db.checkInTable,
-          )..where((table) => table.id.equals(doc.id))).getSingleOrNull();
-          if (!_isCurrentUser(expectedUid)) {
-            throw StateError('CHECKIN_SESSION_CHANGED');
+          final local = current[doc.id];
+          if (local?.entry.isSynced == false || local != baseline[doc.id]) {
+            continue;
           }
-          if (local != null && !local.isSynced) continue;
 
           final createdAt = _checkInDateFromId(doc.id);
           if (createdAt == null) {
