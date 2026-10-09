@@ -6,6 +6,8 @@ import 'package:flutter/foundation.dart';
 import 'package:life_os/core/utils/app_logger.dart';
 import 'package:life_os/core/database/database_provider.dart';
 import 'package:life_os/core/database/local_mutation_gate.dart';
+import 'package:life_os/core/database/remote_send_permit.dart';
+import 'package:life_os/core/services/firebase_auth_provider.dart';
 import 'package:life_os/core/services/sync_manager_provider.dart';
 import 'package:life_os/features/focus/data/remote/focus_remote_data_source.dart';
 import 'package:life_os/features/focus/data/repositories/focus_repository.dart';
@@ -39,8 +41,32 @@ final focusPeriodicTimerFactoryProvider = Provider<FocusPeriodicTimerFactory>(
   (ref) => Timer.periodic,
 );
 
+final focusRemoteSendPermitProvider = Provider<RemoteSendPermit Function()>((
+  ref,
+) {
+  return () {
+    try {
+      if (!ref.mounted) throw const RemoteSessionStopped();
+      final auth = ref.read(firebaseAuthProvider);
+      final uid = auth.currentUser?.uid;
+      if (uid == null || uid.trim().isEmpty) {
+        throw const RemoteSessionStopped();
+      }
+      final database = ref.read(databaseProvider);
+      return database.localMutations
+          .captureRemoteSend(expectedUid: uid)
+          .and(() => ref.mounted && auth.currentUser?.uid == uid);
+    } catch (_) {
+      // Missing prepared database or invalid UID must never admit a send.
+      throw const RemoteSessionStopped();
+    }
+  };
+});
+
 final focusRemoteDataSourceProvider = Provider<FocusRemoteDataSource>((ref) {
-  final dataSource = FocusRemoteDataSource();
+  final dataSource = FocusRemoteDataSource(
+    captureRemoteSend: ref.read(focusRemoteSendPermitProvider),
+  );
   ref.onDispose(dataSource.close);
   return dataSource;
 });
@@ -57,20 +83,23 @@ class _FocusCycleContext {
   final FocusTargetType targetType;
   final int plannedDurationSeconds;
   final LocalMutationTicket admission;
+  final RemoteSendPermit? remoteAdmission;
 
   const _FocusCycleContext({
     required this.targetId,
     required this.targetType,
     required this.plannedDurationSeconds,
     required this.admission,
+    required this.remoteAdmission,
   });
 }
 
 class _PendingVerifiedInvalidation {
   final String sessionId;
+  final RemoteSendPermit admission;
   Future<bool>? cancelAttempt;
 
-  _PendingVerifiedInvalidation(this.sessionId);
+  _PendingVerifiedInvalidation(this.sessionId, this.admission);
 }
 
 class FocusState {
@@ -125,6 +154,7 @@ class FocusNotifier extends Notifier<FocusState> {
   bool _isStartingVerifiedSession = false;
   bool _cycleCanBeVerified = true;
   int _startGeneration = 0;
+  int _lifecycleGeneration = 0;
   String? _verifiedSessionId;
   _PendingVerifiedInvalidation? _pendingVerifiedInvalidation;
   _FocusCycleContext? _activeCycle;
@@ -132,8 +162,18 @@ class FocusNotifier extends Notifier<FocusState> {
 
   @override
   FocusState build() {
+    // Riverpod may rebuild this notifier after invalidation. Its fresh state
+    // must not retain an old cycle or an in-flight remote operation.
+    _isStartingVerifiedSession = false;
+    _isCompletingSession = false;
+    _cycleCanBeVerified = true;
+    _verifiedSessionId = null;
+    _pendingVerifiedInvalidation = null;
+    _activeCycle = null;
+    _timerDurationInSeconds = 1500;
     ref.onDispose(() {
       _startGeneration++;
+      _lifecycleGeneration++;
       _timer?.cancel();
     });
 
@@ -211,7 +251,19 @@ class FocusNotifier extends Notifier<FocusState> {
       targetType: targetType,
       plannedDurationSeconds: _timerDurationInSeconds,
       admission: ref.read(databaseProvider).localMutations.capture(),
+      remoteAdmission: _captureCycleRemoteAdmission(),
     );
+  }
+
+  RemoteSendPermit? _captureCycleRemoteAdmission() {
+    final lifecycle = _lifecycleGeneration;
+    try {
+      return ref
+          .read(focusRemoteSendPermitProvider)()
+          .and(() => ref.mounted && lifecycle == _lifecycleGeneration);
+    } on RemoteSessionStopped {
+      return null;
+    }
   }
 
   bool _canStartVerifiedSession(_FocusCycleContext? cycle) {
@@ -226,11 +278,14 @@ class FocusNotifier extends Notifier<FocusState> {
     _FocusCycleContext cycle,
     int generation,
   ) async {
+    final admission = cycle.remoteAdmission;
     try {
+      if (admission == null) throw const RemoteSessionStopped();
+      admission.requireCurrent();
       final invalidation = _pendingVerifiedInvalidation;
       if (invalidation != null) {
         final wasCancelled = await _ensureInvalidationCancel(invalidation);
-        if (generation != _startGeneration) return;
+        if (!admission.isCurrent || generation != _startGeneration) return;
 
         final currentInvalidation = _pendingVerifiedInvalidation;
         if (wasCancelled) {
@@ -252,25 +307,46 @@ class FocusNotifier extends Notifier<FocusState> {
             targetId: cycle.targetId,
             targetType: _toRemoteTargetType(cycle.targetType),
             plannedDurationSeconds: cycle.plannedDurationSeconds,
+            admission: admission,
           );
 
+      if (!admission.isCurrent) return;
       if (generation != _startGeneration) {
-        _beginPendingVerifiedInvalidation(response.sessionId);
+        _beginPendingVerifiedInvalidation(response.sessionId, admission);
         return;
       }
 
       _verifiedSessionId = response.sessionId;
       _startLocalTimer(cycle);
     } catch (_) {
-      if (generation != _startGeneration) return;
+      if (!ref.mounted ||
+          generation != _startGeneration ||
+          (admission != null && !admission.isCurrent))
+        return;
 
       AppLogger.w(
         'Focus verificado indisponível no início; sessão continuará local.',
       );
       _startLocalTimer(cycle);
     } finally {
-      if (generation == _startGeneration) {
+      if (ref.mounted && generation == _startGeneration) {
         _isStartingVerifiedSession = false;
+        if (admission != null && !admission.isCurrent) {
+          try {
+            // Only restore idle UI in the original local session. Waiting for
+            // quiescence holds no lease and never renews remote admission.
+            await ref.read(databaseProvider).localMutations.run(() async {
+              if (ref.mounted &&
+                  generation == _startGeneration &&
+                  !state.isRunning &&
+                  _activeCycle == null) {
+                state = state.copyWith(targetLocked: false);
+              }
+            }, ticket: cycle.admission);
+          } catch (_) {
+            // Disposed or changed/unavailable sessions must keep their state.
+          }
+        }
       }
     }
   }
@@ -389,7 +465,7 @@ class FocusNotifier extends Notifier<FocusState> {
     try {
       final response = await ref
           .read(focusRemoteDataSourceProvider)
-          .finishFocus(sessionId: sessionId);
+          .finishFocus(sessionId: sessionId, admission: cycle.remoteAdmission);
       if (response.sessionId != sessionId ||
           response.verifiedDurationSeconds != cycle.plannedDurationSeconds) {
         AppLogger.w('Resposta incoerente ao finalizar Focus verificado.');
@@ -413,7 +489,10 @@ class FocusNotifier extends Notifier<FocusState> {
     _isStartingVerifiedSession = false;
     final sessionId = _takeVerifiedSession();
     if (sessionId != null) {
-      _beginPendingVerifiedInvalidation(sessionId);
+      _beginPendingVerifiedInvalidation(
+        sessionId,
+        _activeCycle!.remoteAdmission!,
+      );
     }
   }
 
@@ -423,7 +502,10 @@ class FocusNotifier extends Notifier<FocusState> {
     _isStartingVerifiedSession = false;
     final sessionId = _takeVerifiedSession();
     if (sessionId != null) {
-      _beginPendingVerifiedInvalidation(sessionId);
+      _beginPendingVerifiedInvalidation(
+        sessionId,
+        _activeCycle!.remoteAdmission!,
+      );
     }
     _activeCycle = null;
     _cycleCanBeVerified = true;
@@ -440,7 +522,10 @@ class FocusNotifier extends Notifier<FocusState> {
     _isStartingVerifiedSession = false;
     final sessionId = _takeVerifiedSession();
     if (sessionId != null) {
-      _beginPendingVerifiedInvalidation(sessionId);
+      _beginPendingVerifiedInvalidation(
+        sessionId,
+        _activeCycle!.remoteAdmission!,
+      );
     }
     _activeCycle = null;
     _cycleCanBeVerified = true;
@@ -466,7 +551,11 @@ class FocusNotifier extends Notifier<FocusState> {
     _startLocalTimer(cycle);
   }
 
-  void _beginPendingVerifiedInvalidation(String sessionId) {
+  void _beginPendingVerifiedInvalidation(
+    String sessionId,
+    RemoteSendPermit admission,
+  ) {
+    if (!admission.isCurrent) return;
     final currentInvalidation = _pendingVerifiedInvalidation;
     if (currentInvalidation != null &&
         currentInvalidation.sessionId == sessionId) {
@@ -474,7 +563,7 @@ class FocusNotifier extends Notifier<FocusState> {
       return;
     }
 
-    final invalidation = _PendingVerifiedInvalidation(sessionId);
+    final invalidation = _PendingVerifiedInvalidation(sessionId, admission);
     _pendingVerifiedInvalidation = invalidation;
     unawaited(_ensureInvalidationCancel(invalidation));
   }
@@ -485,11 +574,12 @@ class FocusNotifier extends Notifier<FocusState> {
     final existingAttempt = invalidation.cancelAttempt;
     if (existingAttempt != null) return existingAttempt;
 
-    final attempt = _cancelRemoteSession(invalidation.sessionId);
+    final attempt = _cancelRemoteSession(invalidation);
     invalidation.cancelAttempt = attempt;
     unawaited(
       attempt.then((wasCancelled) {
-        if (!identical(_pendingVerifiedInvalidation, invalidation) ||
+        if (!invalidation.admission.isCurrent ||
+            !identical(_pendingVerifiedInvalidation, invalidation) ||
             !identical(invalidation.cancelAttempt, attempt)) {
           return;
         }
@@ -503,18 +593,27 @@ class FocusNotifier extends Notifier<FocusState> {
     return attempt;
   }
 
-  Future<bool> _cancelRemoteSession(String sessionId) async {
+  Future<bool> _cancelRemoteSession(
+    _PendingVerifiedInvalidation invalidation,
+  ) async {
     try {
+      invalidation.admission.requireCurrent();
       final response = await ref
           .read(focusRemoteDataSourceProvider)
-          .cancelFocus(sessionId: sessionId);
-      if (response.sessionId != sessionId) {
+          .cancelFocus(
+            sessionId: invalidation.sessionId,
+            admission: invalidation.admission,
+          );
+      if (!invalidation.admission.isCurrent) return false;
+      if (response.sessionId != invalidation.sessionId) {
         AppLogger.w('Resposta incoerente ao cancelar Focus verificado.');
         return false;
       }
       return true;
     } on FocusRemoteException catch (error) {
-      if (error.code == 'FOCUS_SESSION_EXPIRED') return true;
+      if (invalidation.admission.isCurrent &&
+          error.code == 'FOCUS_SESSION_EXPIRED')
+        return true;
 
       AppLogger.w(
         'Não foi possível cancelar o Focus verificado; '

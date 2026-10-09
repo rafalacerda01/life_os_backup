@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:firebase_app_check/firebase_app_check.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:http/http.dart' as http;
+import 'package:life_os/core/database/remote_send_permit.dart';
 
 typedef FocusIdTokenProvider = Future<String?> Function();
 typedef FocusAppCheckTokenProvider = Future<String?> Function();
@@ -115,12 +116,14 @@ class FocusRemoteException implements Exception {
   final String code;
   final String message;
   final bool isRetryable;
+  final bool isAmbiguous;
 
   const FocusRemoteException({
     required this.statusCode,
     required this.code,
     required this.message,
     required this.isRetryable,
+    this.isAmbiguous = false,
   });
 
   @override
@@ -144,11 +147,13 @@ class FocusRemoteDataSource {
   final String _baseUrl;
   final Duration _timeout;
   final bool _ownsClient;
+  final RemoteSendPermit Function() _captureRemoteSend;
 
   FocusRemoteDataSource({
     http.Client? client,
     FocusIdTokenProvider? idTokenProvider,
     FocusAppCheckTokenProvider? appCheckTokenProvider,
+    RemoteSendPermit Function()? captureRemoteSend,
     String baseUrl = defaultBaseUrl,
     Duration timeout = defaultTimeout,
   }) : _client = client ?? http.Client(),
@@ -157,6 +162,8 @@ class FocusRemoteDataSource {
            appCheckTokenProvider ?? _firebaseAppCheckTokenProvider,
        _baseUrl = _normalizeBaseUrl(baseUrl),
        _timeout = timeout,
+       _captureRemoteSend =
+           captureRemoteSend ?? (() => throw const RemoteSessionStopped()),
        _ownsClient = client == null {
     if (timeout <= Duration.zero) {
       throw ArgumentError.value(timeout, 'timeout', 'Must be positive.');
@@ -167,6 +174,7 @@ class FocusRemoteDataSource {
     required String targetId,
     required FocusRemoteTargetType targetType,
     required int plannedDurationSeconds,
+    RemoteSendPermit? admission,
   }) async {
     final normalizedTargetId = _validateRequestIdentifier(targetId, 'targetId');
     if (!_allowedDurations.contains(plannedDurationSeconds)) {
@@ -175,6 +183,7 @@ class FocusRemoteDataSource {
 
     final response = await _post(
       operation: 'start',
+      admission: admission,
       fallbackCode: 'FOCUS_START_FAILED',
       payload: {
         'targetId': normalizedTargetId,
@@ -194,9 +203,13 @@ class FocusRemoteDataSource {
     return parsed;
   }
 
-  Future<FocusFinishResponse> finishFocus({required String sessionId}) async {
+  Future<FocusFinishResponse> finishFocus({
+    required String sessionId,
+    RemoteSendPermit? admission,
+  }) async {
     final response = await _post(
       operation: 'finish',
+      admission: admission,
       fallbackCode: 'FOCUS_FINISH_FAILED',
       payload: {
         'sessionId': _validateRequestIdentifier(sessionId, 'sessionId'),
@@ -210,9 +223,13 @@ class FocusRemoteDataSource {
     );
   }
 
-  Future<FocusCancelResponse> cancelFocus({required String sessionId}) async {
+  Future<FocusCancelResponse> cancelFocus({
+    required String sessionId,
+    RemoteSendPermit? admission,
+  }) async {
     final response = await _post(
       operation: 'cancel',
+      admission: admission,
       fallbackCode: 'FOCUS_CANCEL_FAILED',
       payload: {
         'sessionId': _validateRequestIdentifier(sessionId, 'sessionId'),
@@ -234,41 +251,65 @@ class FocusRemoteDataSource {
     required String operation,
     required String fallbackCode,
     required Map<String, dynamic> payload,
+    RemoteSendPermit? admission,
   }) async {
+    final RemoteSendPermit permit;
+    try {
+      permit = admission ?? _captureRemoteSend();
+      permit.requireCurrent();
+    } on RemoteSessionStopped {
+      throw _sessionStopped(isAmbiguous: false);
+    }
     final token = await _loadToken(fallbackCode);
+    _requireSession(permit, isAmbiguous: false);
     final appCheckToken = await _loadAppCheckToken();
+    _requireSession(permit, isAmbiguous: false);
     http.Response response;
 
     try {
+      final url = Uri.parse('$_baseUrl/$operation');
+      final headers = {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer $token',
+        'X-Firebase-AppCheck': appCheckToken,
+      };
+      final body = jsonEncode(payload);
+      _requireSession(permit, isAmbiguous: false);
       response = await _client
-          .post(
-            Uri.parse('$_baseUrl/$operation'),
-            headers: {
-              'Content-Type': 'application/json',
-              'Authorization': 'Bearer $token',
-              'X-Firebase-AppCheck': appCheckToken,
-            },
-            body: jsonEncode(payload),
-          )
+          .post(url, headers: headers, body: body)
           .timeout(_timeout);
+    } on FocusRemoteException {
+      rethrow;
     } on TimeoutException {
       throw FocusRemoteException(
         statusCode: null,
         code: fallbackCode,
         message: 'Tempo limite excedido ao comunicar com o backend Focus.',
         isRetryable: true,
+        isAmbiguous: true,
       );
-    } on http.ClientException catch (error) {
+    } on http.ClientException {
       throw FocusRemoteException(
         statusCode: null,
         code: fallbackCode,
-        message: error.message,
+        message: 'Não foi possível comunicar com o backend Focus.',
         isRetryable: true,
+        isAmbiguous: true,
+      );
+    } catch (_) {
+      throw FocusRemoteException(
+        statusCode: null,
+        code: fallbackCode,
+        message: 'Não foi possível comunicar com o backend Focus.',
+        isRetryable: true,
+        isAmbiguous: true,
       );
     }
 
+    // A sent POST may have completed remotely, but cannot revive its session.
+    _requireSession(permit, isAmbiguous: true);
     if (response.statusCode < 200 || response.statusCode >= 300) {
-      throw _backendException(response, fallbackCode);
+      throw _backendException(response, fallbackCode, [token, appCheckToken]);
     }
 
     try {
@@ -280,6 +321,19 @@ class FocusRemoteDataSource {
       throw _invalidResponse(response.statusCode, fallbackCode);
     }
   }
+
+  void _requireSession(RemoteSendPermit permit, {required bool isAmbiguous}) {
+    if (!permit.isCurrent) throw _sessionStopped(isAmbiguous: isAmbiguous);
+  }
+
+  static FocusRemoteException _sessionStopped({required bool isAmbiguous}) =>
+      FocusRemoteException(
+        statusCode: null,
+        code: 'SESSION_STOPPED',
+        message: 'A sessão não permite concluir esta operação.',
+        isRetryable: false,
+        isAmbiguous: isAmbiguous,
+      );
 
   Future<String> _loadToken(String fallbackCode) async {
     String? token;
@@ -355,6 +409,7 @@ class FocusRemoteDataSource {
   static FocusRemoteException _backendException(
     http.Response response,
     String fallbackCode,
+    List<String> secrets,
   ) {
     Map<String, dynamic>? body;
     try {
@@ -374,15 +429,23 @@ class FocusRemoteDataSource {
       );
     }
     final backendMessage = body?['error'];
+    String sanitized(String value) {
+      for (final secret in secrets) {
+        value = value.replaceAll(secret, '[redacted]');
+      }
+      return value;
+    }
+
     return FocusRemoteException(
       statusCode: response.statusCode,
       code: backendCode is String && backendCode.trim().isNotEmpty
-          ? backendCode.trim()
+          ? sanitized(backendCode.trim())
           : fallbackCode,
       message: backendMessage is String && backendMessage.trim().isNotEmpty
-          ? backendMessage.trim()
+          ? sanitized(backendMessage.trim())
           : 'Falha na operação remota de Focus.',
       isRetryable: _isRetryableStatus(response.statusCode),
+      isAmbiguous: response.statusCode >= 500 || response.statusCode == 408,
     );
   }
 
@@ -408,6 +471,7 @@ class FocusRemoteDataSource {
       code: fallbackCode,
       message: 'Resposta inválida do backend Focus.',
       isRetryable: false,
+      isAmbiguous: true,
     );
   }
 

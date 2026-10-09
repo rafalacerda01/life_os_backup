@@ -1,10 +1,16 @@
 import 'dart:async';
+import 'dart:convert';
 
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:drift/native.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 import 'package:life_os/core/database/app_database.dart';
 import 'package:life_os/core/database/database_provider.dart';
+import 'package:life_os/core/database/remote_send_permit.dart';
+import 'package:life_os/core/services/firebase_auth_provider.dart';
 import 'package:life_os/core/services/sync_manager.dart';
 import 'package:life_os/core/services/sync_manager_provider.dart';
 import 'package:life_os/features/focus/data/remote/focus_remote_data_source.dart';
@@ -17,6 +23,19 @@ import 'package:life_os/features/study/presentation/providers/study_provider.dar
 import 'package:life_os/features/tasks/presentation/providers/tasks_provider.dart';
 
 import '../../../../helpers/recording_analytics_platform.dart';
+
+// ignore: subtype_of_sealed_class
+class _User extends Fake implements User {
+  _User(this.uid);
+  @override
+  final String uid;
+}
+
+// ignore: subtype_of_sealed_class
+class _Auth extends Fake implements FirebaseAuth {
+  @override
+  User? currentUser = _User('a');
+}
 
 typedef _StartOperation =
     Future<FocusStartResponse> Function({
@@ -120,6 +139,7 @@ class _FakeFocusRemoteDataSource implements FocusRemoteDataSource {
     required String targetId,
     required FocusRemoteTargetType targetType,
     required int plannedDurationSeconds,
+    RemoteSendPermit? admission,
   }) async {
     startCalls++;
     lastTargetId = targetId;
@@ -147,7 +167,10 @@ class _FakeFocusRemoteDataSource implements FocusRemoteDataSource {
   }
 
   @override
-  Future<FocusFinishResponse> finishFocus({required String sessionId}) async {
+  Future<FocusFinishResponse> finishFocus({
+    required String sessionId,
+    RemoteSendPermit? admission,
+  }) async {
     finishCalls++;
     finishedSessionIds.add(sessionId);
 
@@ -165,7 +188,10 @@ class _FakeFocusRemoteDataSource implements FocusRemoteDataSource {
   }
 
   @override
-  Future<FocusCancelResponse> cancelFocus({required String sessionId}) async {
+  Future<FocusCancelResponse> cancelFocus({
+    required String sessionId,
+    RemoteSendPermit? admission,
+  }) async {
     cancelCalls++;
     cancelledSessionIds.add(sessionId);
 
@@ -230,29 +256,40 @@ void main() {
   late RecordingAnalyticsPlatform analytics;
   late ProviderContainer container;
   late _ControlledPeriodicTimer timer;
+  late AppDatabase database;
+  late _Auth auth;
+  late FocusRemoteDataSource activeRemote;
+  late int timersCreated;
 
   setUp(() {
     focusRepository = _FakeFocusRepository();
     tasksRepository = _FakeTasksRepository();
     studyRepository = _FakeStudyRepository();
     remoteDataSource = _FakeFocusRemoteDataSource();
+    activeRemote = remoteDataSource;
+    timersCreated = 0;
     syncManager = _RecordingSyncManager();
     analytics = RecordingAnalyticsPlatform();
-    final database = AppDatabase(executor: NativeDatabase.memory());
+    auth = _Auth();
+    database = AppDatabase(executor: NativeDatabase.memory());
+    database.localMutations.bindSessionReader(() => auth.currentUser?.uid);
+    database.localMutations.openPreparedSession();
     addTearDown(database.close);
 
     container = ProviderContainer(
       overrides: [
         databaseProvider.overrideWithValue(database),
+        firebaseAuthProvider.overrideWithValue(auth),
         focusRepositoryProvider.overrideWithValue(focusRepository),
         syncManagerProvider.overrideWithValue(syncManager),
         tasksRepositoryProvider.overrideWithValue(tasksRepository),
         studyRepositoryProvider.overrideWithValue(studyRepository),
-        focusRemoteDataSourceProvider.overrideWithValue(remoteDataSource),
+        focusRemoteDataSourceProvider.overrideWith((ref) => activeRemote),
         focusPeriodicTimerFactoryProvider.overrideWithValue((
           duration,
           callback,
         ) {
+          timersCreated++;
           timer = _ControlledPeriodicTimer(callback);
           return timer;
         }),
@@ -285,6 +322,637 @@ void main() {
       timer.fire();
     }
   }
+
+  void changeSession(String? uid) {
+    auth.currentUser = uid == null ? null : _User(uid);
+    database.localMutations.observeSession(uid);
+  }
+
+  void wireHttp({
+    required Future<http.Response> Function(http.Request) handler,
+    Future<String?> Function()? idToken,
+    Future<String?> Function()? appCheck,
+  }) {
+    final client = MockClient(handler);
+    addTearDown(client.close);
+    activeRemote = FocusRemoteDataSource(
+      client: client,
+      captureRemoteSend: () => container.read(focusRemoteSendPermitProvider)(),
+      idTokenProvider: idToken ?? () async => 'private-id-token',
+      appCheckTokenProvider: appCheck ?? () async => 'private-app-check',
+      baseUrl: 'https://example.test/api/focus',
+    );
+  }
+
+  http.Response successfulHttp(http.Request request) {
+    final payload = jsonDecode(request.body) as Map<String, dynamic>;
+    final operation = request.url.pathSegments.last;
+    return http.Response(
+      jsonEncode(switch (operation) {
+        'start' => {
+          'sessionId': 'verified-http',
+          'status': 'RUNNING',
+          'plannedDurationSeconds': payload['plannedDurationSeconds'],
+          'startedAt': '2026-08-17T12:00:00Z',
+          'expiresAt': '2026-08-17T13:00:00Z',
+          'reused': false,
+        },
+        'finish' => {
+          'sessionId': payload['sessionId'],
+          'status': 'COMPLETED',
+          'verifiedDurationSeconds': 60,
+          'completedAt': '2026-08-17T13:00:00Z',
+          'replayed': false,
+        },
+        _ => {
+          'sessionId': payload['sessionId'],
+          'status': 'CANCELLED',
+          'cancelledAt': '2026-08-17T12:05:00Z',
+          'replayed': false,
+        },
+      }),
+      200,
+    );
+  }
+
+  group('R1 aborted logout target recovery', () {
+    for (final phase in ['ID Token', 'App Check']) {
+      for (final releaseBeforeAbort in [false, true]) {
+        test(
+          '$phase pending, release before abort=$releaseBeforeAbort unlocks idle target',
+          () async {
+            final started = Completer<void>();
+            final token = Completer<String?>();
+            final postedTargets = <String>[];
+            var idLoads = 0;
+            var appLoads = 0;
+            wireHttp(
+              handler: (request) async {
+                expect(request.url.pathSegments.last, 'start');
+                postedTargets.add(
+                  (jsonDecode(request.body) as Map<String, dynamic>)['targetId']
+                      as String,
+                );
+                return successfulHttp(request);
+              },
+              idToken: () {
+                idLoads++;
+                if (phase == 'ID Token' && !started.isCompleted) {
+                  started.complete();
+                  return token.future;
+                }
+                return Future.value('private-id-token');
+              },
+              appCheck: () {
+                appLoads++;
+                if (phase == 'App Check' && !started.isCompleted) {
+                  started.complete();
+                  return token.future;
+                }
+                return Future.value('private-app-check');
+              },
+            );
+            final originalAdmission = container.read(
+              focusRemoteSendPermitProvider,
+            )();
+            final notifier = container.read(focusProvider.notifier);
+            configureTarget(notifier, FocusTargetType.task);
+            notifier.startTimer();
+            await started.future;
+            expect(container.read(focusProvider).targetLocked, isTrue);
+            final barrier = database.localMutations.beginQuiesce('a');
+            await barrier.drain();
+            if (releaseBeforeAbort) {
+              token.complete('private-token');
+              await pumpEventQueue();
+              // Returning from preflight while quiescent must hold no lease.
+              await barrier.drain();
+            }
+            barrier.finish(signOutConfirmed: false);
+            if (!releaseBeforeAbort) token.complete('private-token');
+            await pumpEventQueue();
+
+            final recovered = container.read(focusProvider);
+            expect(recovered.targetLocked, isFalse);
+            expect(recovered.isRunning, isFalse);
+            expect(recovered.activeTargetId, 'task-1');
+            expect(recovered.activeTargetType, FocusTargetType.task);
+            expect(recovered.durationRemaining, 60);
+            expect(originalAdmission.isCurrent, isFalse);
+            expect(postedTargets, isEmpty);
+            expect(timersCreated, 0);
+            expect(idLoads, 1);
+            expect(appLoads, phase == 'App Check' ? 1 : 0);
+
+            // These public actions also prove the pending-start flag is cleared.
+            notifier.selectTarget(
+              'subject-new',
+              'New subject',
+              FocusTargetType.subject,
+            );
+            notifier.setCustomDuration(3);
+            expect(container.read(focusProvider).activeTargetId, 'subject-new');
+            expect(container.read(focusProvider).durationRemaining, 180);
+            expect(postedTargets, isEmpty);
+            expect(timersCreated, 0);
+            notifier.startTimer();
+            notifier.startTimer();
+            await pumpEventQueue();
+            expect(postedTargets, ['subject-new']);
+            expect(timersCreated, 1);
+            expect(container.read(focusProvider).isRunning, isTrue);
+            expect(container.read(focusProvider).targetLocked, isTrue);
+            expect(container.read(focusProvider).activeTargetId, 'subject-new');
+            expect(originalAdmission.isCurrent, isFalse);
+            expect(focusRepository.saveCalls, 0);
+          },
+        );
+      }
+    }
+
+    test(
+      'queued recovery after dispose cannot unlock a newer running cycle',
+      () async {
+        final started = Completer<void>();
+        final token = Completer<String?>();
+        final postedTargets = <String>[];
+        wireHttp(
+          handler: (request) async {
+            postedTargets.add(
+              (jsonDecode(request.body) as Map<String, dynamic>)['targetId']
+                  as String,
+            );
+            return successfulHttp(request);
+          },
+          idToken: () {
+            if (!started.isCompleted) {
+              started.complete();
+              return token.future;
+            }
+            return Future.value('private-token');
+          },
+        );
+        final oldNotifier = container.read(focusProvider.notifier);
+        configureTarget(oldNotifier, FocusTargetType.task);
+        oldNotifier.startTimer();
+        await started.future;
+        final barrier = database.localMutations.beginQuiesce('a');
+        await barrier.drain();
+        token.complete('private-token');
+        await pumpEventQueue();
+        container.invalidate(focusProvider);
+        final newNotifier = container.read(focusProvider.notifier);
+        barrier.finish(signOutConfirmed: false);
+        configureTarget(newNotifier, FocusTargetType.subject);
+        newNotifier.startTimer();
+        await pumpEventQueue();
+        expect(postedTargets, ['subject-1']);
+        expect(timersCreated, 1);
+        expect(container.read(focusProvider).targetLocked, isTrue);
+        expect(container.read(focusProvider).isRunning, isTrue);
+        expect(container.read(focusProvider).activeTargetId, 'subject-1');
+        newNotifier.selectTarget(
+          'other-task',
+          'Other task',
+          FocusTargetType.task,
+        );
+        expect(container.read(focusProvider).activeTargetId, 'subject-1');
+      },
+    );
+
+    for (final transition in ['A-B', 'A-null-A']) {
+      test('queued recovery does not mutate state after $transition', () async {
+        final started = Completer<void>();
+        final token = Completer<String?>();
+        var posts = 0;
+        wireHttp(
+          handler: (request) async {
+            posts++;
+            return successfulHttp(request);
+          },
+          idToken: () {
+            started.complete();
+            return token.future;
+          },
+        );
+        final notifier = container.read(focusProvider.notifier);
+        configureTarget(notifier, FocusTargetType.task);
+        notifier.startTimer();
+        await started.future;
+        final before = container.read(focusProvider);
+        final barrier = database.localMutations.beginQuiesce('a');
+        await barrier.drain();
+        token.complete('private-token');
+        await pumpEventQueue();
+        changeSession(transition == 'A-B' ? 'b' : null);
+        barrier.finish(signOutConfirmed: false);
+        if (transition == 'A-null-A') {
+          changeSession('a');
+          database.localMutations.openPreparedSession();
+        }
+        await pumpEventQueue();
+        expect(container.read(focusProvider), same(before));
+        expect(posts, 0);
+        expect(timersCreated, 0);
+        expect(focusRepository.saveCalls, 0);
+      });
+    }
+
+    test(
+      'running cycle after aborted logout keeps target and completes locally without finish POST',
+      () async {
+        final operations = <String>[];
+        var idLoads = 0;
+        var appLoads = 0;
+        wireHttp(
+          handler: (request) async {
+            operations.add(request.url.pathSegments.last);
+            return successfulHttp(request);
+          },
+          idToken: () async {
+            idLoads++;
+            return 'private-id-token';
+          },
+          appCheck: () async {
+            appLoads++;
+            return 'private-app-check';
+          },
+        );
+        final originalAdmission = container.read(
+          focusRemoteSendPermitProvider,
+        )();
+        final notifier = container.read(focusProvider.notifier);
+        configureTarget(notifier, FocusTargetType.subject);
+        await startAndFlush(notifier);
+        timer.fire();
+        final running = container.read(focusProvider);
+        final barrier = database.localMutations.beginQuiesce('a');
+        await barrier.drain();
+        barrier.finish(signOutConfirmed: false);
+        expect(originalAdmission.isCurrent, isFalse);
+        expect(container.read(focusProvider), same(running));
+        notifier.selectTarget('other-task', 'Other task', FocusTargetType.task);
+        expect(container.read(focusProvider).activeTargetId, 'subject-1');
+        expect(container.read(focusProvider).targetLocked, isTrue);
+        expect(container.read(focusProvider).isRunning, isTrue);
+        timer.fireAtTick(60);
+        await pumpEventQueue();
+        expect(operations, ['start']);
+        expect(idLoads, 1);
+        expect(appLoads, 1);
+        expect(timersCreated, 1);
+        expect(focusRepository.saveCalls, 1);
+        expect(focusRepository.lastTargetId, 'subject-1');
+        expect(focusRepository.lastTargetType, 'SUBJECT');
+        expect(focusRepository.lastDurationSeconds, 60);
+        expect(studyRepository.addStudyTimeCalls, 1);
+        expect(studyRepository.lastSubjectId, 'subject-1');
+        expect(tasksRepository.toggleCalls, 0);
+        expect(container.read(focusProvider).isBreak, isTrue);
+        expect(container.read(focusProvider).targetLocked, isFalse);
+        expect(originalAdmission.isCurrent, isFalse);
+      },
+    );
+  });
+
+  group('remote session admission integration', () {
+    for (final operation in ['finish', 'cancel']) {
+      for (final phase in ['ID Token', 'App Check']) {
+        test('$operation pending $phase cannot POST after logout', () async {
+          final started = Completer<void>();
+          final token = Completer<String?>();
+          final operations = <String>[];
+          var idLoads = 0;
+          var appLoads = 0;
+          wireHttp(
+            handler: (request) async {
+              operations.add(request.url.pathSegments.last);
+              return successfulHttp(request);
+            },
+            idToken: () {
+              idLoads++;
+              if (phase == 'ID Token' && idLoads == 2) {
+                started.complete();
+                return token.future;
+              }
+              return Future.value('private-id-token');
+            },
+            appCheck: () {
+              appLoads++;
+              if (phase == 'App Check' && appLoads == 2) {
+                started.complete();
+                return token.future;
+              }
+              return Future.value('private-app-check');
+            },
+          );
+          final notifier = container.read(focusProvider.notifier);
+          configureTarget(notifier, FocusTargetType.task);
+          await startAndFlush(notifier);
+          if (operation == 'finish') {
+            finishCurrentTimer(60);
+          } else {
+            notifier.resetTimer();
+          }
+          await started.future;
+          final barrier = database.localMutations.beginQuiesce('a');
+          await barrier.drain();
+          expect(token.isCompleted, isFalse);
+          changeSession(null);
+          barrier.finish(signOutConfirmed: true);
+          container.invalidate(focusProvider);
+          container.read(focusProvider);
+          token.complete('private-token');
+          await pumpEventQueue();
+          expect(operations, ['start']);
+          expect(container.read(focusProvider).isRunning, isFalse);
+          expect(container.read(focusProvider).isBreak, isFalse);
+          expect(focusRepository.saveCalls, operation == 'finish' ? 1 : 0);
+          expect(tasksRepository.toggleCalls, operation == 'finish' ? 1 : 0);
+        });
+      }
+    }
+
+    for (final phase in ['ID Token', 'App Check']) {
+      test('logout during $phase stops POST without delaying drain', () async {
+        final started = Completer<void>();
+        final token = Completer<String?>();
+        var posts = 0;
+        Future<String?> holdToken() {
+          started.complete();
+          return token.future;
+        }
+
+        wireHttp(
+          handler: (request) async {
+            posts++;
+            return successfulHttp(request);
+          },
+          idToken: phase == 'ID Token' ? holdToken : null,
+          appCheck: phase == 'App Check' ? holdToken : null,
+        );
+        final notifier = container.read(focusProvider.notifier);
+        configureTarget(notifier, FocusTargetType.task);
+        notifier.startTimer();
+        await started.future;
+        final barrier = database.localMutations.beginQuiesce('a');
+        await barrier.drain();
+        expect(token.isCompleted, isFalse);
+        changeSession(null);
+        barrier.finish(signOutConfirmed: true);
+        container.invalidate(focusProvider);
+        container.read(focusProvider);
+        token.complete('private-token');
+        await pumpEventQueue();
+        expect(posts, 0);
+        expect(timersCreated, 0);
+        expect(focusRepository.saveCalls, 0);
+        expect(tasksRepository.toggleCalls, 0);
+        expect(container.read(focusProvider).isRunning, isFalse);
+      });
+    }
+
+    for (final transition in ['A-B', 'A-null-A', 'abort logout']) {
+      test(
+        '$transition cannot revive pending start even without dispose',
+        () async {
+          final started = Completer<void>();
+          final token = Completer<String?>();
+          var posts = 0;
+          wireHttp(
+            handler: (request) async {
+              posts++;
+              return successfulHttp(request);
+            },
+            idToken: () {
+              if (!started.isCompleted) {
+                started.complete();
+                return token.future;
+              }
+              return Future.value('new-private-token');
+            },
+          );
+          final notifier = container.read(focusProvider.notifier);
+          configureTarget(notifier, FocusTargetType.task);
+          notifier.startTimer();
+          await started.future;
+          final barrier = database.localMutations.beginQuiesce('a');
+          await barrier.drain();
+          if (transition == 'abort logout') {
+            barrier.finish(signOutConfirmed: false);
+          } else {
+            changeSession(transition == 'A-B' ? 'b' : null);
+            barrier.finish(signOutConfirmed: true);
+            if (transition == 'A-null-A') {
+              changeSession('a');
+              database.localMutations.openPreparedSession();
+            }
+          }
+          token.complete('old-private-token');
+          await pumpEventQueue();
+          expect(posts, 0);
+          expect(timersCreated, 0);
+          expect(container.read(focusProvider).isRunning, isFalse);
+          if (transition != 'A-B') {
+            await startAndFlush(notifier);
+            expect(posts, 1);
+            expect(timersCreated, 1);
+            expect(container.read(focusProvider).isRunning, isTrue);
+          }
+        },
+      );
+    }
+
+    test(
+      'dispose during preflight invalidates only the old notifier',
+      () async {
+        final started = Completer<void>();
+        final token = Completer<String?>();
+        var posts = 0;
+        wireHttp(
+          handler: (request) async {
+            posts++;
+            return successfulHttp(request);
+          },
+          idToken: () {
+            if (!started.isCompleted) {
+              started.complete();
+              return token.future;
+            }
+            return Future.value('new-private-token');
+          },
+        );
+        final oldNotifier = container.read(focusProvider.notifier);
+        configureTarget(oldNotifier, FocusTargetType.task);
+        oldNotifier.startTimer();
+        await started.future;
+        container.invalidate(focusProvider);
+        final newNotifier = container.read(focusProvider.notifier);
+        token.complete('old-private-token');
+        await pumpEventQueue();
+        expect(posts, 0);
+        expect(timersCreated, 0);
+        configureTarget(newNotifier, FocusTargetType.subject);
+        await startAndFlush(newNotifier);
+        expect(posts, 1);
+        expect(timersCreated, 1);
+        expect(container.read(focusProvider).activeTargetId, 'subject-1');
+      },
+    );
+
+    test(
+      'already sent start response cannot revive invalidated session',
+      () async {
+        final sent = Completer<void>();
+        final response = Completer<http.Response>();
+        var posts = 0;
+        late http.Request captured;
+        wireHttp(
+          handler: (request) {
+            posts++;
+            captured = request;
+            sent.complete();
+            return response.future;
+          },
+        );
+        final notifier = container.read(focusProvider.notifier);
+        configureTarget(notifier, FocusTargetType.task);
+        notifier.startTimer();
+        await sent.future;
+        final barrier = database.localMutations.beginQuiesce('a');
+        await barrier.drain();
+        changeSession(null);
+        barrier.finish(signOutConfirmed: true);
+        response.complete(successfulHttp(captured));
+        await pumpEventQueue();
+        expect(posts, 1);
+        expect(timersCreated, 0);
+        expect(focusRepository.saveCalls, 0);
+        expect(container.read(focusProvider).isRunning, isFalse);
+      },
+    );
+
+    for (final action in ['reset', 'pause']) {
+      test(
+        '$action in same session permits late start and legitimate cancel',
+        () async {
+          final started = Completer<void>();
+          final token = Completer<String?>();
+          final operations = <String>[];
+          wireHttp(
+            handler: (request) async {
+              operations.add(request.url.pathSegments.last);
+              return successfulHttp(request);
+            },
+            idToken: () {
+              if (!started.isCompleted) {
+                started.complete();
+                return token.future;
+              }
+              return Future.value('private-token');
+            },
+          );
+          final notifier = container.read(focusProvider.notifier);
+          configureTarget(notifier, FocusTargetType.task);
+          notifier.startTimer();
+          await started.future;
+          if (action == 'reset') {
+            notifier.resetTimer();
+          } else {
+            notifier.pauseTimer();
+          }
+          token.complete('private-token');
+          await pumpEventQueue();
+          expect(operations, ['start', 'cancel']);
+          expect(timersCreated, 0);
+          expect(focusRepository.saveCalls, 0);
+          expect(container.read(focusProvider).isRunning, isFalse);
+          expect(container.read(focusProvider).targetLocked, action == 'pause');
+        },
+      );
+    }
+
+    test(
+      'normal HTTP flow has one start, one finish and one set of local effects',
+      () async {
+        final operations = <String>[];
+        wireHttp(
+          handler: (request) async {
+            operations.add(request.url.pathSegments.last);
+            return successfulHttp(request);
+          },
+        );
+        final notifier = container.read(focusProvider.notifier);
+        configureTarget(notifier, FocusTargetType.task);
+        notifier.startTimer();
+        notifier.startTimer();
+        await pumpEventQueue();
+        finishCurrentTimer(60);
+        timer.fire(force: true);
+        await pumpEventQueue();
+        expect(operations, ['start', 'finish']);
+        expect(focusRepository.saveCalls, 1);
+        expect(tasksRepository.toggleCalls, 1);
+        expect(container.read(focusProvider).isBreak, isTrue);
+      },
+    );
+
+    test(
+      'unavailable remote authentication preserves personal local fallback',
+      () async {
+        var posts = 0;
+        wireHttp(
+          handler: (request) async {
+            posts++;
+            return successfulHttp(request);
+          },
+          idToken: () async => null,
+        );
+        final notifier = container.read(focusProvider.notifier);
+        configureTarget(notifier, FocusTargetType.subject);
+        await startAndFlush(notifier);
+        expect(container.read(focusProvider).isRunning, isTrue);
+        expect(posts, 0);
+        expect(timersCreated, 1);
+        finishCurrentTimer(60);
+        await pumpEventQueue();
+        expect(posts, 0);
+        expect(focusRepository.saveCalls, 1);
+        expect(studyRepository.addStudyTimeCalls, 1);
+        expect(container.read(focusProvider).isBreak, isTrue);
+      },
+    );
+
+    for (final invalidUid in <String?>[null, '', '   ']) {
+      test('production capture rejects UID $invalidUid', () {
+        auth.currentUser = invalidUid == null ? null : _User(invalidUid);
+        expect(
+          () => container.read(focusRemoteSendPermitProvider),
+          returnsNormally,
+        );
+        expect(
+          () => container.read(focusRemoteSendPermitProvider)(),
+          throwsA(isA<RemoteSessionStopped>()),
+        );
+      });
+    }
+
+    test('production capture fails closed without prepared database', () {
+      final isolated = ProviderContainer(
+        overrides: [
+          firebaseAuthProvider.overrideWithValue(auth),
+          databaseProvider.overrideWith(
+            (ref) => throw StateError('not prepared'),
+          ),
+        ],
+      );
+      addTearDown(isolated.dispose);
+      expect(
+        () => isolated.read(focusRemoteSendPermitProvider)(),
+        throwsA(isA<RemoteSessionStopped>()),
+      );
+    });
+  });
 
   test('selecting a task defines TASK target type', () {
     container

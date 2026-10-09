@@ -4,6 +4,8 @@ import 'dart:convert';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
+import 'package:life_os/core/database/local_mutation_gate.dart';
+import 'package:life_os/core/database/remote_send_permit.dart';
 import 'package:life_os/features/focus/data/remote/focus_remote_data_source.dart';
 
 const _baseUrl = 'https://example.test/api/focus';
@@ -41,6 +43,7 @@ FocusRemoteDataSource _dataSource(
   FocusIdTokenProvider? tokenProvider,
   FocusAppCheckTokenProvider? appCheckTokenProvider,
   Duration timeout = FocusRemoteDataSource.defaultTimeout,
+  RemoteSendPermit Function()? captureRemoteSend,
 }) {
   return FocusRemoteDataSource(
     client: client,
@@ -48,6 +51,7 @@ FocusRemoteDataSource _dataSource(
     appCheckTokenProvider: appCheckTokenProvider ?? () async => _appCheckToken,
     baseUrl: _baseUrl,
     timeout: timeout,
+    captureRemoteSend: captureRemoteSend ?? () => RemoteSendPermit(() => true),
   );
 }
 
@@ -62,7 +66,345 @@ Future<FocusRemoteException> _captureRemoteException(
   }
 }
 
+class _Session {
+  String? uid = 'a';
+  int captures = 0;
+  late final gate = LocalMutationGate(ownerUid: 'a')
+    ..bindSessionReader(() => uid)
+    ..openPreparedSession();
+
+  RemoteSendPermit capture() {
+    captures++;
+    return gate.captureRemoteSend(expectedUid: 'a');
+  }
+
+  void change(String? nextUid) {
+    uid = nextUid;
+    gate.observeSession(nextUid);
+  }
+}
+
+Future<Object> _invoke(
+  String operation,
+  FocusRemoteDataSource source, {
+  RemoteSendPermit? admission,
+}) => switch (operation) {
+  'start' => source.startFocus(
+    targetId: 'task-1',
+    targetType: FocusRemoteTargetType.task,
+    plannedDurationSeconds: 1500,
+    admission: admission,
+  ),
+  'finish' => source.finishFocus(
+    sessionId: 'session-finish',
+    admission: admission,
+  ),
+  _ => source.cancelFocus(sessionId: 'session-cancel', admission: admission),
+};
+
+http.Response _success(String operation) => http.Response(
+  jsonEncode(switch (operation) {
+    'start' => _startResponse,
+    'finish' => _finishResponse,
+    _ => _cancelResponse,
+  }),
+  200,
+);
+
 void main() {
+  group('remote session admission', () {
+    for (final operation in ['start', 'finish', 'cancel']) {
+      test(
+        '$operation: original cycle admission is never replaced after relogin',
+        () async {
+          final session = _Session();
+          final original = session.capture();
+          session.change(null);
+          session.change('a');
+          session.gate.openPreparedSession();
+          var posts = 0;
+          final source = _dataSource(
+            MockClient((_) async {
+              posts++;
+              return _success(operation);
+            }),
+            captureRemoteSend: session.capture,
+          );
+          final error = await _captureRemoteException(
+            () => _invoke(operation, source, admission: original),
+          );
+          expect(error.code, 'SESSION_STOPPED');
+          expect(posts, 0);
+          expect(session.captures, 1);
+        },
+      );
+      for (final phase in ['ID Token', 'App Check']) {
+        for (final transition in [
+          'logout',
+          'A-B',
+          'A-null-A',
+          'abort logout',
+        ]) {
+          test(
+            '$operation: $phase pending then $transition sends no POST',
+            () async {
+              final session = _Session();
+              final started = Completer<void>();
+              final token = Completer<String?>();
+              var posts = 0;
+              var idLoads = 0;
+              var appLoads = 0;
+              final source = _dataSource(
+                MockClient((_) async {
+                  posts++;
+                  return _success(operation);
+                }),
+                captureRemoteSend: session.capture,
+                tokenProvider: () {
+                  idLoads++;
+                  if (phase == 'ID Token' && !started.isCompleted) {
+                    started.complete();
+                    return token.future;
+                  }
+                  return Future.value(_token);
+                },
+                appCheckTokenProvider: () {
+                  appLoads++;
+                  if (phase == 'App Check' && !started.isCompleted) {
+                    started.complete();
+                    return token.future;
+                  }
+                  return Future.value(_appCheckToken);
+                },
+              );
+              final result = _captureRemoteException(
+                () => _invoke(operation, source),
+              );
+              await started.future;
+              final barrier = session.gate.beginQuiesce('a');
+              // Remote admission owns no lease: draining does not wait for token.
+              await barrier.drain();
+              expect(token.isCompleted, isFalse);
+              switch (transition) {
+                case 'logout':
+                  session.change(null);
+                  barrier.finish(signOutConfirmed: true);
+                case 'A-B':
+                  session.change('b');
+                  barrier.finish(signOutConfirmed: true);
+                case 'A-null-A':
+                  session.change(null);
+                  barrier.finish(signOutConfirmed: true);
+                  session.change('a');
+                  session.gate.openPreparedSession();
+                case 'abort logout':
+                  barrier.finish(signOutConfirmed: false);
+              }
+              token.complete(phase == 'ID Token' ? _token : _appCheckToken);
+              final error = await result;
+              expect(error.code, 'SESSION_STOPPED');
+              expect(error.isRetryable, isFalse);
+              expect(error.isAmbiguous, isFalse);
+              expect(posts, 0);
+              expect(session.captures, 1);
+              expect(idLoads, 1);
+              expect(appLoads, phase == 'App Check' ? 1 : 0);
+              for (final secret in [_token, _appCheckToken]) {
+                expect(error.toString(), isNot(contains(secret)));
+              }
+              if (transition == 'abort logout' || transition == 'A-null-A') {
+                await _invoke(operation, source);
+                expect(posts, 1);
+                expect(session.captures, 2);
+              }
+            },
+          );
+        }
+      }
+
+      test(
+        '$operation: response after logout is ambiguous and discarded',
+        () async {
+          final session = _Session();
+          final sent = Completer<void>();
+          final response = Completer<http.Response>();
+          var posts = 0;
+          final source = _dataSource(
+            MockClient((_) {
+              posts++;
+              sent.complete();
+              return response.future;
+            }),
+            captureRemoteSend: session.capture,
+          );
+          final result = _captureRemoteException(
+            () => _invoke(operation, source),
+          );
+          await sent.future;
+          final barrier = session.gate.beginQuiesce('a');
+          await barrier.drain();
+          session.change(null);
+          barrier.finish(signOutConfirmed: true);
+          response.complete(_success(operation));
+          final error = await result;
+          expect(error.code, 'SESSION_STOPPED');
+          expect(error.isAmbiguous, isTrue);
+          expect(error.isRetryable, isFalse);
+          expect(posts, 1);
+          expect(session.captures, 1);
+        },
+      );
+
+      test('$operation: final synchronous validation blocks POST', () async {
+        var checks = 0;
+        var posts = 0;
+        var appLoaded = false;
+        final source = _dataSource(
+          MockClient((_) async {
+            posts++;
+            return _success(operation);
+          }),
+          captureRemoteSend: () => RemoteSendPermit(() => ++checks < 4),
+          appCheckTokenProvider: () async {
+            appLoaded = true;
+            return _appCheckToken;
+          },
+        );
+        final error = await _captureRemoteException(
+          () => _invoke(operation, source),
+        );
+        expect(error.code, 'SESSION_STOPPED');
+        expect(error.isAmbiguous, isFalse);
+        expect(checks, 4);
+        expect(appLoaded, isTrue);
+        expect(posts, 0);
+      });
+    }
+
+    test(
+      'no configured admission fails closed before providers or HTTP',
+      () async {
+        var loads = 0;
+        var posts = 0;
+        final source = FocusRemoteDataSource(
+          client: MockClient((_) async {
+            posts++;
+            return _success('start');
+          }),
+          idTokenProvider: () async {
+            loads++;
+            return _token;
+          },
+          appCheckTokenProvider: () async {
+            loads++;
+            return _appCheckToken;
+          },
+          baseUrl: _baseUrl,
+        );
+        final error = await _captureRemoteException(
+          () => _invoke('start', source),
+        );
+        expect(error.code, 'SESSION_STOPPED');
+        expect(error.isAmbiguous, isFalse);
+        expect(loads, 0);
+        expect(posts, 0);
+      },
+    );
+
+    test('A cannot capture an operation in session B', () async {
+      final session = _Session()..change('b');
+      var posts = 0;
+      final source = _dataSource(
+        MockClient((_) async {
+          posts++;
+          return _success('start');
+        }),
+        captureRemoteSend: session.capture,
+      );
+      final error = await _captureRemoteException(
+        () => _invoke('start', source),
+      );
+      expect(error.code, 'SESSION_STOPPED');
+      expect(posts, 0);
+    });
+
+    test('backend errors redact tokens without changing known codes', () async {
+      final source = _dataSource(
+        MockClient(
+          (_) async => http.Response(
+            jsonEncode({
+              'code': 'TARGET_NOT_FOUND',
+              'error': 'detail $_token $_appCheckToken',
+            }),
+            404,
+          ),
+        ),
+      );
+      final error = await _captureRemoteException(
+        () => _invoke('start', source),
+      );
+      expect(error.code, 'TARGET_NOT_FOUND');
+      expect(error.statusCode, 404);
+      expect(error.isAmbiguous, isFalse);
+      for (final secret in [_token, _appCheckToken]) {
+        expect(error.toString(), isNot(contains(secret)));
+      }
+    });
+
+    for (final status in [200, 500, 408]) {
+      test(
+        'sent response $status with no confirmation remains ambiguous',
+        () async {
+          final source = _dataSource(
+            MockClient((_) async => http.Response('{}', status)),
+          );
+          final error = await _captureRemoteException(
+            () => _invoke('start', source),
+          );
+          expect(error.isAmbiguous, isTrue);
+        },
+      );
+    }
+
+    test('unexpected transport errors are sanitized and ambiguous', () async {
+      final source = _dataSource(
+        MockClient((_) async {
+          throw StateError('private $_token $_appCheckToken');
+        }),
+      );
+      final error = await _captureRemoteException(
+        () => _invoke('finish', source),
+      );
+      expect(error.code, 'FOCUS_FINISH_FAILED');
+      expect(error.isAmbiguous, isTrue);
+      for (final secret in [_token, _appCheckToken, 'private']) {
+        expect(error.toString(), isNot(contains(secret)));
+      }
+    });
+
+    test('transport errors are ambiguous and never expose tokens', () async {
+      var posts = 0;
+      final source = _dataSource(
+        MockClient((request) async {
+          posts++;
+          throw http.ClientException(
+            'private $_token $_appCheckToken',
+            request.url,
+          );
+        }),
+      );
+      final error = await _captureRemoteException(
+        () => _invoke('cancel', source),
+      );
+      expect(error.code, 'FOCUS_CANCEL_FAILED');
+      expect(error.isRetryable, isTrue);
+      expect(error.isAmbiguous, isTrue);
+      expect(posts, 1);
+      for (final secret in [_token, _appCheckToken, 'private']) {
+        expect(error.toString(), isNot(contains(secret)));
+      }
+    });
+  });
   group('App Check', () {
     test('start envia tokens e payload exatos com App Check trimado', () async {
       late http.Request request;
