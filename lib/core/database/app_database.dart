@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:async';
 
 import 'package:drift/drift.dart';
 import 'package:drift/native.dart';
@@ -56,7 +57,11 @@ class AppDatabase extends _$AppDatabase {
   }) : this._(executor, LocalMutationGate(ownerUid: identity.uid), identity);
 
   AppDatabase._(QueryExecutor executor, this.localMutations, this.identity)
-    : super(executor.interceptWith(LocalMutationInterceptor(localMutations)));
+    : super(
+        executor
+            .interceptWith(LocalMutationInterceptor(localMutations))
+            .interceptWith(_TransactionCommitGuardInterceptor()),
+      );
 
   final LocalMutationGate localMutations;
   final LocalDatabaseIdentity? identity;
@@ -68,10 +73,45 @@ class AppDatabase extends _$AppDatabase {
     LocalMutationTicket? admission,
     bool waitForReopen = true,
   }) => localMutations.run(
-    () => super.transaction(action, requireNew: requireNew),
+    () => _withCommitGuards(
+      () => super.transaction(action, requireNew: requireNew),
+    ),
     ticket: admission,
     waitForReopen: waitForReopen,
   );
+
+  /// Water ACKs retain remote admission until the outermost SQL commit,
+  /// including when called within an existing transaction.
+  Future<T> transactionWithCommitGuard<T>(
+    Future<T> Function() action, {
+    required LocalMutationTicket admission,
+    required void Function() validateBeforeCommit,
+    bool waitForReopen = false,
+  }) => localMutations.run(
+    () => _withCommitGuards(
+      () => super.transaction(action),
+      validateBeforeCommit: validateBeforeCommit,
+    ),
+    ticket: admission,
+    waitForReopen: waitForReopen,
+  );
+
+  Future<T> _withCommitGuards<T>(
+    Future<T> Function() action, {
+    void Function()? validateBeforeCommit,
+  }) {
+    final inherited =
+        Zone.current[_commitGuardKey] as _TransactionCommitGuards?;
+    final guards = inherited?.database == this
+        ? inherited!
+        : _TransactionCommitGuards(this);
+    if (validateBeforeCommit != null)
+      guards.validators.add(validateBeforeCommit);
+    if (identical(guards, inherited)) return action();
+    return runZoned(action, zoneValues: {_commitGuardKey: guards});
+  }
+
+  static final Object _commitGuardKey = Object();
 
   // =========================================================================
   // CONFIGURAÇÃO DO SCHEMA
@@ -776,4 +816,26 @@ LazyDatabase _openConnection() {
       },
     );
   });
+}
+
+/// Optional synchronous guard at the actual transaction commit boundary.
+/// Existing callers have no guard and retain the original gate behavior.
+class _TransactionCommitGuardInterceptor extends QueryInterceptor {
+  @override
+  Future<void> commitTransaction(TransactionExecutor inner) {
+    (Zone.current[AppDatabase._commitGuardKey] as _TransactionCommitGuards?)
+        ?.validate();
+    return super.commitTransaction(inner);
+  }
+}
+
+class _TransactionCommitGuards {
+  _TransactionCommitGuards(this.database);
+  final AppDatabase database;
+  final validators = <void Function()>[];
+  void validate() {
+    for (final validator in validators) {
+      validator();
+    }
+  }
 }

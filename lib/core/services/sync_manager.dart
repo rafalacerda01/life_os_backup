@@ -7,6 +7,8 @@ import 'sync_operation_result.dart';
 import 'sync_queue_store.dart';
 import 'sync_remote_data_source.dart';
 import 'sync_ui_event.dart';
+import 'water_v2_contract.dart';
+import 'water_v2_sync_processor.dart';
 
 class SyncManager {
   static const _succeededRetention = Duration(days: 7);
@@ -19,6 +21,7 @@ class SyncManager {
     Duration(minutes: 5),
   ];
 
+  final WaterV2SyncProcessor? waterV2Processor;
   final SyncQueueStore _queueStore;
   final SyncRemoteDataSource _remoteDataSource;
   final String? Function() _currentUserId;
@@ -42,6 +45,7 @@ class SyncManager {
     required this._queueStore,
     required this._remoteDataSource,
     required this._currentUserId,
+    this.waterV2Processor,
   });
 
   /// Stop session work without uploading or discarding the preserved queue.
@@ -210,6 +214,7 @@ class SyncManager {
             continue;
           }
 
+          final isWater = WaterV2Queue.isWater(item);
           SyncOperationResult result;
 
           try {
@@ -217,7 +222,18 @@ class SyncManager {
             // Future.any still observes a late remote error; the generation
             // check below prevents late acknowledgements or another send.
             result = await Future.any<SyncOperationResult>([
-              _remoteDataSource is SessionBoundSyncRemoteDataSource
+              isWater
+                  ? (waterV2Processor?.process(
+                          ownerUid,
+                          item,
+                          canSend: () => _canProcess(ownerUid, generation),
+                        ) ??
+                        Future.value(
+                          const SyncOperationResult.retryable(
+                            code: 'WATER_V2_DISABLED',
+                          ),
+                        ))
+                  : _remoteDataSource is SessionBoundSyncRemoteDataSource
                   ? _remoteDataSource.processForSession(
                       ownerUid,
                       item,
@@ -247,7 +263,10 @@ class SyncManager {
                 _emitUiEvent(SyncUiEventType.resumed, ownerUid);
                 _recoveryResumed = true;
               }
-              await _queueStore.markSyncItemAsSucceeded(item.id, ownerUid);
+              // Water success means its entire Drift ACK has committed.
+              // Never acknowledge it a second time through the generic store.
+              if (!isWater)
+                await _queueStore.markSyncItemAsSucceeded(item.id, ownerUid);
               break;
 
             case SyncOperationStatus.retryableError:

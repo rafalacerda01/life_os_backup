@@ -1,6 +1,8 @@
 import 'package:drift/drift.dart';
 import 'package:life_os/core/database/app_database.dart';
 import 'package:life_os/core/database/local_mutation_gate.dart';
+import 'package:life_os/core/database/remote_send_permit.dart';
+import 'package:life_os/core/services/water_v2_contract.dart';
 import 'package:life_os/features/health/data/local/water_v2_tables.dart';
 
 /// Captured values supplied by the future gesture/provisioning integration.
@@ -25,8 +27,8 @@ final class WaterV2IntentInput {
   final String? originEpoch;
 }
 
-/// Local-only primitives. No API here acknowledges delivery, updates the legacy
-/// projection, changes an intent's status/epoch, or creates a SyncQueue item.
+/// Local persistence plus a direct-response ACK. No API here creates an intent's
+/// queue link, performs network, adopts an epoch, or converts a legacy operation.
 final class WaterV2LocalStore {
   const WaterV2LocalStore(this._db);
 
@@ -266,6 +268,215 @@ final class WaterV2LocalStore {
       },
       admission: ticket,
       waitForReopen: false,
+    );
+  }
+
+  /// Atomically validate the explicit queue link and mark the attempt uncertain
+  /// before any network preflight. A lost response must never leave not_sent.
+  Future<WaterV2IncrementRequest?> prepareIncrement(
+    String ownerUid,
+    SyncQueueTableData item, {
+    required LocalMutationTicket admission,
+    required RemoteSendPermit permit,
+  }) {
+    final ticket = _admit(ownerUid, admission);
+    return _db.transactionWithCommitGuard(
+      () async {
+        permit.requireCurrent();
+        final row =
+            await (_db.select(_db.waterV2Intents)..where(
+                  (t) =>
+                      t.ownerUid.equals(ownerUid) &
+                      t.mutationId.equals(item.docId),
+                ))
+                .getSingleOrNull();
+        if (row == null || row.originEpoch == null)
+          throw StateError('WATER_ORIGIN_REQUIRED');
+        final request = WaterV2IncrementRequest.fromIntent(row);
+        final queue = await _linkedQueue(row, request);
+        if (queue.id != item.id || !request.matchesQueue(item))
+          throw StateError('WATER_QUEUE_CONFLICT');
+        final state =
+            await (_db.select(_db.waterV2DailyStates)..where(
+                  (t) =>
+                      t.ownerUid.equals(ownerUid) &
+                      t.healthDay.equals(row.healthDay),
+                ))
+                .getSingleOrNull();
+        if (state == null || state.epoch != row.originEpoch)
+          throw StateError('WATER_STATE_REQUIRED');
+        await _requireEpoch(ownerUid, row.originEpoch!);
+        if (row.localStatus == WaterV2IntentStatus.receiptConfirmed &&
+            queue.status == SyncQueuePersistenceStatus.succeeded)
+          return null;
+        if (queue.status != SyncQueuePersistenceStatus.pending ||
+            row.localStatus == WaterV2IntentStatus.receiptConfirmed)
+          throw StateError('WATER_QUEUE_CONFLICT');
+        await (_db.update(_db.waterV2Intents)..where(
+              (t) =>
+                  t.ownerUid.equals(ownerUid) &
+                  t.mutationId.equals(row.mutationId),
+            ))
+            .write(
+              const WaterV2IntentsCompanion(
+                localStatus: Value(WaterV2IntentStatus.unreconciled),
+              ),
+            );
+        permit.requireCurrent();
+        return request;
+      },
+      admission: ticket,
+      waitForReopen: false,
+      validateBeforeCommit: permit.requireCurrent,
+    );
+  }
+
+  Future<SyncQueueTableData> _linkedQueue(
+    WaterV2Intent row,
+    WaterV2IncrementRequest request,
+  ) async {
+    if (row.syncQueueId == null) throw StateError('WATER_QUEUE_CONFLICT');
+    final queue = await (_db.select(
+      _db.syncQueueTable,
+    )..where((t) => t.id.equals(row.syncQueueId!))).getSingleOrNull();
+    if (queue == null || !request.matchesQueue(queue))
+      throw StateError('WATER_QUEUE_CONFLICT');
+    return queue;
+  }
+
+  /// Only direct increment evidence is accepted. Reconcile membership has no
+  /// fingerprint and is a different type that cannot call this API.
+  Future<void> acknowledgeIncrement(
+    WaterV2IncrementSuccess success, {
+    required LocalMutationTicket admission,
+    required RemoteSendPermit permit,
+    required String observedAtUtc,
+  }) {
+    _validateUtc(observedAtUtc);
+    // The response retains its original remote admission. A caller cannot
+    // revive old evidence by supplying a new permit after aborted logout.
+    final boundPermit = success.remotePermit.and(() => permit.isCurrent);
+    final request = success.request;
+    final ticket = _admit(request.ownerUid, admission);
+    return _db.transactionWithCommitGuard(
+      () async {
+        boundPermit.requireCurrent();
+        final row =
+            await (_db.select(_db.waterV2Intents)..where(
+                  (t) =>
+                      t.ownerUid.equals(request.ownerUid) &
+                      t.mutationId.equals(request.mutationId),
+                ))
+                .getSingleOrNull();
+        if (row == null ||
+            !request.matches(row) ||
+            row.originEpoch == null ||
+            row.originEpoch != success.epoch)
+          throw StateError('WATER_MUTATION_CONFLICT');
+        final queue = await _linkedQueue(row, request);
+        final prior =
+            await (_db.select(_db.waterV2DailyStates)..where(
+                  (t) =>
+                      t.ownerUid.equals(request.ownerUid) &
+                      t.healthDay.equals(request.healthDay),
+                ))
+                .getSingleOrNull();
+        if (prior == null || prior.epoch != success.epoch)
+          throw StateError('WATER_EPOCH_CONFLICT');
+        if (success.revision < prior.revision)
+          throw StateError('WATER_REVISION_REGRESSION');
+        if (success.waterIntakeMl < prior.confirmedWaterIntakeMl ||
+            (success.revision == prior.revision &&
+                success.waterIntakeMl != prior.confirmedWaterIntakeMl))
+          throw StateError('WATER_SNAPSHOT_CONFLICT');
+        if (row.localStatus == WaterV2IntentStatus.receiptConfirmed &&
+            queue.status == SyncQueuePersistenceStatus.succeeded) {
+          boundPermit.requireCurrent();
+          return; // Replay of an already durable ACK never changes its projection.
+        }
+        if (row.localStatus != WaterV2IntentStatus.unreconciled ||
+            queue.status != SyncQueuePersistenceStatus.pending)
+          throw StateError('WATER_QUEUE_CONFLICT');
+        final others =
+            await (_db.select(_db.waterV2Intents)..where(
+                  (t) =>
+                      t.ownerUid.equals(request.ownerUid) &
+                      t.healthDay.equals(request.healthDay) &
+                      t.mutationId.equals(request.mutationId).not(),
+                ))
+                .get();
+        var remainingMl = 0;
+        for (final other in others) {
+          if (other.originEpoch != success.epoch)
+            throw StateError('WATER_EPOCH_CONFLICT');
+          if (other.localStatus == WaterV2IntentStatus.receiptConfirmed)
+            continue;
+          // A snapshot may already include an uncertain operation. Do not guess
+          // its membership, discard it, or partially ACK the current operation.
+          if (other.localStatus != WaterV2IntentStatus.notSent)
+            throw StateError('WATER_RECONCILIATION_REQUIRED');
+          final linked = await _linkedQueue(
+            other,
+            WaterV2IncrementRequest.fromIntent(other),
+          );
+          if (linked.status != SyncQueuePersistenceStatus.pending ||
+              linked.attemptCount != 0)
+            throw StateError('WATER_RECONCILIATION_REQUIRED');
+          remainingMl += other.deltaMl;
+        }
+        final health = await (_db.select(
+          _db.healthEntries,
+        )..where((t) => t.docId.equals(request.healthDay))).getSingleOrNull();
+        if (health == null) throw StateError('WATER_PROJECTION_REQUIRED');
+        boundPermit.requireCurrent();
+        await persistConfirmedState(
+          ownerUid: request.ownerUid,
+          healthDay: request.healthDay,
+          epoch: success.epoch,
+          revision: success.revision,
+          confirmedWaterIntakeMl: success.waterIntakeMl,
+          reconciledAtUtc: observedAtUtc,
+          admission: ticket,
+        );
+        await (_db.update(_db.waterV2Intents)..where(
+              (t) =>
+                  t.ownerUid.equals(request.ownerUid) &
+                  t.mutationId.equals(request.mutationId),
+            ))
+            .write(
+              const WaterV2IntentsCompanion(
+                localStatus: Value(WaterV2IntentStatus.receiptConfirmed),
+              ),
+            );
+        await (_db.update(_db.syncQueueTable)..where(
+              (t) =>
+                  t.id.equals(queue.id) & t.ownerUid.equals(request.ownerUid),
+            ))
+            .write(
+              SyncQueueTableCompanion(
+                status: const Value(SyncQueuePersistenceStatus.succeeded),
+                isSynced: const Value(true),
+                lastErrorCode: const Value(null),
+                attemptCount: Value(queue.attemptCount + 1),
+                lastAttemptAt: Value(
+                  DateTime.parse(observedAtUtc).millisecondsSinceEpoch,
+                ),
+              ),
+            );
+        await (_db.update(
+          _db.healthEntries,
+        )..where((t) => t.docId.equals(request.healthDay))).write(
+          HealthEntriesCompanion(
+            waterIntakeMl: Value(
+              (success.waterIntakeMl + remainingMl).clamp(0, 1000000),
+            ),
+          ),
+        );
+        boundPermit.requireCurrent();
+      },
+      admission: ticket,
+      waitForReopen: false,
+      validateBeforeCommit: boundPermit.requireCurrent,
     );
   }
 

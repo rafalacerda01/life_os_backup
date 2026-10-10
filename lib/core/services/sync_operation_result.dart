@@ -27,18 +27,18 @@ class SyncOperationResult {
   const SyncOperationResult.quotaExceeded()
     : this._(status: SyncOperationStatus.quotaExceeded, code: 'QUOTA_EXCEEDED');
 
-  const SyncOperationResult.permissionDenied()
-    : this._(
-        status: SyncOperationStatus.permissionDenied,
-        code: 'PERMISSION_DENIED',
-      );
+  const SyncOperationResult.permissionDenied({
+    String code = 'PERMISSION_DENIED',
+  }) : this._(status: SyncOperationStatus.permissionDenied, code: code);
 
-  const SyncOperationResult.invalidPayload({String? message})
-    : this._(
-        status: SyncOperationStatus.invalidPayload,
-        message: message,
-        code: 'INVALID_PAYLOAD',
-      );
+  const SyncOperationResult.invalidPayload({
+    String? message,
+    String code = 'INVALID_PAYLOAD',
+  }) : this._(
+         status: SyncOperationStatus.invalidPayload,
+         message: message,
+         code: code,
+       );
 
   const SyncOperationResult.unsupportedOperation({String? message})
     : this._(
