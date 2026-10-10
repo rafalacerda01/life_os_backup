@@ -132,11 +132,13 @@ void main() {
       // Reads initialize Drift internally without granting a domain lease.
       expect(await cold.select(cold.taskTable).get(), isEmpty);
       expect(await cold.select(cold.syncQueueTable).get(), isEmpty);
+      expect(await cold.select(cold.waterV2DailyStates).get(), isEmpty);
+      expect(await cold.select(cold.waterV2Intents).get(), isEmpty);
       expect(
         (await cold.customSelect('PRAGMA user_version').get()).single.read<int>(
           'user_version',
         ),
-        9,
+        10,
       );
       await expectLater(
         cold
@@ -245,11 +247,13 @@ void main() {
       expect(row.docId, 'legacy');
       expect(row.ownerUid, isNull);
       expect(row.status, SyncQueuePersistenceStatus.succeeded);
+      expect(await cold.select(cold.waterV2DailyStates).get(), isEmpty);
+      expect(await cold.select(cold.waterV2Intents).get(), isEmpty);
       expect(
         (await cold.customSelect('PRAGMA user_version').get()).single.read<int>(
           'user_version',
         ),
-        9,
+        10,
       );
       await expectLater(
         cold.insertSyncItem(

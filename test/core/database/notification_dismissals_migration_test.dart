@@ -6,7 +6,7 @@ import 'package:sqlite3/sqlite3.dart' as sqlite3;
 
 void main() {
   test(
-    'upgrade 8 to 9 preserves notifications, entities and owner queue',
+    'upgrade 8 to current preserves notifications, entities and owner queue',
     () async {
       final directory = Directory.systemTemp.createTempSync('notification_v8_');
       final file = File('${directory.path}/existing.sqlite');
@@ -47,6 +47,8 @@ void main() {
       await db.close();
       // Exact v8 schema: v9 adds the dismissal table and local occurrence key.
       final raw = sqlite3.sqlite3.open(file.path);
+      raw.execute('DROP TABLE water_v2_intents');
+      raw.execute('DROP TABLE water_v2_daily_states');
       raw.execute('DROP TABLE notification_dismissals');
       raw.execute('ALTER TABLE notifications_table DROP COLUMN occurrence_key');
       raw.execute('PRAGMA user_version = 8');
@@ -61,9 +63,11 @@ void main() {
         (await db.customSelect('PRAGMA user_version').getSingle()).read<int>(
           'user_version',
         ),
-        9,
+        10,
       );
-      expect(db.allTables, hasLength(14));
+      expect(db.allTables, hasLength(16));
+      expect(await db.select(db.waterV2DailyStates).get(), isEmpty);
+      expect(await db.select(db.waterV2Intents).get(), isEmpty);
     },
   );
 }

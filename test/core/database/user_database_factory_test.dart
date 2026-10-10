@@ -61,20 +61,20 @@ void main() {
   });
 
   test(
-    'missing A creates scoped key and encrypted schema v9 with current PRAGMAs',
+    'missing A creates scoped key and encrypted schema v10 with current PRAGMAs',
     () async {
       final db = await open(a);
       expect(db.identity, a);
       await seed(db, 'task-a');
-      expect(db.schemaVersion, 9);
-      expect(db.allTables, hasLength(14));
+      expect(db.schemaVersion, 10);
+      expect(db.allTables, hasLength(16));
       expect(
         (await db.customSelect('PRAGMA user_version').get())
             .single
             .data
             .values
             .single,
-        9,
+        10,
       );
       expect(
         (await db.customSelect('PRAGMA journal_mode').get())
@@ -261,7 +261,7 @@ void main() {
       final db = AppDatabase(executor: NativeDatabase.memory());
       databases.add(db);
       expect(db.identity, isNull);
-      expect(db.schemaVersion, 9);
+      expect(db.schemaVersion, 10);
       await seed(db, 'injected-task');
       expect((await db.select(db.taskTable).get()).single.id, 'injected-task');
       expect(directory.listSync(), isEmpty);

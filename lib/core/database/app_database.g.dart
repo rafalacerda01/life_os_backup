@@ -6232,6 +6232,1046 @@ class SyncQueueTableCompanion extends UpdateCompanion<SyncQueueTableData> {
   }
 }
 
+class $WaterV2DailyStatesTable extends WaterV2DailyStates
+    with TableInfo<$WaterV2DailyStatesTable, WaterV2DailyState> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  $WaterV2DailyStatesTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _ownerUidMeta = const VerificationMeta(
+    'ownerUid',
+  );
+  @override
+  late final GeneratedColumn<String> ownerUid = GeneratedColumn<String>(
+    'owner_uid',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _healthDayMeta = const VerificationMeta(
+    'healthDay',
+  );
+  @override
+  late final GeneratedColumn<String> healthDay = GeneratedColumn<String>(
+    'health_day',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _epochMeta = const VerificationMeta('epoch');
+  @override
+  late final GeneratedColumn<String> epoch = GeneratedColumn<String>(
+    'epoch',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _revisionMeta = const VerificationMeta(
+    'revision',
+  );
+  @override
+  late final GeneratedColumn<int> revision = GeneratedColumn<int>(
+    'revision',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _confirmedWaterIntakeMlMeta =
+      const VerificationMeta('confirmedWaterIntakeMl');
+  @override
+  late final GeneratedColumn<int> confirmedWaterIntakeMl = GeneratedColumn<int>(
+    'confirmed_water_intake_ml',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _reconciledAtUtcMeta = const VerificationMeta(
+    'reconciledAtUtc',
+  );
+  @override
+  late final GeneratedColumn<String> reconciledAtUtc = GeneratedColumn<String>(
+    'reconciled_at_utc',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  @override
+  List<GeneratedColumn> get $columns => [
+    ownerUid,
+    healthDay,
+    epoch,
+    revision,
+    confirmedWaterIntakeMl,
+    reconciledAtUtc,
+  ];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'water_v2_daily_states';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<WaterV2DailyState> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('owner_uid')) {
+      context.handle(
+        _ownerUidMeta,
+        ownerUid.isAcceptableOrUnknown(data['owner_uid']!, _ownerUidMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_ownerUidMeta);
+    }
+    if (data.containsKey('health_day')) {
+      context.handle(
+        _healthDayMeta,
+        healthDay.isAcceptableOrUnknown(data['health_day']!, _healthDayMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_healthDayMeta);
+    }
+    if (data.containsKey('epoch')) {
+      context.handle(
+        _epochMeta,
+        epoch.isAcceptableOrUnknown(data['epoch']!, _epochMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_epochMeta);
+    }
+    if (data.containsKey('revision')) {
+      context.handle(
+        _revisionMeta,
+        revision.isAcceptableOrUnknown(data['revision']!, _revisionMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_revisionMeta);
+    }
+    if (data.containsKey('confirmed_water_intake_ml')) {
+      context.handle(
+        _confirmedWaterIntakeMlMeta,
+        confirmedWaterIntakeMl.isAcceptableOrUnknown(
+          data['confirmed_water_intake_ml']!,
+          _confirmedWaterIntakeMlMeta,
+        ),
+      );
+    } else if (isInserting) {
+      context.missing(_confirmedWaterIntakeMlMeta);
+    }
+    if (data.containsKey('reconciled_at_utc')) {
+      context.handle(
+        _reconciledAtUtcMeta,
+        reconciledAtUtc.isAcceptableOrUnknown(
+          data['reconciled_at_utc']!,
+          _reconciledAtUtcMeta,
+        ),
+      );
+    } else if (isInserting) {
+      context.missing(_reconciledAtUtcMeta);
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {ownerUid, healthDay};
+  @override
+  WaterV2DailyState map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return WaterV2DailyState(
+      ownerUid: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}owner_uid'],
+      )!,
+      healthDay: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}health_day'],
+      )!,
+      epoch: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}epoch'],
+      )!,
+      revision: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}revision'],
+      )!,
+      confirmedWaterIntakeMl: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}confirmed_water_intake_ml'],
+      )!,
+      reconciledAtUtc: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}reconciled_at_utc'],
+      )!,
+    );
+  }
+
+  @override
+  $WaterV2DailyStatesTable createAlias(String alias) {
+    return $WaterV2DailyStatesTable(attachedDatabase, alias);
+  }
+}
+
+class WaterV2DailyState extends DataClass
+    implements Insertable<WaterV2DailyState> {
+  final String ownerUid;
+  final String healthDay;
+  final String epoch;
+  final int revision;
+  final int confirmedWaterIntakeMl;
+
+  /// Canonical UTC text retains milliseconds and records snapshot freshness.
+  final String reconciledAtUtc;
+  const WaterV2DailyState({
+    required this.ownerUid,
+    required this.healthDay,
+    required this.epoch,
+    required this.revision,
+    required this.confirmedWaterIntakeMl,
+    required this.reconciledAtUtc,
+  });
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['owner_uid'] = Variable<String>(ownerUid);
+    map['health_day'] = Variable<String>(healthDay);
+    map['epoch'] = Variable<String>(epoch);
+    map['revision'] = Variable<int>(revision);
+    map['confirmed_water_intake_ml'] = Variable<int>(confirmedWaterIntakeMl);
+    map['reconciled_at_utc'] = Variable<String>(reconciledAtUtc);
+    return map;
+  }
+
+  WaterV2DailyStatesCompanion toCompanion(bool nullToAbsent) {
+    return WaterV2DailyStatesCompanion(
+      ownerUid: Value(ownerUid),
+      healthDay: Value(healthDay),
+      epoch: Value(epoch),
+      revision: Value(revision),
+      confirmedWaterIntakeMl: Value(confirmedWaterIntakeMl),
+      reconciledAtUtc: Value(reconciledAtUtc),
+    );
+  }
+
+  factory WaterV2DailyState.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return WaterV2DailyState(
+      ownerUid: serializer.fromJson<String>(json['ownerUid']),
+      healthDay: serializer.fromJson<String>(json['healthDay']),
+      epoch: serializer.fromJson<String>(json['epoch']),
+      revision: serializer.fromJson<int>(json['revision']),
+      confirmedWaterIntakeMl: serializer.fromJson<int>(
+        json['confirmedWaterIntakeMl'],
+      ),
+      reconciledAtUtc: serializer.fromJson<String>(json['reconciledAtUtc']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'ownerUid': serializer.toJson<String>(ownerUid),
+      'healthDay': serializer.toJson<String>(healthDay),
+      'epoch': serializer.toJson<String>(epoch),
+      'revision': serializer.toJson<int>(revision),
+      'confirmedWaterIntakeMl': serializer.toJson<int>(confirmedWaterIntakeMl),
+      'reconciledAtUtc': serializer.toJson<String>(reconciledAtUtc),
+    };
+  }
+
+  WaterV2DailyState copyWith({
+    String? ownerUid,
+    String? healthDay,
+    String? epoch,
+    int? revision,
+    int? confirmedWaterIntakeMl,
+    String? reconciledAtUtc,
+  }) => WaterV2DailyState(
+    ownerUid: ownerUid ?? this.ownerUid,
+    healthDay: healthDay ?? this.healthDay,
+    epoch: epoch ?? this.epoch,
+    revision: revision ?? this.revision,
+    confirmedWaterIntakeMl:
+        confirmedWaterIntakeMl ?? this.confirmedWaterIntakeMl,
+    reconciledAtUtc: reconciledAtUtc ?? this.reconciledAtUtc,
+  );
+  WaterV2DailyState copyWithCompanion(WaterV2DailyStatesCompanion data) {
+    return WaterV2DailyState(
+      ownerUid: data.ownerUid.present ? data.ownerUid.value : this.ownerUid,
+      healthDay: data.healthDay.present ? data.healthDay.value : this.healthDay,
+      epoch: data.epoch.present ? data.epoch.value : this.epoch,
+      revision: data.revision.present ? data.revision.value : this.revision,
+      confirmedWaterIntakeMl: data.confirmedWaterIntakeMl.present
+          ? data.confirmedWaterIntakeMl.value
+          : this.confirmedWaterIntakeMl,
+      reconciledAtUtc: data.reconciledAtUtc.present
+          ? data.reconciledAtUtc.value
+          : this.reconciledAtUtc,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('WaterV2DailyState(')
+          ..write('ownerUid: $ownerUid, ')
+          ..write('healthDay: $healthDay, ')
+          ..write('epoch: $epoch, ')
+          ..write('revision: $revision, ')
+          ..write('confirmedWaterIntakeMl: $confirmedWaterIntakeMl, ')
+          ..write('reconciledAtUtc: $reconciledAtUtc')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hash(
+    ownerUid,
+    healthDay,
+    epoch,
+    revision,
+    confirmedWaterIntakeMl,
+    reconciledAtUtc,
+  );
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is WaterV2DailyState &&
+          other.ownerUid == this.ownerUid &&
+          other.healthDay == this.healthDay &&
+          other.epoch == this.epoch &&
+          other.revision == this.revision &&
+          other.confirmedWaterIntakeMl == this.confirmedWaterIntakeMl &&
+          other.reconciledAtUtc == this.reconciledAtUtc);
+}
+
+class WaterV2DailyStatesCompanion extends UpdateCompanion<WaterV2DailyState> {
+  final Value<String> ownerUid;
+  final Value<String> healthDay;
+  final Value<String> epoch;
+  final Value<int> revision;
+  final Value<int> confirmedWaterIntakeMl;
+  final Value<String> reconciledAtUtc;
+  final Value<int> rowid;
+  const WaterV2DailyStatesCompanion({
+    this.ownerUid = const Value.absent(),
+    this.healthDay = const Value.absent(),
+    this.epoch = const Value.absent(),
+    this.revision = const Value.absent(),
+    this.confirmedWaterIntakeMl = const Value.absent(),
+    this.reconciledAtUtc = const Value.absent(),
+    this.rowid = const Value.absent(),
+  });
+  WaterV2DailyStatesCompanion.insert({
+    required String ownerUid,
+    required String healthDay,
+    required String epoch,
+    required int revision,
+    required int confirmedWaterIntakeMl,
+    required String reconciledAtUtc,
+    this.rowid = const Value.absent(),
+  }) : ownerUid = Value(ownerUid),
+       healthDay = Value(healthDay),
+       epoch = Value(epoch),
+       revision = Value(revision),
+       confirmedWaterIntakeMl = Value(confirmedWaterIntakeMl),
+       reconciledAtUtc = Value(reconciledAtUtc);
+  static Insertable<WaterV2DailyState> custom({
+    Expression<String>? ownerUid,
+    Expression<String>? healthDay,
+    Expression<String>? epoch,
+    Expression<int>? revision,
+    Expression<int>? confirmedWaterIntakeMl,
+    Expression<String>? reconciledAtUtc,
+    Expression<int>? rowid,
+  }) {
+    return RawValuesInsertable({
+      if (ownerUid != null) 'owner_uid': ownerUid,
+      if (healthDay != null) 'health_day': healthDay,
+      if (epoch != null) 'epoch': epoch,
+      if (revision != null) 'revision': revision,
+      if (confirmedWaterIntakeMl != null)
+        'confirmed_water_intake_ml': confirmedWaterIntakeMl,
+      if (reconciledAtUtc != null) 'reconciled_at_utc': reconciledAtUtc,
+      if (rowid != null) 'rowid': rowid,
+    });
+  }
+
+  WaterV2DailyStatesCompanion copyWith({
+    Value<String>? ownerUid,
+    Value<String>? healthDay,
+    Value<String>? epoch,
+    Value<int>? revision,
+    Value<int>? confirmedWaterIntakeMl,
+    Value<String>? reconciledAtUtc,
+    Value<int>? rowid,
+  }) {
+    return WaterV2DailyStatesCompanion(
+      ownerUid: ownerUid ?? this.ownerUid,
+      healthDay: healthDay ?? this.healthDay,
+      epoch: epoch ?? this.epoch,
+      revision: revision ?? this.revision,
+      confirmedWaterIntakeMl:
+          confirmedWaterIntakeMl ?? this.confirmedWaterIntakeMl,
+      reconciledAtUtc: reconciledAtUtc ?? this.reconciledAtUtc,
+      rowid: rowid ?? this.rowid,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (ownerUid.present) {
+      map['owner_uid'] = Variable<String>(ownerUid.value);
+    }
+    if (healthDay.present) {
+      map['health_day'] = Variable<String>(healthDay.value);
+    }
+    if (epoch.present) {
+      map['epoch'] = Variable<String>(epoch.value);
+    }
+    if (revision.present) {
+      map['revision'] = Variable<int>(revision.value);
+    }
+    if (confirmedWaterIntakeMl.present) {
+      map['confirmed_water_intake_ml'] = Variable<int>(
+        confirmedWaterIntakeMl.value,
+      );
+    }
+    if (reconciledAtUtc.present) {
+      map['reconciled_at_utc'] = Variable<String>(reconciledAtUtc.value);
+    }
+    if (rowid.present) {
+      map['rowid'] = Variable<int>(rowid.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('WaterV2DailyStatesCompanion(')
+          ..write('ownerUid: $ownerUid, ')
+          ..write('healthDay: $healthDay, ')
+          ..write('epoch: $epoch, ')
+          ..write('revision: $revision, ')
+          ..write('confirmedWaterIntakeMl: $confirmedWaterIntakeMl, ')
+          ..write('reconciledAtUtc: $reconciledAtUtc, ')
+          ..write('rowid: $rowid')
+          ..write(')'))
+        .toString();
+  }
+}
+
+class $WaterV2IntentsTable extends WaterV2Intents
+    with TableInfo<$WaterV2IntentsTable, WaterV2Intent> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  $WaterV2IntentsTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _ownerUidMeta = const VerificationMeta(
+    'ownerUid',
+  );
+  @override
+  late final GeneratedColumn<String> ownerUid = GeneratedColumn<String>(
+    'owner_uid',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _mutationIdMeta = const VerificationMeta(
+    'mutationId',
+  );
+  @override
+  late final GeneratedColumn<String> mutationId = GeneratedColumn<String>(
+    'mutation_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _healthDayMeta = const VerificationMeta(
+    'healthDay',
+  );
+  @override
+  late final GeneratedColumn<String> healthDay = GeneratedColumn<String>(
+    'health_day',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _deltaMlMeta = const VerificationMeta(
+    'deltaMl',
+  );
+  @override
+  late final GeneratedColumn<int> deltaMl = GeneratedColumn<int>(
+    'delta_ml',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _occurredAtUtcMeta = const VerificationMeta(
+    'occurredAtUtc',
+  );
+  @override
+  late final GeneratedColumn<String> occurredAtUtc = GeneratedColumn<String>(
+    'occurred_at_utc',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _timeZoneOffsetMinutesMeta =
+      const VerificationMeta('timeZoneOffsetMinutes');
+  @override
+  late final GeneratedColumn<int> timeZoneOffsetMinutes = GeneratedColumn<int>(
+    'time_zone_offset_minutes',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _originEpochMeta = const VerificationMeta(
+    'originEpoch',
+  );
+  @override
+  late final GeneratedColumn<String> originEpoch = GeneratedColumn<String>(
+    'origin_epoch',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+  );
+  static const VerificationMeta _localStatusMeta = const VerificationMeta(
+    'localStatus',
+  );
+  @override
+  late final GeneratedColumn<String> localStatus = GeneratedColumn<String>(
+    'local_status',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    defaultValue: const Constant(WaterV2IntentStatus.notSent),
+  );
+  static const VerificationMeta _syncQueueIdMeta = const VerificationMeta(
+    'syncQueueId',
+  );
+  @override
+  late final GeneratedColumn<int> syncQueueId = GeneratedColumn<int>(
+    'sync_queue_id',
+    aliasedName,
+    true,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+  );
+  @override
+  List<GeneratedColumn> get $columns => [
+    ownerUid,
+    mutationId,
+    healthDay,
+    deltaMl,
+    occurredAtUtc,
+    timeZoneOffsetMinutes,
+    originEpoch,
+    localStatus,
+    syncQueueId,
+  ];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'water_v2_intents';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<WaterV2Intent> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('owner_uid')) {
+      context.handle(
+        _ownerUidMeta,
+        ownerUid.isAcceptableOrUnknown(data['owner_uid']!, _ownerUidMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_ownerUidMeta);
+    }
+    if (data.containsKey('mutation_id')) {
+      context.handle(
+        _mutationIdMeta,
+        mutationId.isAcceptableOrUnknown(data['mutation_id']!, _mutationIdMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_mutationIdMeta);
+    }
+    if (data.containsKey('health_day')) {
+      context.handle(
+        _healthDayMeta,
+        healthDay.isAcceptableOrUnknown(data['health_day']!, _healthDayMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_healthDayMeta);
+    }
+    if (data.containsKey('delta_ml')) {
+      context.handle(
+        _deltaMlMeta,
+        deltaMl.isAcceptableOrUnknown(data['delta_ml']!, _deltaMlMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_deltaMlMeta);
+    }
+    if (data.containsKey('occurred_at_utc')) {
+      context.handle(
+        _occurredAtUtcMeta,
+        occurredAtUtc.isAcceptableOrUnknown(
+          data['occurred_at_utc']!,
+          _occurredAtUtcMeta,
+        ),
+      );
+    } else if (isInserting) {
+      context.missing(_occurredAtUtcMeta);
+    }
+    if (data.containsKey('time_zone_offset_minutes')) {
+      context.handle(
+        _timeZoneOffsetMinutesMeta,
+        timeZoneOffsetMinutes.isAcceptableOrUnknown(
+          data['time_zone_offset_minutes']!,
+          _timeZoneOffsetMinutesMeta,
+        ),
+      );
+    } else if (isInserting) {
+      context.missing(_timeZoneOffsetMinutesMeta);
+    }
+    if (data.containsKey('origin_epoch')) {
+      context.handle(
+        _originEpochMeta,
+        originEpoch.isAcceptableOrUnknown(
+          data['origin_epoch']!,
+          _originEpochMeta,
+        ),
+      );
+    }
+    if (data.containsKey('local_status')) {
+      context.handle(
+        _localStatusMeta,
+        localStatus.isAcceptableOrUnknown(
+          data['local_status']!,
+          _localStatusMeta,
+        ),
+      );
+    }
+    if (data.containsKey('sync_queue_id')) {
+      context.handle(
+        _syncQueueIdMeta,
+        syncQueueId.isAcceptableOrUnknown(
+          data['sync_queue_id']!,
+          _syncQueueIdMeta,
+        ),
+      );
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {ownerUid, mutationId};
+  @override
+  WaterV2Intent map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return WaterV2Intent(
+      ownerUid: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}owner_uid'],
+      )!,
+      mutationId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}mutation_id'],
+      )!,
+      healthDay: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}health_day'],
+      )!,
+      deltaMl: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}delta_ml'],
+      )!,
+      occurredAtUtc: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}occurred_at_utc'],
+      )!,
+      timeZoneOffsetMinutes: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}time_zone_offset_minutes'],
+      )!,
+      originEpoch: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}origin_epoch'],
+      ),
+      localStatus: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}local_status'],
+      )!,
+      syncQueueId: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}sync_queue_id'],
+      ),
+    );
+  }
+
+  @override
+  $WaterV2IntentsTable createAlias(String alias) {
+    return $WaterV2IntentsTable(attachedDatabase, alias);
+  }
+}
+
+class WaterV2Intent extends DataClass implements Insertable<WaterV2Intent> {
+  final String ownerUid;
+  final String mutationId;
+  final String healthDay;
+  final int deltaMl;
+  final String occurredAtUtc;
+  final int timeZoneOffsetMinutes;
+
+  /// Null means unprovisioned/quarantined, never permission to adopt an epoch.
+  final String? originEpoch;
+  final String localStatus;
+
+  /// Reserved logical link. No FK: succeeded queue rows have a shorter lifetime
+  /// than durable identities. This round neither enqueues nor assigns this link.
+  final int? syncQueueId;
+  const WaterV2Intent({
+    required this.ownerUid,
+    required this.mutationId,
+    required this.healthDay,
+    required this.deltaMl,
+    required this.occurredAtUtc,
+    required this.timeZoneOffsetMinutes,
+    this.originEpoch,
+    required this.localStatus,
+    this.syncQueueId,
+  });
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['owner_uid'] = Variable<String>(ownerUid);
+    map['mutation_id'] = Variable<String>(mutationId);
+    map['health_day'] = Variable<String>(healthDay);
+    map['delta_ml'] = Variable<int>(deltaMl);
+    map['occurred_at_utc'] = Variable<String>(occurredAtUtc);
+    map['time_zone_offset_minutes'] = Variable<int>(timeZoneOffsetMinutes);
+    if (!nullToAbsent || originEpoch != null) {
+      map['origin_epoch'] = Variable<String>(originEpoch);
+    }
+    map['local_status'] = Variable<String>(localStatus);
+    if (!nullToAbsent || syncQueueId != null) {
+      map['sync_queue_id'] = Variable<int>(syncQueueId);
+    }
+    return map;
+  }
+
+  WaterV2IntentsCompanion toCompanion(bool nullToAbsent) {
+    return WaterV2IntentsCompanion(
+      ownerUid: Value(ownerUid),
+      mutationId: Value(mutationId),
+      healthDay: Value(healthDay),
+      deltaMl: Value(deltaMl),
+      occurredAtUtc: Value(occurredAtUtc),
+      timeZoneOffsetMinutes: Value(timeZoneOffsetMinutes),
+      originEpoch: originEpoch == null && nullToAbsent
+          ? const Value.absent()
+          : Value(originEpoch),
+      localStatus: Value(localStatus),
+      syncQueueId: syncQueueId == null && nullToAbsent
+          ? const Value.absent()
+          : Value(syncQueueId),
+    );
+  }
+
+  factory WaterV2Intent.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return WaterV2Intent(
+      ownerUid: serializer.fromJson<String>(json['ownerUid']),
+      mutationId: serializer.fromJson<String>(json['mutationId']),
+      healthDay: serializer.fromJson<String>(json['healthDay']),
+      deltaMl: serializer.fromJson<int>(json['deltaMl']),
+      occurredAtUtc: serializer.fromJson<String>(json['occurredAtUtc']),
+      timeZoneOffsetMinutes: serializer.fromJson<int>(
+        json['timeZoneOffsetMinutes'],
+      ),
+      originEpoch: serializer.fromJson<String?>(json['originEpoch']),
+      localStatus: serializer.fromJson<String>(json['localStatus']),
+      syncQueueId: serializer.fromJson<int?>(json['syncQueueId']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'ownerUid': serializer.toJson<String>(ownerUid),
+      'mutationId': serializer.toJson<String>(mutationId),
+      'healthDay': serializer.toJson<String>(healthDay),
+      'deltaMl': serializer.toJson<int>(deltaMl),
+      'occurredAtUtc': serializer.toJson<String>(occurredAtUtc),
+      'timeZoneOffsetMinutes': serializer.toJson<int>(timeZoneOffsetMinutes),
+      'originEpoch': serializer.toJson<String?>(originEpoch),
+      'localStatus': serializer.toJson<String>(localStatus),
+      'syncQueueId': serializer.toJson<int?>(syncQueueId),
+    };
+  }
+
+  WaterV2Intent copyWith({
+    String? ownerUid,
+    String? mutationId,
+    String? healthDay,
+    int? deltaMl,
+    String? occurredAtUtc,
+    int? timeZoneOffsetMinutes,
+    Value<String?> originEpoch = const Value.absent(),
+    String? localStatus,
+    Value<int?> syncQueueId = const Value.absent(),
+  }) => WaterV2Intent(
+    ownerUid: ownerUid ?? this.ownerUid,
+    mutationId: mutationId ?? this.mutationId,
+    healthDay: healthDay ?? this.healthDay,
+    deltaMl: deltaMl ?? this.deltaMl,
+    occurredAtUtc: occurredAtUtc ?? this.occurredAtUtc,
+    timeZoneOffsetMinutes: timeZoneOffsetMinutes ?? this.timeZoneOffsetMinutes,
+    originEpoch: originEpoch.present ? originEpoch.value : this.originEpoch,
+    localStatus: localStatus ?? this.localStatus,
+    syncQueueId: syncQueueId.present ? syncQueueId.value : this.syncQueueId,
+  );
+  WaterV2Intent copyWithCompanion(WaterV2IntentsCompanion data) {
+    return WaterV2Intent(
+      ownerUid: data.ownerUid.present ? data.ownerUid.value : this.ownerUid,
+      mutationId: data.mutationId.present
+          ? data.mutationId.value
+          : this.mutationId,
+      healthDay: data.healthDay.present ? data.healthDay.value : this.healthDay,
+      deltaMl: data.deltaMl.present ? data.deltaMl.value : this.deltaMl,
+      occurredAtUtc: data.occurredAtUtc.present
+          ? data.occurredAtUtc.value
+          : this.occurredAtUtc,
+      timeZoneOffsetMinutes: data.timeZoneOffsetMinutes.present
+          ? data.timeZoneOffsetMinutes.value
+          : this.timeZoneOffsetMinutes,
+      originEpoch: data.originEpoch.present
+          ? data.originEpoch.value
+          : this.originEpoch,
+      localStatus: data.localStatus.present
+          ? data.localStatus.value
+          : this.localStatus,
+      syncQueueId: data.syncQueueId.present
+          ? data.syncQueueId.value
+          : this.syncQueueId,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('WaterV2Intent(')
+          ..write('ownerUid: $ownerUid, ')
+          ..write('mutationId: $mutationId, ')
+          ..write('healthDay: $healthDay, ')
+          ..write('deltaMl: $deltaMl, ')
+          ..write('occurredAtUtc: $occurredAtUtc, ')
+          ..write('timeZoneOffsetMinutes: $timeZoneOffsetMinutes, ')
+          ..write('originEpoch: $originEpoch, ')
+          ..write('localStatus: $localStatus, ')
+          ..write('syncQueueId: $syncQueueId')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hash(
+    ownerUid,
+    mutationId,
+    healthDay,
+    deltaMl,
+    occurredAtUtc,
+    timeZoneOffsetMinutes,
+    originEpoch,
+    localStatus,
+    syncQueueId,
+  );
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is WaterV2Intent &&
+          other.ownerUid == this.ownerUid &&
+          other.mutationId == this.mutationId &&
+          other.healthDay == this.healthDay &&
+          other.deltaMl == this.deltaMl &&
+          other.occurredAtUtc == this.occurredAtUtc &&
+          other.timeZoneOffsetMinutes == this.timeZoneOffsetMinutes &&
+          other.originEpoch == this.originEpoch &&
+          other.localStatus == this.localStatus &&
+          other.syncQueueId == this.syncQueueId);
+}
+
+class WaterV2IntentsCompanion extends UpdateCompanion<WaterV2Intent> {
+  final Value<String> ownerUid;
+  final Value<String> mutationId;
+  final Value<String> healthDay;
+  final Value<int> deltaMl;
+  final Value<String> occurredAtUtc;
+  final Value<int> timeZoneOffsetMinutes;
+  final Value<String?> originEpoch;
+  final Value<String> localStatus;
+  final Value<int?> syncQueueId;
+  final Value<int> rowid;
+  const WaterV2IntentsCompanion({
+    this.ownerUid = const Value.absent(),
+    this.mutationId = const Value.absent(),
+    this.healthDay = const Value.absent(),
+    this.deltaMl = const Value.absent(),
+    this.occurredAtUtc = const Value.absent(),
+    this.timeZoneOffsetMinutes = const Value.absent(),
+    this.originEpoch = const Value.absent(),
+    this.localStatus = const Value.absent(),
+    this.syncQueueId = const Value.absent(),
+    this.rowid = const Value.absent(),
+  });
+  WaterV2IntentsCompanion.insert({
+    required String ownerUid,
+    required String mutationId,
+    required String healthDay,
+    required int deltaMl,
+    required String occurredAtUtc,
+    required int timeZoneOffsetMinutes,
+    this.originEpoch = const Value.absent(),
+    this.localStatus = const Value.absent(),
+    this.syncQueueId = const Value.absent(),
+    this.rowid = const Value.absent(),
+  }) : ownerUid = Value(ownerUid),
+       mutationId = Value(mutationId),
+       healthDay = Value(healthDay),
+       deltaMl = Value(deltaMl),
+       occurredAtUtc = Value(occurredAtUtc),
+       timeZoneOffsetMinutes = Value(timeZoneOffsetMinutes);
+  static Insertable<WaterV2Intent> custom({
+    Expression<String>? ownerUid,
+    Expression<String>? mutationId,
+    Expression<String>? healthDay,
+    Expression<int>? deltaMl,
+    Expression<String>? occurredAtUtc,
+    Expression<int>? timeZoneOffsetMinutes,
+    Expression<String>? originEpoch,
+    Expression<String>? localStatus,
+    Expression<int>? syncQueueId,
+    Expression<int>? rowid,
+  }) {
+    return RawValuesInsertable({
+      if (ownerUid != null) 'owner_uid': ownerUid,
+      if (mutationId != null) 'mutation_id': mutationId,
+      if (healthDay != null) 'health_day': healthDay,
+      if (deltaMl != null) 'delta_ml': deltaMl,
+      if (occurredAtUtc != null) 'occurred_at_utc': occurredAtUtc,
+      if (timeZoneOffsetMinutes != null)
+        'time_zone_offset_minutes': timeZoneOffsetMinutes,
+      if (originEpoch != null) 'origin_epoch': originEpoch,
+      if (localStatus != null) 'local_status': localStatus,
+      if (syncQueueId != null) 'sync_queue_id': syncQueueId,
+      if (rowid != null) 'rowid': rowid,
+    });
+  }
+
+  WaterV2IntentsCompanion copyWith({
+    Value<String>? ownerUid,
+    Value<String>? mutationId,
+    Value<String>? healthDay,
+    Value<int>? deltaMl,
+    Value<String>? occurredAtUtc,
+    Value<int>? timeZoneOffsetMinutes,
+    Value<String?>? originEpoch,
+    Value<String>? localStatus,
+    Value<int?>? syncQueueId,
+    Value<int>? rowid,
+  }) {
+    return WaterV2IntentsCompanion(
+      ownerUid: ownerUid ?? this.ownerUid,
+      mutationId: mutationId ?? this.mutationId,
+      healthDay: healthDay ?? this.healthDay,
+      deltaMl: deltaMl ?? this.deltaMl,
+      occurredAtUtc: occurredAtUtc ?? this.occurredAtUtc,
+      timeZoneOffsetMinutes:
+          timeZoneOffsetMinutes ?? this.timeZoneOffsetMinutes,
+      originEpoch: originEpoch ?? this.originEpoch,
+      localStatus: localStatus ?? this.localStatus,
+      syncQueueId: syncQueueId ?? this.syncQueueId,
+      rowid: rowid ?? this.rowid,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (ownerUid.present) {
+      map['owner_uid'] = Variable<String>(ownerUid.value);
+    }
+    if (mutationId.present) {
+      map['mutation_id'] = Variable<String>(mutationId.value);
+    }
+    if (healthDay.present) {
+      map['health_day'] = Variable<String>(healthDay.value);
+    }
+    if (deltaMl.present) {
+      map['delta_ml'] = Variable<int>(deltaMl.value);
+    }
+    if (occurredAtUtc.present) {
+      map['occurred_at_utc'] = Variable<String>(occurredAtUtc.value);
+    }
+    if (timeZoneOffsetMinutes.present) {
+      map['time_zone_offset_minutes'] = Variable<int>(
+        timeZoneOffsetMinutes.value,
+      );
+    }
+    if (originEpoch.present) {
+      map['origin_epoch'] = Variable<String>(originEpoch.value);
+    }
+    if (localStatus.present) {
+      map['local_status'] = Variable<String>(localStatus.value);
+    }
+    if (syncQueueId.present) {
+      map['sync_queue_id'] = Variable<int>(syncQueueId.value);
+    }
+    if (rowid.present) {
+      map['rowid'] = Variable<int>(rowid.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('WaterV2IntentsCompanion(')
+          ..write('ownerUid: $ownerUid, ')
+          ..write('mutationId: $mutationId, ')
+          ..write('healthDay: $healthDay, ')
+          ..write('deltaMl: $deltaMl, ')
+          ..write('occurredAtUtc: $occurredAtUtc, ')
+          ..write('timeZoneOffsetMinutes: $timeZoneOffsetMinutes, ')
+          ..write('originEpoch: $originEpoch, ')
+          ..write('localStatus: $localStatus, ')
+          ..write('syncQueueId: $syncQueueId, ')
+          ..write('rowid: $rowid')
+          ..write(')'))
+        .toString();
+  }
+}
+
 abstract class _$AppDatabase extends GeneratedDatabase {
   _$AppDatabase(QueryExecutor e) : super(e);
   $AppDatabaseManager get managers => $AppDatabaseManager(this);
@@ -6279,6 +7319,9 @@ abstract class _$AppDatabase extends GeneratedDatabase {
     'idx_checkin_is_synced',
     'CREATE INDEX idx_checkin_is_synced ON check_in_table (is_synced)',
   );
+  late final $WaterV2DailyStatesTable waterV2DailyStates =
+      $WaterV2DailyStatesTable(this);
+  late final $WaterV2IntentsTable waterV2Intents = $WaterV2IntentsTable(this);
   late final NotificationDao notificationDao = NotificationDao(
     this as AppDatabase,
   );
@@ -6301,6 +7344,8 @@ abstract class _$AppDatabase extends GeneratedDatabase {
     notificationsTable,
     notificationDismissals,
     syncQueueTable,
+    waterV2DailyStates,
+    waterV2Intents,
     idxTransactionsDate,
     idxTransactionsCategory,
     idxTransactionsType,
@@ -9754,6 +10799,533 @@ typedef $$SyncQueueTableTableProcessedTableManager =
       PrefetchHooks Function()
     >;
 
+typedef $$WaterV2DailyStatesTableCreateCompanionBuilder =
+    WaterV2DailyStatesCompanion Function({
+      required String ownerUid,
+      required String healthDay,
+      required String epoch,
+      required int revision,
+      required int confirmedWaterIntakeMl,
+      required String reconciledAtUtc,
+      Value<int> rowid,
+    });
+typedef $$WaterV2DailyStatesTableUpdateCompanionBuilder =
+    WaterV2DailyStatesCompanion Function({
+      Value<String> ownerUid,
+      Value<String> healthDay,
+      Value<String> epoch,
+      Value<int> revision,
+      Value<int> confirmedWaterIntakeMl,
+      Value<String> reconciledAtUtc,
+      Value<int> rowid,
+    });
+
+class $$WaterV2DailyStatesTableFilterComposer
+    extends Composer<_$AppDatabase, $WaterV2DailyStatesTable> {
+  $$WaterV2DailyStatesTableFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<String> get ownerUid => $composableBuilder(
+    column: $table.ownerUid,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get healthDay => $composableBuilder(
+    column: $table.healthDay,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get epoch => $composableBuilder(
+    column: $table.epoch,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get revision => $composableBuilder(
+    column: $table.revision,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get confirmedWaterIntakeMl => $composableBuilder(
+    column: $table.confirmedWaterIntakeMl,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get reconciledAtUtc => $composableBuilder(
+    column: $table.reconciledAtUtc,
+    builder: (column) => ColumnFilters(column),
+  );
+}
+
+class $$WaterV2DailyStatesTableOrderingComposer
+    extends Composer<_$AppDatabase, $WaterV2DailyStatesTable> {
+  $$WaterV2DailyStatesTableOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<String> get ownerUid => $composableBuilder(
+    column: $table.ownerUid,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get healthDay => $composableBuilder(
+    column: $table.healthDay,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get epoch => $composableBuilder(
+    column: $table.epoch,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get revision => $composableBuilder(
+    column: $table.revision,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get confirmedWaterIntakeMl => $composableBuilder(
+    column: $table.confirmedWaterIntakeMl,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get reconciledAtUtc => $composableBuilder(
+    column: $table.reconciledAtUtc,
+    builder: (column) => ColumnOrderings(column),
+  );
+}
+
+class $$WaterV2DailyStatesTableAnnotationComposer
+    extends Composer<_$AppDatabase, $WaterV2DailyStatesTable> {
+  $$WaterV2DailyStatesTableAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<String> get ownerUid =>
+      $composableBuilder(column: $table.ownerUid, builder: (column) => column);
+
+  GeneratedColumn<String> get healthDay =>
+      $composableBuilder(column: $table.healthDay, builder: (column) => column);
+
+  GeneratedColumn<String> get epoch =>
+      $composableBuilder(column: $table.epoch, builder: (column) => column);
+
+  GeneratedColumn<int> get revision =>
+      $composableBuilder(column: $table.revision, builder: (column) => column);
+
+  GeneratedColumn<int> get confirmedWaterIntakeMl => $composableBuilder(
+    column: $table.confirmedWaterIntakeMl,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get reconciledAtUtc => $composableBuilder(
+    column: $table.reconciledAtUtc,
+    builder: (column) => column,
+  );
+}
+
+class $$WaterV2DailyStatesTableTableManager
+    extends
+        RootTableManager<
+          _$AppDatabase,
+          $WaterV2DailyStatesTable,
+          WaterV2DailyState,
+          $$WaterV2DailyStatesTableFilterComposer,
+          $$WaterV2DailyStatesTableOrderingComposer,
+          $$WaterV2DailyStatesTableAnnotationComposer,
+          $$WaterV2DailyStatesTableCreateCompanionBuilder,
+          $$WaterV2DailyStatesTableUpdateCompanionBuilder,
+          (
+            WaterV2DailyState,
+            BaseReferences<
+              _$AppDatabase,
+              $WaterV2DailyStatesTable,
+              WaterV2DailyState
+            >,
+          ),
+          WaterV2DailyState,
+          PrefetchHooks Function()
+        > {
+  $$WaterV2DailyStatesTableTableManager(
+    _$AppDatabase db,
+    $WaterV2DailyStatesTable table,
+  ) : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $$WaterV2DailyStatesTableFilterComposer($db: db, $table: table),
+          createOrderingComposer: () =>
+              $$WaterV2DailyStatesTableOrderingComposer($db: db, $table: table),
+          createComputedFieldComposer: () =>
+              $$WaterV2DailyStatesTableAnnotationComposer(
+                $db: db,
+                $table: table,
+              ),
+          updateCompanionCallback:
+              ({
+                Value<String> ownerUid = const Value.absent(),
+                Value<String> healthDay = const Value.absent(),
+                Value<String> epoch = const Value.absent(),
+                Value<int> revision = const Value.absent(),
+                Value<int> confirmedWaterIntakeMl = const Value.absent(),
+                Value<String> reconciledAtUtc = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => WaterV2DailyStatesCompanion(
+                ownerUid: ownerUid,
+                healthDay: healthDay,
+                epoch: epoch,
+                revision: revision,
+                confirmedWaterIntakeMl: confirmedWaterIntakeMl,
+                reconciledAtUtc: reconciledAtUtc,
+                rowid: rowid,
+              ),
+          createCompanionCallback:
+              ({
+                required String ownerUid,
+                required String healthDay,
+                required String epoch,
+                required int revision,
+                required int confirmedWaterIntakeMl,
+                required String reconciledAtUtc,
+                Value<int> rowid = const Value.absent(),
+              }) => WaterV2DailyStatesCompanion.insert(
+                ownerUid: ownerUid,
+                healthDay: healthDay,
+                epoch: epoch,
+                revision: revision,
+                confirmedWaterIntakeMl: confirmedWaterIntakeMl,
+                reconciledAtUtc: reconciledAtUtc,
+                rowid: rowid,
+              ),
+          withReferenceMapper: (p0) => p0
+              .map((e) => (e.readTable(table), BaseReferences(db, table, e)))
+              .toList(),
+          prefetchHooksCallback: null,
+        ),
+      );
+}
+
+typedef $$WaterV2DailyStatesTableProcessedTableManager =
+    ProcessedTableManager<
+      _$AppDatabase,
+      $WaterV2DailyStatesTable,
+      WaterV2DailyState,
+      $$WaterV2DailyStatesTableFilterComposer,
+      $$WaterV2DailyStatesTableOrderingComposer,
+      $$WaterV2DailyStatesTableAnnotationComposer,
+      $$WaterV2DailyStatesTableCreateCompanionBuilder,
+      $$WaterV2DailyStatesTableUpdateCompanionBuilder,
+      (
+        WaterV2DailyState,
+        BaseReferences<
+          _$AppDatabase,
+          $WaterV2DailyStatesTable,
+          WaterV2DailyState
+        >,
+      ),
+      WaterV2DailyState,
+      PrefetchHooks Function()
+    >;
+typedef $$WaterV2IntentsTableCreateCompanionBuilder =
+    WaterV2IntentsCompanion Function({
+      required String ownerUid,
+      required String mutationId,
+      required String healthDay,
+      required int deltaMl,
+      required String occurredAtUtc,
+      required int timeZoneOffsetMinutes,
+      Value<String?> originEpoch,
+      Value<String> localStatus,
+      Value<int?> syncQueueId,
+      Value<int> rowid,
+    });
+typedef $$WaterV2IntentsTableUpdateCompanionBuilder =
+    WaterV2IntentsCompanion Function({
+      Value<String> ownerUid,
+      Value<String> mutationId,
+      Value<String> healthDay,
+      Value<int> deltaMl,
+      Value<String> occurredAtUtc,
+      Value<int> timeZoneOffsetMinutes,
+      Value<String?> originEpoch,
+      Value<String> localStatus,
+      Value<int?> syncQueueId,
+      Value<int> rowid,
+    });
+
+class $$WaterV2IntentsTableFilterComposer
+    extends Composer<_$AppDatabase, $WaterV2IntentsTable> {
+  $$WaterV2IntentsTableFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<String> get ownerUid => $composableBuilder(
+    column: $table.ownerUid,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get mutationId => $composableBuilder(
+    column: $table.mutationId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get healthDay => $composableBuilder(
+    column: $table.healthDay,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get deltaMl => $composableBuilder(
+    column: $table.deltaMl,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get occurredAtUtc => $composableBuilder(
+    column: $table.occurredAtUtc,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get timeZoneOffsetMinutes => $composableBuilder(
+    column: $table.timeZoneOffsetMinutes,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get originEpoch => $composableBuilder(
+    column: $table.originEpoch,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get localStatus => $composableBuilder(
+    column: $table.localStatus,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get syncQueueId => $composableBuilder(
+    column: $table.syncQueueId,
+    builder: (column) => ColumnFilters(column),
+  );
+}
+
+class $$WaterV2IntentsTableOrderingComposer
+    extends Composer<_$AppDatabase, $WaterV2IntentsTable> {
+  $$WaterV2IntentsTableOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<String> get ownerUid => $composableBuilder(
+    column: $table.ownerUid,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get mutationId => $composableBuilder(
+    column: $table.mutationId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get healthDay => $composableBuilder(
+    column: $table.healthDay,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get deltaMl => $composableBuilder(
+    column: $table.deltaMl,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get occurredAtUtc => $composableBuilder(
+    column: $table.occurredAtUtc,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get timeZoneOffsetMinutes => $composableBuilder(
+    column: $table.timeZoneOffsetMinutes,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get originEpoch => $composableBuilder(
+    column: $table.originEpoch,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get localStatus => $composableBuilder(
+    column: $table.localStatus,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get syncQueueId => $composableBuilder(
+    column: $table.syncQueueId,
+    builder: (column) => ColumnOrderings(column),
+  );
+}
+
+class $$WaterV2IntentsTableAnnotationComposer
+    extends Composer<_$AppDatabase, $WaterV2IntentsTable> {
+  $$WaterV2IntentsTableAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<String> get ownerUid =>
+      $composableBuilder(column: $table.ownerUid, builder: (column) => column);
+
+  GeneratedColumn<String> get mutationId => $composableBuilder(
+    column: $table.mutationId,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get healthDay =>
+      $composableBuilder(column: $table.healthDay, builder: (column) => column);
+
+  GeneratedColumn<int> get deltaMl =>
+      $composableBuilder(column: $table.deltaMl, builder: (column) => column);
+
+  GeneratedColumn<String> get occurredAtUtc => $composableBuilder(
+    column: $table.occurredAtUtc,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<int> get timeZoneOffsetMinutes => $composableBuilder(
+    column: $table.timeZoneOffsetMinutes,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get originEpoch => $composableBuilder(
+    column: $table.originEpoch,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get localStatus => $composableBuilder(
+    column: $table.localStatus,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<int> get syncQueueId => $composableBuilder(
+    column: $table.syncQueueId,
+    builder: (column) => column,
+  );
+}
+
+class $$WaterV2IntentsTableTableManager
+    extends
+        RootTableManager<
+          _$AppDatabase,
+          $WaterV2IntentsTable,
+          WaterV2Intent,
+          $$WaterV2IntentsTableFilterComposer,
+          $$WaterV2IntentsTableOrderingComposer,
+          $$WaterV2IntentsTableAnnotationComposer,
+          $$WaterV2IntentsTableCreateCompanionBuilder,
+          $$WaterV2IntentsTableUpdateCompanionBuilder,
+          (
+            WaterV2Intent,
+            BaseReferences<_$AppDatabase, $WaterV2IntentsTable, WaterV2Intent>,
+          ),
+          WaterV2Intent,
+          PrefetchHooks Function()
+        > {
+  $$WaterV2IntentsTableTableManager(
+    _$AppDatabase db,
+    $WaterV2IntentsTable table,
+  ) : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $$WaterV2IntentsTableFilterComposer($db: db, $table: table),
+          createOrderingComposer: () =>
+              $$WaterV2IntentsTableOrderingComposer($db: db, $table: table),
+          createComputedFieldComposer: () =>
+              $$WaterV2IntentsTableAnnotationComposer($db: db, $table: table),
+          updateCompanionCallback:
+              ({
+                Value<String> ownerUid = const Value.absent(),
+                Value<String> mutationId = const Value.absent(),
+                Value<String> healthDay = const Value.absent(),
+                Value<int> deltaMl = const Value.absent(),
+                Value<String> occurredAtUtc = const Value.absent(),
+                Value<int> timeZoneOffsetMinutes = const Value.absent(),
+                Value<String?> originEpoch = const Value.absent(),
+                Value<String> localStatus = const Value.absent(),
+                Value<int?> syncQueueId = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => WaterV2IntentsCompanion(
+                ownerUid: ownerUid,
+                mutationId: mutationId,
+                healthDay: healthDay,
+                deltaMl: deltaMl,
+                occurredAtUtc: occurredAtUtc,
+                timeZoneOffsetMinutes: timeZoneOffsetMinutes,
+                originEpoch: originEpoch,
+                localStatus: localStatus,
+                syncQueueId: syncQueueId,
+                rowid: rowid,
+              ),
+          createCompanionCallback:
+              ({
+                required String ownerUid,
+                required String mutationId,
+                required String healthDay,
+                required int deltaMl,
+                required String occurredAtUtc,
+                required int timeZoneOffsetMinutes,
+                Value<String?> originEpoch = const Value.absent(),
+                Value<String> localStatus = const Value.absent(),
+                Value<int?> syncQueueId = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => WaterV2IntentsCompanion.insert(
+                ownerUid: ownerUid,
+                mutationId: mutationId,
+                healthDay: healthDay,
+                deltaMl: deltaMl,
+                occurredAtUtc: occurredAtUtc,
+                timeZoneOffsetMinutes: timeZoneOffsetMinutes,
+                originEpoch: originEpoch,
+                localStatus: localStatus,
+                syncQueueId: syncQueueId,
+                rowid: rowid,
+              ),
+          withReferenceMapper: (p0) => p0
+              .map((e) => (e.readTable(table), BaseReferences(db, table, e)))
+              .toList(),
+          prefetchHooksCallback: null,
+        ),
+      );
+}
+
+typedef $$WaterV2IntentsTableProcessedTableManager =
+    ProcessedTableManager<
+      _$AppDatabase,
+      $WaterV2IntentsTable,
+      WaterV2Intent,
+      $$WaterV2IntentsTableFilterComposer,
+      $$WaterV2IntentsTableOrderingComposer,
+      $$WaterV2IntentsTableAnnotationComposer,
+      $$WaterV2IntentsTableCreateCompanionBuilder,
+      $$WaterV2IntentsTableUpdateCompanionBuilder,
+      (
+        WaterV2Intent,
+        BaseReferences<_$AppDatabase, $WaterV2IntentsTable, WaterV2Intent>,
+      ),
+      WaterV2Intent,
+      PrefetchHooks Function()
+    >;
+
 class $AppDatabaseManager {
   final _$AppDatabase _db;
   $AppDatabaseManager(this._db);
@@ -9788,4 +11360,8 @@ class $AppDatabaseManager {
       );
   $$SyncQueueTableTableTableManager get syncQueueTable =>
       $$SyncQueueTableTableTableManager(_db, _db.syncQueueTable);
+  $$WaterV2DailyStatesTableTableManager get waterV2DailyStates =>
+      $$WaterV2DailyStatesTableTableManager(_db, _db.waterV2DailyStates);
+  $$WaterV2IntentsTableTableManager get waterV2Intents =>
+      $$WaterV2IntentsTableTableManager(_db, _db.waterV2Intents);
 }

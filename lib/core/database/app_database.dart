@@ -14,6 +14,7 @@ import 'package:life_os/features/finance/data/local/transaction_table.dart';
 import 'package:life_os/features/goals/data/models/local/goals_table.dart';
 import 'package:life_os/features/habits/data/models/local/habit_table.dart';
 import 'package:life_os/features/health/data/local/health_table.dart';
+import 'package:life_os/features/health/data/local/water_v2_tables.dart';
 import 'package:life_os/features/health/data/local/medication_table.dart';
 import 'package:life_os/features/study/data/models/local/study_table.dart';
 import 'package:life_os/features/tasks/data/models/local/task_table.dart';
@@ -39,6 +40,8 @@ part 'app_database.g.dart';
     NotificationsTable,
     NotificationDismissals,
     SyncQueueTable,
+    WaterV2DailyStates,
+    WaterV2Intents,
   ],
   daos: [NotificationDao],
 )
@@ -75,7 +78,7 @@ class AppDatabase extends _$AppDatabase {
   // =========================================================================
 
   @override
-  int get schemaVersion => 9;
+  int get schemaVersion => 10;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -152,6 +155,13 @@ class AppDatabase extends _$AppDatabase {
           );
         }
         await migrator.createTable(notificationDismissals);
+      }
+      if (from < 10) {
+        // Additive only: never derive V2 state or deltas from V1 absolutes.
+        await transaction(() async {
+          await migrator.createTable(waterV2DailyStates);
+          await migrator.createTable(waterV2Intents);
+        });
       }
     },
   );
