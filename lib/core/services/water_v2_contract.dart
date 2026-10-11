@@ -1,5 +1,7 @@
 import 'dart:convert';
 
+import 'package:crypto/crypto.dart';
+
 import 'package:life_os/core/database/app_database.dart';
 import 'package:life_os/core/database/remote_send_permit.dart';
 
@@ -40,6 +42,53 @@ abstract final class WaterV2Validation {
     require(value is Map<String, dynamic>);
     return value as Map<String, dynamic>;
   }
+
+  static bool identity(Map<String, dynamic> value) {
+    if (value['mutationId'] is! String ||
+        !uuid.hasMatch(value['mutationId']) ||
+        value['healthDay'] is! String ||
+        !day(value['healthDay']) ||
+        value['deltaMl'] is! int ||
+        value['deltaMl'] != 250 ||
+        value['occurredAt'] is! String ||
+        !RegExp(
+          r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$',
+        ).hasMatch(value['occurredAt']) ||
+        !integer(value['timeZoneOffsetMinutes'], -840, 840))
+      return false;
+    final utc = DateTime.tryParse(value['occurredAt']);
+    return utc != null &&
+        utc.isUtc &&
+        utc.toIso8601String() == value['occurredAt'] &&
+        utc
+                .add(Duration(minutes: value['timeZoneOffsetMinutes'] as int))
+                .toIso8601String()
+                .substring(0, 10) ==
+            value['healthDay'];
+  }
+}
+
+abstract final class WaterV2Fingerprint {
+  static String calculate({
+    required String mutationId,
+    required String healthDay,
+    required int deltaMl,
+    required String occurredAt,
+    required int timeZoneOffsetMinutes,
+  }) => sha256
+      .convert(
+        utf8.encode(
+          jsonEncode([
+            2,
+            mutationId,
+            healthDay,
+            deltaMl,
+            occurredAt,
+            timeZoneOffsetMinutes,
+          ]),
+        ),
+      )
+      .toString();
 }
 
 /// All request identity is copied from a durable row, never the retry clock.
@@ -51,7 +100,7 @@ final class WaterV2IncrementRequest {
       deltaMl = intent.deltaMl,
       occurredAt = intent.occurredAtUtc,
       timeZoneOffsetMinutes = intent.timeZoneOffsetMinutes,
-      originEpoch = intent.originEpoch {
+      originEpoch = intent.originEpoch ?? '' {
     WaterV2Validation.require(
       ownerUid.isNotEmpty &&
           ownerUid == ownerUid.trim() &&
@@ -59,8 +108,7 @@ final class WaterV2IncrementRequest {
     );
     WaterV2Validation.require(
       WaterV2Validation.uuid.hasMatch(mutationId) &&
-          originEpoch != null &&
-          WaterV2Validation.uuid.hasMatch(originEpoch!),
+          WaterV2Validation.uuid.hasMatch(originEpoch),
     );
     final utc = DateTime.tryParse(occurredAt);
     WaterV2Validation.require(
@@ -80,7 +128,7 @@ final class WaterV2IncrementRequest {
     );
   }
   final String ownerUid, mutationId, healthDay, occurredAt;
-  final String? originEpoch;
+  final String originEpoch;
   final int deltaMl, timeZoneOffsetMinutes;
   Map<String, dynamic> toJson() => {
     'operation': WaterV2Queue.increment,
@@ -90,7 +138,15 @@ final class WaterV2IncrementRequest {
     'deltaMl': deltaMl,
     'occurredAt': occurredAt,
     'timeZoneOffsetMinutes': timeZoneOffsetMinutes,
+    'originEpoch': originEpoch,
   };
+  String get fingerprint => WaterV2Fingerprint.calculate(
+    mutationId: mutationId,
+    healthDay: healthDay,
+    deltaMl: deltaMl,
+    occurredAt: occurredAt,
+    timeZoneOffsetMinutes: timeZoneOffsetMinutes,
+  );
   bool matches(WaterV2Intent row) =>
       row.ownerUid == ownerUid &&
       row.mutationId == mutationId &&
@@ -239,36 +295,81 @@ final class WaterV2ReconcileRequest {
 }
 
 final class WaterV2RecognizedIdentity {
-  const WaterV2RecognizedIdentity(
+  const WaterV2RecognizedIdentity._(
     this.mutationId,
+    this.healthDay,
+    this.deltaMl,
+    this.occurredAt,
+    this.timeZoneOffsetMinutes,
+    this.fingerprint,
     this.effectiveCreditMl,
     this.appliedRevision,
   );
-  final String mutationId;
-  final int effectiveCreditMl, appliedRevision;
+  final String mutationId, healthDay, occurredAt, fingerprint;
+  final int deltaMl, timeZoneOffsetMinutes, effectiveCreditMl, appliedRevision;
+  bool matches(WaterV2IncrementRequest local) =>
+      mutationId == local.mutationId &&
+      healthDay == local.healthDay &&
+      deltaMl == local.deltaMl &&
+      occurredAt == local.occurredAt &&
+      timeZoneOffsetMinutes == local.timeZoneOffsetMinutes &&
+      fingerprint == local.fingerprint;
 }
 
-/// Membership-only data. Deliberately cannot be used as an increment ACK.
+/// The local immutable identities captured before HTTP, bound to one query.
+final class WaterV2ReconcilePlan {
+  WaterV2ReconcilePlan(
+    this.request,
+    List<WaterV2IncrementRequest> intents,
+    Map<String, int> queueIds,
+  ) : intents = List.unmodifiable(intents),
+      queueIds = Map.unmodifiable(queueIds) {
+    WaterV2Validation.require(
+      intents.length == request.pendingMutationIds.length &&
+          queueIds.length == intents.length &&
+          queueIds.values.toSet().length == intents.length &&
+          intents.every((r) => (queueIds[r.mutationId] ?? 0) > 0) &&
+          intents.map((r) => r.mutationId).toSet().length == intents.length &&
+          intents.every(
+            (r) =>
+                request.pendingMutationIds.contains(r.mutationId) &&
+                r.ownerUid == request.ownerUid &&
+                r.healthDay == request.healthDay &&
+                r.originEpoch == request.expectedEpoch,
+          ),
+    );
+  }
+  final WaterV2ReconcileRequest request;
+  final List<WaterV2IncrementRequest> intents;
+  final Map<String, int> queueIds;
+}
+
+/// Complete receipt evidence, bound to its original remote admission.
 final class WaterV2ReconcileSuccess {
   WaterV2ReconcileSuccess._(
     this.request,
+    this.epoch,
+    this.revision,
     this.waterIntakeMl,
     this.recognized,
     this.unrecognizedMutationIds,
+    this.remotePermit,
   );
   final WaterV2ReconcileRequest request;
+  final RemoteSendPermit remotePermit;
   String get operation => 'reconcile_water';
   int get version => 2;
   String get healthDay => request.healthDay;
-  String get epoch => request.expectedEpoch;
-  int get revision => request.expectedRevision;
-  final int waterIntakeMl;
+  final String epoch;
+  final int revision, waterIntakeMl;
   final List<WaterV2RecognizedIdentity> recognized;
   final List<String> unrecognizedMutationIds;
   factory WaterV2ReconcileSuccess.parse(
     String body,
-    WaterV2ReconcileRequest request,
-  ) {
+    WaterV2ReconcileRequest request, {
+    required RemoteSendPermit permit,
+  }) {
+    permit.requireCurrent();
     final m = WaterV2Validation.object(body);
     WaterV2Validation.require(
       WaterV2Validation.exact(m, const {
@@ -289,8 +390,11 @@ final class WaterV2ReconcileSuccess {
           m['version'] == 2 &&
           m['healthDay'] == request.healthDay &&
           m['epoch'] == request.expectedEpoch &&
-          m['revision'] is int &&
-          m['revision'] == request.expectedRevision &&
+          WaterV2Validation.integer(
+            m['revision'],
+            request.expectedRevision,
+            WaterV2Validation.maxRevision,
+          ) &&
           WaterV2Validation.integer(m['waterIntakeMl'], 0, 1000000) &&
           m['complete'] == true &&
           m['recognized'] is List &&
@@ -305,24 +409,45 @@ final class WaterV2ReconcileSuccess {
       WaterV2Validation.require(
         WaterV2Validation.exact(row, const {
               'mutationId',
+              'healthDay',
+              'deltaMl',
+              'occurredAt',
+              'timeZoneOffsetMinutes',
+              'fingerprint',
               'effectiveCreditMl',
               'appliedRevision',
             }) &&
-            row['mutationId'] is String &&
+            WaterV2Validation.identity(row) &&
+            row['healthDay'] == request.healthDay &&
+            row['fingerprint'] is String &&
+            RegExp(r'^[0-9a-f]{64}$').hasMatch(row['fingerprint']) &&
+            row['fingerprint'] ==
+                WaterV2Fingerprint.calculate(
+                  mutationId: row['mutationId'],
+                  healthDay: row['healthDay'],
+                  deltaMl: row['deltaMl'],
+                  occurredAt: row['occurredAt'],
+                  timeZoneOffsetMinutes: row['timeZoneOffsetMinutes'],
+                ) &&
             request.pendingMutationIds.contains(row['mutationId']) &&
             ids.add(row['mutationId'] as String) &&
             WaterV2Validation.integer(row['effectiveCreditMl'], 0, 250) &&
             WaterV2Validation.integer(
               row['appliedRevision'],
               1,
-              request.expectedRevision,
+              m['revision'] as int,
             ) &&
             total >= (row['effectiveCreditMl'] as int) &&
             (row['effectiveCreditMl'] == 250 || total == 1000000),
       );
       recognized.add(
-        WaterV2RecognizedIdentity(
+        WaterV2RecognizedIdentity._(
           row['mutationId'] as String,
+          row['healthDay'] as String,
+          row['deltaMl'] as int,
+          row['occurredAt'] as String,
+          row['timeZoneOffsetMinutes'] as int,
+          row['fingerprint'] as String,
           row['effectiveCreditMl'] as int,
           row['appliedRevision'] as int,
         ),
@@ -338,9 +463,12 @@ final class WaterV2ReconcileSuccess {
     WaterV2Validation.require(ids.length == request.pendingMutationIds.length);
     return WaterV2ReconcileSuccess._(
       request,
+      m['epoch'] as String,
+      m['revision'] as int,
       total,
       List.unmodifiable(recognized),
       List.unmodifiable(missing),
+      permit,
     );
   }
 }

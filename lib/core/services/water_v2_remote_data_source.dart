@@ -91,7 +91,8 @@ final class WaterV2RemoteDataSource {
     request.ownerUid,
     request.toJson(),
     permit,
-    (body, _) => WaterV2ReconcileSuccess.parse(body, request),
+    (body, boundPermit) =>
+        WaterV2ReconcileSuccess.parse(body, request, permit: boundPermit),
   );
 
   Future<String?> _token(String uid, bool forceRefresh) {
@@ -237,6 +238,7 @@ final class WaterV2RemoteDataSource {
       'WATER_MIGRATION_NOT_READY': (503, true),
       'WATER_INVALID_REMOTE_STATE': (409, true),
       'WATER_SNAPSHOT_MISMATCH': (409, true),
+      'WATER_EPOCH_MISMATCH': (409, true),
       'WATER_FIRESTORE_UNAVAILABLE': (503, true),
     };
     try {

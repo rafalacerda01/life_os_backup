@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:crypto/crypto.dart';
 import 'package:drift/drift.dart' hide isNull, isNotNull;
 import 'package:drift/native.dart';
 import 'package:firebase_auth/firebase_auth.dart';
@@ -112,11 +113,80 @@ class _Client extends MockClient {
 
 class _Ledger {
   int total = 1000, revision = 0, writes = 0;
+  String serverEpoch = epoch;
   final receipts = <String, ({String body, int credit, int revision})>{};
+  Map<String, dynamic> recognized(String id) {
+    final receipt = receipts[id]!;
+    final data = jsonDecode(receipt.body) as Map<String, dynamic>;
+    return {
+      for (final key in [
+        'mutationId',
+        'healthDay',
+        'deltaMl',
+        'occurredAt',
+        'timeZoneOffsetMinutes',
+      ])
+        key: data[key],
+      'fingerprint': sha256
+          .convert(
+            utf8.encode(
+              jsonEncode([
+                2,
+                data['mutationId'],
+                data['healthDay'],
+                data['deltaMl'],
+                data['occurredAt'],
+                data['timeZoneOffsetMinutes'],
+              ]),
+            ),
+          )
+          .toString(),
+      'effectiveCreditMl': receipt.credit,
+      'appliedRevision': receipt.revision,
+    };
+  }
+
   http.Response apply(http.Request request) {
     final data = jsonDecode(request.body) as Map<String, dynamic>;
+    if (data['operation'] == 'reconcile_water') {
+      if (data['expectedEpoch'] != serverEpoch ||
+          (data['expectedRevision'] as int) > revision)
+        return error(409, 'WATER_SNAPSHOT_MISMATCH', true);
+      final ids = (data['pendingMutationIds'] as List).cast<String>();
+      if (ids.any(
+        (id) =>
+            receipts.containsKey(id) &&
+            jsonDecode(receipts[id]!.body)['originEpoch'] != serverEpoch,
+      ))
+        return error(409, 'WATER_SNAPSHOT_MISMATCH', true);
+      return http.Response(
+        jsonEncode({
+          'success': true,
+          'operation': 'reconcile_water',
+          'version': 2,
+          'healthDay': data['healthDay'],
+          'epoch': serverEpoch,
+          'revision': revision,
+          'waterIntakeMl': total,
+          'complete': true,
+          'recognized': [
+            for (final id in ids)
+              if (receipts.containsKey(id)) recognized(id),
+          ],
+          'unrecognizedMutationIds': [
+            for (final id in ids)
+              if (!receipts.containsKey(id)) id,
+          ],
+        }),
+        200,
+      );
+    }
+    if (data['originEpoch'] != serverEpoch)
+      return error(409, 'WATER_EPOCH_MISMATCH', true);
     final mutation = data['mutationId'] as String;
     final prior = receipts[mutation];
+    if (prior != null && jsonDecode(prior.body)['originEpoch'] != serverEpoch)
+      return error(409, 'WATER_SNAPSHOT_MISMATCH', true);
     if (prior != null && prior.body != request.body)
       return error(409, 'WATER_MUTATION_CONFLICT', false);
     if (prior == null) {
@@ -137,7 +207,7 @@ class _Ledger {
         'operation': 'increment_water',
         'version': 2,
         'healthDay': data['healthDay'],
-        'epoch': epoch,
+        'epoch': serverEpoch,
         'revision': revision,
         'waterIntakeMl': total,
         'alreadyApplied': prior != null,
@@ -230,6 +300,7 @@ void main() {
           'deltaMl': 250,
           'occurredAt': occurred,
           'timeZoneOffsetMinutes': offset,
+          'originEpoch': origin,
         }),
       );
       await (db.update(db.waterV2Intents)
@@ -313,6 +384,82 @@ void main() {
     );
   }
 
+  Future<void> makeUncertain(
+    SyncQueueTableData item, {
+    bool applied = true,
+  }) async {
+    final permit = db.localMutations.captureRemoteSend(expectedUid: uid);
+    final request = (await store.prepareIncrement(
+      uid,
+      item,
+      admission: db.localMutations.capture(expectedUid: uid),
+      permit: permit,
+    ))!;
+    if (applied)
+      ledger.apply(
+        http.Request('POST', Uri.https('fake.invalid'))
+          ..body = jsonEncode(request.toJson()),
+      );
+  }
+
+  Future<
+    ({
+      WaterV2ReconcilePlan plan,
+      WaterV2ReconcileSuccess proof,
+      RemoteSendPermit permit,
+      LocalMutationTicket ticket,
+    })
+  >
+  reconciliationProof() async {
+    final ticket = db.localMutations.capture(expectedUid: uid);
+    final permit = db.localMutations.captureRemoteSend(expectedUid: uid);
+    final plan = (await store.prepareReconciliation(
+      uid,
+      day,
+      admission: ticket,
+      permit: permit,
+    ))!;
+    final response = ledger.apply(
+      http.Request('POST', Uri.https('fake.invalid'))
+        ..body = jsonEncode(plan.request.toJson()),
+    );
+    final proof = WaterV2ReconcileSuccess.parse(
+      response.body,
+      plan.request,
+      permit: permit,
+    );
+    return (plan: plan, proof: proof, permit: permit, ticket: ticket);
+  }
+
+  Future<void> checkConfirmed(
+    List<SyncQueueTableData> items, {
+    int revision = 2,
+    int total = 1500,
+  }) async {
+    final state = await db.select(db.waterV2DailyStates).getSingle();
+    expect(state.epoch, epoch);
+    expect(state.revision, revision);
+    expect(state.confirmedWaterIntakeMl, total);
+    for (final item in items) {
+      final row = await (db.select(
+        db.waterV2Intents,
+      )..where((t) => t.mutationId.equals(item.docId))).getSingle();
+      expect(row.localStatus, 'receipt_confirmed');
+      expect(row.syncQueueId, item.id);
+      expect(
+        WaterV2IncrementRequest.fromIntent(row).toJson(),
+        jsonDecode(item.payloadJson),
+      );
+      final queue = await db.getSyncItemById(item.id) as SyncQueueTableData;
+      expect(queue.status, 'succeeded');
+      expect(queue.isSynced, isTrue);
+      expect(queue.payloadJson, item.payloadJson);
+      expect(queue.ownerUid, uid);
+      expect(queue.lastErrorCode, isNull);
+      expect(queue.attemptCount, 1);
+    }
+  }
+
   setUp(() async {
     raw = sqlite.sqlite3.openInMemory();
     writes = _Writes();
@@ -360,6 +507,1434 @@ void main() {
     await db.close();
     raw.dispose();
   });
+
+  test(
+    'R2CB confirmed intent with pending queue fails closed without confirming any sibling',
+    () async {
+      final a = await seed();
+      final b = await seed(id: idB);
+      await makeUncertain(a);
+      await makeUncertain(b);
+      late Map<String, List<Map<String, Object?>>> before;
+      final transport = remote(
+        handler: (r) async {
+          final response = ledger.apply(r);
+          await db.customStatement(
+            "UPDATE water_v2_intents SET local_status = 'receipt_confirmed' WHERE mutation_id = ?",
+            [idB],
+          );
+          before = snapshot();
+          return response;
+        },
+      );
+      final result = await processor(
+        transport,
+      ).reconcileDay(uid, day, canSend: () => true);
+      expect(result.code, 'WATER_QUEUE_CONFLICT');
+      expect(snapshot(), before);
+      expect(
+        (await db.getSyncItemById(a.id) as SyncQueueTableData).status,
+        'pending',
+      );
+    },
+  );
+
+  for (final change in ['uid', 'quiescence', 'generation']) {
+    test(
+      'R2CB $change after final SQL rolls back every reconciliation ACK component',
+      () async {
+        final a = await seed();
+        final b = await seed(id: idB);
+        await makeUncertain(a);
+        await makeUncertain(b);
+        final before = snapshot();
+        final reached = Completer<void>();
+        final release = Completer<void>();
+        var currentGeneration = 0;
+        final captured = currentGeneration;
+        writes.afterProjection = () async {
+          reached.complete();
+          await release.future;
+        };
+        final operation = processor().reconcileDay(
+          uid,
+          day,
+          canSend: () => currentGeneration == captured,
+        );
+        await reached.future;
+        LocalMutationQuiescence? q;
+        if (change == 'uid') {
+          auth.uid = 'owner-b';
+          db.localMutations.observeSession(auth.uid);
+        }
+        if (change == 'quiescence') q = db.localMutations.beginQuiesce(uid);
+        if (change == 'generation') currentGeneration++;
+        release.complete();
+        expect((await operation).code, 'SESSION_STOPPED');
+        expect(snapshot(), before);
+        if (q != null) {
+          await q.drain();
+          q.finish(signOutConfirmed: false);
+        }
+        writes.afterProjection = null;
+      },
+    );
+  }
+  for (final invalidation in ['SQLite', 'aborted logout']) {
+    test(
+      'R2CB outer transaction $invalidation rolls back an already completed inner reconcile ACK',
+      () async {
+        final a = await seed();
+        final b = await seed(id: idB);
+        await makeUncertain(a);
+        await makeUncertain(b);
+        final evidence = await reconciliationProof();
+        final before = snapshot();
+        final reached = Completer<void>();
+        final release = Completer<void>();
+        final outer = db.transaction(() async {
+          await store.acknowledgeReconciliation(
+            evidence.proof,
+            plan: evidence.plan,
+            admission: evidence.ticket,
+            permit: evidence.permit,
+            observedAtUtc: instant,
+          );
+          reached.complete();
+          await release.future;
+        }, admission: evidence.ticket);
+        final checked = expectLater(
+          outer,
+          invalidation == 'SQLite'
+              ? throwsStateError
+              : throwsA(isA<RemoteSessionStopped>()),
+        );
+        await reached.future;
+        LocalMutationQuiescence? q;
+        if (invalidation == 'SQLite')
+          writes.failCommit = true;
+        else
+          q = db.localMutations.beginQuiesce(uid);
+        release.complete();
+        await checked;
+        writes.failCommit = false;
+        if (q != null) {
+          await q.drain();
+          q.finish(signOutConfirmed: false);
+        }
+        expect(snapshot(), before);
+        expect(
+          (await processor().reconcileDay(
+            uid,
+            day,
+            canSend: () => true,
+          )).isSuccess,
+          isTrue,
+        );
+        await checkConfirmed([a, b]);
+        expect(ledger.writes, 2);
+      },
+    );
+  }
+  test(
+    'R2CB old reconcile proof cannot be revived by a new permit after aborted logout',
+    () async {
+      final a = await seed();
+      await makeUncertain(a);
+      final evidence = await reconciliationProof();
+      final before = snapshot();
+      final q = db.localMutations.beginQuiesce(uid);
+      await q.drain();
+      q.finish(signOutConfirmed: false);
+      final fresh = db.localMutations.captureRemoteSend(expectedUid: uid);
+      expect(evidence.permit.isCurrent, isFalse);
+      expect(fresh.isCurrent, isTrue);
+      await expectLater(
+        store.acknowledgeReconciliation(
+          evidence.proof,
+          plan: evidence.plan,
+          admission: db.localMutations.capture(expectedUid: uid),
+          permit: fresh,
+          observedAtUtc: instant,
+        ),
+        throwsA(isA<RemoteSessionStopped>()),
+      );
+      expect(snapshot(), before);
+    },
+  );
+  for (final invalid in [
+    'origin',
+    'queue',
+    'owner',
+    'link',
+    'status',
+    'immutable',
+    'deleted',
+  ]) {
+    test(
+      'R2CB persisted $invalid changed during HTTP prevents every sibling confirmation',
+      () async {
+        final a = await seed();
+        final b = await seed(id: idB);
+        await makeUncertain(a);
+        await makeUncertain(b);
+        late Map<String, List<Map<String, Object?>>> before;
+        final transport = remote(
+          handler: (r) async {
+            final response = ledger.apply(r);
+            switch (invalid) {
+              case 'origin':
+                await db.customStatement(
+                  'UPDATE water_v2_intents SET origin_epoch = ? WHERE mutation_id = ?',
+                  [epochB, idB],
+                );
+              case 'queue':
+                await db.customStatement(
+                  "UPDATE sync_queue_table SET payload_json = '{}' WHERE id = ?",
+                  [b.id],
+                );
+              case 'owner':
+                await db.customStatement(
+                  "UPDATE sync_queue_table SET owner_uid = 'other' WHERE id = ?",
+                  [b.id],
+                );
+              case 'link':
+                await db.customStatement(
+                  'UPDATE water_v2_intents SET sync_queue_id = ? WHERE mutation_id = ?',
+                  [a.id, idB],
+                );
+              case 'status':
+                await db.customStatement(
+                  "UPDATE sync_queue_table SET status = 'rejected' WHERE id = ?",
+                  [b.id],
+                );
+              case 'immutable':
+                await db.customStatement(
+                  'UPDATE water_v2_intents SET occurred_at_utc = ? WHERE mutation_id = ?',
+                  ['2026-08-21T11:00:00.123Z', idB],
+                );
+              case 'deleted':
+                await db.customStatement(
+                  'DELETE FROM water_v2_intents WHERE mutation_id = ?',
+                  [idB],
+                );
+            }
+            before = snapshot();
+            return response;
+          },
+        );
+        expect(
+          (await processor(
+            transport,
+          ).reconcileDay(uid, day, canSend: () => true)).shouldRetry,
+          isTrue,
+        );
+        expect(snapshot(), before);
+        expect(
+          (await db.getSyncItemById(a.id) as SyncQueueTableData).status,
+          'pending',
+        );
+      },
+    );
+  }
+  for (final invalid in [
+    'nullOrigin',
+    'unknownEpoch',
+    'unlinked',
+    'legacyPayload',
+    'attemptedNotSent',
+  ]) {
+    test(
+      'R2CB $invalid local state stays quarantined without adoption or conversion',
+      () async {
+        final a = await seed(origin: invalid == 'nullOrigin' ? null : epoch);
+        switch (invalid) {
+          case 'unknownEpoch':
+            await db.customStatement(
+              'UPDATE water_v2_intents SET origin_epoch = ?',
+              [epochB],
+            );
+          case 'unlinked':
+            await db.customStatement(
+              'UPDATE water_v2_intents SET sync_queue_id = NULL',
+            );
+          case 'legacyPayload':
+            await db.customStatement(
+              "UPDATE sync_queue_table SET payload_json = '{\"waterIntakeMl\":1250}'",
+            );
+          case 'attemptedNotSent':
+            await db.customStatement(
+              'UPDATE sync_queue_table SET attempt_count = 1',
+            );
+        }
+        final before = snapshot();
+        final result = await processor().reconcileDay(
+          uid,
+          day,
+          canSend: () => true,
+        );
+        expect(result.shouldRetry, isTrue);
+        expect(snapshot(), before);
+        if (invalid != 'attemptedNotSent') expect(requests, isEmpty);
+        expect(
+          (await db.getSyncItemById(a.id) as SyncQueueTableData).status,
+          'pending',
+        );
+        expect(ledger.writes, 0);
+      },
+    );
+  }
+  test(
+    'R2CB independent processors serialize reconcile and increment on the same database lane',
+    () async {
+      final a = await seed();
+      final b = await seed(id: idB);
+      await makeUncertain(a);
+      final reached = Completer<void>();
+      final release = Completer<void>();
+      final first = processor(
+        remote(
+          handler: (r) async {
+            final response = ledger.apply(r);
+            reached.complete();
+            await release.future;
+            return response;
+          },
+        ),
+      ).reconcileDay(uid, day, canSend: () => true);
+      await reached.future;
+      final second = processor().process(uid, b, canSend: () => true);
+      expect(requests, hasLength(1));
+      release.complete();
+      expect((await first).isSuccess, isTrue);
+      expect((await second).isSuccess, isTrue);
+      expect(requests.map((r) => jsonDecode(r.body)['operation']), [
+        'reconcile_water',
+        'increment_water',
+      ]);
+      await checkConfirmed([a, b]);
+      expect(ledger.writes, 2);
+    },
+  );
+  test(
+    'R2CB queued reconcile retains old admission across aborted logout',
+    () async {
+      final a = await seed();
+      await makeUncertain(a);
+      final reached = Completer<void>();
+      final release = Completer<void>();
+      final first = processor(
+        remote(
+          handler: (r) async {
+            final response = ledger.apply(r);
+            reached.complete();
+            await release.future;
+            return response;
+          },
+        ),
+      ).reconcileDay(uid, day, canSend: () => true);
+      await reached.future;
+      final queued = processor().reconcileDay(uid, day, canSend: () => true);
+      final q = db.localMutations.beginQuiesce(uid);
+      await q.drain();
+      q.finish(signOutConfirmed: false);
+      release.complete();
+      expect((await first).code, 'SESSION_STOPPED');
+      expect((await queued).code, 'SESSION_STOPPED');
+      expect(requests, hasLength(1));
+      pending(a);
+      expect(
+        (await processor().reconcileDay(
+          uid,
+          day,
+          canSend: () => true,
+        )).isSuccess,
+        isTrue,
+      );
+    },
+  );
+  test(
+    'R2CB manager epoch error stays pending with sanitized code and one HTTP attempt',
+    () async {
+      final a = await seed();
+      ledger.serverEpoch = epochB;
+      final queue = _Queue(db);
+      final other = _OtherRemote();
+      final manager = SyncManager(
+        queueStore: queue,
+        remoteDataSource: other,
+        currentUserId: () => auth.uid,
+        waterV2Processor: processor(),
+      );
+      addTearDown(manager.dispose);
+      expect(await manager.processPendingItems(), isFalse);
+      final item = await db.getSyncItemById(a.id) as SyncQueueTableData;
+      expect(item.status, 'pending');
+      expect(item.lastErrorCode, 'WATER_EPOCH_MISMATCH');
+      expect(item.attemptCount, 1);
+      expect(requests, hasLength(1));
+      expect(queue.genericAcks, 0);
+      expect(other.calls, 0);
+      expect(ledger.writes, 0);
+    },
+  );
+  test(
+    'R2CB reconciliation leaves a pending legacy absolute row entirely unchanged',
+    () async {
+      final a = await seed();
+      await makeUncertain(a);
+      final legacy = await db.insertSyncItem(
+        ownerUid: uid,
+        collection: 'health_info',
+        docId: day,
+        operationType: 'update',
+        payloadJson: ' {"waterIntakeMl":1250} ',
+      );
+      final before = await db.getSyncItemById(legacy);
+      final logs = <String>[];
+      void listen(OutputEvent event) => logs.addAll(event.lines);
+      Logger.addOutputListener(listen);
+      addTearDown(() => Logger.removeOutputListener(listen));
+      expect(
+        (await processor().reconcileDay(
+          uid,
+          day,
+          canSend: () => true,
+        )).isSuccess,
+        isTrue,
+      );
+      expect(await db.getSyncItemById(legacy), before);
+      expect(db.schemaVersion, 10);
+      expect(logs.join(), isNot(matches('fake-secret|$uid|$idA|$instant')));
+    },
+  );
+  test(
+    'R2CB raw reconcile transport errors never leak secrets or modify pending identities',
+    () async {
+      final a = await seed();
+      await makeUncertain(a);
+      final before = snapshot();
+      final logs = <String>[];
+      void listen(OutputEvent event) => logs.addAll(event.lines);
+      Logger.addOutputListener(listen);
+      addTearDown(() => Logger.removeOutputListener(listen));
+      final result = await processor(
+        remote(
+          handler: (_) async => http.Response(
+            '{"error":"fake-secret $uid $instant","code":"fake-secret","retryable":false}',
+            409,
+          ),
+        ),
+      ).reconcileDay(uid, day, canSend: () => true);
+      expect(result.code, 'WATER_HTTP_409');
+      expect(result.message, isNull);
+      expect(snapshot(), before);
+      expect(logs.join(), isNot(matches('fake-secret|$uid|$instant')));
+    },
+  );
+
+  for (final defect in [
+    'fingerprint',
+    'fingerprintCase',
+    'fingerprintMissing',
+    'receiptExtra',
+    'delta',
+    'deltaFloat',
+    'day',
+    'timestamp',
+    'offset',
+    'uuid',
+    'foreign',
+    'duplicate',
+    'crossDuplicate',
+    'coverage',
+    'complete',
+    'envelopeExtra',
+    'epoch',
+    'revision',
+    'appliedZero',
+    'appliedFuture',
+    'credit',
+    'creditBelowCap',
+  ]) {
+    test(
+      'R2CB malformed reconcile $defect never ACKs even a valid sibling',
+      () async {
+        final a = await seed();
+        final b = await seed(id: idB);
+        await makeUncertain(a);
+        await makeUncertain(b);
+        final before = snapshot();
+        final transport = remote(
+          handler: (r) async {
+            final wire =
+                jsonDecode(ledger.apply(r).body) as Map<String, dynamic>;
+            final proof =
+                (wire['recognized'] as List).last as Map<String, dynamic>;
+            switch (defect) {
+              case 'fingerprint':
+                proof['fingerprint'] = 'f' * 64;
+              case 'fingerprintCase':
+                proof['fingerprint'] = (proof['fingerprint'] as String)
+                    .toUpperCase();
+              case 'fingerprintMissing':
+                proof.remove('fingerprint');
+              case 'receiptExtra':
+                proof['extra'] = true;
+              case 'delta':
+                proof['deltaMl'] = 500;
+              case 'deltaFloat':
+                proof['deltaMl'] = 250.0;
+              case 'day':
+                proof['healthDay'] = '2026-08-22';
+              case 'timestamp':
+                proof['occurredAt'] = '2026-08-21T11:00:00.123Z';
+              case 'offset':
+                proof['timeZoneOffsetMinutes'] = 180;
+              case 'uuid':
+                proof['mutationId'] = idB.toUpperCase();
+              case 'foreign':
+                proof['mutationId'] = idC;
+              case 'duplicate':
+                (wire['recognized'] as List).add(
+                  Map<String, dynamic>.from(proof),
+                );
+              case 'crossDuplicate':
+                wire['unrecognizedMutationIds'] = [idA];
+              case 'coverage':
+                (wire['recognized'] as List).removeLast();
+              case 'complete':
+                wire['complete'] = false;
+              case 'envelopeExtra':
+                wire['extra'] = true;
+              case 'epoch':
+                wire['epoch'] = epochB;
+              case 'revision':
+                wire['revision'] = -1;
+              case 'appliedZero':
+                proof['appliedRevision'] = 0;
+              case 'appliedFuture':
+                proof['appliedRevision'] = 3;
+              case 'credit':
+                proof['effectiveCreditMl'] = 251;
+              case 'creditBelowCap':
+                proof['effectiveCreditMl'] = 0;
+            }
+            return http.Response(jsonEncode(wire), 200);
+          },
+        );
+        expect(
+          (await processor(
+            transport,
+          ).reconcileDay(uid, day, canSend: () => true)).code,
+          'WATER_INVALID_RESPONSE',
+        );
+        expect(snapshot(), before);
+        expect(ledger.writes, 2);
+      },
+    );
+  }
+  for (final field in ['occurredAt', 'timeZoneOffsetMinutes']) {
+    test(
+      'R2CB self-consistent remote $field and hash must still match persisted local intent',
+      () async {
+        final a = await seed();
+        final b = await seed(id: idB);
+        await makeUncertain(a);
+        await makeUncertain(b);
+        final before = snapshot();
+        final transport = remote(
+          handler: (r) async {
+            final wire =
+                jsonDecode(ledger.apply(r).body) as Map<String, dynamic>;
+            final receipt =
+                (wire['recognized'] as List).last as Map<String, dynamic>;
+            receipt[field] = field == 'occurredAt'
+                ? '2026-08-21T11:00:00.123Z'
+                : 180;
+            receipt['fingerprint'] = WaterV2Fingerprint.calculate(
+              mutationId: receipt['mutationId'],
+              healthDay: receipt['healthDay'],
+              deltaMl: receipt['deltaMl'],
+              occurredAt: receipt['occurredAt'],
+              timeZoneOffsetMinutes: receipt['timeZoneOffsetMinutes'],
+            );
+            return http.Response(jsonEncode(wire), 200);
+          },
+        );
+        expect(
+          (await processor(
+            transport,
+          ).reconcileDay(uid, day, canSend: () => true)).code,
+          'WATER_MUTATION_CONFLICT',
+        );
+        expect(snapshot(), before);
+      },
+    );
+  }
+  for (final known in [0, 2]) {
+    test(
+      'R2CB actual snapshot revision two is accepted with minimum $known',
+      () async {
+        final a = await seed();
+        final b = await seed(id: idB);
+        await makeUncertain(a);
+        await makeUncertain(b);
+        if (known > 0)
+          await store.persistConfirmedState(
+            ownerUid: uid,
+            healthDay: day,
+            epoch: epoch,
+            revision: known,
+            confirmedWaterIntakeMl: 1500,
+            reconciledAtUtc: instant,
+          );
+        expect(
+          (await processor().reconcileDay(
+            uid,
+            day,
+            canSend: () => true,
+          )).isSuccess,
+          isTrue,
+        );
+        expect(jsonDecode(requests.single.body)['expectedRevision'], known);
+        await checkConfirmed([a, b]);
+      },
+    );
+  }
+  test(
+    'R2CB remote revision below captured minimum is rejected before any ACK',
+    () async {
+      final a = await seed();
+      await makeUncertain(a);
+      await store.persistConfirmedState(
+        ownerUid: uid,
+        healthDay: day,
+        epoch: epoch,
+        revision: 2,
+        confirmedWaterIntakeMl: 1250,
+        reconciledAtUtc: instant,
+      );
+      final before = snapshot();
+      expect(
+        (await processor().reconcileDay(uid, day, canSend: () => true)).code,
+        'WATER_SNAPSHOT_MISMATCH',
+      );
+      expect(snapshot(), before);
+    },
+  );
+  for (final changed in ['revision', 'total']) {
+    test(
+      'R2CB snapshot $changed cannot regress the latest local confirmed state',
+      () async {
+        final a = await seed();
+        final b = await seed(id: idB);
+        await makeUncertain(a);
+        await makeUncertain(b);
+        late Map<String, List<Map<String, Object?>>> before;
+        final transport = remote(
+          handler: (r) async {
+            final wire =
+                jsonDecode(ledger.apply(r).body) as Map<String, dynamic>;
+            if (changed == 'revision') {
+              await store.persistConfirmedState(
+                ownerUid: uid,
+                healthDay: day,
+                epoch: epoch,
+                revision: 3,
+                confirmedWaterIntakeMl: 1750,
+                reconciledAtUtc: instant,
+              );
+              await db
+                  .update(db.healthEntries)
+                  .write(
+                    const HealthEntriesCompanion(waterIntakeMl: Value(1750)),
+                  );
+            } else {
+              wire['waterIntakeMl'] = 900;
+            }
+            before = snapshot();
+            return http.Response(jsonEncode(wire), 200);
+          },
+        );
+        expect(
+          (await processor(
+            transport,
+          ).reconcileDay(uid, day, canSend: () => true)).code,
+          changed == 'revision'
+              ? 'WATER_REVISION_REGRESSION'
+              : 'WATER_SNAPSHOT_CONFLICT',
+        );
+        expect(snapshot(), before);
+      },
+    );
+  }
+  for (final changed in [
+    'uid',
+    'a-b-a',
+    'logout',
+    'aborted',
+    'quiescence',
+    'generation',
+  ]) {
+    test(
+      'R2CB $changed during reconcile HTTP invalidates original admission and preserves every row',
+      () async {
+        final a = await seed();
+        await makeUncertain(a);
+        final before = snapshot();
+        final reached = Completer<void>();
+        final release = Completer<void>();
+        var generation = 0;
+        final captured = generation;
+        final transport = remote(
+          handler: (r) async {
+            final response = ledger.apply(r);
+            reached.complete();
+            await release.future;
+            return response;
+          },
+        );
+        final oldPermit = transport.capturePermit(
+          uid,
+          () => generation == captured,
+        );
+        final operation = processor(
+          transport,
+        ).reconcileDay(uid, day, canSend: () => generation == captured);
+        await reached.future;
+        LocalMutationQuiescence? q;
+        switch (changed) {
+          case 'uid':
+            auth.uid = 'owner-b';
+            db.localMutations.observeSession(auth.uid);
+          case 'a-b-a':
+            auth.uid = 'owner-b';
+            db.localMutations.observeSession(auth.uid);
+            auth.uid = uid;
+            db.localMutations.observeSession(uid);
+            db.localMutations.openPreparedSession();
+          case 'logout':
+            q = db.localMutations.beginQuiesce(uid);
+            await q.drain();
+            q.finish(signOutConfirmed: true);
+          case 'aborted':
+            q = db.localMutations.beginQuiesce(uid);
+            await q.drain();
+            q.finish(signOutConfirmed: false);
+          case 'quiescence':
+            q = db.localMutations.beginQuiesce(uid);
+            await q.drain();
+          case 'generation':
+            generation++;
+        }
+        release.complete();
+        expect((await operation).code, 'SESSION_STOPPED');
+        expect(snapshot(), before);
+        expect(oldPermit.isCurrent, isFalse);
+        if (changed == 'quiescence') q!.finish(signOutConfirmed: false);
+        auth.uid = uid;
+        db.localMutations.observeSession(uid);
+        db.localMutations.openPreparedSession();
+        expect(
+          (await processor().reconcileDay(
+            uid,
+            day,
+            canSend: () => true,
+          )).isSuccess,
+          isTrue,
+        );
+        await checkConfirmed([a], revision: 1, total: 1250);
+        expect(ledger.writes, 1);
+      },
+    );
+  }
+  for (final duringApp in [false, true]) {
+    test(
+      'R2CB aborted logout during reconcile ${duringApp ? 'App Check' : 'ID Token'} stops old preflight',
+      () async {
+        final a = await seed();
+        await makeUncertain(a);
+        final before = snapshot();
+        final reached = Completer<void>();
+        final release = Completer<String?>();
+        final transport = remote(
+          token: (_, _) {
+            if (!duringApp) {
+              reached.complete();
+              return release.future;
+            }
+            return Future.value('fake');
+          },
+          app: () {
+            if (duringApp) {
+              reached.complete();
+              return release.future;
+            }
+            return Future.value('fake');
+          },
+        );
+        final operation = processor(
+          transport,
+        ).reconcileDay(uid, day, canSend: () => true);
+        await reached.future;
+        final q = db.localMutations.beginQuiesce(uid);
+        await q.drain();
+        q.finish(signOutConfirmed: false);
+        release.complete('fake');
+        expect((await operation).code, 'SESSION_STOPPED');
+        expect(requests, isEmpty);
+        expect(snapshot(), before);
+        expect(
+          (await processor().reconcileDay(
+            uid,
+            day,
+            canSend: () => true,
+          )).isSuccess,
+          isTrue,
+        );
+      },
+    );
+  }
+  for (final code in ['AUTHENTICATION_REQUIRED', 'APP_CHECK_REQUIRED']) {
+    test('R2CB reconcile $code prevents HTTP and mutations', () async {
+      final a = await seed();
+      await makeUncertain(a);
+      final before = snapshot();
+      final transport = remote(
+        token: (_, _) async =>
+            code == 'AUTHENTICATION_REQUIRED' ? null : 'fake',
+        app: () async => code == 'APP_CHECK_REQUIRED' ? null : 'fake',
+      );
+      expect(
+        (await processor(
+          transport,
+        ).reconcileDay(uid, day, canSend: () => true)).code,
+        code,
+      );
+      expect(requests, isEmpty);
+      expect(snapshot(), before);
+    });
+  }
+  test(
+    'R2CB UID change before reconcile produces no tokens, HTTP or local mutations',
+    () async {
+      final a = await seed();
+      await makeUncertain(a);
+      final before = snapshot();
+      auth.uid = 'owner-b';
+      expect(
+        (await processor().reconcileDay(uid, day, canSend: () => true)).code,
+        'SESSION_STOPPED',
+      );
+      expect(tokenCalls, 0);
+      expect(requests, isEmpty);
+      expect(snapshot(), before);
+    },
+  );
+  test(
+    'R2CB rotated server epoch is recoverable and never replaces persisted origin',
+    () async {
+      final a = await seed();
+      ledger.serverEpoch = epochB;
+      final p = processor();
+      final result = await p.process(uid, a, canSend: () => true);
+      expect(result.code, 'WATER_EPOCH_MISMATCH');
+      expect(result.shouldRetry, isTrue);
+      expect(ledger.writes, 0);
+      final before = snapshot();
+      expect(
+        (await p.reconcileDay(uid, day, canSend: () => true)).code,
+        'WATER_SNAPSHOT_MISMATCH',
+      );
+      expect(snapshot(), before);
+      expect(
+        (await db.select(db.waterV2Intents).getSingle()).originEpoch,
+        epoch,
+      );
+      expect(jsonDecode(requests.first.body)['originEpoch'], epoch);
+    },
+  );
+  test(
+    'R2CB default reconcile gate closes before database, token or HTTP work',
+    () async {
+      final a = await seed();
+      await makeUncertain(a);
+      final before = snapshot();
+      expect(
+        (await processor(
+          WaterV2RemoteDataSource(auth),
+        ).reconcileDay(uid, day, canSend: () => true)).code,
+        'WATER_V2_DISABLED',
+      );
+      expect(snapshot(), before);
+      expect(requests, isEmpty);
+      expect(tokenCalls, 0);
+    },
+  );
+
+  for (final vector in <(String, int, String)>[
+    (
+      '2026-08-21T10:00:00.000Z',
+      0,
+      '4746ff0a42ce8ecf80440c58f92e321904a8308463998482ec8af640cd36fe44',
+    ),
+    (
+      '2026-08-21T10:00:00.123Z',
+      -180,
+      '1f36d7419353e415e565df205ab213de26c212734aef4c55af429a5dd3fca97a',
+    ),
+    (
+      '2026-08-22T01:00:00.000Z',
+      -180,
+      'e8d721a4ac8e768e1b98616c817a20e49daeff528cacef78f2213b11dd70ad37',
+    ),
+    (
+      '2026-08-20T23:00:00.000Z',
+      120,
+      '149dca28fe7a283d3f9ccfb77ed45af1123db75974ef6d84100c33e086469d7a',
+    ),
+    (
+      '2026-08-21T00:00:00.000Z',
+      840,
+      'fdfa45e9695dc61ff2a022de012746dc2a04ecde5c2390fc3ce34fda54339496',
+    ),
+    (
+      '2026-08-21T14:00:00.000Z',
+      -840,
+      'e00edcc987e21562dfb990de29a3833c75ab8b74cc7694c4320f9f6ad3566b58',
+    ),
+  ]) {
+    test('R2CB SHA-256 golden offset ${vector.$2} at ${vector.$1}', () async {
+      final item = await seed(offset: vector.$2, occurred: vector.$1);
+      final row = await db.select(db.waterV2Intents).getSingle();
+      final request = WaterV2IncrementRequest.fromIntent(row);
+      expect(request.fingerprint, vector.$3);
+      await makeUncertain(item);
+      expect(ledger.recognized(idA)['fingerprint'], vector.$3);
+      expect(
+        (await processor().reconcileDay(
+          uid,
+          day,
+          canSend: () => true,
+        )).isSuccess,
+        isTrue,
+      );
+      await checkConfirmed([item], revision: 1, total: 1250);
+    });
+  }
+  test(
+    'R2CB two lost responses reconcile without resending or duplicate credit',
+    () async {
+      final a = await seed();
+      final b = await seed(id: idB);
+      final p = processor(
+        remote(
+          handler: (r) async {
+            final response = ledger.apply(r);
+            if (jsonDecode(r.body)['operation'] == 'increment_water')
+              throw http.ClientException('fake-secret-lost');
+            return response;
+          },
+        ),
+      );
+      expect(
+        (await p.process(uid, a, canSend: () => true)).code,
+        'NETWORK_ERROR',
+      );
+      expect(
+        (await p.process(uid, b, canSend: () => true)).code,
+        'NETWORK_ERROR',
+      );
+      final health = await db.select(db.healthEntries).getSingle();
+      expect(
+        (await p.reconcileDay(uid, day, canSend: () => true)).isSuccess,
+        isTrue,
+      );
+      await checkConfirmed([a, b]);
+      expect(ledger.writes, 2);
+      expect(await db.select(db.healthEntries).getSingle(), health);
+      expect(requests.map((r) => jsonDecode(r.body)['operation']), [
+        'increment_water',
+        'increment_water',
+        'reconcile_water',
+      ]);
+      expect(
+        (await p.reconcileDay(uid, day, canSend: () => true)).isSuccess,
+        isTrue,
+      );
+      expect(requests, hasLength(3));
+      expect(ledger.writes, 2);
+    },
+  );
+  test(
+    'R2CB known applied and missing uncertain refuse the complete ACK until original UUID replay',
+    () async {
+      final a = await seed();
+      final b = await seed(id: idB);
+      await makeUncertain(a);
+      await makeUncertain(b, applied: false);
+      final before = snapshot();
+      final p = processor();
+      expect(
+        (await p.reconcileDay(uid, day, canSend: () => true)).code,
+        'WATER_RECONCILIATION_REQUIRED',
+      );
+      expect(snapshot(), before);
+      expect(ledger.writes, 1);
+      expect(
+        (await p.process(uid, b, canSend: () => true)).code,
+        'WATER_RECONCILIATION_REQUIRED',
+      );
+      expect(snapshot(), before);
+      expect(ledger.writes, 2);
+      expect(jsonDecode(requests[1].body), jsonDecode(b.payloadJson));
+      expect(
+        (await p.reconcileDay(uid, day, canSend: () => true)).isSuccess,
+        isTrue,
+      );
+      await checkConfirmed([a, b]);
+      expect(ledger.writes, 2);
+      expect(ledger.receipts.keys.toSet(), {idA, idB});
+    },
+  );
+  test(
+    'R2CB recognized plus proven not_sent missing preserves local delta without confirming missing',
+    () async {
+      final a = await seed();
+      final b = await seed(id: idB);
+      await makeUncertain(a);
+      final health = await db.select(db.healthEntries).getSingle();
+      expect(
+        (await processor().reconcileDay(
+          uid,
+          day,
+          canSend: () => true,
+        )).isSuccess,
+        isTrue,
+      );
+      await checkConfirmed([a], revision: 1, total: 1250);
+      expect(await db.select(db.healthEntries).getSingle(), health);
+      expect(
+        (await db.getSyncItemById(b.id) as SyncQueueTableData).status,
+        'pending',
+      );
+      expect(
+        (await (db.select(
+          db.waterV2Intents,
+        )..where((t) => t.mutationId.equals(idB))).getSingle()).localStatus,
+        'not_sent',
+      );
+      expect(ledger.writes, 1);
+      expect(
+        (await processor().process(uid, b, canSend: () => true)).isSuccess,
+        isTrue,
+      );
+      expect(ledger.total, 1500);
+      expect(ledger.writes, 2);
+    },
+  );
+  test(
+    'R2CB three mixed intents never partially ACK or drop an uncertain missing UUID',
+    () async {
+      final a = await seed();
+      final b = await seed(id: idB);
+      final c = await seed(id: idC);
+      await makeUncertain(a);
+      await makeUncertain(b, applied: false);
+      final before = snapshot();
+      final p = processor();
+      expect(
+        (await p.reconcileDay(uid, day, canSend: () => true)).code,
+        'WATER_RECONCILIATION_REQUIRED',
+      );
+      expect(snapshot(), before);
+      expect(
+        (await p.process(uid, b, canSend: () => true)).code,
+        'WATER_RECONCILIATION_REQUIRED',
+      );
+      expect(
+        (await p.reconcileDay(uid, day, canSend: () => true)).isSuccess,
+        isTrue,
+      );
+      await checkConfirmed([a, b]);
+      expect(
+        (await db.select(db.healthEntries).getSingle()).waterIntakeMl,
+        1750,
+      );
+      expect(
+        (await db.getSyncItemById(c.id) as SyncQueueTableData).status,
+        'pending',
+      );
+      expect(ledger.total, 1500);
+      expect(ledger.writes, 2);
+    },
+  );
+  test(
+    'R2CB remote snapshot includes an unqueried other-device increment',
+    () async {
+      final a = await seed();
+      await makeUncertain(a);
+      final other = jsonDecode(a.payloadJson) as Map<String, dynamic>;
+      other['mutationId'] = idC;
+      ledger.apply(
+        http.Request('POST', Uri.https('fake.invalid'))
+          ..body = jsonEncode(other),
+      );
+      expect(
+        (await processor().reconcileDay(
+          uid,
+          day,
+          canSend: () => true,
+        )).isSuccess,
+        isTrue,
+      );
+      await checkConfirmed([a], revision: 2, total: 1500);
+      expect(
+        (await db.select(db.healthEntries).getSingle()).waterIntakeMl,
+        1500,
+      );
+      expect(jsonDecode(requests.single.body)['pendingMutationIds'], [idA]);
+      expect(ledger.writes, 2);
+    },
+  );
+  test(
+    'R2CB intent created during reconcile HTTP is projected only while provably not_sent',
+    () async {
+      final a = await seed();
+      await makeUncertain(a);
+      final before = await db.select(db.healthEntries).getSingle();
+      final reached = Completer<void>();
+      final release = Completer<void>();
+      final operation = processor(
+        remote(
+          handler: (r) async {
+            final response = ledger.apply(r);
+            reached.complete();
+            await release.future;
+            return response;
+          },
+        ),
+      ).reconcileDay(uid, day, canSend: () => true);
+      await reached.future;
+      final b = await seed(id: idB);
+      release.complete();
+      expect((await operation).isSuccess, isTrue);
+      await checkConfirmed([a], revision: 1, total: 1250);
+      final after = await db.select(db.healthEntries).getSingle();
+      expect(after.waterIntakeMl, 1500);
+      expect(after.mood, before.mood);
+      expect(after.hasTakenPillToday, before.hasTakenPillToday);
+      expect(after.menstrualCycleJson, before.menstrualCycleJson);
+      expect(after.date, before.date);
+      expect(
+        (await db.getSyncItemById(b.id) as SyncQueueTableData).status,
+        'pending',
+      );
+    },
+  );
+  test(
+    'R2CB a new uncertain intent during HTTP blocks every reconciliation write',
+    () async {
+      final a = await seed();
+      await makeUncertain(a);
+      final reached = Completer<void>();
+      final release = Completer<void>();
+      final operation = processor(
+        remote(
+          handler: (r) async {
+            final response = ledger.apply(r);
+            reached.complete();
+            await release.future;
+            return response;
+          },
+        ),
+      ).reconcileDay(uid, day, canSend: () => true);
+      await reached.future;
+      final b = await seed(id: idB);
+      await makeUncertain(b, applied: false);
+      final before = snapshot();
+      release.complete();
+      expect((await operation).code, 'WATER_RECONCILIATION_REQUIRED');
+      expect(snapshot(), before);
+    },
+  );
+  test(
+    'R2CB more than 100 pending intents are quarantined without HTTP or paging',
+    () async {
+      for (var i = 0; i < 101; i++)
+        await seed(
+          id: '${i.toRadixString(16).padLeft(8, '0')}-0000-4000-8000-000000000000',
+        );
+      final before = snapshot();
+      expect(
+        (await processor().reconcileDay(uid, day, canSend: () => true)).code,
+        'WATER_RECONCILIATION_LIMIT',
+      );
+      expect(snapshot(), before);
+      expect(requests, isEmpty);
+      expect(ledger.writes, 0);
+    },
+  );
+  test(
+    'R2CB exactly 100 complete proofs commit one snapshot and no duplicate credits',
+    () async {
+      final items = <SyncQueueTableData>[];
+      for (var i = 0; i < 100; i++) {
+        final item = await seed(
+          id: '${i.toRadixString(16).padLeft(8, '0')}-0000-4000-8000-000000000000',
+        );
+        items.add(item);
+        await makeUncertain(item);
+      }
+      expect(
+        (await processor().reconcileDay(
+          uid,
+          day,
+          canSend: () => true,
+        )).isSuccess,
+        isTrue,
+      );
+      await checkConfirmed(items, revision: 100, total: 26000);
+      expect(
+        (await db.select(db.healthEntries).getSingle()).waterIntakeMl,
+        26000,
+      );
+      expect(ledger.writes, 100);
+      expect(requests, hasLength(1));
+    },
+  );
+  for (final mid in [true, false]) {
+    test(
+      'R2CB SQLite ${mid ? 'middle queue write' : 'commit'} rollback permits complete proof replay',
+      () async {
+        final a = await seed();
+        final b = await seed(id: idB);
+        await makeUncertain(a);
+        await makeUncertain(b);
+        final evidence = await reconciliationProof();
+        final before = snapshot();
+        writes.failQueue = mid;
+        writes.failCommit = !mid;
+        await expectLater(
+          store.acknowledgeReconciliation(
+            evidence.proof,
+            plan: evidence.plan,
+            admission: evidence.ticket,
+            permit: evidence.permit,
+            observedAtUtc: instant,
+          ),
+          throwsStateError,
+        );
+        expect(snapshot(), before);
+        writes.failQueue = false;
+        writes.failCommit = false;
+        await store.acknowledgeReconciliation(
+          evidence.proof,
+          plan: evidence.plan,
+          admission: evidence.ticket,
+          permit: evidence.permit,
+          observedAtUtc: instant,
+        );
+        await checkConfirmed([a, b]);
+        expect(ledger.writes, 2);
+      },
+    );
+  }
+  test(
+    'R2CB processor recovers after first ACK commit failure without renewing UUIDs or doubling remote credits',
+    () async {
+      final a = await seed();
+      final b = await seed(id: idB);
+      await makeUncertain(a);
+      await makeUncertain(b);
+      var inject = true;
+      final p = processor(
+        remote(
+          handler: (r) async {
+            final response = ledger.apply(r);
+            if (inject) writes.failCommit = true;
+            return response;
+          },
+        ),
+      );
+      final before = snapshot();
+      expect(
+        (await p.reconcileDay(uid, day, canSend: () => true)).code,
+        'WATER_LOCAL_ACK_FAILED',
+      );
+      expect(snapshot(), before);
+      inject = false;
+      writes.failCommit = false;
+      expect(
+        (await p.reconcileDay(uid, day, canSend: () => true)).isSuccess,
+        isTrue,
+      );
+      expect(requests[0].body, requests[1].body);
+      await checkConfirmed([a, b]);
+      expect(ledger.writes, 2);
+    },
+  );
+  test(
+    'R2CB duplicate reconcile proof leaves a newer local gesture and ACK counters unchanged',
+    () async {
+      final a = await seed();
+      await makeUncertain(a);
+      final evidence = await reconciliationProof();
+      await store.acknowledgeReconciliation(
+        evidence.proof,
+        plan: evidence.plan,
+        admission: evidence.ticket,
+        permit: evidence.permit,
+        observedAtUtc: instant,
+      );
+      await seed(id: idB);
+      final before = snapshot();
+      await store.acknowledgeReconciliation(
+        evidence.proof,
+        plan: evidence.plan,
+        admission: evidence.ticket,
+        permit: evidence.permit,
+        observedAtUtc: instant,
+      );
+      expect(snapshot(), before);
+      expect(ledger.writes, 1);
+    },
+  );
+  for (final [start, credit] in [
+    [999900, 100],
+    [1000000, 0],
+  ]) {
+    test(
+      'R2CB reconciles cap credit $credit using full original identity',
+      () async {
+        await store.persistConfirmedState(
+          ownerUid: uid,
+          healthDay: day,
+          epoch: epoch,
+          revision: 1,
+          confirmedWaterIntakeMl: start,
+          reconciledAtUtc: instant,
+        );
+        await db
+            .update(db.healthEntries)
+            .write(HealthEntriesCompanion(waterIntakeMl: Value(start)));
+        ledger.total = start;
+        ledger.revision = 1;
+        final a = await seed();
+        final b = await seed(id: idB);
+        await makeUncertain(a);
+        await makeUncertain(b);
+        expect(ledger.recognized(idA)['effectiveCreditMl'], credit);
+        expect(ledger.recognized(idB)['effectiveCreditMl'], 0);
+        expect(
+          (await processor().reconcileDay(
+            uid,
+            day,
+            canSend: () => true,
+          )).isSuccess,
+          isTrue,
+        );
+        await checkConfirmed([a, b], revision: 3, total: 1000000);
+        expect(
+          (await db.select(db.healthEntries).getSingle()).waterIntakeMl,
+          1000000,
+        );
+      },
+    );
+  }
+
+  test(
+    'R2CB increment includes exactly eight fields from persisted identity',
+    () async {
+      final a = await seed();
+      final row = await db.select(db.waterV2Intents).getSingle();
+      final payload = WaterV2IncrementRequest.fromIntent(row).toJson();
+      expect(payload.keys.toSet(), {
+        'operation',
+        'version',
+        'mutationId',
+        'healthDay',
+        'deltaMl',
+        'occurredAt',
+        'timeZoneOffsetMinutes',
+        'originEpoch',
+      });
+      expect(payload['originEpoch'], row.originEpoch);
+      expect(payload['mutationId'], a.docId);
+    },
+  );
+  test(
+    'R2CB reconcile accepts revision two and full proof above minimum zero',
+    () async {
+      await preparedProof(await seed());
+      await preparedProof(await seed(id: idB));
+      final req = WaterV2ReconcileRequest(
+        ownerUid: uid,
+        healthDay: day,
+        expectedEpoch: epoch,
+        expectedRevision: 0,
+        pendingMutationIds: [idA, idB],
+      );
+      final transport = remote(
+        handler: (_) async => http.Response(
+          jsonEncode({
+            'success': true,
+            'operation': 'reconcile_water',
+            'version': 2,
+            'healthDay': day,
+            'epoch': epoch,
+            'revision': ledger.revision,
+            'waterIntakeMl': ledger.total,
+            'complete': true,
+            'recognized': [ledger.recognized(idA), ledger.recognized(idB)],
+            'unrecognizedMutationIds': [],
+          }),
+          200,
+        ),
+      );
+      final result = await transport.reconcile(
+        req,
+        transport.capturePermit(uid, () => true),
+      );
+      expect(result.error, isNull);
+      expect(result.value!.revision, 2);
+      expect(result.value!.epoch, epoch);
+      expect(result.value!.recognized.map((r) => r.mutationId), [idA, idB]);
+    },
+  );
+  test(
+    'R2CB resolves two remotely applied uncertain intents atomically',
+    () async {
+      final a = await seed();
+      final b = await seed(id: idB);
+      await preparedProof(a);
+      await preparedProof(b);
+      final beforeHealth = await db.select(db.healthEntries).getSingle();
+      final result = await processor().reconcileDay(
+        uid,
+        day,
+        canSend: () => true,
+      );
+      expect(result.isSuccess, isTrue);
+      expect((await db.select(db.waterV2DailyStates).getSingle()).revision, 2);
+      expect(
+        (await db.select(db.waterV2Intents).get()).every(
+          (r) => r.localStatus == 'receipt_confirmed',
+        ),
+        isTrue,
+      );
+      expect(
+        (await db.select(db.syncQueueTable).get()).every(
+          (r) => r.status == 'succeeded',
+        ),
+        isTrue,
+      );
+      expect(await db.select(db.healthEntries).getSingle(), beforeHealth);
+      expect(ledger.total, 1500);
+      expect(ledger.writes, 2);
+    },
+  );
 
   test(
     'exact immutable payload, approved HTTPS, no redirects, typed success and one atomic ACK',
@@ -1128,6 +2703,9 @@ void main() {
         expectedRevision: 1,
         pendingMutationIds: [idA, idB],
       );
+      ledger.apply(
+        http.Request('POST', Uri.https('fake.invalid'))..body = a.payloadJson,
+      );
       final transport = remote(
         handler: (r) async => http.Response(
           jsonEncode({
@@ -1139,13 +2717,7 @@ void main() {
             'revision': 1,
             'waterIntakeMl': 1250,
             'complete': true,
-            'recognized': [
-              {
-                'mutationId': idA,
-                'effectiveCreditMl': 250,
-                'appliedRevision': 1,
-              },
-            ],
+            'recognized': [ledger.recognized(idA)],
             'unrecognizedMutationIds': [idB],
           }),
           200,
@@ -1179,7 +2751,7 @@ void main() {
         ownerUid: uid,
         healthDay: day,
         expectedEpoch: epoch,
-        expectedRevision: 0,
+        expectedRevision: 1,
         pendingMutationIds: [idA],
       );
       final data = <String, dynamic>{
@@ -1188,7 +2760,7 @@ void main() {
         'version': 2,
         'healthDay': day,
         'epoch': epoch,
-        'revision': 0,
+        'revision': 1,
         'waterIntakeMl': 1000,
         'complete': true,
         'recognized': [],
@@ -1208,7 +2780,7 @@ void main() {
         case 'epoch':
           data['epoch'] = epochB;
         case 'revision':
-          data['revision'] = 1;
+          data['revision'] = 0;
       }
       final transport = remote(
         handler: (_) async => http.Response(jsonEncode(data), 200),
