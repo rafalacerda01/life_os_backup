@@ -50,6 +50,11 @@ service cloud.firestore {
         && !accountDeletionBlocked(userId);
     }
 
+    // Any authoritative marker closes client water writes, even if malformed.
+    function hasWaterProtocolBarrier(userId) {
+      return exists(/databases/$(database)/documents/users/$(userId)/water_protocol/activation);
+    }
+
     function circleDeletionPath(circleId) {
       return /databases/$(database)/documents/circle_deletions/$(circleId);
     }
@@ -1022,8 +1027,19 @@ service cloud.firestore {
 
       match /health_info/{healthInfoId} {
         allow read: if isOwner(userId);
-        allow create, update: if canWriteUserData(userId)
-          && validHealthData();
+        allow create: if canWriteUserData(userId)
+          && validHealthData()
+          && (
+            !hasWaterProtocolBarrier(userId)
+            || !request.resource.data.keys().hasAny(['waterIntakeMl'])
+          );
+        allow update: if canWriteUserData(userId)
+          && validHealthData()
+          && (
+            !hasWaterProtocolBarrier(userId)
+            || !request.resource.data.diff(resource.data)
+              .affectedKeys().hasAny(['waterIntakeMl'])
+          );
         allow delete: if false;
       }
 
