@@ -480,6 +480,9 @@ class AppDatabase extends _$AppDatabase {
                 (table) =>
                     table.ownerUid.equals(cleanOwnerUid) &
                     table.status.equals(SyncQueuePersistenceStatus.succeeded) &
+                    // Preserve historical Health payloads until reviewed cleanup.
+                    // Do not infer safe deletion from a legacy absolute or status.
+                    table.collection.equals('health_info').not() &
                     (table.lastAttemptAt.isSmallerThanValue(olderThanEpochMs) |
                         (table.lastAttemptAt.isNull() &
                             table.createdAt.isSmallerThanValue(

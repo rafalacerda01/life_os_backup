@@ -253,4 +253,39 @@ void main() {
     expect(item.attemptCount, 1);
     expect(await db.getPendingSyncItems('user-123'), hasLength(1));
   });
+
+  for (final payload in [
+    '{"waterIntakeMl":1250}',
+    '{"waterIntakeMl":1250,"mood":"Before"}',
+    '{"mood":"Before"}',
+  ]) {
+    test(
+      'Health history remains intact during succeeded cleanup: $payload',
+      () async {
+        final id = await db
+            .into(db.syncQueueTable)
+            .insert(
+              SyncQueueTableCompanion.insert(
+                ownerUid: const Value('user-a'),
+                collection: 'health_info',
+                docId: '2026-08-21',
+                operationType: 'update',
+                payloadJson: payload,
+                createdAt: old,
+                status: const Value(SyncQueuePersistenceStatus.succeeded),
+                isSynced: const Value(true),
+                lastAttemptAt: Value(old),
+              ),
+            );
+        final before = await db.getSyncItemById(id);
+        expect(
+          await AppDatabaseSyncQueueStore(
+            db,
+          ).cleanupSucceededSyncItems('user-a', cutoff),
+          0,
+        );
+        expect(await db.getSyncItemById(id), before);
+      },
+    );
+  }
 }

@@ -237,7 +237,10 @@ void main() {
         owner,
         DateTime.now().add(const Duration(days: 1)).millisecondsSinceEpoch,
       );
-      expect(await db.select(db.syncQueueTable).get(), isEmpty);
+      final historical = await db.select(db.syncQueueTable).getSingle();
+      expect(historical.id, queueId);
+      expect(historical.payloadJson, '{"waterIntakeMl":1250}');
+      expect(historical.status, SyncQueuePersistenceStatus.succeeded);
       expect(await store.insertIntent(intent()), before);
     },
   );
@@ -656,7 +659,7 @@ void main() {
     },
   );
   test(
-    'current addWater remains V1 even if isolated V2 records exist',
+    'registration remains unavailable without fallback even if isolated V2 records exist',
     () async {
       final firestore = _Firestore();
       final sync = _Sync();
@@ -681,29 +684,23 @@ void main() {
         sync,
         now: () => DateTime(2026, 8, 21, 10),
       );
-      await repo.addWater();
+      await expectLater(
+        repo.addWater(),
+        throwsA(isA<WaterRegistrationUnavailable>()),
+      );
       final legacy = await db.select(db.healthEntries).getSingle();
-      expect(legacy.waterIntakeMl, 1250);
+      expect(legacy.waterIntakeMl, 1000);
       expect(legacy.mood, 'bem');
       expect(legacy.hasTakenPillToday, isTrue);
       expect(legacy.menstrualCycleJson, '{"cycleLength":28}');
-      final queued = await db.select(db.syncQueueTable).getSingle();
-      expect(queued.ownerUid, owner);
-      expect(queued.status, 'pending');
-      expect(queued.attemptCount, 0);
-      expect(jsonDecode(queued.payloadJson), {
-        'waterIntakeMl': 1250,
-        'date': DateTime(2026, 8, 21, 10).toIso8601String(),
-      });
-      expect(queued.collection, 'health_info');
-      expect(queued.operationType, 'update');
+      expect(await db.select(db.syncQueueTable).get(), isEmpty);
       expect(await rows(), isEmpty);
       expect(
         await store.readConfirmedState(ownerUid: owner, healthDay: day),
         v2,
       );
       expect(firestore.calls, 0);
-      expect(sync.calls, 1);
+      expect(sync.calls, 0);
     },
   );
   test(

@@ -12,9 +12,18 @@ import 'package:life_os/core/security/input_sanitizer.dart';
 import 'package:life_os/core/services/notification_preferences.dart';
 import 'package:life_os/core/services/notification_service.dart';
 import 'package:life_os/core/services/sync_manager.dart';
+import 'package:life_os/core/services/legacy_water_queue.dart';
 import 'package:life_os/core/utils/app_logger.dart';
 import 'package:life_os/features/health/data/models/health_model.dart';
 import 'package:life_os/features/health/services/medication_reminder_lifecycle.dart';
+
+/// Registration remains unavailable until trusted Water V2 provisioning exists.
+class WaterRegistrationUnavailable implements Exception {
+  const WaterRegistrationUnavailable();
+
+  @override
+  String toString() => 'O registro de água está temporariamente indisponível.';
+}
 
 enum _PillStatusMutation { updated, unchanged }
 
@@ -83,7 +92,6 @@ class HealthRepository {
 
   static const int _defaultCycleLengthDays = 28;
   static const int _defaultPeriodLengthDays = 5;
-  static const int _waterIncrementMl = 250;
   static const int _maxWaterIntakeMl = 1000000;
 
   static const String _defaultMood = '—';
@@ -646,9 +654,6 @@ class HealthRepository {
           await _upsertHealthEntry(
             docId: todayDocId,
             mood: companion.mood.present ? companion.mood.value : null,
-            waterIntakeMl: companion.waterIntakeMl.present
-                ? companion.waterIntakeMl.value
-                : null,
             hasTakenPillToday: companion.hasTakenPillToday.present
                 ? companion.hasTakenPillToday.value
                 : null,
@@ -719,7 +724,6 @@ class HealthRepository {
   Future _upsertHealthEntry({
     required String docId,
     String? mood,
-    int? waterIntakeMl,
     bool? hasTakenPillToday,
     String? menstrualCycleJson,
     DateTime? date,
@@ -737,9 +741,6 @@ class HealthRepository {
             HealthEntriesCompanion.insert(
               docId: docId,
               mood: Value(mood ?? _defaultMood),
-              waterIntakeMl: Value(
-                (waterIntakeMl ?? 0).clamp(0, _maxWaterIntakeMl),
-              ),
               hasTakenPillToday: Value(hasTakenPillToday ?? false),
               menstrualCycleJson: Value(menstrualCycleJson),
               date: insertDate,
@@ -749,9 +750,6 @@ class HealthRepository {
 
     final updates = HealthEntriesCompanion(
       mood: mood == null ? const Value.absent() : Value(mood),
-      waterIntakeMl: waterIntakeMl == null
-          ? const Value.absent()
-          : Value(waterIntakeMl.clamp(0, _maxWaterIntakeMl)),
       hasTakenPillToday: hasTakenPillToday == null
           ? const Value.absent()
           : Value(hasTakenPillToday),
@@ -786,57 +784,9 @@ class HealthRepository {
     );
   }
 
+  /// No legacy write, local credit or fabricated V2 intent is permitted.
   Future<void> addWater() async {
-    final ownerUid = _getUserId();
-    if (ownerUid == null || ownerUid.trim().isEmpty) {
-      AppLogger.w('Tentativa de atualizar saúde sem usuário autenticado.');
-      return;
-    }
-
-    final now = _now();
-    final docId = DateFormat('yyyy-MM-dd').format(now);
-    final admission = _db.localMutations.capture(expectedUid: ownerUid);
-
-    await _db.transaction(
-      () async {
-        _requireCurrentUser(ownerUid);
-        final existing = await (_db.select(
-          _db.healthEntries,
-        )..where((table) => table.docId.equals(docId))).getSingleOrNull();
-        _requireCurrentUser(ownerUid);
-
-        final currentWater = (existing?.waterIntakeMl ?? 0).clamp(
-          0,
-          _maxWaterIntakeMl,
-        );
-        final newWaterAmount = (currentWater + _waterIncrementMl).clamp(
-          0,
-          _maxWaterIntakeMl,
-        );
-        await _upsertHealthEntry(
-          docId: docId,
-          waterIntakeMl: newWaterAmount,
-          date: now,
-        );
-        _requireCurrentUser(ownerUid);
-
-        await _db.insertSyncItem(
-          ownerUid: ownerUid,
-          collection: 'health_info',
-          docId: docId,
-          operationType: 'update',
-          payloadJson: jsonEncode(<String, dynamic>{
-            'waterIntakeMl': newWaterAmount,
-            'date': now.toIso8601String(),
-          }),
-        );
-        _requireCurrentUser(ownerUid);
-      },
-      admission: admission,
-      waitForReopen: false,
-    );
-
-    if (_isCurrentUser(ownerUid)) _schedulePendingHealthSync();
+    throw const WaterRegistrationUnavailable();
   }
 
   Future<bool?> getPillStatusForToday({required String expectedUid}) async {
@@ -1065,6 +1015,7 @@ class HealthRepository {
                 .get();
         _requireCurrentUser(userId);
         final protectedHealthDocIds = authoritativeHealthItems
+            .where((item) => !LegacyWaterQueue.isWaterOnly(item))
             .map((item) => item.docId)
             .toSet();
 
@@ -1198,14 +1149,8 @@ class HealthRepository {
         ? _timestampToDate(data['date']) ?? DateTime.tryParse(doc.id)
         : null;
 
-    final rawWater = data['waterIntakeMl'];
-
-    final waterIntake = data.containsKey('waterIntakeMl')
-        ? rawWater is num
-              ? rawWater.toInt()
-              : int.tryParse(rawWater?.toString() ?? '')
-        : null;
-
+    // Legacy absolutes are never a trusted Water V2 snapshot, even on first login.
+    // Existing water projections are owned exclusively by the typed V2 ACK path.
     final cleanMood = data.containsKey('mood')
         ? _sanitizeMood(data['mood']?.toString() ?? '')
         : null;
@@ -1219,7 +1164,6 @@ class HealthRepository {
     await _upsertHealthEntry(
       docId: doc.id,
       mood: cleanMood,
-      waterIntakeMl: waterIntake?.clamp(0, _maxWaterIntakeMl),
       hasTakenPillToday: pillStatus,
       menstrualCycleJson: menstrualCycleJson,
       date: date,

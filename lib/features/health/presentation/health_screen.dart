@@ -84,20 +84,6 @@ class HealthScreen extends ConsumerWidget {
     }
   }
 
-  Future<void> _addWater(BuildContext context, WidgetRef ref) async {
-    try {
-      await ref.read(healthRepositoryProvider).addWater();
-    } catch (e, stack) {
-      AppLogger.e('Erro ao registrar hidratação', e, stack);
-
-      _showSnackBar(
-        context,
-        'Não foi possível registrar a hidratação.',
-        error: true,
-      );
-    }
-  }
-
   void _showAddMedicationModal(BuildContext parentContext, WidgetRef ref) {
     final nameController = TextEditingController();
     final durationController = TextEditingController();
@@ -1013,7 +999,7 @@ class HealthScreen extends ConsumerWidget {
             width: double.infinity,
             height: 46,
             child: OutlinedButton.icon(
-              onPressed: () => _addWater(context, ref),
+              onPressed: null,
               style: OutlinedButton.styleFrom(
                 side: BorderSide(
                   color: _hydrationColor.withValues(alpha: 0.42),
@@ -1025,7 +1011,7 @@ class HealthScreen extends ConsumerWidget {
               ),
               icon: const Icon(Icons.add_rounded, size: 19),
               label: const Text(
-                'Registrar +250 ml',
+                'Registro temporariamente indisponível',
                 style: TextStyle(fontWeight: FontWeight.w700),
               ),
             ),

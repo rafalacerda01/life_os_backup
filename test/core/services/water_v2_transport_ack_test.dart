@@ -2593,7 +2593,7 @@ void main() {
     },
   );
   test(
-    'legacy absolute operation remains V1 and is never converted into an intent',
+    'legacy absolute operation stays pending, never sent, ACKed or converted into an intent',
     () async {
       final id = await db.insertSyncItem(
         ownerUid: uid,
@@ -2611,9 +2611,10 @@ void main() {
         waterV2Processor: processor(),
       );
       addTearDown(manager.dispose);
-      expect(await manager.processPendingItems(), isTrue);
-      expect(other.calls, 1);
+      expect(await manager.processPendingItems(), isFalse);
+      expect(other.calls, 0);
       expect(requests, isEmpty);
+      expect(await db.getSyncItemById(id), original);
       expect(await db.select(db.waterV2Intents).get(), isEmpty);
       expect(
         (await db.getSyncItemById(id) as SyncQueueTableData).payloadJson,

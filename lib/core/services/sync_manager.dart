@@ -4,6 +4,7 @@ import 'package:life_os/core/database/app_database.dart';
 import 'package:life_os/core/utils/app_logger.dart';
 
 import 'sync_operation_result.dart';
+import 'legacy_water_queue.dart';
 import 'sync_queue_store.dart';
 import 'sync_remote_data_source.dart';
 import 'sync_ui_event.dart';
@@ -175,6 +176,7 @@ class SyncManager {
       return false;
     }
 
+    var hasBlockedLegacyWater = false;
     try {
       try {
         await _queueStore.cleanupSucceededSyncItems(
@@ -215,6 +217,13 @@ class SyncManager {
           }
 
           final isWater = WaterV2Queue.isWater(item);
+          if (!isWater && LegacyWaterQueue.isBlocked(item)) {
+            // Leave every byte/status/attempt intact and process unrelated work.
+            // No retry timer: an unresolved legacy entry is not a network failure.
+            hasBlockedLegacyWater = true;
+            continue;
+          }
+
           SyncOperationResult result;
 
           try {
@@ -301,7 +310,7 @@ class SyncManager {
 
     final sameUser = _canProcess(initialUid, generation);
     _resetRetry();
-    return sameUser;
+    return sameUser && !hasBlockedLegacyWater;
   }
 
   void _beginRecovery(String uid) {

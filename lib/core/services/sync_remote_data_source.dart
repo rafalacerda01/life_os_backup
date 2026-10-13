@@ -8,6 +8,7 @@ import 'package:http/http.dart' as http;
 import 'package:life_os/core/database/app_database.dart';
 
 import 'sync_operation_result.dart';
+import 'legacy_water_queue.dart';
 import 'water_v2_contract.dart';
 import '../database/remote_send_permit.dart';
 import 'package:life_os/features/notifications/domain/models/notification_occurrence.dart';
@@ -93,6 +94,11 @@ class FirestoreSyncRemoteDataSource
     // Explicit V2 work never falls through to generic Firestore writes.
     if (WaterV2Queue.isWater(item)) {
       return const SyncOperationResult.retryable(code: 'WATER_V2_DISABLED');
+    }
+
+    // Defense in depth for callers outside SyncManager; no SDK/HTTP or false ACK.
+    if (LegacyWaterQueue.isBlocked(item)) {
+      return const SyncOperationResult.retryable(code: 'LEGACY_WATER_BLOCKED');
     }
 
     if (collection.isEmpty || docId.isEmpty) {

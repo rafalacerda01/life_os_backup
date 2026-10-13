@@ -42,6 +42,46 @@ void main() {
     expect(find.text('Disponível'), findsNothing);
   });
 
+  testWidgets('hidratação indisponível não aceita gesto nem anuncia crédito', (
+    tester,
+  ) async {
+    final health = HealthModel(
+      mood: 'Neutro',
+      waterIntakeMl: 1000,
+      hasTakenPillToday: false,
+      date: DateTime(2026, 10, 13),
+    );
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          healthStreamProvider.overrideWith((ref) => Stream.value(health)),
+          medicationsStreamProvider.overrideWith(
+            (ref) => Stream.value(const []),
+          ),
+          planLimitsProvider.overrideWithValue(PlanLimits.free),
+          // No repository is available: tapping the disabled control must not read it.
+          healthRepositoryProvider.overrideWith(
+            (ref) => throw StateError('UNEXPECTED_WATER_GESTURE'),
+          ),
+        ],
+        child: const MaterialApp(home: HealthScreen()),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final label = find.text('Registro temporariamente indisponível');
+    await tester.scrollUntilVisible(label, 250);
+    final button = tester.widget<OutlinedButton>(
+      find.ancestor(of: label, matching: find.byType(OutlinedButton)).first,
+    );
+    expect(button.onPressed, isNull);
+    await tester.tap(label);
+    await tester.pump();
+    expect(tester.takeException(), isNull);
+    expect(find.text('Registrar +250 ml'), findsNothing);
+    expect(find.text('1250 ml registrados'), findsNothing);
+    expect(find.text('1000 ml registrados'), findsOneWidget);
+  });
+
   testWidgets('card do ciclo preserva key e linguagem de estimativa', (
     tester,
   ) async {

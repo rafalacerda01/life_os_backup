@@ -900,7 +900,7 @@ void main() {
     expect(healthDoc.updateCalls, 0);
   });
 
-  test('health_info create também usa set com merge:true', () async {
+  test('health_info create com água legada não escreve nem confirma', () async {
     final item = createHealthItem(
       operationType: 'create',
       payload: {'waterIntakeMl': 250, 'date': '2026-08-21T10:00:00.000Z'},
@@ -908,13 +908,14 @@ void main() {
 
     final result = await remote.process('user-123', item);
 
-    expect(result.isSuccess, isTrue);
-    expect(healthDoc.lastData?['waterIntakeMl'], 250);
-    expect(healthDoc.lastData?['date'], isA<Timestamp>());
-    expect(healthDoc.lastOptions?.merge, isTrue);
+    expect(result.isSuccess, isFalse);
+    expect(result.shouldRetry, isTrue);
+    expect(result.code, 'LEGACY_WATER_BLOCKED');
+    expect(healthDoc.setCalls, 0);
+    expect(healthDoc.lastData, isNull);
   });
 
-  test('humor seguido de água preserva ambos os campos', () async {
+  test('humor seguido de água mantém só o envio permitido', () async {
     await remote.process(
       'user-123',
       createHealthItem(
@@ -931,10 +932,11 @@ void main() {
     );
 
     expect(healthDoc.storedData['mood'], 'Radiante');
-    expect(healthDoc.storedData['waterIntakeMl'], 750);
+    expect(healthDoc.storedData.containsKey('waterIntakeMl'), isFalse);
+    expect(healthDoc.setCalls, 1);
   });
 
-  test('água seguida de humor preserva ambos os campos', () async {
+  test('água bloqueada não impede o envio posterior de humor', () async {
     await remote.process(
       'user-123',
       createHealthItem(
@@ -950,7 +952,8 @@ void main() {
       ),
     );
 
-    expect(healthDoc.storedData['waterIntakeMl'], 750);
+    expect(healthDoc.storedData.containsKey('waterIntakeMl'), isFalse);
+    expect(healthDoc.setCalls, 1);
     expect(healthDoc.storedData['mood'], 'Radiante');
   });
 
@@ -1962,5 +1965,64 @@ void main() {
       expect(result.code, 'INVALID_PAYLOAD');
       expect(clientCreated, isFalse);
     }
+  });
+
+  for (final operation in ['create', 'update', 'delete']) {
+    for (final value in [0, 1000, null, 'invalid']) {
+      test(
+        'legacy water $operation with $value never reaches Firestore or HTTP',
+        () async {
+          healthDoc.storedData.addAll({
+            'waterIntakeMl': 1000,
+            'mood': 'Before',
+          });
+          final before = Map<String, dynamic>.of(healthDoc.storedData);
+          final item = createHealthItem(
+            operationType: operation,
+            payload: {
+              'waterIntakeMl': value,
+              'mood': 'Mixed',
+              'date': '2026-08-21T10:00:00.000Z',
+            },
+          );
+          final result = await remote.process('user-123', item);
+          expect(result.isSuccess, isFalse);
+          expect(result.shouldRetry, isTrue);
+          expect(result.code, 'LEGACY_WATER_BLOCKED');
+          expect(healthDoc.setCalls, 0);
+          expect(healthDoc.updateCalls, 0);
+          expect(healthDoc.storedData, before);
+        },
+      );
+    }
+  }
+  test(
+    'health delete without water payload is retained without deleting projection',
+    () async {
+      final result = await remote.process(
+        'user-123',
+        createHealthItem(operationType: 'delete', payload: {}),
+      );
+      expect(result.code, 'LEGACY_WATER_BLOCKED');
+      expect(result.isSuccess, isFalse);
+      expect(healthDoc.setCalls, 0);
+    },
+  );
+  test('pill partial payload still merges without changing water', () async {
+    healthDoc.storedData.addAll({'waterIntakeMl': 1250, 'mood': 'Before'});
+    final result = await remote.process(
+      'user-123',
+      createHealthItem(
+        operationType: 'update',
+        payload: {
+          'hasTakenPillToday': true,
+          'date': '2026-08-21T10:00:00.000Z',
+        },
+      ),
+    );
+    expect(result.isSuccess, isTrue);
+    expect(healthDoc.storedData['waterIntakeMl'], 1250);
+    expect(healthDoc.storedData['mood'], 'Before');
+    expect(healthDoc.storedData['hasTakenPillToday'], isTrue);
   });
 }

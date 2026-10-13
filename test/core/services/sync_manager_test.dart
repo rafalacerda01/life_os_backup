@@ -1,4 +1,10 @@
 import 'dart:async';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:life_os/core/database/database_provider.dart';
+import 'package:life_os/core/services/sync_manager_provider.dart';
+import 'package:life_os/features/auth/presentation/providers/auth_provider.dart';
 import 'dart:convert';
 
 import 'package:drift/native.dart';
@@ -211,6 +217,13 @@ SyncManager _recordUiEvents(
     await subscription.cancel();
   });
   return manager;
+}
+
+class _UnusedFirestore extends Fake implements FirebaseFirestore {}
+
+class _NoUserAuth extends Fake implements FirebaseAuth {
+  @override
+  User? get currentUser => null;
 }
 
 void main() {
@@ -1377,11 +1390,12 @@ void main() {
         releaseFirst.complete();
         await Future.wait([firstRun, secondRun]);
 
-        expect(store.markedAsSynced, [1, 2]);
+        expect(store.markedAsSynced, [1]);
+        expect(store.items.singleWhere((item) => item.id == water.id), water);
         expect(remote.processedItems, [
           'user-123:health_info:2026-08-21:update',
-          'user-123:health_info:2026-08-21:update',
         ]);
+        expect(await manager.processPendingItems(), isFalse);
       },
     );
 
@@ -1414,13 +1428,14 @@ void main() {
 
         await manager.processPendingItems();
 
-        expect(remote.calls, 3);
-        expect(store.markedAsSynced, [1, 2]);
+        expect(remote.calls, 2);
+        expect(store.markedAsSynced, [1]);
+        expect(store.items.singleWhere((item) => item.id == water.id), water);
         expect(remote.firestoreDoc, {
           'mood': 'Radiante',
-          'date': '2026-08-21T10:05:00.000Z',
-          'waterIntakeMl': 250,
+          'date': '2026-08-21T10:00:00.000Z',
         });
+        expect(await manager.processPendingItems(), isFalse);
       },
     );
 
@@ -1586,5 +1601,161 @@ void main() {
       expect(store.markedAsSynced, [1]);
       manager.dispose();
     });
+  });
+
+  group('Water V1 preservada sem bloquear módulos vivos', () {
+    for (final mixed in [false, true]) {
+      test(
+        'fila ${mixed ? 'mista' : 'absoluta'} intacta, outros módulos progridem, descarte negado',
+        () async {
+          final db = AppDatabase(executor: NativeDatabase.memory());
+          addTearDown(db.close);
+          final payload = mixed
+              ? '{"waterIntakeMl":1250,"mood":"Local","date":"2026-08-21T10:00:00.000Z"}'
+              : '{ "waterIntakeMl" : 1250, "date" : "2026-08-21T10:00:00.000Z" }';
+          final legacyId = await db.insertSyncItem(
+            ownerUid: 'user-a',
+            collection: 'health_info',
+            docId: '2026-08-21',
+            operationType: 'update',
+            payloadJson: payload,
+            createdAt: 1,
+          );
+          final before = await db.getSyncItemById(legacyId);
+          for (final module in [
+            'tasks',
+            'habits',
+            'transactions',
+            'study_info',
+          ]) {
+            await db.insertSyncItem(
+              ownerUid: 'user-a',
+              collection: module,
+              docId: module,
+              operationType: 'update',
+              payloadJson: '{}',
+            );
+          }
+          for (final body in [
+            {'mood': 'Focado'},
+            {'hasTakenPillToday': true},
+            {
+              'menstrualCycle': {'isEnabled': true},
+            },
+          ]) {
+            await db.insertSyncItem(
+              ownerUid: 'user-a',
+              collection: 'health_info',
+              docId: '2026-08-21',
+              operationType: 'update',
+              payloadJson: jsonEncode(body),
+            );
+          }
+          final remote = FakeSyncRemoteDataSource((_, item) async {
+            expect(
+              (jsonDecode(item.payloadJson) as Map).containsKey(
+                'waterIntakeMl',
+              ),
+              isFalse,
+            );
+            return const SyncOperationResult.success();
+          });
+          final manager = SyncManager(
+            queueStore: AppDatabaseSyncQueueStore(db),
+            remoteDataSource: remote,
+            currentUserId: () => 'user-a',
+          );
+          addTearDown(manager.dispose);
+          final events = <SyncUiEvent>[];
+          final subscription = manager.uiEvents.listen(events.add);
+          addTearDown(subscription.cancel);
+          expect(await manager.processPendingItems(), isFalse);
+          expect(remote.processedItems, hasLength(7));
+          expect(await db.getSyncItemById(legacyId), before);
+          expect(await db.getPendingSyncItems('user-a'), [before]);
+          expect(await db.hasRejectedSyncItems('user-a'), isFalse);
+          expect(await manager.prepareForLocalDataDiscard(), isFalse);
+          expect(await manager.processPendingItems(), isFalse);
+          expect(remote.processedItems, hasLength(7));
+          expect(await db.getSyncItemById(legacyId), before);
+          expect(await db.select(db.waterV2Intents).get(), isEmpty);
+          expect(await db.select(db.waterV2DailyStates).get(), isEmpty);
+          expect(
+            events.where((e) => e.type == SyncUiEventType.recoveryCompleted),
+            isEmpty,
+          );
+        },
+      );
+    }
+    test(
+      'UID A-B-A e logout abortado não confirmam resposta antiga ou apagam água',
+      () async {
+        String? uid = 'user-a';
+        final store = FakeSyncQueueStore([
+          createSyncItem(
+            id: 1,
+            ownerUid: 'user-a',
+            collection: 'health_info',
+            payloadJson: '{"waterIntakeMl":1250}',
+          ),
+          createSyncItem(id: 2, ownerUid: 'user-a', collection: 'tasks'),
+          createSyncItem(id: 3, ownerUid: 'user-b', collection: 'tasks'),
+        ]);
+        final legacy = store.items.first;
+        final reached = Completer<void>();
+        final late = Completer<SyncOperationResult>();
+        var first = true;
+        final remote = FakeSyncRemoteDataSource((_, item) {
+          if (first) {
+            first = false;
+            reached.complete();
+            return late.future;
+          }
+          return Future.value(const SyncOperationResult.success());
+        });
+        final manager = SyncManager(
+          queueStore: store,
+          remoteDataSource: remote,
+          currentUserId: () => uid,
+        );
+        addTearDown(manager.dispose);
+        final processing = manager.processPendingItems();
+        await reached.future;
+        expect(await manager.prepareForSessionDetach('user-a'), isTrue);
+        uid = 'user-b';
+        expect(manager.resumeForPreparedSession('user-a'), isFalse);
+        uid = 'user-a';
+        expect(manager.resumeForPreparedSession('user-a'), isTrue);
+        late.complete(const SyncOperationResult.success());
+        expect(await processing, isFalse);
+        expect(store.markedAsSynced, isEmpty);
+        expect(await manager.processPendingItems(), isFalse);
+        expect(store.markedAsSynced, [2]);
+        expect(store.items.first, legacy);
+        expect(store.items.last.status, SyncQueuePersistenceStatus.pending);
+        final managerB = SyncManager(
+          queueStore: store,
+          remoteDataSource: remote,
+          currentUserId: () => 'user-b',
+        );
+        addTearDown(managerB.dispose);
+        expect(await managerB.processPendingItems(), isTrue);
+        expect(store.markedAsSynced, [2, 3]);
+        expect(store.items.first, legacy);
+      },
+    );
+  });
+  test('normal provider remains without an active Water V2 processor', () {
+    final db = AppDatabase(executor: NativeDatabase.memory());
+    addTearDown(db.close);
+    final container = ProviderContainer(
+      overrides: [
+        databaseProvider.overrideWithValue(db),
+        firestoreProvider.overrideWithValue(_UnusedFirestore()),
+        firebaseAuthProvider.overrideWithValue(_NoUserAuth()),
+      ],
+    );
+    addTearDown(container.dispose);
+    expect(container.read(syncManagerProvider).waterV2Processor, isNull);
   });
 }
