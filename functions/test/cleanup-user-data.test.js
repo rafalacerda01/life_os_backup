@@ -20,11 +20,30 @@ require.cache[adminPath].exports = {
   firestore() {
     return activeDb;
   },
+  auth() {
+    return {getUser: async (owner) => {
+      assert.equal(owner, uid);
+      if (activeDb.authHook) await activeDb.authHook(owner);
+      if (activeDb.authError) throw activeDb.authError;
+      if (activeDb.authUser) return activeDb.authUser;
+      throw Object.assign(new Error("synthetic not found"),
+          {code: "auth/user-not-found"});
+    }};
+  },
 };
 
 delete require.cache[indexPath];
 const {cleanupUserData} = require(indexPath);
 require.cache[adminPath].exports = originalAdmin;
+
+// Existing unit calls exercise the trusted handler, with managed v1 context.
+// Explicit contexts still reach the real callback unchanged for refusal tests.
+const managedCleanupRun = cleanupUserData.run;
+cleanupUserData.run = (user, context = {eventId: "synthetic-legacy-delete",
+  eventType: "google.firebase.auth.user.delete",
+  timestamp: "2026-10-13T23:59:59Z", params: {},
+  resource: {service: "firebaseauth.googleapis.com",
+    name: "projects/demo-life-os"}}) => managedCleanupRun(user, context);
 
 const uid = "sensitive-uid";
 const rootPath = `users/${uid}`;
@@ -158,6 +177,10 @@ class FakeDocumentSnapshot {
     this.id = ref.path.split('/').at(-1);
     this.exists = data !== undefined;
     this._data = data;
+    if (this.exists) {
+      this.createTime = ref.db.createTimes && ref.db.createTimes.has(ref.path) ?
+        ref.db.createTimes.get(ref.path) : Timestamp.fromMillis(0);
+    }
   }
 
   /** @return {Object|undefined} Dados atuais. */
@@ -268,6 +291,8 @@ class FakeTransaction extends FakeWriter {
 class FakeFirestore {
   /** Inicializa estado observavel e injecoes de falha. */
   constructor() {
+    this.projectId = "demo-life-os";
+    this.createTimes = new Map();
     this.store = new Map();
     this.recursiveDeletes = [];
     this.operationLog = [];
@@ -838,7 +863,7 @@ test("falha na finalização deixa orphan DELETING recuperável", async () => {
   activeDb = new FakeFirestore();
   activeDb.seed(rootPath, {activeCircleId: null});
   activeDb.seed(billingAccountPath, {uid, state: "ACTIVE"});
-  activeDb.beforeTransactions[4] = () => {
+  activeDb.beforeTransactions[5] = () => {
     throw new Error("private finalizer failure");
   };
 
@@ -912,7 +937,7 @@ test("token surgindo antes do finalizer mantém barrier até retry", async () =>
   activeDb = new FakeFirestore();
   activeDb.seed(rootPath, {activeCircleId: null});
   activeDb.seed(billingAccountPath, {uid, state: "ACTIVE"});
-  activeDb.beforeTransactions[4] = () => {
+  activeDb.beforeTransactions[5] = () => {
     activeDb.seed(lateTokenPath, {accountHash});
   };
 
@@ -934,7 +959,7 @@ test("account removido durante finalização converge idempotentemente", async (
   activeDb = new FakeFirestore();
   activeDb.seed(rootPath, {activeCircleId: null});
   activeDb.seed(billingAccountPath, {uid, state: "ACTIVE"});
-  activeDb.beforeTransactions[4] = () => {
+  activeDb.beforeTransactions[5] = () => {
     activeDb.store.delete(billingAccountPath);
   };
 
@@ -1113,7 +1138,7 @@ test("admin unico remove Circle inteiro antes do usuario", async () => {
   seedAdminCircle(activeDb, false);
   const markerPath = `circle_deletions/${circleId}`;
   activeDb.afterTransactionCommit = (number) => {
-    if (number !== 3) return;
+    if (number !== 4) return;
     assert.equal(
         activeDb.data(markerPath).state,
         "AUTH_DELETE_ORPHAN_CLEANUP",
@@ -1269,7 +1294,7 @@ test("root recriado após claim não é apagado", async () => {
   const markerPath = `circle_deletions/${circleId}`;
   let recreated = false;
   activeDb.afterTransactionCommit = (number) => {
-    if (number !== 3) return;
+    if (number !== 4) return;
     assert.equal(activeDb.data(`circles/${circleId}`), undefined);
     assert.equal(
         activeDb.data(markerPath).state,
@@ -1306,7 +1331,7 @@ test("root recriado antes do claim impede cleanup residual", async () => {
   activeDb.seed(rootPath, {activeCircleId: circleId});
   activeDb.seed(`circles/${circleId}/members/${uid}`, memberData("member"));
   const newCircle = circleData();
-  activeDb.beforeTransactions[3] = () => {
+  activeDb.beforeTransactions[4] = () => {
     activeDb.seed(`circles/${circleId}`, newCircle);
     activeDb.seed(
         `circles/${circleId}/members/${adminUid}`,
@@ -1319,7 +1344,7 @@ test("root recriado antes do claim impede cleanup residual", async () => {
       {message: "USER_DATA_CLEANUP_FAILED"},
   ));
 
-  assert.equal(activeDb.transactionCount, 3);
+  assert.equal(activeDb.transactionCount, 4);
   assert.deepEqual(activeDb.data(`circles/${circleId}`), newCircle);
   assert.deepEqual(activeDb.data(rootPath), {activeCircleId: circleId});
   assert.deepEqual(
@@ -1640,3 +1665,365 @@ test("fallback resumes pending Circle deletion before resolving the current admi
   assert.deepEqual(activeDb.data(`users/${remainingUid}`), {activeCircleId: null});
   assert.equal(activeDb.data(guardPath).state, "COMPLETE");
 });
+
+
+// C1 scenarios retained under the approved R3 policy A. The original diagnostic
+// patch is preserved separately; timestamp ambiguity does not create authority.
+const c1BirthPath = `account_birth_decisions/${uid}`;
+const c1Born = Timestamp.fromMillis(Date.parse("2026-10-13T10:00:00Z"));
+const c1Clock = Timestamp.fromMillis(Date.parse("2026-10-14T10:00:00Z"));
+
+/**
+ * Generate a legitimate CLOSED ledger through the approved real B2-A core.
+ * Adapt only the existing private fake's create/serverTimestamp mechanics.
+ * @param {FakeFirestore} db Synthetic storage.
+ * @param {Timestamp} born Synthetic Auth creation.
+ * @return {Promise<Object>} Persisted real core record.
+ */
+async function c1SeedBirth(db, born = c1Born) {
+  const {createAccountBirthTestHarness} = require("../water_account_birth");
+  const recordedAt = Timestamp.fromMillis(born.toMillis() + 1000);
+  const source = {type: "FIREBASE_AUTH_CREATE", uid,
+    eventId: `synthetic-create-${born.toMillis()}`,
+    projectId: "demo-life-os", tenantId: null,
+    authCreatedAt: born, eventAt: born};
+  const syntheticDb = {projectId: "demo-life-os",
+    collection: (name) => db.collection(name),
+    runTransaction: (callback) => db.runTransaction((transaction) =>
+      callback({get: (ref) => transaction.get(ref),
+        create: (ref, data) => {
+          assert.equal(db.data(ref.path), undefined, "create cannot overwrite");
+          assert.equal(data.recordedAt.constructor.name,
+              "ServerTimestampTransform");
+          transaction.set(ref, {...data, recordedAt});
+        }})),
+  };
+  const recorder = createAccountBirthTestHarness({db: syntheticDb,
+    getTrustedBirth: () => ({source,
+      identity: {uid, email: "synthetic-c1@example.invalid",
+        displayName: "Synthetic C1 Owner", photoUrl: "synthetic-c1-avatar"},
+      cohort: {version: 1, id: "closed-c1", policy: "NEW_ACCOUNT_V2_ONLY",
+        state: "CLOSED", cutoverAt: Timestamp.fromMillis(
+            Date.parse("2026-10-01T00:00:00Z"))}}),
+    getCurrentAuthGeneration: () => ({uid, projectId: "demo-life-os",
+      tenantId: null, authCreatedAt: born}), now: () => recordedAt});
+  assert.equal((await recorder.record()).eligible, false);
+  return db.data(c1BirthPath);
+}
+
+/**
+ * @param {*} metadata SDK wire metadata or absence.
+ * @return {Object} Actual installed Functions SDK event-record shape.
+ */
+function c1DeleteUser(metadata = {
+  creationTime: c1Born.toDate().toUTCString(),
+}) {
+  const {userRecordConstructor} = require("firebase-functions/v1/auth");
+  return userRecordConstructor({uid, metadata,
+    email: "synthetic-delete@example.invalid"});
+}
+
+/**
+ * @param {Object} user Managed-event record supplied by trusted test code.
+ * @return {Promise<void>} Real existing onDelete callback with synthetic IO.
+ */
+function c1Delete(user = c1DeleteUser()) {
+  return cleanupUserData.run(user, {eventId: "synthetic-delete-c1",
+    eventType: "google.firebase.auth.user.delete",
+    timestamp: "2026-10-13T11:00:00Z",
+    resource: {service: "firebaseauth.googleapis.com",
+      name: "projects/demo-life-os"}, params: {}});
+}
+
+for (const withRoot of [true, false]) {
+  test(`C1 resolved: mandatory ledger removal (root present: ${withRoot})`,
+      async () => {
+        activeDb = new FakeFirestore();
+        await c1SeedBirth(activeDb);
+        if (withRoot) activeDb.seed(rootPath, {activeCircleId: null});
+        await c1Delete();
+        assert.equal(activeDb.data(rootPath), undefined);
+        assert.equal(activeDb.data(guardPath).state, "COMPLETE");
+        assert.equal(activeDb.data(c1BirthPath), undefined,
+            "Confirmed deletion must not retain originalIdentity PII");
+      });
+}
+
+test("C1 resolved: normal cleanup removes original identity under COMPLETE",
+    async () => {
+      activeDb = new FakeFirestore();
+      const ledger = await c1SeedBirth(activeDb);
+      activeDb.seed(rootPath, {activeCircleId: null});
+      await c1Delete();
+      assert.equal(activeDb.data(rootPath), undefined);
+      assert.equal(activeDb.data(c1BirthPath), undefined);
+      assert.deepEqual(ledger.originalIdentity, {uid,
+        email: "synthetic-c1@example.invalid",
+        displayName: "Synthetic C1 Owner",
+        photoUrl: "synthetic-c1-avatar"});
+      assert.equal(activeDb.data(guardPath).state, "COMPLETE");
+      assert.equal(activeDb.operationLog.includes(`delete:${c1BirthPath}`),
+          true);
+    });
+
+test("C1 resolved: ledger-only account is marked COMPLETE after removal",
+    async () => {
+      activeDb = new FakeFirestore();
+      await c1SeedBirth(activeDb);
+      await c1Delete();
+      assert.equal(activeDb.data(c1BirthPath), undefined);
+      assert.deepEqual(activeDb.recursiveDeletes, [rootPath]);
+      assert.equal(activeDb.data(guardPath).state, "COMPLETE");
+    });
+
+test("C1 resolved: old deletion preserves a later generation tree and ledger",
+    async () => {
+      activeDb = new FakeFirestore();
+      const laterRoot = {activeCircleId: null,
+        displayName: "Synthetic recreated"};
+      await c1SeedBirth(activeDb,
+          Timestamp.fromMillis(c1Born.toMillis() + 7200000));
+      activeDb.seed(rootPath, laterRoot);
+      activeDb.seed(`${rootPath}/health/day`, {waterIntakeMl: 250});
+      await withoutErrorLog(() => assert.rejects(c1Delete(),
+          {message: "USER_DATA_CLEANUP_FAILED"}));
+      assert.deepEqual(activeDb.data(rootPath), laterRoot);
+      assert.deepEqual(activeDb.data(`${rootPath}/health/day`),
+          {waterIntakeMl: 250});
+      assert.deepEqual(activeDb.recursiveDeletes, []);
+    });
+
+test("C1 resolved: old event cannot delete later tree with divergent ledger",
+    async () => {
+      activeDb = new FakeFirestore();
+      const later = await c1SeedBirth(activeDb,
+          Timestamp.fromMillis(c1Born.toMillis() + 7200000));
+      activeDb.seed(rootPath, {activeCircleId: null,
+        displayName: "Synthetic recreated"});
+      activeDb.seed(`${rootPath}/health/day`, {waterIntakeMl: 250});
+      await withoutErrorLog(() => assert.rejects(c1Delete(),
+          {message: "USER_DATA_CLEANUP_FAILED"}));
+      assert.equal(activeDb.data(rootPath).displayName, "Synthetic recreated");
+      assert.deepEqual(activeDb.data(`${rootPath}/health/day`),
+          {waterIntakeMl: 250});
+      assert.deepEqual(activeDb.data(c1BirthPath), later);
+      assert.equal(activeDb.data(guardPath), undefined);
+    });
+
+test("C1 policy A: missing creation metadata still permits managed deletion",
+    async () => {
+      activeDb = new FakeFirestore();
+      await c1SeedBirth(activeDb);
+      activeDb.seed(rootPath, {activeCircleId: null});
+      await c1Delete(c1DeleteUser(null));
+      assert.equal(activeDb.data(c1BirthPath), undefined);
+      assert.equal(activeDb.data(rootPath), undefined);
+      assert.equal(activeDb.data(guardPath).state, "COMPLETE");
+    });
+
+test("C1 policy A: coarse metadata alone never proves generation reuse",
+    async () => {
+      const {UserRecord} = require("firebase-admin/auth");
+      const old = new UserRecord({localId: uid,
+        createdAt: String(c1Born.toMillis() + 100)});
+      const later = new UserRecord({localId: uid,
+        createdAt: String(c1Born.toMillis() + 900)});
+      assert.equal(old.metadata.creationTime, later.metadata.creationTime);
+      activeDb = new FakeFirestore();
+      await c1SeedBirth(activeDb);
+      activeDb.seed(rootPath, {activeCircleId: null});
+      const user = c1DeleteUser({creationTime: old.metadata.creationTime});
+      await c1Delete(user);
+      assert.equal(activeDb.data(c1BirthPath), undefined);
+      assert.equal(activeDb.data(rootPath), undefined);
+      assert.equal(activeDb.data(guardPath).state, "COMPLETE");
+    });
+
+test("C1 resolved: duplicate event is idempotent and removes PII",
+    async () => {
+      activeDb = new FakeFirestore();
+      await c1SeedBirth(activeDb);
+      activeDb.seed(rootPath, {activeCircleId: null});
+      await c1Delete(); const firstGuard = activeDb.data(guardPath);
+      await c1Delete();
+      assert.equal(activeDb.data(c1BirthPath), undefined);
+      assert.deepEqual(activeDb.data(guardPath), firstGuard);
+      assert.deepEqual(activeDb.recursiveDeletes, [rootPath, rootPath]);
+    });
+
+for (const state of ["IN_PROGRESS", "COMPLETE"]) {
+  test(`C1 evidence: existing ${state} guard does not bind Auth generation`,
+      async () => {
+        activeDb = new FakeFirestore();
+        await c1SeedBirth(activeDb);
+        activeDb.seed(rootPath, {activeCircleId: null});
+        const guard = {version: 1, state,
+          deletionId: "00000000-0000-4000-8000-000000000001",
+          startedAt: c1Born,
+          retainUntil: state === "COMPLETE" ? c1Clock : null};
+        activeDb.seed(guardPath, guard);
+        await c1Delete();
+        assert.equal(activeDb.data(guardPath).deletionId, guard.deletionId);
+        assert.equal(activeDb.data(guardPath).state, "COMPLETE");
+        assert.equal(activeDb.data(rootPath), undefined);
+        assert.equal(activeDb.data(c1BirthPath), undefined);
+      });
+}
+
+test("C1 evidence: failure before tree deletion keeps IN_PROGRESS and PII",
+    async () => {
+      activeDb = new FakeFirestore();
+      const ledger = await c1SeedBirth(activeDb);
+      activeDb.seed(rootPath, {activeCircleId: null});
+      activeDb.failRecursiveDeleteOnce.set(rootPath, 1);
+      await withoutErrorLog(() => assert.rejects(c1Delete(),
+          {message: "USER_DATA_CLEANUP_FAILED"}));
+      const deletionId = activeDb.data(guardPath).deletionId;
+      assert.equal(activeDb.data(guardPath).state, "IN_PROGRESS");
+      assert.deepEqual(activeDb.data(c1BirthPath), ledger);
+      assert.ok(activeDb.data(rootPath));
+      await c1Delete();
+      assert.equal(activeDb.data(guardPath).deletionId, deletionId);
+      assert.equal(activeDb.data(guardPath).state, "COMPLETE");
+      assert.equal(activeDb.data(c1BirthPath), undefined);
+    });
+
+test("C1 evidence: failure before guard completion cannot falsely complete",
+    async () => {
+      activeDb = new FakeFirestore();
+      const ledger = await c1SeedBirth(activeDb);
+      activeDb.seed(rootPath, {activeCircleId: null});
+      const runTransaction = activeDb.runTransaction.bind(activeDb);
+      let fail = true;
+      activeDb.runTransaction = (callback) => runTransaction(async (tx) => {
+        const result = await callback(tx);
+        if (fail && tx.writes.some((write) => write.ref.path === guardPath &&
+          write.type === "update" && write.data.state === "COMPLETE")) {
+          fail = false; throw new Error("synthetic commit failure");
+        }
+        return result;
+      });
+      await withoutErrorLog(() => assert.rejects(c1Delete(),
+          {message: "USER_DATA_CLEANUP_FAILED"}));
+      assert.equal(activeDb.data(rootPath), undefined);
+      assert.equal(activeDb.data(guardPath).state, "IN_PROGRESS");
+      assert.deepEqual(activeDb.data(c1BirthPath), ledger);
+      const deletionId = activeDb.data(guardPath).deletionId;
+      await c1Delete();
+      assert.equal(activeDb.data(guardPath).deletionId, deletionId);
+      assert.equal(activeDb.data(guardPath).state, "COMPLETE");
+    });
+
+test("C1 evidence: lost response after COMPLETE replays without a new guard",
+    async () => {
+      activeDb = new FakeFirestore();
+      await c1SeedBirth(activeDb); let lost = false;
+      activeDb.seed(rootPath, {activeCircleId: null});
+      activeDb.afterTransactionCommit = () => {
+        if (!lost && activeDb.data(guardPath) &&
+          activeDb.data(guardPath).state === "COMPLETE") {
+          lost = true; throw new Error("synthetic lost reply");
+        }
+      };
+      await withoutErrorLog(() => assert.rejects(c1Delete(),
+          {message: "USER_DATA_CLEANUP_FAILED"}));
+      assert.equal(activeDb.data(rootPath), undefined);
+      const guard = activeDb.data(guardPath);
+      assert.equal(guard.state, "COMPLETE");
+      activeDb.afterTransactionCommit = null; await c1Delete();
+      assert.deepEqual(activeDb.data(guardPath), guard);
+      assert.equal(activeDb.data(c1BirthPath), undefined);
+    });
+
+test("C1 evidence: delayed CLOSED birth is refused by the cleanup guard",
+    async () => {
+      activeDb = new FakeFirestore(); await c1Delete();
+      const before = [...activeDb.store];
+      await assert.rejects(c1SeedBirth(activeDb),
+          {code: "WATER_ACCOUNT_DELETING"});
+      assert.deepEqual([...activeDb.store], before);
+      assert.equal(activeDb.data(c1BirthPath), undefined);
+    });
+
+test("C1 evidence: unrelated UID ledger and every local module stay intact",
+    async () => {
+      activeDb = new FakeFirestore();
+      await c1SeedBirth(activeDb);
+      activeDb.seed(rootPath, {activeCircleId: null});
+      const other = "synthetic-c1-other";
+      const docs = [[`users/${other}`, {displayName: "Synthetic other"}],
+        [`account_birth_decisions/${other}`, {synthetic: "other ledger"}],
+        [`users/${other}/health/day`, {waterIntakeMl: 500, mood: "fine"}],
+        [`users/${other}/checkins/day`, {synthetic: "checkin"}],
+        [`users/${other}/tasks/task`, {title: "Synthetic task"}],
+        [`users/${other}/habits/habit`, {synthetic: "habit"}],
+        [`users/${other}/focus/session`, {synthetic: "focus"}],
+        [`users/${other}/subjects/subject`, {synthetic: "subject"}]];
+      for (const [path, data] of docs) activeDb.seed(path, data);
+      await c1Delete();
+      for (const [path, data] of docs) {
+        assert.deepEqual(activeDb.data(path), data);
+      }
+      assert.equal(activeDb.operationLog.some((entry) =>
+        entry.includes(other)), false);
+    });
+
+test("C1 evidence: legacy ledger-absent cleanup retains its original behavior",
+    async () => {
+      activeDb = new FakeFirestore();
+      activeDb.seed(rootPath, {activeCircleId: null});
+      activeDb.seed(`${rootPath}/tasks/task`, {title: "Synthetic legacy"});
+      await c1Delete();
+      assert.equal(activeDb.data(rootPath), undefined);
+      assert.equal(activeDb.data(c1BirthPath), undefined);
+      assertOnlyCompletedGuard();
+    });
+
+
+test("R3 managed UID remains bound across pending Auth lookup", async () => {
+  activeDb = new FakeFirestore(); await c1SeedBirth(activeDb);
+  activeDb.seed(rootPath, {activeCircleId: null});
+  const foreignRoot = "users/synthetic-r3-foreign";
+  const foreign = {displayName: "Synthetic foreign"};
+  activeDb.seed(foreignRoot, foreign);
+  const user = c1DeleteUser();
+  activeDb.authHook = () => {
+    user.uid = "synthetic-r3-foreign";
+  };
+  await c1Delete(user);
+  assert.deepEqual(activeDb.data(foreignRoot), foreign);
+  assert.equal(activeDb.data(rootPath), undefined);
+  assert.equal(activeDb.data(c1BirthPath), undefined);
+  assert.equal(activeDb.data(guardPath).state, "COMPLETE");
+  assert.equal(activeDb.operationLog.some((entry) =>
+    entry.includes("synthetic-r3-foreign")), false);
+});
+
+test("R3 live Auth refuses before guard, Circles or Billing", async () => {
+  activeDb = new FakeFirestore(); await c1SeedBirth(activeDb);
+  activeDb.seed(rootPath, {activeCircleId: null});
+  activeDb.authUser = {uid}; const before = [...activeDb.store];
+  await withoutErrorLog(() => assert.rejects(c1Delete(),
+      {message: "USER_DATA_CLEANUP_FAILED"}));
+  assert.deepEqual([...activeDb.store], before);
+  assert.deepEqual(activeDb.recursiveDeletes, []);
+  assert.equal(activeDb.data(guardPath), undefined);
+});
+
+
+for (const creationTime of [null, c1Born.toDate().toUTCString()]) {
+  test(`R3 Auth with absent/coarse metadata: ${creationTime}`, async () => {
+    const {UserRecord} = require("firebase-admin/auth");
+    activeDb = new FakeFirestore(); await c1SeedBirth(activeDb);
+    activeDb.seed(rootPath, {activeCircleId: null});
+    activeDb.authUser = new UserRecord({localId: uid,
+      createdAt: String(c1Born.toMillis() + 900)});
+    const before = [...activeDb.store];
+    await withoutErrorLog(() => assert.rejects(
+        c1Delete(c1DeleteUser({creationTime})),
+        {message: "USER_DATA_CLEANUP_FAILED"}));
+    assert.deepEqual([...activeDb.store], before);
+    assert.deepEqual(activeDb.recursiveDeletes, []);
+    assert.equal(activeDb.data(guardPath), undefined);
+  });
+}

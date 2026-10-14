@@ -3,6 +3,7 @@ const admin = require("firebase-admin");
 const {createHash} = require("node:crypto");
 const {Timestamp} = require("firebase-admin/firestore");
 const circleCleanup = require("./circle_cleanup");
+const birthCleanup = require("./birth_ledger_cleanup");
 
 const CIRCLE_SCHEMA_VERSION = 2;
 const MAX_CIRCLE_MEMBERS = 30;
@@ -531,30 +532,32 @@ exports.cleanupUserData = functions
     .runWith({
       failurePolicy: true,
     })
-    .auth.user().onDelete(async (user) => {
+    .auth.user().onDelete(async (user, context) => {
       const db = admin.firestore();
-      const userRef = db.collection("users").doc(user.uid);
-
       try {
-        const guard = await circleCleanup.beginGuard(db, user.uid);
-        const billingCleanup = await ensureBillingDeletionBarrier(db, user.uid);
+        const admission = await birthCleanup.prepare(db, user, context,
+            (uid) => admin.auth().getUser(uid));
+        const {guard} = admission;
+        const uid = admission.bound.uid;
+        const userRef = db.collection("users").doc(uid);
+        const billingCleanup = await ensureBillingDeletionBarrier(db, uid);
         await cleanupBillingTokenIndexes(db, billingCleanup.accountHash);
-        await circleCleanup.cleanupPendingMarkers(db, user.uid, guard);
+        await circleCleanup.cleanupPendingMarkers(db, uid, guard);
         const userSnapshot = await userRef.get();
         if (userSnapshot.exists) {
-          await cleanupExternalCircleData(db, user.uid, userSnapshot);
+          await cleanupExternalCircleData(db, uid, userSnapshot);
         }
-        await circleCleanup.cleanupOwned(db, user.uid, guard, true);
-        await circleCleanup.cleanupMemberships(db, user.uid, guard);
-        await circleCleanup.cleanupHistory(db, user.uid, guard);
-        await circleCleanup.verifyReferences(db, user.uid);
+        await circleCleanup.cleanupOwned(db, uid, guard, true);
+        await circleCleanup.cleanupMemberships(db, uid, guard);
+        await circleCleanup.cleanupHistory(db, uid, guard);
+        await circleCleanup.verifyReferences(db, uid);
         await db.runTransaction(async (transaction) => {
-          await circleCleanup.requireGuard(transaction, db, user.uid, guard);
-          await circleCleanup.assertEmpty(transaction, db, user.uid);
+          await circleCleanup.requireGuard(transaction, db, uid, guard);
+          await circleCleanup.assertEmpty(transaction, db, uid);
         });
         await db.recursiveDelete(userRef);
-        await finalizeBillingDeletionBarrier(db, user.uid, billingCleanup);
-        await circleCleanup.completeGuard(db, user.uid, guard);
+        await finalizeBillingDeletionBarrier(db, uid, billingCleanup);
+        await birthCleanup.finish(db, admission);
       } catch (_) {
         console.error("[cleanupUserData] Falha na limpeza pós-exclusão.");
         throw new Error("USER_DATA_CLEANUP_FAILED");

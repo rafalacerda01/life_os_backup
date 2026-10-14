@@ -564,36 +564,42 @@ test("module is inert on import and index exports no new t" +
       ["birthError", "createAccountBirthTestHarness", "recordAccountBirth"]);
 });
 
-test("actual active Auth cleanup removes users tree but le" +
-    "aves global birth record: rollout blocker", async () => {
-  const f = fixture(); await f.record(); f.db.put(ROOT, {activeCircleId: null});
-  f.db.put(`${ROOT}/health_info/day`, {waterIntakeMl: 0});
-  const original = copy(f.db.docs.get(PATH));
-  // Same Admin replacement technique as the existing cleanup test; no SDK IO.
-  require("firebase-functions/v1");
-  const adminPath = require.resolve("firebase-admin"); const indexPath =
+test("actual active Auth cleanup removes users tree and global birth record",
+    async () => {
+      const f = fixture(); await f.record();
+      f.db.put(ROOT, {activeCircleId: null});
+      f.db.put(`${ROOT}/health_info/day`, {waterIntakeMl: 0});
+      // Explicit synthetic Admin replacement; no SDK IO.
+      require("firebase-functions/v1");
+      const adminPath = require.resolve("firebase-admin"); const indexPath =
       require.resolve("../index");
-  require(adminPath); const savedAdmin = require.cache[adminPath].exports;
-  const savedIndex = require.cache[indexPath]; let cleanup;
-  try {
-    require.cache[adminPath].exports = {initializeApp() {}, firestore: (
-    ) => f.db};
-    delete require.cache[indexPath]; cleanup = require(
-        indexPath).cleanupUserData;
-  } finally {
-    require.cache[adminPath].exports = savedAdmin;
-    delete require.cache[indexPath]; if (
-      savedIndex) require.cache[indexPath] = savedIndex;
-  }
-  await cleanup.run({uid: UID});
-  assert.equal(f.db.docs.has(ROOT), false);
-  assert.equal(f.db.docs.has(`${ROOT}/health_info/day`), false);
-  assert.deepEqual(f.db.docs.get(PATH), original);
-  assert.equal(f.db.docs.get(GUARD).state, "COMPLETE");
-  // Even this retained non-eligible record cannot resurrect after Auth
-  // deletion.
-  f.live = null; await unchangedFailure(f, "WATER_BIRTH_AUTH_NOT_FOUND");
-});
+      require(adminPath); const savedAdmin = require.cache[adminPath].exports;
+      const savedIndex = require.cache[indexPath]; let cleanup;
+      try {
+        require.cache[adminPath].exports = {initializeApp() {}, firestore: (
+        ) => f.db, auth: () => ({getUser: async () => {
+          throw Object.assign(new Error("synthetic not found"),
+              {code: "auth/user-not-found"});
+        }})};
+        delete require.cache[indexPath]; cleanup = require(
+            indexPath).cleanupUserData;
+      } finally {
+        require.cache[adminPath].exports = savedAdmin;
+        delete require.cache[indexPath]; if (
+          savedIndex) require.cache[indexPath] = savedIndex;
+      }
+      await cleanup.run({uid: UID}, {eventId: "synthetic-delete-b2a",
+        eventType: "google.firebase.auth.user.delete",
+        timestamp: "2026-10-13T13:00:00Z",
+        resource: {service: "firebaseauth.googleapis.com",
+          name: "projects/demo-life-os"}});
+      assert.equal(f.db.docs.has(ROOT), false);
+      assert.equal(f.db.docs.has(`${ROOT}/health_info/day`), false);
+      assert.equal(f.db.docs.has(PATH), false);
+      assert.equal(f.db.docs.get(GUARD).state, "COMPLETE");
+      // The removed record cannot resurrect after Auth deletion.
+      f.live = null; await unchangedFailure(f, "WATER_BIRTH_AUTH_NOT_FOUND");
+    });
 
 test("concurrent divergent events cannot overwrite the com" +
     "mitted winner", async () => {
