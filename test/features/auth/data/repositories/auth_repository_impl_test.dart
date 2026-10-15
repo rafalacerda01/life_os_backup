@@ -25,6 +25,7 @@ class FakeFirebaseAuth extends Fake implements FirebaseAuth {
   Object? signOutError;
   Object? currentUserError;
   int signOutCalls = 0;
+  Future<void> Function()? onSignOut;
   int signInCalls = 0;
   int signUpCalls = 0;
   int passwordResetCalls = 0;
@@ -38,6 +39,7 @@ class FakeFirebaseAuth extends Fake implements FirebaseAuth {
   @override
   Future<void> signOut() async {
     signOutCalls += 1;
+    await onSignOut?.call();
     if (signOutError != null) throw signOutError!;
   }
 
@@ -86,6 +88,7 @@ class FakeFirebaseUser extends Fake implements User {
   Object? updateDisplayNameError;
   Future<void> Function()? onUpdateDisplayName;
   int reloadCalls = 0;
+  Future<void> Function()? onReload;
   int updateDisplayNameCalls = 0;
   int deleteCalls = 0;
 
@@ -99,6 +102,7 @@ class FakeFirebaseUser extends Fake implements User {
   @override
   Future<void> reload() async {
     reloadCalls += 1;
+    await onReload?.call();
     if (reloadError != null) throw reloadError!;
   }
 
@@ -288,18 +292,26 @@ void main() {
     expect(user.deleteCalls, 0);
   });
 
-  test('ambiguidade com user-not-found reconcilia como sucesso', () async {
-    remote.error = _ambiguousError;
-    user.reloadError = FirebaseAuthException(code: 'user-not-found');
+  test(
+    'D2-B ambiguidade com user-not-found nunca confirma exclusão integral',
+    () async {
+      remote.error = _ambiguousError;
+      user.reloadError = FirebaseAuthException(code: 'user-not-found');
 
-    final result = await repository.deleteAccount(expectedUid: 'user-a');
+      final result = await repository.deleteAccount(expectedUid: 'user-a');
 
-    var succeeded = false;
-    result.when((_) => succeeded = true, (_) {});
-    expect(succeeded, isTrue);
-    expect(user.reloadCalls, 1);
-    expect(auth.signOutCalls, 1);
-  });
+      Failure? capturedFailure;
+      var succeeded = false;
+      result.when(
+        (_) => succeeded = true,
+        (failure) => capturedFailure = failure,
+      );
+      expect(succeeded, isFalse);
+      expect(capturedFailure?.code, 'ACCOUNT_DELETE_UNCONFIRMED');
+      expect(user.reloadCalls, 1);
+      expect(auth.signOutCalls, 1);
+    },
+  );
 
   test('ambiguidade com usuário existente preserva a falha', () async {
     remote.error = _ambiguousError;
@@ -308,7 +320,7 @@ void main() {
     Failure? capturedFailure;
     result.when((_) {}, (failure) => capturedFailure = failure);
     expect(capturedFailure, isA<AuthFailure>());
-    expect(capturedFailure?.code, 'ACCOUNT_DELETE_SERVER_ERROR');
+    expect(capturedFailure?.code, 'ACCOUNT_DELETE_UNCONFIRMED');
     expect(user.reloadCalls, 1);
     expect(auth.signOutCalls, 0);
   });
@@ -414,12 +426,59 @@ void main() {
 
     var succeeded = false;
     result.when((_) => succeeded = true, (_) {});
-    expect(succeeded, isTrue);
+    expect(succeeded, isFalse);
     expect(user.reloadCalls, 1);
     expect(auth.signOutCalls, 0);
     expect(auth.currentUser?.uid, 'user-b');
   });
 
+  testWidgets(
+    'D2-B reload pendente termina como incerto e retorno tardio não confirma',
+    (tester) async {
+      final release = Completer<void>();
+      remote.error = _ambiguousError;
+      user.onReload = () => release.future;
+      user.reloadError = FirebaseAuthException(code: 'user-not-found');
+      Failure? failure;
+      var success = false;
+      final pending = repository
+          .deleteAccount(expectedUid: 'user-a')
+          .then(
+            (result) =>
+                result.when((_) => success = true, (value) => failure = value),
+          );
+      await tester.pump();
+      expect(failure, isNull);
+      await tester.pump(const Duration(seconds: 20));
+      await pending;
+      expect(failure, isA<AccountDeletionUnconfirmedFailure>());
+      expect(success, isFalse);
+      expect(auth.signOutCalls, 0);
+      release.complete();
+      await tester.pump();
+      expect(success, isFalse);
+      expect(auth.signOutCalls, 0);
+    },
+  );
+  testWidgets('D2-B signOut pendente não retém loading após HTTP confirmado', (
+    tester,
+  ) async {
+    final release = Completer<void>();
+    auth.onSignOut = () => release.future;
+    var success = false;
+    final pending = repository
+        .deleteAccount(expectedUid: 'user-a')
+        .then((result) => result.when((_) => success = true, (_) {}));
+    await tester.pump();
+    expect(success, isFalse);
+    await tester.pump(const Duration(seconds: 20));
+    await pending;
+    expect(success, isTrue);
+    expect(remote.calls, 1);
+    expect(user.reloadCalls, 0);
+    release.complete();
+    await tester.pump();
+  });
   group('feedback sanitizado de autenticação', () {
     group('Google Sign-In estruturado', () {
       test('cancelamento retorna mensagem neutra', () {

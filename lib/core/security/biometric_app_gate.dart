@@ -1,3 +1,4 @@
+import 'package:life_os/core/errors/failure.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:life_os/core/router/router.dart';
@@ -143,10 +144,14 @@ class _BiometricAppGateState extends ConsumerState<BiometricAppGate>
         _lastBiometricStatus != BiometricLockStatus.locked;
     _lastBiometricStatus = biometricState.status;
 
-    if (authState is AuthError &&
-        authState.scope == AuthErrorScope.publicEntry &&
-        !_sessionWasAuthenticated &&
-        ref.read(firebaseAuthProvider).currentUser == null) {
+    final deletionUnconfirmed =
+        authState is AuthError &&
+        authState.code == AccountDeletionUnconfirmedFailure.failureCode;
+    if (deletionUnconfirmed ||
+        (authState is AuthError &&
+            authState.scope == AuthErrorScope.publicEntry &&
+            !_sessionWasAuthenticated &&
+            ref.read(firebaseAuthProvider).currentUser == null)) {
       final router = ref.watch(routerProvider);
       return ListenableBuilder(
         listenable: router.routerDelegate,
@@ -162,7 +167,8 @@ class _BiometricAppGateState extends ConsumerState<BiometricAppGate>
           };
           final canRevealPublicRoute =
               publicPaths.contains(path) &&
-              ref.read(firebaseAuthProvider).currentUser == null;
+              (deletionUnconfirmed ||
+                  ref.read(firebaseAuthProvider).currentUser == null);
           return Stack(
             children: [
               // Keep Router alive to complete the redirect without painting or

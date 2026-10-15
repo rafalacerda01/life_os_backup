@@ -11,7 +11,8 @@ abstract class AuthState {
   factory AuthState.error(
     String message, {
     AuthErrorScope scope = AuthErrorScope.protectedSession,
-  }) => AuthError(message, scope: scope);
+    String? code,
+  }) => AuthError(message, scope: scope, code: code);
 
   R maybeWhen<R>({
     R Function()? initial,
@@ -55,5 +56,10 @@ enum AuthErrorScope { protectedSession, publicEntry }
 class AuthError extends AuthState {
   final String message;
   final AuthErrorScope scope;
-  const AuthError(this.message, {this.scope = AuthErrorScope.protectedSession});
+  final String? code;
+  const AuthError(
+    this.message, {
+    this.scope = AuthErrorScope.protectedSession,
+    this.code,
+  });
 }

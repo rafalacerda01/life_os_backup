@@ -1,3 +1,4 @@
+import 'package:life_os/core/errors/failure.dart';
 import 'dart:async';
 
 import 'package:firebase_auth/firebase_auth.dart';
@@ -698,4 +699,79 @@ void main() {
     await _pumpAsync(tester);
     expect(find.text('Sensitive router content'), findsOneWidget);
   });
+  for (final cachedAuth in [false, true]) {
+    testWidgets(
+      'D2-B uncertain deletion can reach public UI after prior session; cached Auth=$cachedAuth',
+      (tester) async {
+        final service = _FakeBiometricService();
+        final auth = _FirebaseAuth(hasUser: true);
+        final notifier = _StaticAuthNotifier(const AuthAuthenticated(_user));
+        final release = Completer<String?>();
+        var held = false;
+        final router = GoRouter(
+          initialLocation: '/home',
+          redirect: (_, _) => held ? release.future : null,
+          routes: [
+            GoRoute(
+              path: '/home',
+              builder: (_, _) => const Text('Sensitive router content'),
+            ),
+            GoRoute(
+              path: '/splash',
+              builder: (_, _) => const Text('Pending deletion support'),
+            ),
+            GoRoute(
+              path: '/login',
+              builder: (_, _) => const Text('Public login'),
+            ),
+          ],
+        );
+        addTearDown(router.dispose);
+        await tester.pumpWidget(
+          ProviderScope(
+            overrides: [
+              authNotifierProvider.overrideWith(() => notifier),
+              firebaseAuthProvider.overrideWithValue(auth),
+              biometricServiceProvider.overrideWithValue(service),
+              routerProvider.overrideWithValue(router),
+            ],
+            child: MaterialApp.router(
+              routerConfig: router,
+              builder: (_, child) => BiometricAppGate(child: child!),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(find.text('Sensitive router content'), findsOneWidget);
+        auth.hasUser = cachedAuth;
+        held = true;
+        notifier.emit(
+          AuthState.error(
+            const AccountDeletionUnconfirmedFailure().message,
+            code: AccountDeletionUnconfirmedFailure.failureCode,
+            scope: AuthErrorScope.publicEntry,
+          ),
+        );
+        router.go('/splash');
+        for (var frame = 0; frame < 3; frame++) {
+          await tester.pump();
+          expect(find.text('Sensitive router content'), findsNothing);
+          expect(find.text('Pending deletion support'), findsNothing);
+          expect(router.routerDelegate.currentConfiguration.uri.path, '/home');
+        }
+        held = false;
+        release.complete(null);
+        await tester.pumpAndSettle();
+        expect(find.text('Pending deletion support'), findsOneWidget);
+        expect(find.text('Sensitive router content'), findsNothing);
+        expect(find.text('Protegendo sua sessão...'), findsNothing);
+        router.go('/login');
+        await tester.pumpAndSettle();
+        expect(find.text('Public login'), findsOneWidget);
+        expect(find.text('Sensitive router content'), findsNothing);
+        expect(service.calls, 0);
+        expect(tester.takeException(), isNull);
+      },
+    );
+  }
 }

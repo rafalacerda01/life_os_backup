@@ -43,7 +43,7 @@ void main() {
         jsonDecode(
           storage.values[AccountDeletionCleanupBarrier.storageKey]!,
         )['v'],
-        2,
+        3,
       );
       expect(await barrier.request('A'), requested);
     },
@@ -161,7 +161,7 @@ void main() {
 
   for (final phase in AccountDeletionPhase.values) {
     test(
-      'valid v1 ${phase.name} is readable and preserved during v2 mutation',
+      'valid v1 ${phase.name} is readable and preserved during v3 mutation',
       () async {
         final legacy = jsonEncode({
           'v': 1,
@@ -183,7 +183,7 @@ void main() {
           jsonDecode(
             storage.values[AccountDeletionCleanupBarrier.storageKey]!,
           )['v'],
-          2,
+          3,
         );
         expect(await barrier.clearIfCurrent(b), isTrue);
         expect(await barrier.readForUser('A'), a);
@@ -208,7 +208,7 @@ void main() {
         jsonDecode(
           storage.values[AccountDeletionCleanupBarrier.storageKey]!,
         )['v'],
-        2,
+        3,
       );
     },
   );
@@ -322,4 +322,93 @@ void main() {
       await expectLater(barrier.readForUser('A'), throwsFormatException);
     },
   );
+  for (final version in [1, 2]) {
+    test(
+      'D2-B legacy confirmation has no authoritative provenance v$version',
+      () async {
+        final entry = {
+          'uid': 'A',
+          'phase': 'remoteConfirmed',
+          'revision': 'a' * 22,
+        };
+        final legacy = jsonEncode(
+          version == 1
+              ? {'v': 1, ...entry}
+              : {
+                  'v': 2,
+                  'markers': [entry],
+                },
+        );
+        storage.values[AccountDeletionCleanupBarrier.storageKey] = legacy;
+        final a = (await barrier.readForUser('A'))!;
+        expect(a.hasAuthoritativeConfirmation, isFalse);
+        expect(
+          storage.values[AccountDeletionCleanupBarrier.storageKey],
+          legacy,
+        );
+        final b = await barrier.confirmIfCurrent(await barrier.request('B'));
+        expect(b.hasAuthoritativeConfirmation, isTrue);
+        final reopened = AccountDeletionCleanupBarrier(storage);
+        expect(await reopened.readForUser('A'), a);
+        expect(
+          (await reopened.readForUser('A'))!.hasAuthoritativeConfirmation,
+          isFalse,
+        );
+        expect(await reopened.readForUser('B'), b);
+        await expectLater(barrier.confirmIfCurrent(a), throwsStateError);
+      },
+    );
+  }
+  test(
+    'D2-B new confirmation provenance survives restart and stale CAS cannot confer it',
+    () async {
+      final requested = await barrier.request('A');
+      expect(requested.hasAuthoritativeConfirmation, isFalse);
+      final confirmed = await barrier.confirmIfCurrent(requested);
+      expect(confirmed.hasAuthoritativeConfirmation, isTrue);
+      expect(
+        (await AccountDeletionCleanupBarrier(storage).readForUser('A'))!,
+        confirmed,
+      );
+      final raw = jsonDecode(
+        storage.values[AccountDeletionCleanupBarrier.storageKey]!,
+      );
+      expect(raw['v'], 3);
+      expect(raw['markers'].single['confirmedBy'], 'accountDeleteResponse');
+      await expectLater(barrier.confirmIfCurrent(requested), throwsStateError);
+      expect(await barrier.clearIfCurrent(requested), isFalse);
+    },
+  );
+  for (final confirmedBy in [true, 'authAbsence', 1]) {
+    test('D2-B malformed provenance fails closed $confirmedBy', () async {
+      final raw = jsonEncode({
+        'v': 3,
+        'markers': [
+          {
+            'uid': 'A',
+            'phase': 'remoteConfirmed',
+            'revision': 'a' * 22,
+            'confirmedBy': confirmedBy,
+          },
+        ],
+      });
+      storage.values[AccountDeletionCleanupBarrier.storageKey] = raw;
+      await expectLater(barrier.readAll(), throwsFormatException);
+      expect(storage.values[AccountDeletionCleanupBarrier.storageKey], raw);
+    });
+  }
+  test('D2-B requested cannot contain confirmation provenance', () async {
+    storage.values[AccountDeletionCleanupBarrier.storageKey] = jsonEncode({
+      'v': 3,
+      'markers': [
+        {
+          'uid': 'A',
+          'phase': 'requested',
+          'revision': 'a' * 22,
+          'confirmedBy': 'accountDeleteResponse',
+        },
+      ],
+    });
+    await expectLater(barrier.readAll(), throwsFormatException);
+  });
 }

@@ -81,9 +81,12 @@ class AuthRepositoryImpl implements AuthRepository {
       await _signOutBestEffort(normalizedExpectedUid);
       return const Success(null);
     } on AccountRemoteException catch (error) {
-      if (error.isAmbiguous && await _isAuthUserDeleted(user)) {
-        await _signOutBestEffort(normalizedExpectedUid);
-        return const Success(null);
+      if (error.isAmbiguous) {
+        if (await _isAuthUserDeleted(user)) {
+          // End only the captured session. Auth absence is not remote cleanup.
+          await _signOutBestEffort(normalizedExpectedUid);
+        }
+        return const Error(AccountDeletionUnconfirmedFailure());
       }
       return Error(AuthFailure(error.message, code: error.code));
     } catch (_) {
@@ -98,7 +101,7 @@ class AuthRepositoryImpl implements AuthRepository {
 
   Future<bool> _isAuthUserDeleted(fb.User user) async {
     try {
-      await user.reload();
+      await user.reload().timeout(const Duration(seconds: 20));
       return false;
     } on fb.FirebaseAuthException catch (error) {
       return error.code == 'user-not-found';
@@ -111,7 +114,7 @@ class AuthRepositoryImpl implements AuthRepository {
     if (_firebaseAuth.currentUser?.uid != expectedUid) return;
 
     try {
-      await _firebaseAuth.signOut();
+      await _firebaseAuth.signOut().timeout(const Duration(seconds: 20));
     } catch (_) {
       // A exclusão confirmada no servidor não pode ser revertida localmente.
     }

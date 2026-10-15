@@ -1,3 +1,4 @@
+import 'package:life_os/core/errors/failure.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:life_os/core/router/router.dart';
 import 'package:life_os/features/auth/domain/entities/user_entity.dart';
@@ -170,4 +171,40 @@ void main() {
       isNull,
     );
   });
+  for (final hasUser in [false, true]) {
+    test(
+      'D2-B pending deletion isolates private routes with cached Auth=$hasUser',
+      () {
+        final pending = AuthState.error(
+          const AccountDeletionUnconfirmedFailure().message,
+          code: AccountDeletionUnconfirmedFailure.failureCode,
+          scope: AuthErrorScope.publicEntry,
+        );
+        expect(
+          authRedirectFor(
+            authState: pending,
+            hasFirebaseUser: hasUser,
+            location: '/home',
+          ),
+          '/splash',
+        );
+        expect(
+          authRedirectFor(
+            authState: pending,
+            hasFirebaseUser: hasUser,
+            location: '/login',
+          ),
+          isNull,
+        );
+        expect(
+          authRedirectFor(
+            authState: pending,
+            hasFirebaseUser: hasUser,
+            location: '/privacy-policy',
+          ),
+          isNull,
+        );
+      },
+    );
+  }
 }

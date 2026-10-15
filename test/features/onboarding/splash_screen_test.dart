@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:life_os/core/errors/failure.dart';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -319,4 +320,34 @@ void main() {
     retryCompleter.complete();
     await tester.pump();
   });
+  testWidgets(
+    'D2-B unconfirmed deletion displays safe support message and public exit',
+    (tester) async {
+      final harness = await pumpSplash(
+        tester,
+        authState: AuthState.error(
+          'technical-sdk-marker',
+          code: AccountDeletionUnconfirmedFailure.failureCode,
+          scope: AuthErrorScope.publicEntry,
+        ),
+        store: _TestOnboardingStore(),
+      );
+      await tester.pumpAndSettle();
+      expect(
+        find.text(const AccountDeletionUnconfirmedFailure().message),
+        findsOneWidget,
+      );
+      expect(find.text('technical-sdk-marker'), findsNothing);
+      expect(find.text('Home'), findsNothing);
+      await tester.ensureVisible(find.text('Ir para o acesso'));
+      await tester.tap(find.text('Ir para o acesso'));
+      await tester.pumpAndSettle();
+      expect(harness.router.state.uri.path, '/login');
+      expect(find.text('Login'), findsOneWidget);
+      final notifier =
+          harness.container.read(authNotifierProvider.notifier)
+              as _TestAuthNotifier;
+      expect(notifier.checkCurrentUserCalls, 0);
+    },
+  );
 }

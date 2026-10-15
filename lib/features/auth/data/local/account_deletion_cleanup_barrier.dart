@@ -10,20 +10,24 @@ class PendingAccountDeletion {
     required this.userId,
     required this.phase,
     required this.revision,
+    this.hasAuthoritativeConfirmation = false,
   });
 
   final String userId;
   final AccountDeletionPhase phase;
   final String revision;
+  final bool hasAuthoritativeConfirmation;
 
   @override
   bool operator ==(Object other) =>
       other is PendingAccountDeletion &&
       other.userId == userId &&
       other.phase == phase &&
-      other.revision == revision;
+      other.revision == revision &&
+      other.hasAuthoritativeConfirmation == hasAuthoritativeConfirmation;
   @override
-  int get hashCode => Object.hash(userId, phase, revision);
+  int get hashCode =>
+      Object.hash(userId, phase, revision, hasAuthoritativeConfirmation);
 }
 
 /// Independent from the non-destructive logout/isolation marker.
@@ -31,7 +35,7 @@ class AccountDeletionCleanupBarrier {
   AccountDeletionCleanupBarrier(this._storage);
 
   static const storageKey = 'life_os_account_deletion_cleanup_v1';
-  static const storageVersion = 2;
+  static const storageVersion = 3;
   static Future<void> _tail = Future<void>.value();
   final AuthCleanupBarrierStorage _storage;
 
@@ -100,6 +104,8 @@ class AccountDeletionCleanupBarrier {
       userId: uid,
       phase: phase,
       revision: revision,
+      hasAuthoritativeConfirmation:
+          phase == AccountDeletionPhase.remoteConfirmed,
     );
   }
 
@@ -115,6 +121,9 @@ class AccountDeletionCleanupBarrier {
               'uid': marker.userId,
               'phase': marker.phase.name,
               'revision': marker.revision,
+              'confirmedBy': marker.hasAuthoritativeConfirmation
+                  ? 'accountDeleteResponse'
+                  : null,
             },
         ],
       }),
@@ -145,7 +154,7 @@ class AccountDeletionCleanupBarrier {
         }),
       ]);
     }
-    if (value['v'] != storageVersion ||
+    if (![2, storageVersion].contains(value['v']) ||
         value.length != 2 ||
         value['markers'] is! List) {
       throw const FormatException('ACCOUNT_DELETION_MARKER_INVALID');
@@ -153,7 +162,10 @@ class AccountDeletionCleanupBarrier {
     final markers = <PendingAccountDeletion>[];
     final owners = <String>{};
     for (final entry in value['markers'] as List) {
-      final marker = _parseMarker(entry);
+      final marker = _parseMarker(
+        entry,
+        currentVersion: value['v'] == storageVersion,
+      );
       if (!owners.add(marker.userId)) {
         throw const FormatException('ACCOUNT_DELETION_MARKER_INVALID');
       }
@@ -163,9 +175,20 @@ class AccountDeletionCleanupBarrier {
     return List.unmodifiable(markers);
   }
 
-  PendingAccountDeletion _parseMarker(Object? value) {
+  PendingAccountDeletion _parseMarker(
+    Object? value, {
+    bool currentVersion = false,
+  }) {
     if (value is! Map<String, dynamic> ||
-        value.length != 3 ||
+        value.length != (currentVersion ? 4 : 3) ||
+        (currentVersion &&
+            (!value.containsKey('confirmedBy') ||
+                ![
+                  null,
+                  'accountDeleteResponse',
+                ].contains(value['confirmedBy']) ||
+                (value['phase'] == 'requested' &&
+                    value['confirmedBy'] != null))) ||
         value['uid'] is! String ||
         (value['uid'] as String).trim().isEmpty ||
         value['uid'] != (value['uid'] as String).trim() ||
@@ -182,6 +205,11 @@ class AccountDeletionCleanupBarrier {
         (phase) => phase.name == value['phase'],
       ),
       revision: value['revision'] as String,
+      // v1/v2 could have been confirmed by Auth absence; never upgrade trust.
+      hasAuthoritativeConfirmation:
+          currentVersion &&
+          value['phase'] == 'remoteConfirmed' &&
+          value['confirmedBy'] == 'accountDeleteResponse',
     );
   }
 

@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:life_os/core/errors/failure.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:life_os/features/auth/presentation/providers/auth_provider.dart';
@@ -167,8 +168,12 @@ class _SplashScreenState extends ConsumerState<SplashScreen>
                       ),
                       if (authState is AuthError) ...[
                         const SizedBox(height: 28),
-                        const Text(
-                          "Não foi possível iniciar sua sessão.",
+                        Text(
+                          authState.code ==
+                                  AccountDeletionUnconfirmedFailure.failureCode
+                              ? const AccountDeletionUnconfirmedFailure()
+                                    .message
+                              : "Não foi possível iniciar sua sessão.",
                           textAlign: TextAlign.center,
                           style: TextStyle(color: Colors.white70, fontSize: 14),
                         ),
@@ -184,6 +189,14 @@ class _SplashScreenState extends ConsumerState<SplashScreen>
                                 )
                               : const Text("Tentar novamente"),
                         ),
+                        if (authState.code ==
+                            AccountDeletionUnconfirmedFailure.failureCode) ...[
+                          const SizedBox(height: 12),
+                          TextButton(
+                            onPressed: () => context.go('/login'),
+                            child: const Text('Ir para o acesso'),
+                          ),
+                        ],
                       ],
                     ],
                   ),

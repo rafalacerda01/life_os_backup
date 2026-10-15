@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:life_os/core/errors/failure.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -48,6 +49,11 @@ String? authRedirectFor({
       location == '/login' ||
       location == '/register';
   final isPublicRoute = location == '/privacy-policy';
+
+  if (authState is AuthError &&
+      authState.code == AccountDeletionUnconfirmedFailure.failureCode) {
+    return !isAuthEntryRoute && !isPublicRoute ? '/splash' : null;
+  }
 
   return authState.maybeWhen(
     authenticated: (_) => isAuthEntryRoute ? '/home' : null,

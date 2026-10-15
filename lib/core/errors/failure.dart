@@ -41,6 +41,24 @@ class AuthFailure extends Failure {
   );
 }
 
+/// Auth absence or an ambiguous transport result is not a cleanup receipt.
+/// Reuses the existing requested barrier; never authorizes local destruction.
+class AccountDeletionUnconfirmedFailure extends AuthFailure
+    implements Exception {
+  static const failureCode = 'ACCOUNT_DELETE_UNCONFIRMED';
+
+  const AccountDeletionUnconfirmedFailure()
+    : super(
+        'A identidade da conta pode ter sido removida, mas não foi possível '
+        'confirmar toda a exclusão. Seus dados não serão apresentados a outra '
+        'conta. Procure o suporte para verificar a solicitação.',
+        code: failureCode,
+      );
+
+  @override
+  String toString() => 'AccountDeletionUnconfirmedFailure';
+}
+
 class CacheFailure extends Failure {
   const CacheFailure(super.message, {super.code});
 
