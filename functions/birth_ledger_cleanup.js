@@ -166,6 +166,21 @@ async function inspect(tx, db, bound) {
       .digest("hex"), rootExists: root.exists};
 }
 
+// Every range below belongs to the final transaction. A concurrent preparation
+// either commits before this snapshot (and is observed), or retries against
+// COMPLETE and loses its write authority.
+async function assertTerminal(tx, db, accountUid) {
+  const hash = createHash("sha256").update(accountUid, "utf8").digest("hex");
+  const billing = await tx.get(db.collection("billing_google_accounts").doc(hash));
+  const tokens = await tx.get(db.collection("billing_google_tokens")
+      .where("accountHash", "==", hash).limit(1));
+  const runtime = await tx.get(db.collection("users").doc(accountUid)
+      .collection("runtime").limit(1));
+  await circles.assertEmpty(tx, db, accountUid);
+  await circles.verifyReferences(db, accountUid, tx);
+  if (billing.exists || tokens.docs.length || runtime.docs.length) fail();
+}
+
 /**
  * Trusted SDK onDelete boundary only; not a verifier for arbitrary JSON.
  * Under policy A a missing/coarse creation date is not deletion authority.
@@ -194,19 +209,22 @@ async function prepare(db, user, context, getUser) {
     const guard = await circles.beginGuard(db, bound.uid, async (tx) => {
       await inspect(tx, db, bound);
     });
-    const digest = await db.runTransaction(async (tx) => {
+    const observation = await db.runTransaction(async (tx) => {
       await circles.requireGuard(tx, db, bound.uid, guard);
       const remaining = await inspect(tx, db, bound);
-      // Older cleanup may have marked COMPLETE without considering this ledger.
-      // Reclaim the same deletionId before effects; IN_PROGRESS closes writers.
-      if (guard.state === "COMPLETE" &&
-        (remaining.digest !== null || remaining.rootExists)) {
-        tx.update(db.collection("account_deletion_guards").doc(bound.uid),
-            {state: "IN_PROGRESS", retainUntil: null});
+      const snapshot = await tx.get(circles.guardRef(db, bound.uid));
+      const current = circles.validateGuard(snapshot.data());
+      // Preserve the existing, identity-validated root/ledger recovery only.
+      // An attempt admitted before COMPLETE cannot reopen a peer's finish.
+      if (guard.state === "COMPLETE" && current.state === "COMPLETE" &&
+          (remaining.digest !== null || remaining.rootExists)) {
+        tx.update(snapshot.ref, {state: "IN_PROGRESS", retainUntil: null});
+        return {digest: remaining.digest,
+          guard: {...current, state: "IN_PROGRESS", retainUntil: null}};
       }
-      return remaining.digest;
+      return {digest: remaining.digest, guard: current};
     });
-    return Object.freeze({bound, guard, digest});
+    return Object.freeze({bound, guard: observation.guard, digest: observation.digest});
   }
   // Any existing Auth user is an explicit violation/stale event under policy A.
   fail();
@@ -222,6 +240,7 @@ async function prepare(db, user, context, getUser) {
 async function finish(db, admission) {
   const {bound, guard, digest} = admission;
   if (db.projectId !== bound.projectId || !uid(bound.uid)) fail();
+  await circles.assertUserTreeEmpty(db, bound.uid);
   await db.runTransaction(async (tx) => {
     await circles.requireGuard(tx, db, bound.uid, guard);
     const guardRef = db.collection("account_deletion_guards").doc(bound.uid);
@@ -229,7 +248,7 @@ async function finish(db, admission) {
     const root = await tx.get(db.collection("users").doc(bound.uid));
     const ledgerRef = db.collection("account_birth_decisions").doc(bound.uid);
     const ledger = await tx.get(ledgerRef);
-    if (root.exists) fail();
+    if (root.exists || (currentGuard.data().state === "COMPLETE" && ledger.exists)) fail();
     if (ledger.exists) {
       validate(ledger.data(), bound);
       const current = createHash("sha256").update(
@@ -237,6 +256,7 @@ async function finish(db, admission) {
       if (current !== digest) fail();
     }
     // Concurrent legitimate cleanup may already have deleted this same ledger.
+    await assertTerminal(tx, db, bound.uid);
     if (ledger.exists) tx.delete(ledgerRef);
     if (currentGuard.data().state !== "COMPLETE") {
       tx.update(guardRef, {state: "COMPLETE",

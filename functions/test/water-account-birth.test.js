@@ -78,7 +78,14 @@ class FakeFirestore {
    * @return {Object} Reference.
    */
   ref(path) {
-    return {path, kind: "doc", collection: (name) =>
+    return {path, kind: "doc", listCollections: async () => {
+      const names = [...new Set([...this.docs.keys()].filter(p => p.startsWith(path + "/"))
+        .map(p => p.slice(path.length + 1).split("/")[0]))];
+      return names.map(name => ({listDocuments: async () => [...new Set([...this.docs.keys()]
+        .filter(p => p.startsWith(path + "/" + name + "/"))
+        .map(p => p.slice(0, (path + "/" + name + "/").length) +
+          p.slice((path + "/" + name + "/").length).split("/")[0]))]}));
+    }, collection: (name) =>
       this.collection(`${path}/${name}`),
     get: async () => this.snapshot(path, this.docs)};
   }
