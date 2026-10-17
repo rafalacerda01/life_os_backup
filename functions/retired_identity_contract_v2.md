@@ -359,3 +359,119 @@ Validação FIX1 em 2026-10-17, Node v24.17.0:
   PENDENTE. Nenhuma instalação realizada.
 - Launcher R3 não reexecutado: bloqueio anterior de socket permanece pendente,
   sem elevação ou contorno. Nenhum acesso à produção foi realizado.
+
+## R11 — adapter Firestore isolado, somente leitura
+
+Arquivos: `retired_identity_firestore_reader.js`, testes dedicados em
+`test/retired-identity-firestore-reader.test.js` e esta documentação. O classificador
+R10/FIX1, R2, harness R3, dispatchers, cleaners e backend não foram alterados.
+Nenhum writer, endpoint, migração ou recuperação foi integrado.
+
+### Interfaces e limites de confiança
+
+`classifyLoadedRetiredIdentitySnapshots(input)` é a fronteira A, síncrona, sem IO.
+Recebe exatamente `scope`, `reservation`, `guard`, `auth`, `expectedDeletionId`,
+`expectedOrigin` e `now`. `scope` contém exatamente `projectId`, `databaseId`, `uid`.
+Cada leitura é `{snapshot: documentSnapshot}` ou `{readError: true}`. Não recebe
+callbacks de aquisição, escrita ou autorização. Snapshots devem ser das classes
+instaladas DocumentSnapshot/QueryDocumentSnapshot, sem converter customizado nem
+overrides dos acessos públicos utilizados. JSON com `exists: false` não é snapshot.
+
+O escopo aceita somente projetos explícitos `demo-*`, banco `(default)` e UID
+canônico com até 128 caracteres/bytes UTF-8, sem controles, separadores, espaços
+nas extremidades ou nomes reservados. Referências são verificadas por UID,
+coleção, projeto, banco e mesmo cliente Firestore. Instâncias SDK e identidade de
+referência não atestam procedência Auth; código privilegiado no mesmo processo
+não é isolado por essas verificações. Não é uma interface para requests públicos.
+
+`classifyRetiredIdentityFromEmulator(input)` é a fronteira B, assíncrona e somente
+para testes. Recebe exatamente `scope`, `emulatorHost` e os quatro campos de
+contexto acima, sem snapshots, referências ou callbacks fornecidos pelo chamador.
+Constrói seu próprio cliente SDK e lê os dois documentos em `runTransaction`
+com `{readOnly: true}`, por um único `tx.getAll`. Confere cardinalidade, identidade
+das referências e igualdade exata dos `readTime` antes da classificação.
+Captura escopo e contexto antes do await para impedir troca tardia pelo chamador.
+
+Ambas retornam `{classification, normalization, acquisition}` congelado. O campo
+`classification` é a resposta original do classificador puro, sem promoção ou
+alteração de autoridade. `normalization` contém somente enums sanitizados;
+`acquisition` distingue `LOADED_ONLY`, `READ_ONLY_TRANSACTION`, `NOT_PERFORMED`
+e `UNAVAILABLE`. Frames e dados dos documentos nunca são retornados publicamente.
+Não são publicados UID, projeto, host, deletionId, payload ou texto de exceções.
+
+### Frames internos e precisão
+
+- Ausência confirmada: `{exists: false}`, somente para snapshot SDK ausente com
+  readTime suportado, data indefinida e sem createTime/updateTime contraditórios.
+- Presença: `{exists: true, data}` com `createTime` opcional; schema desconhecido
+  ou malformado é encaminhado sem transformar campos extras em schema válido.
+- Erro explícito ou exceção SDK: `{readError: true}`; nunca vira ausência.
+- Snapshot/escopo inválido: frame inválido, sem copiar payload desconhecido.
+
+Timestamps instalados são extraídos por `seconds` e `nanoseconds`, sem `toMillis`,
+`toDate`, arredondamento, relógio implícito ou data Auth. A saída de normalização
+distingue `SDK_TIMESTAMP`, `NULL`, `MISSING`, `UNSUPPORTED` e `INVALID`. Valores
+não normalizáveis permanecem inconclusivos no classificador, sem fabricar tempo.
+`now` também deve ser fornecido explicitamente; não é preenchido automaticamente.
+`snapshot.createTime` é a criação do documento Firestore, nunca geração Auth.
+
+### Compatibilidade demonstrada por testes locais
+
+| Entrada | Classificação preservada / limitação |
+|---|---|
+| Reserva ausente | ABSENT; nenhuma admissão autorizada. |
+| V1 válida | V1_REVIEW_REQUIRED; sem createTime, V1_CONTEXT_INSUFFICIENT. |
+| V2 PRE_AUTH / AUTH_EVENT / LEGACY_REVIEW | Revalidação específica da origem; procedência UNPROVEN. |
+| Versão futura / schema inválido | VERSION_UNSUPPORTED / RECORD_INVALID. |
+| Guard IN_PROGRESS / deletionId divergente | Contexto temporal separado / DELETION_ID_CONFLICT. |
+| COMPLETE retido ou expirado | TERMINAL_PROOF_REQUIRED; sem reabertura. |
+| COMPLETE com retainUntil null | GUARD_INVALID, preservando FIX1. |
+| Guard ausente com reserva | GUARD_MISSING_REVIEW_REQUIRED. |
+| Leitura negada, deadline, desconexão ou transação parcial | READ_UNAVAILABLE; sem ausência presumida. |
+| Metadados fora do formato suportado | Inconclusivos; precisão não é inventada. |
+
+### Isolamento e consistência
+
+B exige host explícito `127.0.0.1:porta` (1..65535), igual a
+`FIRESTORE_EMULATOR_HOST`. Configurações de projeto presentes devem coincidir com
+o projeto demo explícito. Recusa configuração de credenciais, proxies e tracing
+externos listada no módulo. O cliente usa autenticação sintética fixa do emulador,
+sem descoberta ADC, certificado, chave privada ou login. Não possui caminho de
+fallback para Google Cloud. Revalida o ambiente antes/durante/depois da aquisição
+e encerra o cliente ao terminar. Nenhum emulador é iniciado pelo módulo.
+
+COMPROVADA localmente: SDK instalado `@google-cloud/firestore` 8.7.1 suporta
+transação read-only, sem write batch/commit e sem retry do callback nessa modalidade.
+Seus comentários documentam snapshot consistente possivelmente até 60 segundos
+no passado. Teste com pipeline SDK e RPC simulado verifica `newTransaction.readOnly`,
+dois nomes de documento corretos, timestamps SDK e zero commits. A comparação
+entre operações observa mudanças do guard sem recriar ou alterar nada.
+
+PENDENTE no Emulator: garantia real do servidor, timestamps de commits reais,
+concorrência real, endpoint/autenticação de transporte e timeout configurado.
+Auth está fora da transação Firestore. Igualdade de readTime, reserva ou COMPLETE
+não comprovam continuidade de geração Auth, não reutilização de UID nem integridade
+terminal. Permanecem `destructiveAuthority: false`, `admissionAuthority: false`,
+`provenance: UNPROVEN` e `terminalProof: NOT_PERFORMED` em todas as classificações.
+
+### Validação e custos R11 em 2026-10-17
+
+- 85/85 testes novos: objetos SDK com dados sintéticos, mocks de aquisição e um
+  teste do pipeline SDK com RPC simulado. Zero sockets e zero descoberta ADC.
+- Accessors adicionados a Timestamp são recusados sem executar callbacks.
+- Focais R11 + V2/R10/FIX1 + R2: 255/255 aprovados, zero falhas/skips.
+- Functions: 695 descobertos, 694 aprovados, zero falhas e 1 skip R3 opt-in.
+- Nenhum teste real de Firestore Emulator foi executado. A restrição anterior de
+  socket no launcher R3 continua uma pendência, sem nova tentativa, elevação,
+  instalação ou contorno. Não declarar R11 validada contra o Emulator.
+- Node executado v24.17.0; execução Node 22 continua pendente se indisponível.
+- A normalização A custa zero operações adicionais. B solicita dois documentos
+  por operação explícita, sem consultas globais, polling, writes ou retry próprio.
+  Há timeout RPC configurado de 5 segundos; não é prova de deadline total e sua
+  efetividade no transporte permanece pendente. Nova chamada manual solicita duas
+  leituras novamente. Não há armazenamento permanente ou serviço novo.
+- Utilização/custo adicional de Firebase e Google Cloud de produção: zero.
+
+Próxima revisão: executar testes reais somente quando a execução regular de
+emuladores for permitida; revisar transporte/IAM/identidade antes de qualquer
+integração futura. R11 não autoriza recuperação destrutiva nem writer V2.
