@@ -5,7 +5,8 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
-const {createSyntheticRetirementContractV2} = require("../retired_identity_contract_v2");
+const {createSyntheticRetirementContractV2,
+  classifyRetiredIdentitySnapshots} = require("../retired_identity_contract_v2");
 
 const PROJECT = "demo-life-os";
 const DATABASE = "(default)";
@@ -538,7 +539,8 @@ test("module has no real-service capabilities or integration with production ent
   const forbidden = () => {throw new Error("FORBIDDEN_CAPABILITY");};
   vm.runInNewContext(source, {module, require: forbidden, fetch: forbidden,
     console: {log: forbidden, error: forbidden}, process: new Proxy({}, {get: forbidden})});
-  assert.deepEqual(Object.keys(module.exports), ["createSyntheticRetirementContractV2"]);
+  assert.deepEqual(Object.keys(module.exports),
+      ["createSyntheticRetirementContractV2", "classifyRetiredIdentitySnapshots"]);
   assert.doesNotMatch(source, /require\(|fetch\(|https?:|process\.|console\.|setTimeout\(/);
   for (const relative of ["../index.js", "../birth_ledger_cleanup.js",
     "../../backend/api/account/delete.js", "../../backend/api/account/_birth_ledger_cleanup.js"]) {
@@ -547,4 +549,275 @@ test("module has no real-service capabilities or integration with production ent
   }
   assert.deepEqual(Object.keys(fixture().model).sort(),
       ["checkAdmission", "inspect", "recordAuthEvent", "recordLegacyReview", "reservePreAuth"]);
+});
+
+// R10: normalized data, not SDK snapshots. No readers, writers or services.
+const timestamp = (seconds, nanoseconds = 0) => ({seconds, nanoseconds});
+const legacyRecord = () => ({version: 1, state: "RESERVED", deletionId: ID, authCreatedAtMs: 1000});
+const present = (data, createTime = timestamp(3)) => ({exists: true, data, createTime});
+const readerInput = (extra = {}) => ({
+  reservation: present(saved("PRE_AUTH")),
+  guard: present(guard({startedAt: timestamp(2)})),
+  auth: {state: "ABSENT"}, expectedDeletionId: ID, expectedOrigin: null,
+  now: timestamp(10), ...extra,
+});
+const completeGuard = (retainUntil = timestamp(20)) =>
+  present(guard({state: "COMPLETE", startedAt: timestamp(2), retainUntil}));
+function deepFreeze(value) {
+  if (value && typeof value === "object") {
+    Object.values(value).forEach(deepFreeze);
+    Object.freeze(value);
+  }
+  return value;
+}
+function readerResult(value) {
+  assert.equal(value.destructiveAuthority, false);
+  assert.equal(value.admissionAuthority, false);
+  assert.equal(value.provenance, "UNPROVEN");
+  assert.equal(value.terminalProof, "NOT_PERFORMED");
+  assert.equal(Object.isFrozen(value), true);
+  assert.equal(Object.isFrozen(value.requiredEvidence), true);
+  assert.ok(value.requiredEvidence.includes("TRUSTED_PROVENANCE"));
+  assert.ok(value.requiredEvidence.includes("TERMINAL_PROOF"));
+  for (const privateValue of [ID, OTHER, UID, PRIVATE, PROJECT]) {
+    assert.equal(JSON.stringify(value).includes(privateValue), false);
+  }
+}
+const readerVectors = [
+  ["absent reservation and guard", {reservation: {exists: false}, guard: {exists: false}},
+    {status: "LEGACY_OR_NEW_UNPROVEN", reservation: "ABSENT", guard: "ABSENT", operation: "UNBOUND"}],
+  ["absent reservation with active guard", {reservation: {exists: false}},
+    {status: "LEGACY_OR_NEW_UNPROVEN", operation: "GUARD_ONLY"}],
+  ["V1 structural and contextual validity", {reservation: present(legacyRecord())},
+    {status: "V1_REVIEW_REQUIRED", reservation: "V1_STRUCTURALLY_VALID", v1Context: "CONSISTENT"}],
+  ["V1 without create metadata", {reservation: {exists: true, data: legacyRecord()}},
+    {status: "V1_CONTEXT_INSUFFICIENT", reservation: "V1_STRUCTURALLY_VALID", v1Context: "INSUFFICIENT"}],
+  ["V1 with unnormalized metadata", {reservation: present(legacyRecord(), 3000)},
+    {status: "V1_CONTEXT_INSUFFICIENT", v1Context: "INSUFFICIENT"}],
+  ["V1 born after guard", {reservation: present({...legacyRecord(), authCreatedAtMs: 4000})},
+    {status: "V1_CONTEXT_INCONSISTENT", v1Context: "INCONSISTENT"}],
+  ["V1 reservation predates guard by one nanosecond", {reservation: present(legacyRecord(), timestamp(1, 999999999))},
+    {status: "V1_CONTEXT_INCONSISTENT", v1Context: "INCONSISTENT"}],
+  ["V1 birth outside representable Timestamp range", {reservation: present({...legacyRecord(), authCreatedAtMs: Number.MAX_SAFE_INTEGER})},
+    {status: "V1_CONTEXT_INCONSISTENT", reservation: "V1_STRUCTURALLY_VALID"}],
+  ["V1 missing guard", {reservation: present(legacyRecord()), guard: {exists: false}},
+    {status: "GUARD_MISSING_REVIEW_REQUIRED", v1Context: "INSUFFICIENT", operation: "GUARD_MISSING"}],
+  ["V2 PRE_AUTH", {}, {status: "PRE_AUTH_PROCEDURE_REVALIDATION_REQUIRED", reservation: "V2_PRE_AUTH"}],
+  ["V2 AUTH_EVENT", {reservation: present(saved("AUTH_EVENT"))},
+    {status: "MANAGED_AUTH_EVENT_REVALIDATION_REQUIRED", reservation: "V2_AUTH_EVENT"}],
+  ["V2 LEGACY_REVIEW", {reservation: present(saved("LEGACY_REVIEW"))},
+    {status: "LEGACY_REVIEW_REQUIRED", reservation: "V2_LEGACY_REVIEW"}],
+  ["V2 unknown origin", {reservation: present(saved("UNTRUSTED"))},
+    {status: "RECORD_INVALID", reservation: "MALFORMED"}],
+  ["V2 declared origin mismatches expected procedure", {expectedOrigin: "AUTH_EVENT"},
+    {status: "ORIGIN_CONFLICT", reservation: "V2_PRE_AUTH", operation: "MATCH"}],
+  ["future record version", {reservation: present({version: 99, privatePayload: PRIVATE})},
+    {status: "VERSION_UNSUPPORTED", reservation: "UNKNOWN_VERSION"}],
+  ["invalid version type", {reservation: present({version: "2"})},
+    {status: "RECORD_INVALID", reservation: "MALFORMED"}],
+  ["extra record PII", {reservation: present(saved("PRE_AUTH", {email: PRIVATE}))},
+    {status: "RECORD_INVALID", reservation: "MALFORMED"}],
+  ["malformed V1", {reservation: present({...legacyRecord(), authCreatedAtMs: null})},
+    {status: "RECORD_INVALID", reservation: "MALFORMED"}],
+  ["malformed record existence", {reservation: {exists: "false"}},
+    {status: "RECORD_INVALID", reservation: "MALFORMED"}],
+  ["active guard", {}, {guard: "IN_PROGRESS", guardContext: "CONSISTENT", operation: "MATCH"}],
+  ["COMPLETE not expired", {guard: completeGuard()},
+    {status: "TERMINAL_PROOF_REQUIRED", guard: "COMPLETE"}],
+  ["COMPLETE expired", {guard: completeGuard(timestamp(8))},
+    {status: "TERMINAL_PROOF_REQUIRED", guard: "COMPLETE_RETENTION_EXPIRED"}],
+  ["COMPLETE boundary inclusive", {guard: completeGuard(timestamp(10))},
+    {status: "TERMINAL_PROOF_REQUIRED", guard: "COMPLETE"}],
+  ["COMPLETE one nanosecond expired", {guard: completeGuard(timestamp(10)), now: timestamp(10, 1)},
+    {status: "TERMINAL_PROOF_REQUIRED", guard: "COMPLETE_RETENTION_EXPIRED"}],
+  ["COMPLETE expiration unknown without clock", {guard: completeGuard(), now: null},
+    {status: "TERMINAL_PROOF_REQUIRED", guard: "COMPLETE_RETENTION_UNKNOWN"}],
+  ["COMPLETE has no normalized retention", {guard: completeGuard(20000)},
+    {status: "TERMINAL_PROOF_REQUIRED", guard: "COMPLETE_RETENTION_UNKNOWN", guardContext: "INSUFFICIENT"}],
+  ["guard missing with V2", {guard: {exists: false}},
+    {status: "GUARD_MISSING_REVIEW_REQUIRED", operation: "GUARD_MISSING"}],
+  ["malformed guard", {guard: present(guard({state: "ACTIVE", startedAt: timestamp(2)}))},
+    {status: "GUARD_INVALID", guard: "MALFORMED"}],
+  ["future guard schema", {guard: present(guard({version: 2, startedAt: timestamp(2)}))},
+    {status: "GUARD_INVALID", guard: "MALFORMED"}],
+  ["guard time not normalized", {guard: present(guard())},
+    {status: "GUARD_CONTEXT_INSUFFICIENT", guard: "IN_PROGRESS", guardContext: "INSUFFICIENT"}],
+  ["retention before guard", {guard: completeGuard(timestamp(1))},
+    {status: "GUARD_CONTEXT_INCONSISTENT", guardContext: "INCONSISTENT"}],
+  ["guard starts in the future", {now: timestamp(1)},
+    {status: "GUARD_CONTEXT_INCONSISTENT", guardContext: "INCONSISTENT"}],
+  ["guard reservation deletionId mismatch", {reservation: present(saved("PRE_AUTH", {deletionId: OTHER}))},
+    {status: "DELETION_ID_CONFLICT", operation: "CONFLICT"}],
+  ["trusted expected operation mismatch", {expectedDeletionId: OTHER},
+    {status: "DELETION_ID_CONFLICT", operation: "CONFLICT"}],
+  ["matching records without an expected operation", {expectedDeletionId: null},
+    {status: "PRE_AUTH_PROCEDURE_REVALIDATION_REQUIRED", operation: "MATCH_UNBOUND"}],
+  ["Auth present", {auth: {state: "PRESENT"}}, {status: "AUTH_PRESENT_RECOVERY_BLOCKED", auth: "PRESENT"}],
+  ["Auth ambiguous", {auth: {state: "AMBIGUOUS"}}, {status: "IDENTITY_AMBIGUOUS", auth: "AMBIGUOUS"}],
+  ["creation metadata is not Auth generation", {auth: {state: "PRESENT", createdAtMs: 1000}},
+    {status: "IDENTITY_AMBIGUOUS", auth: "AMBIGUOUS"}],
+  ["Auth read failed", {auth: {state: "UNAVAILABLE"}}, {status: "READ_UNAVAILABLE", auth: "UNAVAILABLE"}],
+  ["record read failed", {reservation: {readError: true}}, {status: "READ_UNAVAILABLE", reservation: "UNAVAILABLE"}],
+  ["guard read failed", {guard: {readError: true}}, {status: "READ_UNAVAILABLE", guard: "UNAVAILABLE"}],
+  ["extra input cannot attest root absence", {root: {exists: false}}, {status: "INPUT_INVALID"}],
+];
+
+for (const [name, extra, expected] of readerVectors) {
+  test(`R10 readonly vector: ${name}`, () => {
+    const input = readerInput(clone(extra));
+    const before = clone(input);
+    deepFreeze(input);
+    const output = classifyRetiredIdentitySnapshots(input);
+    readerResult(output);
+    for (const [key, value] of Object.entries(expected)) assert.equal(output[key], value, key);
+    assert.deepEqual(input, before);
+  });
+}
+
+test("R10 nanosecond context is compared exactly and never rounded into consistency", () => {
+  const input = readerInput({reservation: present(legacyRecord(), timestamp(2, 499)),
+    guard: present(guard({startedAt: timestamp(2, 500)}))});
+  let output = classifyRetiredIdentitySnapshots(input);
+  readerResult(output);
+  assert.equal(output.v1Context, "INCONSISTENT");
+  input.reservation.createTime = timestamp(2, 501);
+  output = classifyRetiredIdentitySnapshots(input);
+  readerResult(output);
+  assert.equal(output.v1Context, "CONSISTENT");
+  assert.equal(output.status, "V1_REVIEW_REQUIRED");
+});
+
+for (const time of [timestamp(2, -1), timestamp(2, 1000000000), timestamp(2, 0.5),
+  timestamp(2.5), timestamp(NaN), timestamp(Number.MAX_SAFE_INTEGER),
+  timestamp(253402300800), {seconds: 2}]) {
+  test(`R10 unsupported timestamp remains inconclusive: ${JSON.stringify(time)}`, () => {
+    const output = classifyRetiredIdentitySnapshots(readerInput({reservation: present(legacyRecord(), time)}));
+    readerResult(output);
+    assert.equal(output.v1Context, "INSUFFICIENT");
+    assert.equal(output.status, "V1_CONTEXT_INSUFFICIENT");
+  });
+}
+
+test("R10 does not call Timestamp or snapshot methods to manufacture metadata", () => {
+  let calls = 0;
+  class RawTimestamp {
+    constructor() {this.seconds = 3; this.nanoseconds = 0;}
+    toMillis() {calls++; throw new Error(PRIVATE);}
+    toJSON() {calls++; throw new Error(PRIVATE);}
+  }
+  const output = classifyRetiredIdentitySnapshots(readerInput({reservation: present(legacyRecord(), new RawTimestamp())}));
+  readerResult(output);
+  assert.equal(output.v1Context, "INSUFFICIENT");
+  assert.equal(calls, 0);
+  const raw = {exists: true, data() {calls++; throw new Error(PRIVATE);}};
+  readerResult(classifyRetiredIdentitySnapshots(readerInput({reservation: raw})));
+  assert.equal(calls, 0);
+});
+
+test("R10 accessors and thrown read failures cannot leak identifiers or execute a getter", () => {
+  let getters = 0;
+  const auth = Object.defineProperty({}, "state", {enumerable: true,
+    get() {getters++; return PRIVATE;}});
+  const output = classifyRetiredIdentitySnapshots(readerInput({auth}));
+  readerResult(output);
+  assert.equal(output.status, "READ_UNAVAILABLE");
+  assert.equal(getters, 0);
+  const hostile = new Proxy({}, {getPrototypeOf() {throw new Error(PRIVATE);}});
+  const failed = classifyRetiredIdentitySnapshots(readerInput({reservation: hostile}));
+  readerResult(failed);
+  assert.equal(failed.status, "READ_UNAVAILABLE");
+});
+
+test("R10 accepts no IO callbacks and has no implicit reader or writer", () => {
+  let effects = 0;
+  const forbidden = () => {effects++; throw new Error(PRIVATE);};
+  const input = readerInput({read: forbidden, write: forbidden});
+  const output = classifyRetiredIdentitySnapshots(input);
+  readerResult(output);
+  assert.equal(output.status, "INPUT_INVALID");
+  assert.equal(effects, 0);
+});
+
+test("R10 V1 context separation does not relax the old V2 operation API", async () => {
+  const f = fixture(); f.db.seed(R(), legacyRecord());
+  f.db.docs.get(R()).createTimeMs = null;
+  result(await f.inspect(), "RECORD_INVALID");
+  const output = classifyRetiredIdentitySnapshots(readerInput({reservation: {exists: true, data: legacyRecord()}}));
+  readerResult(output);
+  assert.equal(output.reservation, "V1_STRUCTURALLY_VALID");
+  assert.equal(output.v1Context, "INSUFFICIENT");
+  assert.equal(f.db.counters.writes, 0);
+});
+
+test("R10 absent Auth and an expired COMPLETE never become terminal proof or admission", () => {
+  const input = readerInput({guard: completeGuard(timestamp(8))});
+  const first = classifyRetiredIdentitySnapshots(input);
+  const second = classifyRetiredIdentitySnapshots(input);
+  readerResult(first); readerResult(second);
+  assert.deepEqual(first, second);
+  assert.equal(first.guard, "COMPLETE_RETENTION_EXPIRED");
+  assert.equal(first.terminalProof, "NOT_PERFORMED");
+});
+
+const fix1Frames = [
+  ["legitimate absence", {exists: false}, "ABSENT", "LEGACY_OR_NEW_UNPROVEN"],
+  ["explicit read failure", {readError: true}, "UNAVAILABLE", "READ_UNAVAILABLE"],
+  ["absence combined with read failure", {exists: false, readError: true}, "MALFORMED", "RECORD_INVALID"],
+  ["absence combined with data", {exists: false, data: {}}, "MALFORMED", "RECORD_INVALID"],
+  ["extra frame field around valid V2", {exists: true, data: saved("PRE_AUTH"), unexpected: true}, "MALFORMED", "RECORD_INVALID"],
+  ["valid V2 without metadata", {exists: true, data: saved("PRE_AUTH")}, "V2_PRE_AUTH", "PRE_AUTH_PROCEDURE_REVALIDATION_REQUIRED"],
+  ["valid V2 with metadata", present(saved("PRE_AUTH")), "V2_PRE_AUTH", "PRE_AUTH_PROCEDURE_REVALIDATION_REQUIRED"],
+  ["absence combined with V1 data", {exists: false, data: legacyRecord()}, "MALFORMED", "RECORD_INVALID"],
+  ["extra frame field around valid V1", {...present(legacyRecord()), unexpected: true}, "MALFORMED", "RECORD_INVALID"],
+  ["V1 frame combined with read failure", {...present(legacyRecord()), readError: true}, "MALFORMED", "RECORD_INVALID"],
+  ["valid V1 without metadata", {exists: true, data: legacyRecord()}, "V1_STRUCTURALLY_VALID", "V1_CONTEXT_INSUFFICIENT"],
+  ["valid V1 with metadata", present(legacyRecord()), "V1_STRUCTURALLY_VALID", "V1_REVIEW_REQUIRED"],
+];
+for (const [name, reservation, expectedReservation, status] of fix1Frames) {
+  test(`FIX1 snapshot frame: ${name}`, () => {
+    const input = readerInput({reservation: clone(reservation)});
+    const before = clone(input);
+    deepFreeze(input);
+    const output = classifyRetiredIdentitySnapshots(input);
+    readerResult(output);
+    assert.equal(output.reservation, expectedReservation);
+    assert.equal(output.status, status);
+    assert.deepEqual(input, before);
+  });
+}
+
+for (const [version, record] of [[1, legacyRecord()], [2, saved("PRE_AUTH")]]) {
+  test(`FIX1 COMPLETE with explicit null retention is invalid with V${version}`, () => {
+    const input = readerInput({reservation: present(record), guard: completeGuard(null)});
+    const before = clone(input);
+    deepFreeze(input);
+    const output = classifyRetiredIdentitySnapshots(input);
+    readerResult(output);
+    assert.equal(output.guard, "MALFORMED");
+    assert.equal(output.status, "GUARD_INVALID");
+    assert.notEqual(output.guardContext, "CONSISTENT");
+    assert.equal(output.operation, "UNDETERMINED");
+    assert.deepEqual(input, before);
+  });
+}
+
+test("FIX1 COMPLETE with raw SDK retention remains unknown without calling methods", () => {
+  let calls = 0;
+  class RawTimestamp {
+    constructor() {this.seconds = 20; this.nanoseconds = 500;}
+    toMillis() {calls++; throw new Error(PRIVATE);}
+    toJSON() {calls++; throw new Error(PRIVATE);}
+  }
+  const retention = new RawTimestamp();
+  const input = readerInput({guard: completeGuard(retention)});
+  deepFreeze(input);
+  const output = classifyRetiredIdentitySnapshots(input);
+  readerResult(output);
+  assert.equal(output.guard, "COMPLETE_RETENTION_UNKNOWN");
+  assert.equal(output.guardContext, "INSUFFICIENT");
+  assert.equal(output.status, "TERMINAL_PROOF_REQUIRED");
+  assert.equal(input.guard.data.retainUntil, retention);
+  assert.equal(retention.seconds, 20);
+  assert.equal(retention.nanoseconds, 500);
+  assert.equal(calls, 0);
 });

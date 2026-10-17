@@ -1,6 +1,6 @@
 "use strict";
 
-// Synthetic contract only: no SDK, environment, credentials or production adapter.
+// Isolated contract and pure reader: no SDK, credentials or production adapter.
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const GUARD_KEYS = ["version", "state", "deletionId", "startedAt", "retainUntil"];
 const ORIGINS = Object.freeze({reservePreAuth: "PRE_AUTH",
@@ -45,18 +45,31 @@ function guardValue(snapshot, deletionId, active) {
   if (active && g.state !== "IN_PROGRESS") refuse("GUARD_COMPLETE");
   return g;
 }
-function recordValue(snapshot, deletionId) {
-  if (!snapshot || typeof snapshot.exists !== "boolean") refuse("RECORD_INVALID");
-  if (!snapshot.exists) return null;
+function recordStructure(snapshot) {
+  if (!snapshot || typeof snapshot.exists !== "boolean") return "MALFORMED";
+  if (!snapshot.exists) return "ABSENT";
   const r = snapshot.data;
+  if (!r || typeof r !== "object" || !Object.hasOwn(r, "version")) return "MALFORMED";
+  if (r.version !== 1 && r.version !== 2) {
+    return Number.isSafeInteger(r.version) && r.version > 0 ? "UNKNOWN_VERSION" : "MALFORMED";
+  }
   const v1 = r && r.version === 1;
   if (!exact(r, ["version", "state", "deletionId",
     v1 ? "authCreatedAtMs" : "origin"]) || r.state !== "RESERVED" ||
       typeof r.deletionId !== "string" || !UUID.test(r.deletionId) || (v1 ?
-        (!millis(r.authCreatedAtMs) || !millis(snapshot.createTimeMs)) :
-        (r.version !== 2 || !Object.values(ORIGINS).includes(r.origin)))) {
+        !millis(r.authCreatedAtMs) : !Object.values(ORIGINS).includes(r.origin))) {
+    return "MALFORMED";
+  }
+  return v1 ? "V1_STRUCTURALLY_VALID" : `V2_${r.origin}`;
+}
+function recordValue(snapshot, deletionId) {
+  const structure = recordStructure(snapshot);
+  if (structure === "ABSENT") return null;
+  if (structure === "MALFORMED" || structure === "UNKNOWN_VERSION" ||
+      (structure === "V1_STRUCTURALLY_VALID" && !millis(snapshot.createTimeMs))) {
     refuse("RECORD_INVALID");
   }
+  const r = snapshot.data;
   if (deletionId !== undefined && r.deletionId !== deletionId) {
     refuse("RESERVATION_CONFLICT");
   }
@@ -68,6 +81,159 @@ function authState(value) {
     refuse("IDENTITY_AMBIGUOUS");
   }
   return value.state;
+}
+
+// Read-only normalized snapshots. Never call SDK methods or normalize by rounding.
+function classifierData(value) {
+  if (value === null || typeof value !== "object") return value;
+  if (![Object.prototype, null].includes(Object.getPrototypeOf(value))) return null;
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  const keys = Reflect.ownKeys(descriptors);
+  if (keys.some((key) => typeof key !== "string")) return null;
+  if (keys.some((key) => !Object.hasOwn(descriptors[key], "value"))) {
+    throw new Error("UNREADABLE_CLASSIFICATION_DATA");
+  }
+  return Object.fromEntries(keys.map((key) => [key, descriptors[key].value]));
+}
+function loadedFrame(value) {
+  const frame = classifierData(value);
+  if (frame && typeof frame === "object" && frame.exists === true) {
+    frame.data = classifierData(frame.data);
+    if (frame.data && typeof frame.data === "object") {
+      for (const key of ["startedAt", "retainUntil"]) {
+        if (Object.hasOwn(frame.data, key)) {
+          // Explicit null is distinct from unsupported SDK time metadata.
+          const raw = frame.data[key];
+          frame.data[key] = raw === null ? null : classifierData(raw) ?? undefined;
+        }
+      }
+    }
+    if (Object.hasOwn(frame, "createTime")) frame.createTime = classifierData(frame.createTime);
+  }
+  return frame;
+}
+function timePair(value) {
+  return exact(value, ["seconds", "nanoseconds"]) &&
+    Number.isSafeInteger(value.seconds) && value.seconds >= -62135596800 &&
+    value.seconds <= 253402300799 && Number.isInteger(value.nanoseconds) &&
+    value.nanoseconds >= 0 && value.nanoseconds < 1000000000;
+}
+function compareTime(a, b) {
+  return a.seconds === b.seconds ? Math.sign(a.nanoseconds - b.nanoseconds) :
+    Math.sign(a.seconds - b.seconds);
+}
+function snapshotFrame(value) {
+  if (exact(value, ["readError"]) && value.readError === true) return "UNAVAILABLE";
+  if (exact(value, ["exists"]) && value.exists === false) return "ABSENT";
+  if ((exact(value, ["exists", "data"]) ||
+      exact(value, ["exists", "data", "createTime"])) && value.exists === true) {
+    return "PRESENT";
+  }
+  return "MALFORMED";
+}
+function classification(fields) {
+  return Object.freeze({...fields, provenance: "UNPROVEN",
+    terminalProof: "NOT_PERFORMED", requiredEvidence: Object.freeze([
+      "TRUSTED_PROVENANCE", "IDENTITY_CONTINUITY", "TERMINAL_PROOF",
+      ...(fields.v1Context === "INSUFFICIENT" ? ["V1_CONTEXT"] : []),
+      ...(fields.guardContext === "INSUFFICIENT" ? ["GUARD_TIME_CONTEXT"] : []),
+      ...(fields.guard === "COMPLETE_RETENTION_UNKNOWN" ? ["RETENTION_TIME_CONTEXT"] : []),
+      ...(fields.operation !== "MATCH" ? ["OPERATION_BINDING"] : []),
+    ]), destructiveAuthority: false, admissionAuthority: false});
+}
+
+/** Classifies loaded data only. A declared origin is never an attestation. */
+function classifyRetiredIdentitySnapshots(input) {
+  const fields = {status: "INPUT_INVALID", reservation: "UNDETERMINED",
+    guard: "UNDETERMINED", guardContext: "INSUFFICIENT", operation: "UNDETERMINED",
+    v1Context: "NOT_APPLICABLE", auth: "AMBIGUOUS"};
+  try {
+    input = classifierData(input);
+    if (!exact(input, ["reservation", "guard", "auth", "expectedDeletionId",
+      "expectedOrigin", "now"]) ||
+        !(input.expectedDeletionId === null ||
+          (typeof input.expectedDeletionId === "string" && UUID.test(input.expectedDeletionId))) ||
+        !(input.expectedOrigin === null || Object.values(ORIGINS).includes(input.expectedOrigin))) {
+      return classification(fields);
+    }
+    input = {...input, reservation: loadedFrame(input.reservation),
+      guard: loadedFrame(input.guard), auth: classifierData(input.auth),
+      now: classifierData(input.now)};
+    const rf = snapshotFrame(input.reservation);
+    const gf = snapshotFrame(input.guard);
+    fields.auth = exact(input.auth, ["state"]) &&
+      ["PRESENT", "ABSENT", "AMBIGUOUS", "UNAVAILABLE"].includes(input.auth.state) ?
+      input.auth.state : "AMBIGUOUS";
+    fields.reservation = rf === "UNAVAILABLE" ? "UNAVAILABLE" :
+      rf === "MALFORMED" ? "MALFORMED" : recordStructure(input.reservation);
+    fields.guard = gf === "PRESENT" ? "MALFORMED" : gf;
+    fields.guardContext = gf === "ABSENT" ? "NOT_APPLICABLE" : "INSUFFICIENT";
+    const r = ["V1_STRUCTURALLY_VALID", "V2_PRE_AUTH", "V2_AUTH_EVENT",
+      "V2_LEGACY_REVIEW"].includes(fields.reservation) ? input.reservation.data : null;
+    const g = gf === "PRESENT" ? input.guard.data : null;
+    const validGuard = exact(g, GUARD_KEYS) && g.version === 1 &&
+      typeof g.deletionId === "string" && UUID.test(g.deletionId) &&
+      ["IN_PROGRESS", "COMPLETE"].includes(g.state) &&
+      (g.state === "IN_PROGRESS" ? g.retainUntil === null : g.retainUntil !== null);
+    if (validGuard) {
+      fields.guard = g.state;
+      if (timePair(g.startedAt) && (g.state === "IN_PROGRESS" || timePair(g.retainUntil))) {
+        fields.guardContext = compareTime(g.startedAt, {seconds: 0, nanoseconds: 0}) <= 0 ||
+          (g.state === "COMPLETE" && compareTime(g.retainUntil, g.startedAt) <= 0) ||
+          (timePair(input.now) && compareTime(g.startedAt, input.now) > 0) ?
+          "INCONSISTENT" : "CONSISTENT";
+      }
+      if (g.state === "COMPLETE") {
+        fields.guard = fields.guardContext === "CONSISTENT" && timePair(input.now) ?
+          compareTime(input.now, g.retainUntil) > 0 ? "COMPLETE_RETENTION_EXPIRED" : "COMPLETE" :
+          "COMPLETE_RETENTION_UNKNOWN";
+      }
+    }
+    if ((r && validGuard && r.deletionId !== g.deletionId) ||
+        (input.expectedDeletionId !== null &&
+          ((r && r.deletionId !== input.expectedDeletionId) ||
+            (validGuard && g.deletionId !== input.expectedDeletionId)))) {
+      fields.operation = "CONFLICT";
+    } else if (r && gf === "ABSENT") fields.operation = "GUARD_MISSING";
+    else if (r && validGuard) fields.operation = input.expectedDeletionId === null ? "MATCH_UNBOUND" : "MATCH";
+    else if (validGuard && fields.reservation === "ABSENT") fields.operation = "GUARD_ONLY";
+    else if (gf === "ABSENT" && fields.reservation === "ABSENT") fields.operation = "UNBOUND";
+
+    if (r && r.version === 1) {
+      fields.v1Context = "INSUFFICIENT";
+      if (validGuard && fields.guardContext === "CONSISTENT" && timePair(input.reservation.createTime)) {
+        // This is consistency of a stored V1 number, never proof of Auth generation.
+        const born = {seconds: Math.floor(r.authCreatedAtMs / 1000),
+          nanoseconds: (r.authCreatedAtMs % 1000) * 1000000};
+        fields.v1Context = timePair(born) && compareTime(born, g.startedAt) <= 0 &&
+          compareTime(input.reservation.createTime, g.startedAt) >= 0 ? "CONSISTENT" : "INCONSISTENT";
+      }
+    }
+    if (rf === "UNAVAILABLE" || gf === "UNAVAILABLE" || fields.auth === "UNAVAILABLE") {
+      fields.status = "READ_UNAVAILABLE";
+    } else if (fields.reservation === "MALFORMED") fields.status = "RECORD_INVALID";
+    else if (fields.reservation === "UNKNOWN_VERSION") fields.status = "VERSION_UNSUPPORTED";
+    else if (fields.guard === "MALFORMED") fields.status = "GUARD_INVALID";
+    else if (fields.auth === "AMBIGUOUS") fields.status = "IDENTITY_AMBIGUOUS";
+    else if (fields.operation === "CONFLICT") fields.status = "DELETION_ID_CONFLICT";
+    else if (r && r.version === 2 && input.expectedOrigin !== null && r.origin !== input.expectedOrigin) {
+      fields.status = "ORIGIN_CONFLICT";
+    } else if (fields.operation === "GUARD_MISSING") fields.status = "GUARD_MISSING_REVIEW_REQUIRED";
+    else if (fields.guardContext === "INCONSISTENT") fields.status = "GUARD_CONTEXT_INCONSISTENT";
+    else if (fields.v1Context === "INCONSISTENT") fields.status = "V1_CONTEXT_INCONSISTENT";
+    else if (fields.auth === "PRESENT") fields.status = "AUTH_PRESENT_RECOVERY_BLOCKED";
+    else if (fields.guard.startsWith("COMPLETE")) fields.status = "TERMINAL_PROOF_REQUIRED";
+    else if (fields.guardContext === "INSUFFICIENT") fields.status = "GUARD_CONTEXT_INSUFFICIENT";
+    else if (r && r.version === 1) fields.status = fields.v1Context === "INSUFFICIENT" ?
+      "V1_CONTEXT_INSUFFICIENT" : "V1_REVIEW_REQUIRED";
+    else if (!r) fields.status = "LEGACY_OR_NEW_UNPROVEN";
+    else fields.status = {PRE_AUTH: "PRE_AUTH_PROCEDURE_REVALIDATION_REQUIRED",
+      AUTH_EVENT: "MANAGED_AUTH_EVENT_REVALIDATION_REQUIRED",
+      LEGACY_REVIEW: "LEGACY_REVIEW_REQUIRED"}[r.origin];
+    return classification(fields);
+  } catch (_) {
+    return classification({...fields, status: "READ_UNAVAILABLE"});
+  }
 }
 
 function createSyntheticRetirementContractV2(options) {
@@ -181,4 +347,4 @@ function createSyntheticRetirementContractV2(options) {
   });
 }
 
-module.exports = {createSyntheticRetirementContractV2};
+module.exports = {createSyntheticRetirementContractV2, classifyRetiredIdentitySnapshots};
