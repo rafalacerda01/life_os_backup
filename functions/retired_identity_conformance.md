@@ -141,3 +141,25 @@ vetores. Validar Emulator quando permitido e resolver gates de identidade/IAM
 antes de integrar leituras a rotinas reais. Rollback desta rodada é retirar apenas
 os artefatos novos de teste/documentação; não há schema ou dados para migrar.
 A recuperação destrutiva continua bloqueada. R13 não iniciada.
+
+## R13 — correção P3 do runner, sem mudanças no contrato
+
+COMPROVADO: o antigo negativo release provenance compactava o manifesto com
+JSON.stringify. Mesmo sem mudar o commit, essa compactação alterava o hash
+aprovado fe095417e3406a5949937e1775df18924363cd91e8af9dafb4d87fce8118b310
+para 0b707e93dc4ddbf228132d66baaad76ea94b71d365d9e11a608a125cc4774dee.
+Assim, RELEASE_HASH_MISMATCH podia ocorrer somente pela formatação.
+
+A correção substitui esse negativo por um controle sem mutação, com texto
+idêntico ao original, e um negativo que troca somente o token único do SHA do
+commit. A restauração desse token reproduz o manifesto byte a byte; a comparação
+dos objetos também confirma que nenhum outro campo mudou. O controle passa e
+somente a procedência alterada causa RELEASE_HASH_MISMATCH. Runners Functions e
+backend continuam iguais exceto RUNTIME. Manifestos, hashes aprovados, referência,
+54 vetores e classificador não foram modificados nem regenerados.
+
+Validação R13, Node v24.17.0: Functions R12 74/74; backend R12 73/73; focais
+Functions R2/V2/R10/FIX1/R11/R12 329/329; Functions completa 769 descobertos,
+768 aprovados, zero falhas e 1 skip R3 opt-in. O adapter backend exclusivamente
+de teste possui relatório próprio em backend/retired_identity_backend_adapter.md.
+Emulator real e Node 22 permanecem PENDENTES. Nenhum fluxo destrutivo mudou.
