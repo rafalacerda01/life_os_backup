@@ -5,9 +5,9 @@ const fs = require("node:fs");
 const path = require("node:path");
 const os = require("node:os");
 const net = require("node:net");
-const http = require("node:http");
 const {spawn} = require("node:child_process");
 const {StringDecoder} = require("node:string_decoder");
+const {parseAuthMessage} = require("./retired_identity_auth_worker.cjs");
 const PROJECT = "demo-life-os-d2c02r3";
 const ROOT = path.resolve(__dirname, "..");
 const CLEANUP_MS = 3000;
@@ -119,6 +119,7 @@ async function runLauncher(io) {
         for (const stream of [r.handle.stdout, r.handle.stderr]) {
           try {stream?.destroy();} catch (_) { /* Best effort after deadline. */ }
         }
+        try {if (r.authWorker && r.handle.connected) r.handle.disconnect();} catch (_) { /* Own IPC only. */ }
         try {r.handle.unref();} catch (_) { /* Best effort after deadline. */ }
       }
     } finally { cancel(); }
@@ -148,6 +149,7 @@ async function runLauncher(io) {
       if (!cleaning && failureStage === "FIRESTORE_START_FAILED") {
         stop(1, "FIRESTORE_NOT_READY", r.outputCode || "EARLY_EXIT");
       }
+      if (!cleaning && failureStage === "AUTH_START_FAILED") stop(1, failureStage, "EARLY_EXIT");
     });
     for (const stream of [r.handle.stdout, r.handle.stderr]) {
       on(stream, "error", (error) => {
@@ -234,12 +236,30 @@ async function runLauncher(io) {
     io.chdir(runtime);
     check();
     stage = "AUTH_START_FAILED";
-    // Auth is in-process: its direct console/logger channels bypass io's filters.
-    // Manual execution remains blocked pending the FIX1 review documented in R3.
-    const app = await wait(io.loadAuth(authPath).createApp(PROJECT, 0));
-    check();
-    const auth = resource(io.authServer(app), "server", stage);
-    const authPort = await listen(auth);
+    const auth = child(p.execPath, [path.join(__dirname, "retired_identity_auth_worker.cjs")],
+        {cwd: runtime, env: {...safeEnv, R3_FIREBASE_TOOLS_DIR: path.resolve(authPath, "../../../..")},
+          stdio: ["ignore", "pipe", "pipe", "ipc"], windowsHide: true}, stage);
+    auth.authWorker = true;
+    // Auth console/logger data is drained, never parsed or forwarded as status.
+    on(auth.handle.stdout, "data", () => {});
+    on(auth.handle.stderr, "data", () => {});
+    let authReady;
+    let admitted = false;
+    const readyAuth = new Promise((resolve) => {authReady = resolve;});
+    on(auth.handle, "message", (value) => {
+      const message = parseAuthMessage(value);
+      if (cleaning) {
+        cleanupFailure(message?.category || "IPC_INVALID");
+        return;
+      }
+      if (!message || (message.type === "AUTH_READY" && admitted)) stop(1, "AUTH_START_FAILED", "IPC_INVALID");
+      else if (message.type === "AUTH_FAILED") stop(1, "AUTH_START_FAILED", message.category);
+      else {admitted = true; authReady(message.port);}
+    });
+    on(auth.handle, "disconnect", () => {if (!cleaning) stop(1, "AUTH_START_FAILED", "IPC_DISCONNECTED");});
+    const cancelAuthReady = timer(() => stop(1, "AUTH_START_FAILED", "DEADLINE"), 30000);
+    let authPort;
+    try {authPort = await wait(readyAuth);} finally {cancelAuthReady();}
     stage = "PORT_ALLOCATION_FAILED";
     let firestorePort;
     for (let attempt = 0; attempt < 2; attempt++) {
@@ -304,7 +324,6 @@ async function runLauncher(io) {
 if (require.main === module) {
   runLauncher({process, stat: fs.statSync, mkdtemp: fs.mkdtempSync,
     homedir: os.homedir, tmpdir: os.tmpdir, chdir: process.chdir,
-    loadAuth: (file) => require(file), authServer: (app) => http.createServer(app),
     portServer: () => net.createServer(), spawn, setTimeout, clearTimeout,
     stdout: (text) => process.stdout.write(text), stderr: (text) => process.stderr.write(text),
   }).then((code) => {process.exitCode = code;}, () => {

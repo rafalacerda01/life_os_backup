@@ -1,6 +1,7 @@
 "use strict";
 
-// No real timers, sockets, Java, child processes or Firebase services.
+// Mocks except one synthetic Node child proving the stdout/stderr process boundary.
+// No real sockets, Java, emulators or Firebase services.
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const {EventEmitter} = require("node:events");
@@ -52,11 +53,13 @@ function fixture(options = {}) {
   class Child extends EventEmitter {
     constructor(kind) {
       super(); this.kind = kind; this.kills = 0; this.unrefs = 0;
+      this.connected = kind === "auth-worker";
       this.stdout = new EventEmitter(); this.stderr = new EventEmitter();
       this.stdout.destroy = this.stderr.destroy = () => {};
       state.children.push(this);
     }
     finish(code = 0, signal = null) {
+      this.ended = true;
       // A successful simulated runner normally supplies the R3 evidence footer.
       if (this.kind === "runner" && code === 0 && !signal && options.autoEvidence !== false) {
         this.stdout.emit("data", SUMMARY + R3_LINE);
@@ -68,8 +71,19 @@ function fixture(options = {}) {
       if (options.killThrow === this.kind) throw error("EPERM");
       if (options.stubborn === this.kind) return false;
       if (options.noClose === this.kind) {this.emit("exit", null, "SIGTERM"); return true;}
+      if (this.kind === "auth-worker" && this.authServer) {
+        const server = this.authServer;
+        server.removeAllListeners();
+        try {server.closeAllConnections();} catch (e) {this.emit("error", e);}
+        try {server.close((e) => {
+          if (e) this.emit("error", e);
+          else {server.removeAllListeners(); this.finish(null, "SIGTERM");}
+        });} catch (e) {this.emit("error", e);}
+        return true;
+      }
       this.finish(null, "SIGTERM"); return true;
     }
+    disconnect() {this.connected = false; this.emit("disconnect");}
     unref() {this.unrefs++;}
   }
   const io = {process: p, homedir: () => "C:/test/home", tmpdir: () => "C:/test/tmp",
@@ -101,13 +115,31 @@ function fixture(options = {}) {
       assert.equal(config.env.GOOGLE_APPLICATION_CREDENTIALS, undefined);
       assert.equal(config.env.FIREBASE_TOKEN, undefined);
       assert.equal(config.env.NODE_OPTIONS, undefined);
-      const kind = args[0] === "-jar" ? "java" : "runner";
+      const kind = args[0] === "-jar" ? "java" :
+        args[0].endsWith("retired_identity_auth_worker.cjs") ? "auth-worker" : "runner";
       if (options.spawnThrow === kind) throw error();
       const child = new Child(kind); child.exe = exe; child.args = args; child.config = config;
-      queueMicrotask(() => {
+      queueMicrotask(async () => {
         if (options.spawnFailure === kind) {child.emit("error", error()); child.emit("close");}
         else if (options.interruptAt === kind) p.emit("SIGINT");
-        else if (kind === "java") {
+        else if (kind === "auth-worker") {
+          assert.deepEqual(config.stdio, ["ignore", "pipe", "pipe", "ipc"]);
+          try {
+            // Simulate the dependency in-process only in this fake worker.
+            const app = await io.loadAuth().createApp(PROJECT, 0);
+            if (child.ended) return;
+            const server = io.authServer(app); child.authServer = server;
+            server.on("error", (e) => child.emit("message", {version: 1, type: "AUTH_FAILED", category: e.code}));
+            server.once("listening", () => {
+              if (!options.workerSilent) child.emit("message", Object.hasOwn(options, "authMessage") ?
+                options.authMessage : {version: 1, type: "AUTH_READY",
+                  project: PROJECT, host: "127.0.0.1", port: server.address().port});
+            });
+            server.listen(0, "127.0.0.1");
+          } catch (e) {
+            if (!child.ended) child.emit("message", {version: 1, type: "AUTH_FAILED", category: e.code});
+          }
+        } else if (kind === "java") {
           if (options.earlyJava) {
             child.stderr.emit("data", PRIVATE + " EADDRINUSE\n"); child.finish(1);
           } else if (!options.notReady) child.stdout.emit("data", "API endpoint:\n");
@@ -130,6 +162,8 @@ function fixture(options = {}) {
     state.now = end; await flush();
   };
   state.runner = () => state.children.find((c) => c.kind === "runner");
+  state.authWorker = () => state.children.find((c) => c.kind === "auth-worker");
+  state.java = () => state.children.find((c) => c.kind === "java");
   state.assertReleased = () => {
     assert.equal(state.timers.size, 0);
     assert.equal(p.listenerCount("SIGINT"), 1); // Unrelated listener is preserved.
@@ -169,7 +203,9 @@ for (const [name, options, stage] of [
 for (const point of ["preflight", "app", "auth", "probe", "java", "runner"]) {
   test(`interruption during ${point} stops subsequent stages`, async () => {
     const f = fixture({interruptAt: point}); assert.equal(await f.run(), 130);
-    if (["preflight", "app", "auth", "probe"].includes(point)) assert.equal(f.children.length, 0);
+    if (["preflight", "app", "auth", "probe"].includes(point)) {
+      assert.equal(f.java(), undefined); assert.equal(f.runner(), undefined);
+    }
     if (point === "preflight") assert.equal(f.authLoads, 0);
     if (point === "preflight") assert.equal(f.temporary, 0);
     f.assertReleased();
@@ -213,7 +249,7 @@ for (const options of [{closeThrow: "auth"}, {closeError: "auth"}, {closeHang: "
 test("cancellation while port close is pending keeps its cleanup deadline", async () => {
   const f = fixture({closeHang: "probe"}); f.run(); await flush();
   f.process.emit("SIGINT"); await flush(); await f.advance(3000);
-  assert.equal(await f.work, 130); assert.equal(f.children.length, 0); f.assertReleased();
+  assert.equal(await f.work, 130); assert.equal(f.java(), undefined); f.assertReleased();
 });
 
 test("nonzero test status is preserved", async () => {
@@ -232,7 +268,8 @@ test("late Auth acquisition after cancellation cannot start a server", async () 
   f.io.loadAuth = () => ({createApp: () => new Promise((resolve) => {complete = resolve;})});
   f.run(); await flush(); f.process.emit("SIGINT");
   assert.equal(await f.work, 130); complete({}); await flush();
-  assert.equal(f.servers.length, 0); assert.equal(f.children.length, 0); f.assertReleased();
+  assert.equal(f.servers.length, 0); assert.equal(f.java(), undefined); f.assertReleased();
+  assert.equal(f.runner(), undefined);
 });
 
 test("runner exit due to signal cannot become success", async () => {
@@ -241,7 +278,7 @@ test("runner exit due to signal cannot become success", async () => {
 });
 
 test("a Java failure after readiness aborts the pending runner", async () => {
-  const f = fixture(); f.run(); await flush(); f.children[0].finish(9);
+  const f = fixture(); f.run(); await flush(); f.java().finish(9);
   assert.equal(await f.work, 1); assert.equal(f.runner().kills, 1); f.assertReleased();
 });
 
@@ -272,7 +309,7 @@ test("default and --all keep the fixed project, environment and test discovery",
     assert.equal(runner.exe, f.process.execPath);
     assert.match(runner.config.env.FIRESTORE_EMULATOR_HOST, /^127\.0\.0\.1:\d+$/);
     assert.notEqual(runner.config.env.FIRESTORE_EMULATOR_HOST, runner.config.env.FIREBASE_AUTH_EMULATOR_HOST);
-    const java = f.children[0]; assert.equal(java.args.at(-1), PROJECT);
+    const java = f.java(); assert.equal(java.args.at(-1), PROJECT);
     assert.equal(java.args[java.args.indexOf("--host") + 1], "127.0.0.1");
     runner.finish(0); assert.equal(await f.work, 0); f.assertReleased();
   }
@@ -285,7 +322,7 @@ test("a real project argument is refused before acquiring resources", async () =
 
 test("repeated equal ports fail closed after two probes", async () => {
   const f = fixture({samePort: true}); assert.equal(await f.run(), 1);
-  assert.equal(f.portCalls, 2); assert.equal(f.children.length, 0); f.assertReleased();
+  assert.equal(f.portCalls, 2); assert.equal(f.java(), undefined); f.assertReleased();
 });
 
 const R3_LINE = '# {"fixtures":24,"boundedOperations":457,"adcAttempts":0,"unexpectedOutboundSockets":0,"project":"' + PROJECT + '"}\n';
@@ -399,4 +436,194 @@ test("FIX1 Auth console/logger bypass is characterized and test interception is 
   assert.ok(writes.some((value) => value.includes(PRIVATE)));
   assert.equal(console.error, originalConsole); assert.equal(process.stderr.write, originalWrite);
   f.assertReleased(); // Only io.stdout/io.stderr are protected by the launcher's filter.
+});
+
+const {runAuthWorker, parseAuthMessage} = require("../tools/retired_identity_auth_worker.cjs");
+const readyMessage = () => ({version: 1, type: "AUTH_READY", project: PROJECT, host: "127.0.0.1", port: 4001});
+
+for (const [name, message] of [
+  ["null", null], ["array", []], ["string", PRIVATE], ["extra payload", {...readyMessage(), payload: PRIVATE}],
+  ["real project", {...readyMessage(), project: "life-os-27b92"}],
+  ["nonloopback", {...readyMessage(), host: "0.0.0.0"}], ["invalid port", {...readyMessage(), port: 65536}],
+  ["execution command", {version: 1, type: "EXEC", command: PRIVATE}],
+  ["opaque failure", {version: 1, type: "AUTH_FAILED", category: PRIVATE}],
+]) test(`R17 refuses malformed or unexpected Auth IPC: ${name}`, async () => {
+  assert.equal(parseAuthMessage(message), null);
+  const f = fixture({authMessage: message}); assert.equal(await f.run(), 1);
+  assert.equal(f.java(), undefined); f.assertReleased();
+});
+
+test("R17 duplicate readiness and disconnect fail closed after startup", async () => {
+  for (const event of ["message", "disconnect"]) {
+    const f = fixture(); f.run(); await flush();
+    f.authWorker().emit(event, readyMessage());
+    assert.equal(await f.work, 1); assert.equal(f.runner().kills, 1); f.assertReleased();
+  }
+});
+for (const kind of ["spawnThrow", "spawnFailure"]) test(`R17 Auth worker ${kind} is sanitized`, async () => {
+  const f = fixture({[kind]: "auth-worker"}); assert.equal(await f.run(), 1);
+  assert.equal(f.java(), undefined); f.assertReleased();
+});
+test("R17 premature Auth worker exit never becomes success", async () => {
+  for (const beforeReady of [true, false]) {
+    const f = fixture({workerSilent: beforeReady}); f.run(); await flush();
+    f.authWorker().finish(0); assert.equal(await f.work, 1);
+    // Process exit releases its Auth socket; emulate that local ownership boundary.
+    f.authWorker().authServer.removeAllListeners();
+    f.authWorker().authServer.close(() => {});
+    f.assertReleased();
+  }
+});
+test("R17 Auth readiness has a bounded deadline", async () => {
+  const f = fixture({workerSilent: true}); f.run(); await flush(); await f.advance(30000);
+  assert.equal(await f.work, 1); assert.equal(f.java(), undefined); f.assertReleased();
+});
+test("R17 Auth stdout cannot substitute for IPC readiness", async () => {
+  const f = fixture({workerSilent: true}); f.run(); await flush();
+  f.authWorker().stdout.emit("data", JSON.stringify(readyMessage()) + "\nAPI endpoint:\n");
+  await flush(); assert.equal(f.java(), undefined); await f.advance(30000);
+  assert.equal(await f.work, 1); f.assertReleased();
+});
+test("R17 Auth stdout cannot fabricate test evidence", async () => {
+  const f = fixture({autoEvidence: false}); f.run(); await flush();
+  f.authWorker().stdout.emit("data", SUMMARY + R3_LINE); f.runner().finish(0);
+  assert.equal(await f.work, 1);
+  assert.equal(f.out.some((v) => JSON.parse(v).stage === "R3_ISOLATION"), false); f.assertReleased();
+});
+test("R17 unconfirmed Auth child shutdown fails closed and disconnects only its IPC", async () => {
+  const f = fixture({stubborn: "auth-worker"}); f.run(); await flush(); f.runner().finish(0);
+  await flush(); await f.advance(3000);
+  assert.equal(await f.work, 1);
+  assert.equal(f.authWorker().kills, 1); assert.equal(f.authWorker().unrefs, 1);
+  assert.equal(f.authWorker().connected, false);
+  assert.equal(f.timers.size, 0); assert.deepEqual(f.authWorker().eventNames(), []);
+  assert.equal(JSON.parse(f.out.at(-1)).stage, "RESOURCES_NOT_CONFIRMED_STOPPED");
+  f.authWorker().authServer.removeAllListeners(); // Fake-only remote process remains unconfirmed.
+});
+
+function workerFixture(options = {}) {
+  const p = new EventEmitter(); const messages = []; const timers = new Map(); let serial = 0;
+  const state = {loads: 0, servers: 0, messages, timers, process: p};
+  Object.assign(p, {argv: ["node", "auth-worker"], platform: "win32", connected: true, send() {}, env: {
+    GCLOUD_PROJECT: PROJECT, GOOGLE_CLOUD_PROJECT: PROJECT, XDG_CONFIG_HOME: "C:/test/temp",
+    CLOUDSDK_CONFIG: "C:/test/temp", METADATA_SERVER_DETECTION: "none", GCE_METADATA_HOST: "127.0.0.1:1"}});
+  class ConsoleTransport {constructor() {this.silent = true;}}
+  const logging = {logger: {transports: [new ConsoleTransport()]}, Console: ConsoleTransport, events: new EventEmitter()};
+  const server = new EventEmitter(); server.closes = 0;
+  server.listen = (port, host) => {
+    assert.equal(port, 0); assert.equal(host, "127.0.0.1");
+    queueMicrotask(() => options.bindError ? server.emit("error", error()) : server.emit("listening"));
+  };
+  server.address = () => ({port: 4001});
+  server.closeAllConnections = () => {};
+  server.close = (cb) => {server.closes++; if (!options.closeHang) {server.emit("close"); cb();}};
+  const io = {process: p, cwd: () => "C:/test/temp", homedir: () => "C:/test/home",
+    version: () => options.version || "15.24.0", logging: () => logging,
+    loadAuth: () => {state.loads++; return {createApp: async (project, mode) => {
+      assert.equal(project, PROJECT); assert.equal(mode, 0);
+      if (options.authError) throw error("EPERM");
+      if (options.lateLogger) logging.logger.transports.push({file: PRIVATE});
+      return {};
+    }};},
+    server: () => {state.servers++; return server;},
+    send: (m, cb) => {messages.push(m); cb(options.sendError ? error() : null);},
+    setTimeout: (fn, ms) => {const id = ++serial; timers.set(id, {fn, ms}); return id;},
+    clearTimeout: (id) => timers.delete(id)};
+  state.io = io; state.logging = logging; state.server = server;
+  state.run = () => {state.work = runAuthWorker(io); return state.work;};
+  state.expire = async (ms) => {for (const [id, t] of [...timers]) if (t.ms === ms) {
+    timers.delete(id); t.fn(); await flush();
+  }};
+  state.released = () => {
+    assert.equal(timers.size, 0); assert.deepEqual(p.eventNames(), []); assert.deepEqual(server.eventNames(), []);
+    assert.equal(JSON.stringify(messages).includes(PRIVATE), false);
+  };
+  return state;
+}
+
+for (const [name, mutate] of [
+  ["real project", (f) => {f.process.env.GCLOUD_PROJECT = "life-os-27b92";}],
+  ["credentials", (f) => {f.process.env.GOOGLE_APPLICATION_CREDENTIALS = PRIVATE;}],
+  ["arbitrary CLI", (f) => {f.process.argv.push("--project", "life-os-27b92");}],
+  ["no IPC", (f) => {f.process.connected = false;}],
+  ["foreign cwd", (f) => {f.io.cwd = () => "C:/different";}],
+  ["Node preload", (f) => {f.process.env.NODE_OPTIONS = PRIVATE;}],
+]) test(`R17 worker refuses configuration before Auth load: ${name}`, async () => {
+  const f = workerFixture(); mutate(f); assert.equal(await f.run(), 1);
+  assert.equal(f.loads, 0); assert.equal(f.servers, 0); f.released();
+});
+for (const [name, prepare] of [
+  ["file transport", (f) => f.logging.logger.transports.push({filename: PRIVATE})],
+  ["network/custom transport", (f) => {f.logging.logger.transports = [{}];}],
+  ["active console transport", (f) => {f.logging.logger.transports[0].silent = false;}],
+  ["alternate emitter", (f) => f.logging.events.on("log", () => {})],
+]) test(`R17 unsupervised log destination blocks Auth: ${name}`, async () => {
+  const f = workerFixture(); prepare(f); assert.equal(await f.run(), 1);
+  assert.equal(f.loads, 0); assert.equal(f.messages[0].category, "LOG_DESTINATION_UNSUPERVISED"); f.released();
+});
+test("R17 unreviewed Firebase Tools version is refused", async () => {
+  const f = workerFixture({version: "99.0.0"}); assert.equal(await f.run(), 1);
+  assert.equal(f.loads, 0); assert.equal(f.messages[0].category, "DEPENDENCY_UNREVIEWED"); f.released();
+});
+test("R17 log destination added during Auth initialization is refused", async () => {
+  const f = workerFixture({lateLogger: true}); assert.equal(await f.run(), 1);
+  assert.equal(f.servers, 0); assert.equal(f.messages[0].category, "LOG_DESTINATION_UNSUPERVISED"); f.released();
+});
+for (const options of [{authError: true}, {bindError: true}, {sendError: true}]) {
+  test(`R17 worker startup error is sanitized: ${JSON.stringify(options)}`, async () => {
+    const f = workerFixture(options); assert.equal(await f.run(), 1); f.released();
+  });
+}
+test("R17 worker accepts no inbound IPC command and closes once", async () => {
+  const f = workerFixture(); f.run(); await flush(); assert.equal(f.messages[0].type, "AUTH_READY");
+  f.process.emit("message", {type: "EXEC", command: PRIVATE}); f.process.emit("message", readyMessage());
+  assert.equal(await f.work, 1); assert.equal(f.server.closes, 1); f.released();
+});
+for (const [signal, code] of [["SIGINT", 130], ["SIGTERM", 143], ["SIGHUP", 129], ["SIGBREAK", 131]]) {
+  test(`R17 worker ${signal} cleans up without changing the first result`, async () => {
+    const f = workerFixture(); f.run(); await flush(); f.process.emit(signal); f.process.emit("SIGINT");
+    assert.equal(await f.work, code); assert.equal(f.server.closes, 1); f.released();
+  });
+}
+test("R17 worker cleanup cannot wait indefinitely", async () => {
+  const f = workerFixture({closeHang: true}); f.run(); await flush(); f.process.emit("disconnect");
+  await flush(); await f.expire(3000); assert.equal(await f.work, 1); f.released();
+});
+test("R17 worker cancels a pending startup without late server acquisition", async () => {
+  const f = workerFixture(); let release;
+  f.io.loadAuth = () => ({createApp: () => new Promise((resolve) => {release = resolve;})});
+  f.run(); await flush(); f.process.emit("SIGINT"); assert.equal(await f.work, 130);
+  release({}); await flush(); assert.equal(f.servers, 0); f.released();
+});
+test("R17 worker startup timeout is bounded without a readiness message", async () => {
+  const f = workerFixture(); f.io.loadAuth = () => ({createApp: () => new Promise(() => {})});
+  f.run(); await flush(); await f.expire(30000);
+  assert.equal(await f.work, 1); assert.equal(f.servers, 0);
+  assert.equal(f.messages.filter((m) => m.type === "AUTH_READY").length, 0); f.released();
+});
+
+test("R17 real synthetic child console/logger output never reaches launcher output", {timeout: 10000}, async (t) => {
+  const {spawn} = require("node:child_process");
+  const f = fixture(); const fakeSpawn = f.io.spawn; let child; let started;
+  const runnerStarted = new Promise((resolve) => {started = resolve;});
+  const source = 'const {Console}=require("node:console");' +
+    'console.log(' + JSON.stringify(PRIVATE) + ');console.error(' + JSON.stringify(PRIVATE) + ');' +
+    'new Console(process.stdout,process.stderr).error(' + JSON.stringify(PRIVATE) + ');' +
+    'process.send(' + JSON.stringify(readyMessage()) + ');process.on("message",()=>{});';
+  t.after(() => {if (child && child.exitCode === null && child.signalCode === null) child.kill();});
+  f.io.spawn = (exe, args, options) => {
+    if (args[0].endsWith("retired_identity_auth_worker.cjs")) {
+      // The mock launcher's temporary cwd does not exist on disk; this child only logs/uses IPC.
+      child = spawn(process.execPath, ["-e", source], {...options, cwd: __dirname}); return child;
+    }
+    const result = fakeSpawn(exe, args, options);
+    if (result.kind === "runner") started(result);
+    return result;
+  };
+  f.run(); const runner = await Promise.race([runnerStarted, f.work.then(() => {
+    throw new Error("SYNTHETIC_AUTH_CHILD_FAILED: " + f.err.join(""));
+  })]); runner.finish(0);
+  assert.equal(await f.work, 0); f.assertReleased();
+  assert.ok(child.exitCode !== null || child.signalCode !== null);
+  for (const output of [...f.out, ...f.err]) assert.equal(output.includes(PRIVATE), false);
 });

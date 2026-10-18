@@ -1,9 +1,10 @@
 # D2-C-02-R3 — validação local com Firebase Emulator
 
-**R16-FIX1: execução manual BLOQUEADA.** A sanitização do Auth em processo
-continua parcial: console.error e logger próprio não passam pelo filtro io.
-As instruções de execução abaixo são históricas, não uma autorização atual.
-É necessária decisão humana antes de ampliar o isolamento do Auth.
+**R17: isolamento Auth implementado, aguardando revisão.** O Auth agora roda
+somente em worker Node separado; stdout/stderr são drenados, nunca encaminhados.
+Prontidão/falha usam IPC fechado. As instruções históricas abaixo não autorizam
+execução real nesta rodada. Transportes de log não aprovados ou versão diferente
+da dependência revisada bloqueiam a inicialização. Ver limites na seção R17.
 
 Resultado: protocolo transacional testado com SDKs reais, sem integração. A corrida
 Auth/Firestore continua reproduzível; nenhuma saída concede autoridade destrutiva.
@@ -300,3 +301,87 @@ Functions 831 descobertos, 830 aprovados, zero falhas e um skip R3 sem opt-in.
 Sintaxe aprovada. Nenhum launcher real, Auth/Firestore Emulator ou Java executado;
 o teste de console/logger utiliza apenas dependência Auth simulada e spies
 restaurados, não lê credenciais nem registra o marcador privado na saída.
+
+## R17 — Auth em subprocesso supervisionado
+
+O limite parcial descrito na FIX1 é histórico. O caminho nativo do launcher não
+carrega Firebase Tools/Auth no processo principal. Ele cria somente seu worker
+retired_identity_auth_worker.cjs com o mesmo executável Node, stdio ignore/pipe/
+pipe/ipc, windowsHide e ambiente mínimo. Somente o worker chama createApp e escuta
+127.0.0.1 em porta dinâmica. Projeto fixo demo-life-os-d2c02r3; o namespace demo
+secundário já usado pelo R3 permanece somente dentro do emulador local.
+
+Os dois pipes Auth são drenados sem armazenar ou interpretar texto. console.log,
+console.error, console.warn, logger e escritas diretas aos FDs stdout/stderr do
+worker ficam dentro desse limite de processo. Nenhum método global de console,
+stream ou logger é interceptado no launcher ou no worker.
+
+IPC worker -> launcher aceita exclusivamente mensagens exatas, versionadas:
+
+- AUTH_READY: version=1, type, projeto fixo, host=127.0.0.1 e port inteiro 1..65535.
+- AUTH_FAILED: version=1, type e category da allowlist, sem mensagens/stacks.
+
+Campos extras, origem de projeto diferente, hosts não loopback, tipos incorretos,
+categorias opacas e prontidão repetida falham fechados. stdout não autentica
+prontidão. Não há mensagens/comandos de configuração, execução, importação ou
+shutdown recebidos pelo worker: qualquer IPC de entrada encerra com falha.
+O worker recusa argumentos CLI extras, ausência de IPC, credenciais/preloads ou
+variáveis fora da allowlist, projetos diferentes e configuração de cwd incoerente.
+
+Auth tem prazo de prontidão de 30 s. Timeout global 180 s, fechamento paralelo de
+até 3 s, sinais e prioridade da primeira causa permanecem. Parent usa somente o
+ChildProcess que criou; saída/IPC perdidos durante execução falham fechados.
+Se close não for confirmado no prazo, há CLEANUP_FAILED e retorno não zero; o IPC
+próprio é desconectado antes de unref. Worker também fecha seu servidor em sinais,
+desconexão do pai ou IPC inválido, com prazo de 3 s. Não há comandos de finalização
+por nome/PID nem árvore de processos externa. No Windows, kill pode terminar o
+processo diretamente; confirmar close do processo é obrigatório para sucesso.
+
+### Destinos de log da dependência
+
+Inspeção estática do Firebase Tools instalado 15.24.0: auth/utils.js usa console e
+EmulatorLogger; server.js/state.js também podem emitir dados por esses canais.
+Não foram encontrados createWriteStream/appendFile/writeFile nos módulos Auth.
+logger.js oferece useFileLogger, porém os chamadores encontrados são os entrypoints
+CLI/MCP, que não são carregados pelo caminho direto createApp. O transporte inicial
+Winston é Console com silent=true; não há transporte de arquivo ativado nesse
+caminho. Dispatcher Functions/hub não é iniciado.
+
+O worker exige versão 15.24.0 antes de carregar a dependência, inspeciona o logger
+antes/depois de createApp e antes de publicar prontidão: exatamente um transporte
+Console silencioso e nenhum listener de log no emitter de extensão. Transporte de
+arquivo, custom/network, console ativo ou emitter adicional provoca
+LOG_DESTINATION_UNSUPERVISED. Versão diferente provoca DEPENDENCY_UNREVIEWED.
+Não se silencia um destino desconhecido para prosseguir. Os overrides locais já
+existentes de Firebase Tools continuam sujeitos a esses gates; IPC nunca fornece
+caminhos ou configuração. Nenhuma dependência instalada foi alterada.
+
+O controle é para a dependência local confiável e revisada, não um sandbox de
+código hostil ou proteção contra adulteração do host. A versão não é uma assinatura
+criptográfica de todos os arquivos; mudança local dessa dependência exige nova
+revisão. Não foi encontrado outro destino ativo de logs no caminho inspecionado.
+Se o gate detectar algum em execução futura, manter bloqueio e revisar, sem bypass.
+
+### Evidência e limites da validação
+
+Os 62 cenários FIX1 permanecem, adaptando a fixture Auth à fronteira do worker.
+O teste antigo de escape é uma caracterização de dependência falsa executada em
+processo no mock, não o caminho nativo. Um novo teste com filho Node sintético real
+emite marcador privado via console.log, console.error e Console/logger, comunica
+prontidão por IPC e comprova que nada privado chega à saída do launcher; o filho
+é encerrado e close confirmado. Ele não carrega Auth nem abre sockets de rede.
+Demais testes usam processos, servidores e relógio simulados. Não há emulador real,
+Java, ADC, conta, dados Firebase ou credencial de produção nessa validação.
+
+Emuladores reais, Node 22 e interrupções reais do launcher completo no Windows
+permanecem PENDENTES. As limitações R16 de encerramento forçado/OS/descendentes dos
+workers de teste continuam. Não iniciar execução real antes da revisão humana.
+Nenhuma integração de recuperação pós-Auth, cleaner, Rules ou backend foi alterada.
+
+Validação R17 em Node v24.17.0: launcher/worker 103/103 (62 cenários anteriores e
+41 novos), focais 432/432 e Functions 872 descobertos, 871 aprovados, zero falhas,
+um skip R3 sem opt-in. Sintaxe dos três arquivos JavaScript aprovada. O teste com
+filho sintético inicialmente falhou porque herdou o cwd fictício da fixture;
+foi corrigido somente no teste para usar diretório existente e expor falha de
+spawn sem aguardar timeout. O teste passou com IPC real e encerramento confirmado.
+Nenhum emulador real ou processo Java foi executado em qualquer dessas etapas.
