@@ -11,7 +11,18 @@ const {parseAuthMessage} = require("./retired_identity_auth_worker.cjs");
 const PROJECT = "demo-life-os-d2c02r3";
 const ROOT = path.resolve(__dirname, "..");
 const CLEANUP_MS = 3000;
+const JAVA_SEGMENT_SIZE = 4096;
+const JAVA_OVERLAP = 128; // Longer than every closed signature, including its boundary context.
 const ERROR_CODES = new Set(["EADDRINUSE", "EACCES", "EPERM", "ENOENT"]);
+const JAVA_CATEGORIES = [
+  ["JAVA_CLASS_VERSION", /\bUnsupportedClassVersionError\b/i],
+  ["JAVA_JAR_INVALID", /invalid or corrupt jarfile|unable to access jarfile|no main manifest attribute|\bZipException\b/i],
+  ["JAVA_INVALID_ARGUMENT", /unrecognized (?:VM )?option|unknown (?:option|argument)|expected a value after parameter|was passed main parameter/i],
+  ["JAVA_ACCESS_DENIED", /\b(EACCES|EPERM|AccessDeniedException|SecurityException)\b|access is denied|permission denied|operation not permitted/i],
+  ["JAVA_PORT_FAILURE", /\b(EADDRINUSE|BindException)\b|address already in use|failed to bind|cannot assign requested address/i],
+  ["JAVA_LINKAGE", /\b(NoClassDefFoundError|ClassNotFoundException|NoSuchMethodError|NoSuchFieldError|UnsatisfiedLinkError|ExceptionInInitializerError|LinkageError|IllegalAccessError|IncompatibleClassChangeError)\b/i],
+];
+const JAVA_SIGNALS = new Set(["SIGINT", "SIGTERM", "SIGHUP", "SIGBREAK", "SIGKILL", "SIGABRT", "SIGSEGV"]);
 
 function category(error) {
   try { if (ERROR_CODES.has(error?.code)) return error.code; } catch (_) { /* Opaque error. */ }
@@ -33,6 +44,8 @@ async function runLauncher(io) {
   let cleaning = false;
   let cleanupPromise;
   let cleanupFailed = false;
+  let javaProcess;
+  let finishJavaOutput;
   const evidence = {summary: Object.create(null), r3: false, invalid: false};
   let stage = "PREFLIGHT_FAILED";
   const diagnostic = (name, reason) => io.stderr(JSON.stringify({stage: name, category: reason}) + "\n");
@@ -147,6 +160,11 @@ async function runLauncher(io) {
       r.exited = true;
       exit(Number.isInteger(code) && code >= 0 && code <= 255 && !signal ? code : 1);
       if (!cleaning && failureStage === "FIRESTORE_START_FAILED") {
+        // Preserve the original signed/unsigned Windows status, not the runner's 0..255 normalization.
+        const exitCode = Number.isInteger(code) && code >= -2147483648 && code <= 4294967295 ? code : null;
+        r.javaExit = {exitCode, windowsStatusHex: p.platform === "win32" && exitCode !== null &&
+          (exitCode < 0 || exitCode > 255) ? "0x" + (exitCode >>> 0).toString(16).toUpperCase().padStart(8, "0") : null,
+        signal: signal == null ? null : JAVA_SIGNALS.has(signal) ? signal : "UNKNOWN"};
         stop(1, "FIRESTORE_NOT_READY", r.outputCode || "EARLY_EXIT");
       }
       if (!cleaning && failureStage === "AUTH_START_FAILED") stop(1, failureStage, "EARLY_EXIT");
@@ -272,22 +290,52 @@ async function runLauncher(io) {
     }
     if (firestorePort === authPort) throw new Error();
     stage = "FIRESTORE_START_FAILED";
-    const java = child(javaPath, ["-jar", jarPath, "--host", "127.0.0.1",
+    const java = javaProcess = child(javaPath, ["-jar", jarPath, "--host", "127.0.0.1",
       "--port", String(firestorePort), "--project_id", PROJECT],
     {cwd: runtime, env: safeEnv, windowsHide: true}, stage);
     let ready;
     const readyPromise = new Promise((resolve) => {ready = resolve;});
-    let tail = "";
-    const consume = (data) => {
-      tail = (tail + String(data)).slice(-12000);
+    const tails = ["", ""];
+    const scans = [{overlap: "", trimmed: false}, {overlap: "", trimmed: false}];
+    const decoders = [new StringDecoder("utf8"), new StringDecoder("utf8")];
+    const patterns = JAVA_CATEGORIES.map(([, pattern]) => new RegExp(pattern.source, pattern.flags + "g"));
+    java.categoryIndex = JAVA_CATEGORIES.length;
+    const scanJava = (index, piece, final = false) => {
+      const scan = scans[index];
+      const text = scan.overlap + piece;
+      patterns.forEach((pattern, i) => {
+        if (i >= java.categoryIndex) return;
+        // Position zero after trimming has no left context; all complete matches there were already scanned.
+        pattern.lastIndex = scan.trimmed ? 1 : 0;
+        const match = pattern.exec(text);
+        // Wait for right context (or final drain), so a chunk boundary cannot manufacture a word boundary.
+        if (match && (final || match.index + match[0].length < text.length)) java.categoryIndex = i;
+      });
+      scan.trimmed ||= text.length > JAVA_OVERLAP;
+      scan.overlap = text.slice(-JAVA_OVERLAP);
+    };
+    finishJavaOutput = () => {
+      for (let index = 0; index < scans.length; index++) scanJava(index, decoders[index].end(), true);
+    };
+    const consume = (index, data) => {
+      if (java.closed || !(typeof data === "string" || Buffer.isBuffer(data))) return;
+      for (let offset = 0; offset < data.length; offset += JAVA_SEGMENT_SIZE) {
+        const piece = typeof data === "string" ? data.slice(offset, offset + JAVA_SEGMENT_SIZE) :
+          decoders[index].write(data.subarray(offset, offset + JAVA_SEGMENT_SIZE));
+        scanJava(index, piece); // Scan every bounded segment before dropping any prefix.
+        tails[index] = (tails[index] + piece).slice(-12000);
+      }
+      const tail = tails[index];
       const code = /\b(EADDRINUSE|EACCES|EPERM)\b/.exec(tail);
       if (code) java.outputCode = code[1];
-      if (/Dev App Server is now running|API endpoint:/.test(tail)) ready();
+      if (!java.exited && !cleaning && stopCode === null &&
+          /Dev App Server is now running|API endpoint:/.test(tail)) ready();
     };
-    const removeOut = on(java.handle.stdout, "data", consume);
-    const removeErr = on(java.handle.stderr, "data", consume);
+    // Keep both drains through close/cleanup; exit can precede the final pipe data.
+    on(java.handle.stdout, "data", (data) => consume(0, data));
+    on(java.handle.stderr, "data", (data) => consume(1, data));
     const cancelReady = timer(() => stop(1, "FIRESTORE_NOT_READY", java.outputCode || "DEADLINE"), 30000);
-    try {await wait(readyPromise);} finally {cancelReady(); removeOut(); removeErr();}
+    try {await wait(readyPromise);} finally {cancelReady();}
     const env = {...safeEnv, FIRESTORE_EMULATOR_HOST: `127.0.0.1:${firestorePort}`,
       FIREBASE_AUTH_EMULATOR_HOST: `127.0.0.1:${authPort}`, LIFEOS_RETIRED_IDENTITY_EMULATOR_TEST: "1"};
     check();
@@ -305,6 +353,12 @@ async function runLauncher(io) {
     if (error !== STOP) stop(1, stage, category(error));
   } finally {
     await cleanup();
+    if (javaProcess?.javaExit) {
+      finishJavaOutput?.();
+      io.stderr(JSON.stringify({stage: "JAVA_EXIT",
+        category: JAVA_CATEGORIES[javaProcess.categoryIndex]?.[0] || "JAVA_UNKNOWN",
+        ...javaProcess.javaExit, closeObserved: javaProcess.closed}) + "\n");
+    }
     for (const remove of listeners) remove();
     for (const id of [...timers, ...closeTimers]) io.clearTimeout(id);
     timers.clear(); closeTimers.clear();

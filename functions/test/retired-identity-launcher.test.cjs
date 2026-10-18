@@ -282,6 +282,220 @@ test("a Java failure after readiness aborts the pending runner", async () => {
   assert.equal(await f.work, 1); assert.equal(f.runner().kills, 1); f.assertReleased();
 });
 
+function javaDiagnostic(f) {
+  const values = f.err.map((line) => JSON.parse(line)).filter((v) => v.stage === "JAVA_EXIT");
+  assert.equal(values.length, 1);
+  assert.deepEqual(Object.keys(values[0]).sort(),
+      ["stage", "category", "exitCode", "windowsStatusHex", "signal", "closeObserved"].sort());
+  return values[0];
+}
+
+for (const [code, hex] of [[0, null], [17, null], [-1073741819, "0xC0000005"],
+  [3221225477, "0xC0000005"], [4294967295, "0xFFFFFFFF"]]) {
+  test(`Java diagnostic preserves original exit code ${code}`, async () => {
+    const f = fixture({notReady: true}); f.run(); await flush(); f.java().finish(code);
+    assert.equal(await f.work, 1);
+    assert.deepEqual(javaDiagnostic(f), {stage: "JAVA_EXIT", category: "JAVA_UNKNOWN",
+      exitCode: code, windowsStatusHex: hex, signal: null, closeObserved: true});
+    assert.equal(f.runner(), undefined); f.assertReleased();
+  });
+}
+
+test("Java diagnostic rejects unsafe or arbitrary exit codes and signals", async () => {
+  for (const code of [PRIVATE, NaN, Infinity, -2147483649, 4294967296, null]) {
+    const f = fixture({notReady: true}); f.run(); await flush(); f.java().finish(code, PRIVATE);
+    assert.equal(await f.work, 1);
+    const value = javaDiagnostic(f);
+    assert.equal(value.exitCode, null); assert.equal(value.windowsStatusHex, null);
+    assert.equal(value.signal, "UNKNOWN"); f.assertReleased();
+  }
+});
+
+for (const [text, category] of [
+  ["Unrecognized VM option", "JAVA_INVALID_ARGUMENT"],
+  ["java.lang.UnsupportedClassVersionError", "JAVA_CLASS_VERSION"],
+  ["Invalid or corrupt jarfile", "JAVA_JAR_INVALID"],
+  ["java.nio.file.AccessDeniedException", "JAVA_ACCESS_DENIED"],
+  ["java.net.BindException: Address already in use", "JAVA_PORT_FAILURE"],
+  ["java.lang.UnsatisfiedLinkError", "JAVA_LINKAGE"],
+  ["unclassified failure", "JAVA_UNKNOWN"],
+]) test(`Java final pipe data is sanitized and classified as ${category}`, async () => {
+  const f = fixture({notReady: true}); f.run(); await flush(); const java = f.java();
+  const split = Math.floor(text.length / 2);
+  java.stderr.emit("data", PRIVATE + "\n" + text.slice(0, split));
+  java.emit("exit", 9, null); await flush();
+  assert.equal(f.err.some((line) => JSON.parse(line).stage === "JAVA_EXIT"), false);
+  java.stderr.emit("data", text.slice(split) + " " + PRIVATE);
+  java.emit("close", 9, null);
+  assert.equal(await f.work, 1);
+  assert.equal(javaDiagnostic(f).category, category); assert.equal(java.kills, 0);
+  assert.equal(f.runner(), undefined); f.assertReleased();
+});
+
+test("Java category precedence is deterministic across stdout and stderr", async () => {
+  const f = fixture({notReady: true}); f.run(); await flush();
+  f.java().stdout.emit("data", "NoClassDefFoundError " + PRIVATE);
+  f.java().emit("exit", 2, null); await flush();
+  f.java().stderr.emit("data", "UnsupportedClassVersionError " + PRIVATE);
+  f.java().emit("close", 2, null);
+  assert.equal(await f.work, 1); assert.equal(javaDiagnostic(f).category, "JAVA_CLASS_VERSION");
+  f.assertReleased();
+});
+
+test("Java does not join error fragments from different streams", async () => {
+  const f = fixture({notReady: true}); f.run(); await flush();
+  f.java().stdout.emit("data", "Unrecognized ");
+  f.java().stderr.emit("data", "VM option " + PRIVATE); f.java().finish(1);
+  assert.equal(await f.work, 1); assert.equal(javaDiagnostic(f).category, "JAVA_UNKNOWN");
+  f.assertReleased();
+});
+
+test("Java close deadline reuses bounded cleanup and never confirms missing close", async () => {
+  const f = fixture({notReady: true}); f.run(); await flush();
+  let settled = false; f.work.then(() => {settled = true;});
+  f.java().emit("exit", 3221225477, null); await flush();
+  f.java().stderr.emit("data", PRIVATE + " AccessDeniedException");
+  await f.advance(2999); assert.equal(settled, false);
+  await f.advance(1); assert.equal(await f.work, 1);
+  assert.deepEqual(javaDiagnostic(f), {stage: "JAVA_EXIT", category: "JAVA_ACCESS_DENIED",
+    exitCode: 3221225477, windowsStatusHex: "0xC0000005", signal: null, closeObserved: false});
+  assert.equal(JSON.parse(f.out.at(-1)).stage, "RESOURCES_NOT_CONFIRMED_STOPPED");
+  assert.ok(f.err.some((line) => JSON.parse(line).stage === "CLEANUP_FAILED"));
+  assert.equal(f.java().kills, 0); assert.equal(f.java().unrefs, 1); f.assertReleased();
+});
+
+test("Java readiness received after exit cannot start the runner or publish success", async () => {
+  const f = fixture({notReady: true}); f.run(); await flush();
+  f.java().emit("exit", 0, null);
+  f.java().stdout.emit("data", "API endpoint:\nDev App Server is now running.\n");
+  await flush(); assert.equal(f.runner(), undefined); f.java().emit("close", 0, null);
+  assert.equal(await f.work, 1); assert.equal(javaDiagnostic(f).exitCode, 0);
+  assert.equal(f.out.some((line) => JSON.parse(line).disposable), false); f.assertReleased();
+});
+
+test("Java final output after readiness still diagnoses failure and cleans up the runner", async () => {
+  const f = fixture(); f.run(); await flush(); f.java().emit("exit", 5, null); await flush();
+  f.java().stderr.emit("data", "NoSuchMethodError " + PRIVATE); f.java().emit("close", 5, null);
+  assert.equal(await f.work, 1); assert.equal(javaDiagnostic(f).category, "JAVA_LINKAGE");
+  assert.equal(f.runner().kills, 1); f.assertReleased();
+});
+
+for (const [signal, code] of [["SIGINT", 130], ["SIGTERM", 143], ["SIGHUP", 129], ["SIGBREAK", 131]]) {
+  test(`Java final diagnostic cannot override earlier ${signal}`, async () => {
+    const f = fixture({notReady: true}); f.run(); await flush();
+    f.process.emit(signal); f.java().emit("exit", 7, signal); await flush();
+    f.java().stderr.emit("data", "UnsupportedClassVersionError " + PRIVATE);
+    f.java().emit("close", 7, signal);
+    assert.equal(await f.work, code); assert.equal(javaDiagnostic(f).signal, signal);
+    assert.equal(JSON.parse(f.err[0]).stage, "EXECUTION_INTERRUPTED"); f.assertReleased();
+  });
+}
+
+test("Java drain preserves the first failure when interrupted waiting for close", async () => {
+  const f = fixture({notReady: true}); f.run(); await flush(); f.java().emit("exit", 3, null);
+  await flush(); f.process.emit("SIGINT"); f.java().emit("close", 3, null);
+  assert.equal(await f.work, 1); assert.equal(javaDiagnostic(f).exitCode, 3); f.assertReleased();
+});
+
+test("Java output during timeout cleanup cannot change 124 or create an unexpected-exit diagnostic", async () => {
+  const f = fixture(); f.run(); await flush();
+  f.java().kill = function() {
+    this.kills++; this.stderr.emit("data", "UnsupportedClassVersionError " + PRIVATE);
+    this.finish(7); return true;
+  };
+  await f.advance(180000); assert.equal(await f.work, 124);
+  assert.equal(f.err.some((line) => JSON.parse(line).stage === "JAVA_EXIT"), false); f.assertReleased();
+});
+
+async function classifyJavaChunks(stdout, stderr, afterExit = false) {
+  const f = fixture({notReady: true}); f.run(); await flush();
+  if (afterExit) {f.java().emit("exit", 3221225477, null); await flush();}
+  for (const chunk of stdout) f.java().stdout.emit("data", chunk);
+  for (const chunk of stderr) f.java().stderr.emit("data", chunk);
+  if (afterExit) f.java().emit("close", 3221225477, null);
+  else f.java().finish(3221225477);
+  assert.equal(await f.work, 1); assert.equal(f.runner(), undefined);
+  const diagnostic = javaDiagnostic(f); f.assertReleased(); return diagnostic;
+}
+
+const JAVA_LONG_TRANSCRIPT = PRIVATE + "\nUnsupportedClassVersionError\n" + "x".repeat(13001);
+
+test("JAVA-FIX1 recognizes an error before a 13001-character suffix in one chunk", async () => {
+  assert.equal((await classifyJavaChunks([], [JAVA_LONG_TRANSCRIPT])).category, "JAVA_CLASS_VERSION");
+});
+
+test("JAVA-FIX1 the same transcript has identical diagnostics across chunk sizes", async () => {
+  for (const size of [1, 7, 257, 4096, 8192, 20000]) {
+    const chunks = [];
+    for (let offset = 0; offset < JAVA_LONG_TRANSCRIPT.length; offset += size) {
+      chunks.push(JAVA_LONG_TRANSCRIPT.slice(offset, offset + size));
+    }
+    for (const input of [chunks, chunks.map((chunk) => Buffer.from(chunk))]) {
+      assert.deepEqual(await classifyJavaChunks([], input), {stage: "JAVA_EXIT", category: "JAVA_CLASS_VERSION",
+        exitCode: 3221225477, windowsStatusHex: "0xC0000005", signal: null, closeObserved: true});
+    }
+  }
+});
+
+test("JAVA-FIX1 recognizes a signature split at every chunk boundary", async () => {
+  const signature = "UnsupportedClassVersionError";
+  for (let split = 1; split < signature.length; split++) {
+    const value = await classifyJavaChunks([], [PRIVATE + "\n" + signature.slice(0, split),
+      signature.slice(split) + "\n" + "x".repeat(13001)]);
+    assert.equal(value.category, "JAVA_CLASS_VERSION");
+  }
+});
+
+test("JAVA-FIX1 recognizes signatures crossing internal bounded-segment boundaries", async () => {
+  for (const start of [4095, 4083, 4069, 8185]) {
+    const text = " ".repeat(start) + "UnsupportedClassVersionError\n" + "x".repeat(13001) + PRIVATE;
+    assert.equal((await classifyJavaChunks([text], [])).category, "JAVA_CLASS_VERSION");
+  }
+});
+
+test("JAVA-FIX1 processes the complete final data between exit and close", async () => {
+  assert.equal((await classifyJavaChunks([], [JAVA_LONG_TRANSCRIPT], true)).category, "JAVA_CLASS_VERSION");
+});
+
+test("JAVA-FIX1 extensive separate streams preserve precedence without joining signatures", async () => {
+  const linkage = "NoSuchMethodError\n" + "x".repeat(13001);
+  for (const [stdout, stderr] of [[[linkage], [JAVA_LONG_TRANSCRIPT]], [[JAVA_LONG_TRANSCRIPT], [linkage]]]) {
+    assert.equal((await classifyJavaChunks(stdout, stderr)).category, "JAVA_CLASS_VERSION");
+  }
+  const stdout = " ".repeat(13001) + "UnsupportedClass";
+  const stderr = "VersionError\n" + "x".repeat(13001);
+  assert.equal((await classifyJavaChunks([stdout], [stderr])).category, "JAVA_UNKNOWN");
+});
+
+test("JAVA-FIX1 extensive private output without a signature remains unknown", async () => {
+  const text = (PRIVATE + "\n").repeat(20000);
+  assert.equal((await classifyJavaChunks([Buffer.from(text)], [text], true)).category, "JAVA_UNKNOWN");
+});
+
+test("JAVA-FIX1 word boundaries do not depend on chunks or discarded prefix", async () => {
+  const token = "UnsupportedClassVersionError";
+  for (const [stdout, stderr] of [[[], [token + "X"]], [[], [token, "X"]],
+    [[], [" ".repeat(4096 - token.length) + token + "X"]],
+    [[" ".repeat(4096 - 129) + "X" + token + " ".repeat(128 - token.length), "suffix"], []]]) {
+    assert.equal((await classifyJavaChunks(stdout, stderr)).category, "JAVA_UNKNOWN");
+  }
+  assert.equal((await classifyJavaChunks([], [token])).category, "JAVA_CLASS_VERSION");
+});
+
+test("JAVA-FIX1 extensive output during timeout and signal cleanup creates no Java diagnostic", async () => {
+  for (const reason of ["timeout", "SIGINT", "SIGTERM", "SIGHUP", "SIGBREAK"]) {
+    const f = fixture(); f.run(); await flush();
+    f.java().kill = function() {
+      this.kills++; this.stderr.emit("data", JAVA_LONG_TRANSCRIPT); this.finish(7); return true;
+    };
+    if (reason === "timeout") await f.advance(180000);
+    else f.process.emit(reason);
+    const expected = {timeout: 124, SIGINT: 130, SIGTERM: 143, SIGHUP: 129, SIGBREAK: 131}[reason];
+    assert.equal(await f.work, expected);
+    assert.equal(f.err.some((line) => JSON.parse(line).stage === "JAVA_EXIT"), false); f.assertReleased();
+  }
+});
+
 for (const code of ["EADDRINUSE", "EACCES", "EPERM", "ENOENT", PRIVATE]) {
   test(`error category uses only the closed allowlist: ${code === PRIVATE ? "opaque" : code}`, async () => {
     const f = fixture(); f.io.stat = () => {throw error(code);};
