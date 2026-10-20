@@ -2039,3 +2039,438 @@ for (const creationTime of [null, c1Born.toDate().toUTCString()]) {
     assert.equal(activeDb.data(guardPath), undefined);
   });
 }
+
+// P1 post-Auth evidence: real callback/cleaners, synthetic Admin IO only.
+// This fake serializes Firestore transactions; it does not emulate Auth delivery,
+// Firestore lock/retry behavior, IAM, or atomicity between Auth and Firestore.
+const p1RetiredPath = `retired_auth_identities/${uid}`;
+const p1OtherRoot = "users/synthetic-p1-unrelated";
+const p1OtherChild = `${p1OtherRoot}/notes/private`;
+const p1DeletionId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+const p1OtherDeletionId = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+const p1DenyRecord = (deletionId = p1DeletionId) =>
+  ({version: 2, state: "RESERVED", deletionId, origin: "PRE_AUTH"});
+
+async function p1Fixture() {
+  activeDb = new FakeFirestore();
+  await c1SeedBirth(activeDb);
+  activeDb.seed(rootPath, {activeCircleId: null});
+  activeDb.seed(`${rootPath}/notes/first`, {syntheticOldData: true});
+  activeDb.seed(`${rootPath}/notes/remaining`, {syntheticOldData: true});
+  activeDb.seed(guardPath, {version: 1, state: "IN_PROGRESS",
+    deletionId: p1DeletionId, startedAt: c1Born, retainUntil: null});
+  activeDb.seed(p1RetiredPath, p1DenyRecord());
+  activeDb.seed(p1OtherRoot, {syntheticOtherOwner: true});
+  activeDb.seed(p1OtherChild, {syntheticOtherData: true});
+  const db = activeDb;
+  let authLookups = 0;
+  db.authHook = () => { authLookups += 1; };
+  return {db, authLookups: () => authLookups};
+}
+
+function p1AssertOtherAndDeny(db, record = p1DenyRecord()) {
+  assert.deepEqual(db.data(p1OtherRoot), {syntheticOtherOwner: true});
+  assert.deepEqual(db.data(p1OtherChild), {syntheticOtherData: true});
+  assert.deepEqual(db.data(p1RetiredPath), record);
+  assert.equal(db.operationLog.some((entry) =>
+    entry.endsWith(p1RetiredPath) || entry.includes(p1OtherRoot)), false);
+}
+
+function p1Gate() {
+  const reached = Promise.withResolvers();
+  const released = Promise.withResolvers();
+  return {reached: reached.promise, release: released.resolve,
+    async pause() { reached.resolve(); await released.promise; }};
+}
+
+test("P1 recovery: partial post-Auth failure replays the same event and preserves DENY", async (t) => {
+  const {db, authLookups} = await p1Fixture();
+  const originalDelete = db.recursiveDelete.bind(db);
+  let fail = true;
+  t.mock.method(db, "recursiveDelete", async (ref) => {
+    if (fail && ref.path === rootPath) {
+      fail = false;
+      db.store.delete(rootPath);
+      db.store.delete(`${rootPath}/notes/first`);
+      throw new Error("PRIVATE-P1-PARTIAL-DELETE");
+    }
+    return originalDelete(ref);
+  });
+  await withoutErrorLog(() => assert.rejects(c1Delete(), {message: "USER_DATA_CLEANUP_FAILED"}));
+  assert.equal(authLookups(), 2, "Auth must be absent at admission and before private recursive deletion");
+  assert.equal(db.data(rootPath), undefined);
+  assert.ok(db.data(`${rootPath}/notes/remaining`));
+  assert.ok(db.data(c1BirthPath));
+  assert.equal(db.data(guardPath).state, "IN_PROGRESS");
+  assert.equal(db.data(guardPath).deletionId, p1DeletionId);
+  p1AssertOtherAndDeny(db);
+  await c1Delete();
+  assert.equal(db.data(`${rootPath}/notes/remaining`), undefined);
+  assert.equal(db.data(c1BirthPath), undefined);
+  assert.equal(db.data(guardPath).state, "COMPLETE");
+  assert.equal(db.data(guardPath).deletionId, p1DeletionId);
+  const terminal = db.data(guardPath), operations = [...db.operationLog];
+  await c1Delete();
+  assert.deepEqual(db.data(guardPath), terminal);
+  assert.deepEqual(db.operationLog, operations);
+  p1AssertOtherAndDeny(db);
+});
+
+test("P1 recovery: terminal commit failure cannot acknowledge completion and same-event retry converges", async (t) => {
+  const {db} = await p1Fixture();
+  const originalTransaction = db.runTransaction.bind(db);
+  let fail = true;
+  t.mock.method(db, "runTransaction", (callback) => originalTransaction(async (tx) => {
+    const result = await callback(tx);
+    if (fail && tx.writes.some((write) => write.ref.path === guardPath &&
+        write.data && write.data.state === "COMPLETE")) {
+      fail = false; throw new Error("PRIVATE-P1-TERMINAL-COMMIT");
+    }
+    return result;
+  }));
+  await withoutErrorLog(() => assert.rejects(c1Delete(), {message: "USER_DATA_CLEANUP_FAILED"}));
+  assert.equal(db.data(rootPath), undefined);
+  assert.ok(db.data(c1BirthPath));
+  assert.equal(db.data(guardPath).state, "IN_PROGRESS");
+  p1AssertOtherAndDeny(db);
+  await c1Delete();
+  assert.equal(db.data(c1BirthPath), undefined);
+  assert.equal(db.data(guardPath).state, "COMPLETE");
+  assert.equal(db.data(guardPath).deletionId, p1DeletionId);
+  p1AssertOtherAndDeny(db);
+});
+
+test("P1 recovery: concurrent deliveries of the same event converge for the same operation", async (t) => {
+  const {db} = await p1Fixture(), hold = p1Gate(); t.after(hold.release);
+  const originalDelete = db.recursiveDelete.bind(db);
+  let paused = false;
+  t.mock.method(db, "recursiveDelete", async (ref) => {
+    if (!paused && ref.path === rootPath) {paused = true; await hold.pause();}
+    return originalDelete(ref);
+  });
+  const first = c1Delete().then(() => ({ok: true}), (error) => ({error}));
+  await Promise.race([hold.reached, first.then(() => assert.fail("first delivery did not reach cleanup"))]);
+  await c1Delete(); hold.release();
+  assert.deepEqual(await first, {ok: true});
+  assert.equal(db.data(guardPath).state, "COMPLETE");
+  assert.equal(db.data(guardPath).deletionId, p1DeletionId);
+  assert.equal(db.operationLog.filter((entry) => entry === `delete:${c1BirthPath}`).length, 1);
+  p1AssertOtherAndDeny(db);
+});
+
+for (const changedState of ["different deletionId", "COMPLETE"]) {
+  test(`P1 recovery: guard ${changedState} after admission blocks preparatory effects`, async (t) => {
+    const {db} = await p1Fixture();
+    const birth = require("../birth_ledger_cleanup"), originalPrepare = birth.prepare;
+    t.mock.method(birth, "prepare", async (...args) => {
+      const admission = await originalPrepare(...args);
+      const current = db.data(guardPath);
+      db.seed(guardPath, changedState === "COMPLETE" ? {...current,
+        state: "COMPLETE", retainUntil: c1Clock} : {...current, deletionId: p1OtherDeletionId});
+      return admission;
+    });
+    const before = [...db.operationLog];
+    await withoutErrorLog(() => assert.rejects(c1Delete(), {message: "USER_DATA_CLEANUP_FAILED"}));
+    assert.deepEqual(db.operationLog, before);
+    assert.ok(db.data(rootPath)); assert.ok(db.data(c1BirthPath));
+    assert.deepEqual(db.recursiveDeletes, []);
+    p1AssertOtherAndDeny(db);
+  });
+}
+
+for (const markerId of [p1DeletionId, p1OtherDeletionId]) {
+  test(`P1 recovery: live reused Auth blocks before admission (marker matches=${markerId === p1DeletionId})`, async () => {
+    const {db} = await p1Fixture();
+    const {UserRecord} = require("firebase-admin/auth");
+    db.authUser = new UserRecord({localId: uid, createdAt: String(c1Clock.toMillis())});
+    db.seed(p1RetiredPath, p1DenyRecord(markerId));
+    const before = [...db.store], operations = [...db.operationLog];
+    await withoutErrorLog(() => assert.rejects(c1Delete(), {message: "USER_DATA_CLEANUP_FAILED"}));
+    assert.deepEqual([...db.store], before); assert.deepEqual(db.operationLog, operations);
+    assert.deepEqual(db.recursiveDeletes, []);
+    p1AssertOtherAndDeny(db, p1DenyRecord(markerId));
+  });
+}
+
+test("P1 recovery: UID and PRE_AUTH marker without managed context cannot authorize cleanup", async () => {
+  const {db} = await p1Fixture(); const before = [...db.store];
+  await withoutErrorLog(() => assert.rejects(cleanupUserData.run({uid}, {}),
+    {message: "USER_DATA_CLEANUP_FAILED"}));
+  assert.deepEqual([...db.store], before); assert.deepEqual(db.recursiveDeletes, []);
+  p1AssertOtherAndDeny(db);
+});
+
+test("P1 recovery: unavailable Auth fails closed without trusting the marker", async () => {
+  const {db} = await p1Fixture(); const before = [...db.store];
+  db.authError = Object.assign(new Error("PRIVATE-P1-AUTH-UNAVAILABLE"), {code: "auth/internal-error"});
+  await withoutErrorLog(() => assert.rejects(c1Delete(), {message: "USER_DATA_CLEANUP_FAILED"}));
+  assert.deepEqual([...db.store], before); assert.deepEqual(db.recursiveDeletes, []);
+  p1AssertOtherAndDeny(db);
+});
+
+test("P1 recovery: a detectably later root is refused before destructive work", async () => {
+  const {db} = await p1Fixture(); db.createTimes.set(rootPath, c1Clock);
+  const before = [...db.store];
+  await withoutErrorLog(() => assert.rejects(c1Delete(), {message: "USER_DATA_CLEANUP_FAILED"}));
+  assert.deepEqual([...db.store], before); assert.deepEqual(db.recursiveDeletes, []);
+  p1AssertOtherAndDeny(db);
+});
+
+test("P1 recovery: COMPLETE plus DENY is read-only after mandatory terminal verification", async () => {
+  const {db} = await p1Fixture(); await c1Delete();
+  const before = [...db.store], operations = [...db.operationLog], recursive = [...db.recursiveDeletes];
+  await c1Delete();
+  assert.deepEqual([...db.store], before); assert.deepEqual(db.operationLog, operations);
+  assert.deepEqual(db.recursiveDeletes, recursive); p1AssertOtherAndDeny(db);
+});
+
+test("P1 recovery: late orphan residue prevents COMPLETE until another real cleanup attempt", async (t) => {
+  const {db} = await p1Fixture(), originalDelete = db.recursiveDelete.bind(db);
+  const orphan = `${rootPath}/unknown/missing/nested/private`; let inject = true;
+  t.mock.method(db, "recursiveDelete", async (ref) => {
+    await originalDelete(ref);
+    if (inject && ref.path === rootPath) {inject = false; db.seed(orphan, {syntheticResidue: true});}
+  });
+  await withoutErrorLog(() => assert.rejects(c1Delete(), {message: "USER_DATA_CLEANUP_FAILED"}));
+  assert.ok(db.data(orphan)); assert.ok(db.data(c1BirthPath));
+  assert.equal(db.data(guardPath).state, "IN_PROGRESS"); p1AssertOtherAndDeny(db);
+  await c1Delete();
+  assert.equal(db.data(orphan), undefined); assert.equal(db.data(c1BirthPath), undefined);
+  assert.equal(db.data(guardPath).state, "COMPLETE"); p1AssertOtherAndDeny(db);
+});
+
+// Security regressions deliberately remain RED while this cross-service race
+// exists. A green mock suite must not be mistaken for recovery authorization.
+for (const boundary of ["after admission", "before recursive delete"]) {
+  test(`P1 RED: reused UID ${boundary} must preserve the recreated account`, async (t) => {
+    const {db, authLookups} = await p1Fixture(), hold = p1Gate(); t.after(hold.release);
+    if (boundary === "after admission") {
+      const birth = require("../birth_ledger_cleanup"), originalPrepare = birth.prepare;
+      t.mock.method(birth, "prepare", async (...args) => {
+        const admission = await originalPrepare(...args); await hold.pause(); return admission;
+      });
+    } else {
+      const originalDelete = db.recursiveDelete.bind(db);
+      t.mock.method(db, "recursiveDelete", async (ref) => {
+        if (ref.path === rootPath) await hold.pause();
+        return originalDelete(ref);
+      });
+    }
+    const execution = c1Delete().then(() => ({ok: true}), (error) => ({error}));
+    await Promise.race([hold.reached, execution.then(() => assert.fail("callback did not reach controlled pause"))]);
+    const {UserRecord} = require("firebase-admin/auth");
+    db.authUser = new UserRecord({localId: uid, createdAt: String(c1Clock.toMillis())});
+    // A privileged synthetic recreation bypasses client Rules, as Admin can.
+    // These test labels are ownership evidence in the scenario, not a new schema.
+    db.seed(rootPath, {activeCircleId: null, syntheticRecreatedAccount: true});
+    db.createTimes.set(rootPath, c1Clock);
+    const recreatedChild = `${rootPath}/notes/recreated-private`;
+    db.seed(recreatedChild, {syntheticRecreatedData: true});
+    hold.release(); const outcome = await execution;
+    p1AssertOtherAndDeny(db);
+    t.diagnostic(JSON.stringify({boundary, authLookups: authLookups(), authPresent: !!db.authUser,
+      recreatedRootPreserved: !!db.data(rootPath), recreatedChildPreserved: !!db.data(recreatedChild),
+      guardState: db.data(guardPath).state, callbackResolved: outcome.ok === true}));
+    assert.ok(db.data(recreatedChild), "P1 BLOCKER: an old event deleted data belonging to the recreated UID");
+    assert.ok(db.data(rootPath), "P1 BLOCKER: the recreated root must remain intact");
+  });
+}
+
+
+// P1-AUTH-ABSENCE-RECHECK-R1: real callback, synthetic Auth/Firestore IO.
+// These checks prove local refusal behavior only, not cross-service atomicity.
+function recheckSnapshot(db) {
+  return {store: [...db.store], operations: [...db.operationLog],
+    recursive: [...db.recursiveDeletes], transactions: db.transactionCount};
+}
+
+function assertRecheckStopped(db, snapshot, guard) {
+  assert.deepEqual(recheckSnapshot(db), snapshot,
+      "No cleaner or finalizer may run after an unsafe Auth result");
+  assert.deepEqual(db.data(guardPath), guard);
+  assert.equal(db.data(guardPath).state, "IN_PROGRESS");
+  assert.equal(db.data(guardPath).retainUntil, null);
+  assert.ok(db.data(rootPath));
+  assert.ok(db.data(`${rootPath}/notes/remaining`));
+  assert.ok(db.data(c1BirthPath));
+  assert.equal(db.data(billingAccountPath).state, "DELETING");
+  p1AssertOtherAndDeny(db);
+}
+
+test("P1 absence recheck: Auth absence permits private cleanup immediately after the second query", async (t) => {
+  const {db} = await p1Fixture();
+  let lookups = 0;
+  let atRecheck;
+  db.authHook = (owner) => {
+    assert.equal(owner, uid);
+    if (++lookups === 2) atRecheck = recheckSnapshot(db);
+  };
+  const originalDelete = db.recursiveDelete.bind(db);
+  t.mock.method(db, "recursiveDelete", async (ref) => {
+    assert.equal(ref.path, rootPath);
+    assert.equal(lookups, 2);
+    assert.deepEqual(recheckSnapshot(db), atRecheck,
+        "The recheck must immediately precede private recursive deletion");
+    return originalDelete(ref);
+  });
+  await c1Delete();
+  assert.equal(lookups, 2);
+  assert.deepEqual(db.recursiveDeletes, [rootPath]);
+  assert.equal(db.data(rootPath), undefined);
+  assert.equal(db.data(`${rootPath}/notes/remaining`), undefined);
+  assert.equal(db.data(c1BirthPath), undefined);
+  assert.equal(db.data(billingAccountPath), undefined);
+  assert.equal(db.data(guardPath).state, "COMPLETE");
+  p1AssertOtherAndDeny(db);
+});
+
+for (const [label, result] of [
+  ["Auth present", () => ({uid})],
+  ["Auth unavailable", () => {
+    throw Object.assign(new Error("synthetic unavailable"),
+        {code: "auth/internal-error"});
+  }],
+  ["Auth timeout", () => {
+    throw Object.assign(new Error("synthetic timeout"), {code: "ETIMEDOUT"});
+  }],
+  ["unexpected Auth error", () => {throw new Error("synthetic unexpected");}],
+  ["non-error Auth rejection", () => {throw null;}],
+  ["not-found message without the exact code", () => {
+    throw new Error("auth/user-not-found");
+  }],
+  ["Auth error resembling the completion sentinel", () => {
+    throw Object.assign(new Error("synthetic foreign sentinel"),
+        {code: "ACCOUNT_CLEANUP_COMPLETE"});
+  }],
+]) {
+  test(`P1 absence recheck: ${label} rejects without recursive deletion or subsequent cleaners`, async () => {
+    const {db} = await p1Fixture();
+    const guard = db.data(guardPath);
+    let lookups = 0;
+    let atRecheck;
+    db.authHook = (owner) => {
+      assert.equal(owner, uid);
+      if (++lookups === 2) {
+        atRecheck = recheckSnapshot(db);
+        db.authUser = result();
+      }
+    };
+    await withoutErrorLog(() => assert.rejects(c1Delete(),
+        {message: "USER_DATA_CLEANUP_FAILED"}));
+    assert.equal(lookups, 2, "Refusal must occur at the new Auth query");
+    assert.deepEqual(db.recursiveDeletes, []);
+    assertRecheckStopped(db, atRecheck, guard);
+  });
+}
+
+test("P1 absence recheck: a pending lookup cannot start private deletion, and a later timeout rejects", {timeout: 5000}, async (t) => {
+  const {db} = await p1Fixture();
+  const guard = db.data(guardPath);
+  const hold = p1Gate();
+  t.after(hold.release);
+  let lookups = 0;
+  let atRecheck;
+  db.authHook = async () => {
+    if (++lookups === 2) {
+      atRecheck = recheckSnapshot(db);
+      await hold.pause();
+      throw Object.assign(new Error("synthetic delayed timeout"),
+          {code: "ETIMEDOUT"});
+    }
+  };
+  await withoutErrorLog(async () => {
+    const execution = c1Delete().then(() => ({ok: true}), (error) => ({error}));
+    await Promise.race([hold.reached, execution.then(() =>
+      assert.fail("Callback did not await the new Auth lookup"))]);
+    assert.deepEqual(db.recursiveDeletes, []);
+    assertRecheckStopped(db, atRecheck, guard);
+    hold.release();
+    const outcome = await execution;
+    assert.equal(outcome.ok, undefined);
+    assert.equal(outcome.error.message, "USER_DATA_CLEANUP_FAILED");
+  });
+  assert.equal(lookups, 2);
+  assertRecheckStopped(db, atRecheck, guard);
+});
+
+test("P1 absence recheck: same-event retry retains the original UID and deletion scope", async (t) => {
+  const {db} = await p1Fixture();
+  const guard = db.data(guardPath);
+  const birth = require("../birth_ledger_cleanup");
+  const originalPrepare = birth.prepare;
+  const scopes = [];
+  t.mock.method(birth, "prepare", async (...args) => {
+    const admission = await originalPrepare(...args);
+    scopes.push({uid: args[1].uid, context: {...args[2]},
+      bound: admission.bound, guard: admission.guard});
+    return admission;
+  });
+  let lookups = 0;
+  db.authHook = (owner) => {
+    assert.equal(owner, uid);
+    if (++lookups === 2) {
+      throw Object.assign(new Error("synthetic unavailable"),
+          {code: "auth/internal-error"});
+    }
+  };
+  await withoutErrorLog(() => assert.rejects(c1Delete(),
+      {message: "USER_DATA_CLEANUP_FAILED"}));
+  assert.deepEqual(db.data(guardPath), guard);
+  assert.deepEqual(db.recursiveDeletes, []);
+  p1AssertOtherAndDeny(db);
+  await c1Delete();
+  assert.equal(lookups, 4);
+  assert.equal(scopes.length, 2);
+  assert.deepEqual(scopes[1], scopes[0]);
+  assert.equal(scopes[0].uid, uid);
+  assert.equal(scopes[0].context.eventId, "synthetic-delete-c1");
+  assert.equal(db.data(guardPath).deletionId, guard.deletionId);
+  assert.ok(db.data(guardPath).startedAt.isEqual(guard.startedAt));
+  assert.equal(db.data(guardPath).state, "COMPLETE");
+  assert.deepEqual(db.recursiveDeletes, [rootPath]);
+  p1AssertOtherAndDeny(db);
+});
+
+test("P1 absence recheck: Auth reappearing before the new query preserves the recreated private tree", async () => {
+  const {db} = await p1Fixture();
+  const guard = db.data(guardPath);
+  let lookups = 0;
+  let recreated;
+  db.authHook = () => {
+    if (++lookups === 2) {
+      // Matching metadata/claims are deliberately not continuity evidence.
+      db.authUser = {uid, metadata: {creationTime: c1Born.toDate().toUTCString()},
+        customClaims: {syntheticCopiedClaim: true}};
+      db.seed(rootPath, {activeCircleId: null, syntheticRecreatedAccount: true});
+      db.seed(`${rootPath}/notes/recreated-private`, {syntheticPrivate: true});
+      recreated = recheckSnapshot(db);
+    }
+  };
+  await withoutErrorLog(() => assert.rejects(c1Delete(),
+      {message: "USER_DATA_CLEANUP_FAILED"}));
+  assert.equal(lookups, 2);
+  assert.deepEqual(db.recursiveDeletes, []);
+  assert.deepEqual(db.data(`${rootPath}/notes/recreated-private`),
+      {syntheticPrivate: true});
+  assertRecheckStopped(db, recreated, guard);
+});
+
+test("P1 absence recheck: not-found from recursive deletion is not Auth absence or success", async (t) => {
+  const {db, authLookups} = await p1Fixture();
+  const guard = db.data(guardPath);
+  let beforeDelete;
+  t.mock.method(db, "recursiveDelete", async (ref) => {
+    assert.equal(ref.path, rootPath);
+    beforeDelete = recheckSnapshot(db);
+    throw Object.assign(new Error("synthetic storage not found"),
+        {code: "auth/user-not-found"});
+  });
+  await withoutErrorLog(() => assert.rejects(c1Delete(),
+      {message: "USER_DATA_CLEANUP_FAILED"}));
+  assert.equal(authLookups(), 2);
+  assertRecheckStopped(db, beforeDelete, guard);
+});
+
+// The original P1 RED "before recursive delete" test remains unchanged above.
+// Its pause is inside recursiveDelete, after this new query has completed:
+// it records the remaining race without asserting an atomic Auth/data fence.

@@ -561,6 +561,17 @@ exports.cleanupUserData = functions
           await circleCleanup.requireGuard(transaction, db, uid, guard);
           await circleCleanup.assertEmpty(transaction, db, uid);
         });
+        // Defense in depth only: earlier Billing/Circle effects already ran.
+        // Auth may reappear after this lookup; this is not an atomic fence.
+        const auth = admin.auth();
+        let authAbsent = false;
+        try {
+          await auth.getUser(uid);
+        } catch (error) {
+          authAbsent = !!error && error.code === "auth/user-not-found";
+        }
+        // Normalize unsafe Auth results; never adopt a completion sentinel.
+        if (!authAbsent) throw new Error("AUTH_ABSENCE_RECHECK_FAILED");
         await db.recursiveDelete(userRef);
         await finalizeBillingDeletionBarrier(cleanupDb, uid, billingCleanup);
         await birthCleanup.finish(db, admission);
