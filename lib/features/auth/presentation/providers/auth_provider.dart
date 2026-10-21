@@ -51,6 +51,7 @@ import 'package:life_os/features/auth/presentation/providers/auth_state.dart';
 import 'package:life_os/core/storage/secure_storage_service.dart';
 import 'package:life_os/core/database/database_provider.dart';
 import 'package:life_os/core/database/local_mutation_gate.dart';
+import 'package:life_os/core/services/water_v2_provider.dart';
 import 'package:life_os/core/database/session_database_coordinator.dart';
 
 // Providers de infraestrutura
@@ -1604,6 +1605,7 @@ class AuthNotifier extends Notifier<AuthState> {
       throw StateError('LOCAL_DATA_ISOLATION_FAILED');
     }
     if (cleanupUserId != null) {
+      _invalidateLocalDataStreams();
       await _databases.detach(expectedUid: cleanupUserId);
     }
   }
@@ -1689,8 +1691,9 @@ class AuthNotifier extends Notifier<AuthState> {
     }
   }
 
-  void _invalidateSessionProviders() {
-    ref.read(notificationBootstrapCoordinatorProvider).reset();
+  // Cancel paused consumers before Drift waits for their done events on close.
+  // Durable cleanup and session fences remain in force until detach completes.
+  void _invalidateLocalDataStreams() {
     ref.invalidate(notificationEngineProvider);
     ref.invalidate(financeStreamProvider);
     ref.invalidate(tasksStreamProvider);
@@ -1703,6 +1706,13 @@ class AuthNotifier extends Notifier<AuthState> {
     ref.invalidate(studyStreamProvider);
     ref.invalidate(subjectsStreamProvider);
     ref.invalidate(flashcardStreamProvider);
+    ref.invalidate(waterGoalProvider);
+    ref.invalidate(waterAdmissionProvider);
+  }
+
+  void _invalidateSessionProviders() {
+    ref.read(notificationBootstrapCoordinatorProvider).reset();
+    _invalidateLocalDataStreams();
     ref.invalidate(focusProvider);
     ref.invalidate(circlesProvider);
     ref.invalidate(aiCompanionProvider);

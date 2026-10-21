@@ -1,3 +1,6 @@
+import 'package:flutter_riverpod/misc.dart' show ProviderException;
+import 'package:life_os/core/database/remote_send_permit.dart';
+import 'package:life_os/features/health/presentation/providers/health_provider.dart';
 import 'dart:convert';
 import 'dart:async';
 import 'package:life_os/core/database/session_database_coordinator.dart';
@@ -205,12 +208,14 @@ class _ScriptedFirestore extends Fake implements FirebaseFirestore {
 
   final List<Object?> _clearResults;
   final List<Object?> _terminateResults;
+  Future<void> Function()? beforeClear;
   int clearPersistenceCalls = 0;
   int terminateCalls = 0;
 
   @override
   Future<void> clearPersistence() async {
     clearPersistenceCalls += 1;
+    await beforeClear?.call();
     final result = _clearResults.isEmpty ? null : _clearResults.removeAt(0);
     if (result != null) throw result;
   }
@@ -827,6 +832,7 @@ class _Harness {
     Future<void> Function(AppDatabase)? seedBeforeAuth,
     Future<void> Function(TestUserDatabaseFactory)? seedDatabasesBeforeAuth,
     bool restoreCycleSchedules = false,
+    bool localNotificationStream = false,
     _MemoryBarrierStorage? deletionBarrierStorage,
     Future<void> Function(File)? deleteFile,
     Future<void> Function(String)? deleteActionToken,
@@ -984,6 +990,15 @@ class _Harness {
         if (notificationEffects != null)
           notificationRemoteEffectsBarrierProvider.overrideWithValue(
             notificationEffects,
+          ),
+        if (localNotificationStream)
+          notificationsRepositoryProvider.overrideWith(
+            (ref) => NotificationsRepository(
+              firestore: localFirestore,
+              auth: auth,
+              localDao: ref.watch(databaseProvider).notificationDao,
+              remoteEffects: ref.read(notificationRemoteEffectsBarrierProvider),
+            ),
           ),
         if (bootstrapCoordinator != null)
           notificationBootstrapCoordinatorProvider.overrideWithValue(
@@ -1169,8 +1184,434 @@ Future<void> seedPendingLocalChange(AppDatabase db) async {
   );
 }
 
+Future<String> _r4StoredSnapshot(_Harness harness) async {
+  final db = harness.databaseFactory.inspectClosed(_userA.uid, () => null);
+  return jsonEncode({
+    'tasks': (await db.select(db.taskTable).get())
+        .map((r) => r.toJson())
+        .toList(),
+    'queue': (await db.select(db.syncQueueTable).get())
+        .map((r) => r.toJson())
+        .toList(),
+  });
+}
+
+Object _r5RootError(Object error) {
+  while (error is ProviderException) {
+    error = error.exception;
+  }
+  return error;
+}
+
+class _R5CompletedNotificationBootstrap
+    extends NotificationBootstrapCoordinator {
+  @override
+  Future<void> ensureBootstrapped({
+    required String uid,
+    required DateTime now,
+    required Future<void> Function() bootstrap,
+  }) async {}
+}
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+
+  for (final queueStatus in ['none', 'pending', 'succeeded']) {
+    test(
+      'R4 paused Drift consumer permits durable logout ($queueStatus)',
+      () async {
+        final harness = await _Harness.create(
+          [0, 0],
+          seedBeforeAuth: (db) async {
+            await seedSessionRows(db, _userA.uid);
+            if (queueStatus != 'none') {
+              await seedPendingLocalChange(db);
+              if (queueStatus == 'succeeded') {
+                await db.customUpdate(
+                  "UPDATE sync_queue_table SET status = 'succeeded'",
+                );
+              }
+            }
+          },
+        );
+        addTearDown(harness.dispose);
+        final db = harness.database;
+        final beforeTasks = (await db.select(db.taskTable).get())
+            .map((r) => r.toJson())
+            .toList();
+        final beforeQueue = (await db.select(db.syncQueueTable).get())
+            .map((r) => r.toJson())
+            .toList();
+        final subscription = harness.container.listen(
+          medicationsStreamProvider,
+          (_, _) {},
+        );
+        await harness.container.read(medicationsStreamProvider.future);
+        subscription.pause();
+        await Future<void>.delayed(Duration.zero);
+        final logout = harness.notifier.logout();
+        try {
+          final completed = await logout
+              .then((_) => true)
+              .timeout(const Duration(seconds: 2), onTimeout: () => false);
+          expect(
+            completed,
+            isTrue,
+            reason: 'Paused Drift stream must not deadlock detach',
+          );
+          expect(harness.state, isA<AuthUnauthenticated>());
+          expect(harness.auth.currentUser, isNull);
+          expect(await harness.readPendingCleanup(), isNull);
+          expect(
+            harness.container
+                .read(sessionDatabaseCoordinatorProvider)
+                .attachedDatabase,
+            isNull,
+          );
+          await expectLater(
+            Future.sync(() => db.select(db.taskTable).get()),
+            throwsA(isA<LocalMutationUnavailable>()),
+          );
+          final preserved = harness.databaseFactory.inspect(_userA.uid);
+          expect(
+            (await preserved.select(preserved.taskTable).get())
+                .map((r) => r.toJson())
+                .toList(),
+            beforeTasks,
+          );
+          expect(
+            (await preserved.select(preserved.syncQueueTable).get())
+                .map((r) => r.toJson())
+                .toList(),
+            beforeQueue,
+          );
+        } finally {
+          subscription.resume();
+          subscription.close();
+          await logout;
+        }
+      },
+    );
+  }
+
+  test(
+    'R4 signOut plus delayed local cleanup retains fence under listener events',
+    () async {
+      final harness = await _Harness.create(
+        [0],
+        analyticsService: AnalyticsService(
+          platform: RecordingAnalyticsPlatform(),
+        ),
+        seedBeforeAuth: seedPendingLocalChange,
+      );
+      addTearDown(harness.dispose);
+      final before = await _r4StoredSnapshot(harness);
+      final entered = Completer<void>(), release = Completer<void>();
+      harness.firestore.beforeClear = () {
+        if (!entered.isCompleted) entered.complete();
+        return release.future;
+      };
+      final logout = harness.notifier.logout();
+      await entered.future;
+      try {
+        expect(harness.auth.currentUser, isNull);
+        expect(harness.state, isA<AuthLoading>());
+        expect((await harness.readPendingCleanup())?.requiresSignOut, isTrue);
+        expect(
+          authRedirectFor(
+            authState: harness.state,
+            hasFirebaseUser: false,
+            location: '/health',
+          ),
+          '/splash',
+        );
+        harness.auth.emit(null);
+        harness.auth.emit(null);
+        await Future<void>.delayed(Duration.zero);
+        expect(harness.repository.signOutCalls, 1);
+        expect(harness.state, isA<AuthLoading>());
+        expect(await _r4StoredSnapshot(harness), before);
+        expect(
+          () => harness.container
+              .read(sessionDatabaseCoordinatorProvider)
+              .requirePrepared(),
+          throwsA(isA<SessionDatabaseUnavailable>()),
+        );
+      } finally {
+        release.complete();
+        await logout;
+      }
+      expect(harness.state, isA<AuthUnauthenticated>());
+      expect(await harness.readPendingCleanup(), isNull);
+      expect(await _r4StoredSnapshot(harness), before);
+    },
+  );
+
+  test(
+    'R4 failed isolation blocks new login and recovers without deleting rows',
+    () async {
+      final harness = await _Harness.create(
+        [0, 0, 0],
+        analyticsService: AnalyticsService(
+          platform: RecordingAnalyticsPlatform(),
+        ),
+        seedBeforeAuth: seedPendingLocalChange,
+      );
+      addTearDown(harness.dispose);
+      final before = await _r4StoredSnapshot(harness);
+      harness.firestore.beforeClear = () async =>
+          throw StateError('synthetic cleanup failure');
+      await harness.notifier.logout();
+      expect(harness.state, isA<AuthError>());
+      expect(harness.auth.currentUser, isNull);
+      final marker = await harness.readPendingCleanup();
+      expect(marker?.requiresSignOut, isTrue);
+      await harness.notifier.login(_userB.email, 'synthetic-only');
+      expect(harness.state, isA<AuthError>());
+      expect(harness.auth.currentUser, isNull);
+      expect(
+        harness.databaseFactory.openedUserIds,
+        isNot(contains(_userB.uid)),
+      );
+      expect(await harness.readPendingCleanup(), marker);
+      expect(await _r4StoredSnapshot(harness), before);
+      harness.firestore.beforeClear = null;
+      await harness.notifier.logout();
+      expect(harness.state, isA<AuthUnauthenticated>());
+      expect(await harness.readPendingCleanup(), isNull);
+      expect(await _r4StoredSnapshot(harness), before);
+    },
+  );
+
+  test(
+    'R4 restart recovers durable cleanup before admitting preserved database',
+    () async {
+      final storage = _MemoryBarrierStorage();
+      final first = await _Harness.create(
+        [0],
+        barrierStorage: storage,
+        analyticsService: AnalyticsService(
+          platform: RecordingAnalyticsPlatform(),
+        ),
+        seedBeforeAuth: seedPendingLocalChange,
+      );
+      final before = await _r4StoredSnapshot(first);
+      first.firestore.beforeClear = () async =>
+          throw StateError('synthetic interruption');
+      await first.notifier.logout();
+      expect(first.state, isA<AuthError>());
+      expect((await first.readPendingCleanup())?.requiresSignOut, isTrue);
+      expect(await _r4StoredSnapshot(first), before);
+      final coordinator = first.container.read(
+        sessionDatabaseCoordinatorProvider,
+      );
+      first.container.dispose();
+      await coordinator.dispose();
+      final file = LocalDatabaseIdentity(
+        _userA.uid,
+      ).fileIn(first.databaseFactory.directory);
+      final bytes = await file.readAsBytes();
+      await first.databaseFactory.dispose();
+      await first.auth.close();
+      final second = await _Harness.create(
+        [0],
+        barrierStorage: storage,
+        analyticsService: AnalyticsService(
+          platform: RecordingAnalyticsPlatform(),
+        ),
+        firebaseUserId: null,
+        waitForAuthentication: false,
+        seedDatabasesBeforeAuth: (factory) async {
+          await LocalDatabaseIdentity(
+            _userA.uid,
+          ).fileIn(factory.directory).writeAsBytes(bytes);
+        },
+      );
+      addTearDown(second.dispose);
+      await second.notifier.checkCurrentUser();
+      expect(await second.readPendingCleanup(), isNull);
+      expect(second.state, isA<AuthUnauthenticated>());
+      expect(second.databaseFactory.openedUserIds, isEmpty);
+      expect(await _r4StoredSnapshot(second), before);
+      await second.notifier.login(_userA.email, 'synthetic-only');
+      expect(second.state, isA<AuthAuthenticated>());
+      expect((second.state as AuthAuthenticated).user.uid, _userA.uid);
+      expect(await _r4StoredSnapshot(second), before);
+    },
+  );
+
+  test(
+    'R4 A B A preserves pending queue and invalidates old producers',
+    () async {
+      final harness = await _Harness.create(
+        [0, 0, 0],
+        analyticsService: AnalyticsService(
+          platform: RecordingAnalyticsPlatform(),
+        ),
+        seedBeforeAuth: seedPendingLocalChange,
+      );
+      addTearDown(harness.dispose);
+      final before = await _r4StoredSnapshot(harness);
+      final oldDb = harness.container.read(databaseProvider);
+      final oldSend = oldDb.localMutations.captureRemoteSend(
+        expectedUid: _userA.uid,
+      );
+      await harness.notifier.logout();
+      expect(harness.state, isA<AuthUnauthenticated>());
+      expect(await _r4StoredSnapshot(harness), before);
+      await harness.notifier.login(_userB.email, 'synthetic-only');
+      expect((harness.state as AuthAuthenticated).user.uid, _userB.uid);
+      final b = harness.container.read(databaseProvider);
+      expect(b.identity?.uid, _userB.uid);
+      expect(await b.select(b.taskTable).get(), isEmpty);
+      expect(await b.select(b.syncQueueTable).get(), isEmpty);
+      expect(
+        () => oldSend.requireCurrent(),
+        throwsA(isA<RemoteSessionStopped>()),
+      );
+      await expectLater(
+        Future.sync(() => oldDb.select(oldDb.taskTable).get()),
+        throwsA(isA<LocalMutationUnavailable>()),
+      );
+      expect(await _r4StoredSnapshot(harness), before);
+      await harness.notifier.logout();
+      expect(harness.state, isA<AuthUnauthenticated>());
+      await harness.notifier.login(_userA.email, 'synthetic-only');
+      expect((harness.state as AuthAuthenticated).user.uid, _userA.uid);
+      expect(await _r4StoredSnapshot(harness), before);
+      expect(await harness.readPendingCleanup(), isNull);
+    },
+  );
+
+  test(
+    'R5 paused notification engine cannot hold logout after signOut',
+    () async {
+      final harness = await _Harness.create(
+        [0],
+        localNotificationStream: true,
+        bootstrapCoordinator: _R5CompletedNotificationBootstrap(),
+        seedBeforeAuth: (db) async {
+          await seedSessionRows(db, _userA.uid);
+          await seedPendingLocalChange(db);
+        },
+      );
+      addTearDown(harness.dispose);
+      final before = await _r4StoredSnapshot(harness);
+      final notification =
+          (await harness.database
+                  .select(harness.database.notificationsTable)
+                  .get())
+              .single
+              .toJson();
+      final subscription = harness.container.listen(
+        notificationEngineProvider,
+        (_, _) {},
+      );
+      await harness.container.read(notificationEngineProvider.future);
+      subscription.pause();
+      await Future<void>.delayed(Duration.zero);
+      final logout = harness.notifier.logout();
+      try {
+        final completed = await logout
+            .then((_) => true)
+            .timeout(const Duration(seconds: 2), onTimeout: () => false);
+        expect(
+          completed,
+          isTrue,
+          reason:
+              'NotificationEngine Drift stream must be cancelled before detach',
+        );
+        expect(harness.state, isA<AuthUnauthenticated>());
+        expect(harness.auth.currentUser, isNull);
+        expect(await harness.readPendingCleanup(), isNull);
+        expect(
+          harness.container
+              .read(sessionDatabaseCoordinatorProvider)
+              .attachedDatabase,
+          isNull,
+        );
+        expect(await _r4StoredSnapshot(harness), before);
+        final preserved = harness.databaseFactory.inspectClosed(
+          _userA.uid,
+          () => null,
+        );
+        expect(
+          (await preserved.select(preserved.notificationsTable).get()).single
+              .toJson(),
+          notification,
+        );
+      } finally {
+        subscription.resume();
+        subscription.close();
+        await logout;
+      }
+    },
+  );
+
+  test(
+    'R5 observed and late consumers fail closed during cleanup and detach',
+    () async {
+      final harness = await _Harness.create([
+        0,
+      ], seedBeforeAuth: seedPendingLocalChange);
+      addTearDown(harness.dispose);
+      final before = await _r4StoredSnapshot(harness);
+      final oldDb = harness.container.read(databaseProvider);
+      final opens = List.of(harness.databaseFactory.openedUserIds);
+      final observed = harness.container.listen(
+        medicationsStreamProvider,
+        (_, _) {},
+      );
+      await harness.container.read(medicationsStreamProvider.future);
+      final entered = Completer<void>(), release = Completer<void>();
+      harness.firestore.beforeClear = () {
+        if (!entered.isCompleted) entered.complete();
+        return release.future;
+      };
+      final logout = harness.notifier.logout();
+      await entered.future;
+      try {
+        expect(harness.state, isA<AuthLoading>());
+        expect(harness.auth.currentUser, isNull);
+        expect((await harness.readPendingCleanup())?.requiresSignOut, isTrue);
+        harness.container.invalidate(medicationsStreamProvider);
+        await expectLater(
+          harness.container.read(medicationsStreamProvider.future),
+          throwsA(
+            predicate<Object>(
+              (error) => _r5RootError(error) is SessionDatabaseUnavailable,
+              'session database unavailable',
+            ),
+          ),
+        );
+        expect(
+          () => harness.container
+              .read(sessionDatabaseCoordinatorProvider)
+              .requirePrepared(),
+          throwsA(isA<SessionDatabaseUnavailable>()),
+        );
+        await expectLater(
+          Future.sync(() => oldDb.select(oldDb.taskTable).get()),
+          throwsA(isA<LocalMutationUnavailable>()),
+        );
+        expect(harness.databaseFactory.openedUserIds, opens);
+        expect(await _r4StoredSnapshot(harness), before);
+      } finally {
+        release.complete();
+        await logout;
+        observed.close();
+      }
+      expect(harness.state, isA<AuthUnauthenticated>());
+      expect(await harness.readPendingCleanup(), isNull);
+      expect(
+        harness.container
+            .read(sessionDatabaseCoordinatorProvider)
+            .attachedDatabase,
+        isNull,
+      );
+      expect(await _r4StoredSnapshot(harness), before);
+    },
+  );
 
   for (final abort in [false, true]) {
     test(
