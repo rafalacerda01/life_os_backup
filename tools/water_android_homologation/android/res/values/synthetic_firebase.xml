@@ -1,0 +1,7 @@
+<resources>
+  <!-- Deliberately synthetic; not a Firebase credential or real app config. -->
+  <string name="google_app_id" translatable="false">1:123456789012:android:00000000000000000000000000000000</string>
+  <string name="google_api_key" translatable="false">AIzaSyAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA</string>
+  <string name="project_id" translatable="false">demo-life-os</string>
+  <string name="gcm_defaultSenderId" translatable="false">123456789012</string>
+</resources>

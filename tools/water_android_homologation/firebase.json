@@ -1,0 +1,15 @@
+{
+  "functions": [{"source": "functions", "codebase": "water-demo-only", "runtime": "nodejs22"}],
+  "firestore": {"rules": "emulator.rules"},
+  "emulators": {
+    "auth": {"host": "127.0.0.1", "port": 9099},
+    "firestore": {"host": "127.0.0.1", "port": 8089, "websocketPort": 9159},
+    "functions": {"host": "127.0.0.1", "port": 5009},
+    "hub": {"host": "127.0.0.1", "port": 4409},
+    "logging": {"host": "127.0.0.1", "port": 4509},
+    "eventarc": {"host": "127.0.0.1", "port": 9299},
+    "tasks": {"host": "127.0.0.1", "port": 9499},
+    "ui": {"enabled": false},
+    "singleProjectMode": true
+  }
+}

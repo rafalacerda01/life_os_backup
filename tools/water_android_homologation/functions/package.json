@@ -1,0 +1,7 @@
+{
+  "name": "life-os-water-debug-birth-only",
+  "private": true,
+  "main": "index.cjs",
+  "engines": {"node": "22"},
+  "dependencies": {"firebase-admin": "14.2.0", "firebase-functions": "7.0.0"}
+}

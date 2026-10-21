@@ -1,0 +1,7 @@
+functions/node_modules/
+functions/.env.local
+emulator.rules
+firebase-debug.log
+firestore-debug.log
+ui-debug.log
+database-debug.log

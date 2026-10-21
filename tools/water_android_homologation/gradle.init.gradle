@@ -1,0 +1,29 @@
+// Explicit opt-in only: gradlew -I ../tools/water_android_homologation/gradle.init.gradle
+gradle.beforeProject { p ->
+    if (p.path != ':app') return
+    p.plugins.withId('com.android.application') {
+        def source = new File(p.rootProject.projectDir, '../tools/water_android_homologation').canonicalFile
+        p.android.flavorDimensions += 'isolatedTest'
+        p.android.productFlavors.create('waterHomologation') {
+            dimension = 'isolatedTest'
+            applicationIdSuffix = '.waterhomologation'
+            versionNameSuffix = '-isolated'
+        }
+        p.android.sourceSets.getByName('waterHomologation') {
+            manifest.srcFile new File(source, 'android/AndroidManifest.xml')
+            java.srcDir new File(source, 'android/java')
+            res.srcDir new File(source, 'android/res')
+        }
+        // Already installed transitively by FlutterFire. Native pinning needs
+        // compile visibility; versions remain those of the existing fixed BOM.
+        p.dependencies.add('waterHomologationImplementation', 'com.google.firebase:firebase-auth')
+        p.dependencies.add('waterHomologationImplementation', 'com.google.firebase:firebase-firestore')
+        p.androidComponents.beforeVariants(p.androidComponents.selector().all()) { variant ->
+            if (variant.buildType != 'debug') variant.enable = false
+        }
+        // No google-services.json is processed for this synthetic variant.
+        p.tasks.configureEach { task ->
+            if (task.name == 'processWaterHomologationDebugGoogleServices') task.enabled = false
+        }
+    }
+}
