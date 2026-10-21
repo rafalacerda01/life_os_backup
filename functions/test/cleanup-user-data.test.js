@@ -52,6 +52,30 @@ const accountHash = createHash("sha256").update(uid, "utf8").digest("hex");
 const billingAccountPath = `billing_google_accounts/${accountHash}`;
 const billingTokenPath = (id) => `billing_google_tokens/${id}`;
 
+test("P1 runtime identity: v1 onDelete and retry stay unchanged", () => {
+  const baseline = require("firebase-functions/v1")
+      .runWith({failurePolicy: true})
+      .auth.user().onDelete(async () => {});
+  const account =
+    "life-os-cleanup-runtime@life-os-27b92.iam.gserviceaccount.com";
+  const actualEndpoint = {...cleanupUserData.__endpoint};
+  const originalEndpoint = {...baseline.__endpoint};
+  const actualTrigger = {...cleanupUserData.__trigger};
+  const originalTrigger = {...baseline.__trigger};
+  assert.equal(actualEndpoint.platform, "gcfv1");
+  assert.equal(actualEndpoint.serviceAccountEmail, account);
+  assert.equal(actualTrigger.serviceAccountEmail, account);
+  assert.equal(typeof managedCleanupRun, "function");
+  assert.equal(require("../package.json").engines.node, "22");
+  delete actualEndpoint.serviceAccountEmail;
+  delete originalEndpoint.serviceAccountEmail;
+  delete actualTrigger.serviceAccountEmail;
+  delete originalTrigger.serviceAccountEmail;
+  // Compare real SDK metadata, including event, retry and region defaults.
+  assert.deepEqual(actualEndpoint, originalEndpoint);
+  assert.deepEqual(actualTrigger, originalTrigger);
+});
+
 /** Referencia fake de documento. */
 class FakeDocumentReference {
   /**

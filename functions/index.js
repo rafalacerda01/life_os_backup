@@ -530,6 +530,8 @@ async function cleanupExternalCircleData(db, uid, userSnapshot) {
 
 exports.cleanupUserData = functions
     .runWith({
+      serviceAccount:
+        "life-os-cleanup-runtime@life-os-27b92.iam.gserviceaccount.com",
       failurePolicy: true,
     })
     .auth.user().onDelete(async (user, context) => {
