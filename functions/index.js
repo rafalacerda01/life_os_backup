@@ -20,6 +20,8 @@ const BILLING_TOKEN_DELETE_PAGE_SIZE = 100;
 // Inicializa o Admin SDK
 admin.initializeApp();
 
+exports.recordWaterBirth = require("./water_birth_runtime").trigger;
+
 /**
  * Gera o identificador server-only da conta de billing.
  * @param {string} value Valor a resumir.

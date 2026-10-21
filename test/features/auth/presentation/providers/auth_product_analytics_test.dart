@@ -64,6 +64,13 @@ class _FirebaseUser extends Fake implements User {
 class _FirebaseAuth extends Fake implements FirebaseAuth {
   final StreamController<User?> _changes = StreamController<User?>.broadcast();
   User? user;
+  int signOutCalls = 0;
+
+  @override
+  Future<void> signOut() async {
+    signOutCalls++;
+    user = null;
+  }
 
   @override
   User? get currentUser => user;
@@ -92,9 +99,14 @@ class _AuthRepository extends Fake implements AuthRepository {
   Result<void, Failure> passwordResetResult = const Success(null);
   int passwordResetCalls = 0;
   final firstCurrentUserRead = Completer<void>();
+  int currentUserCalls = 0;
+  int loginCalls = 0;
+  int registrationCalls = 0;
+  int googleCalls = 0;
 
   @override
   Future<Result<UserEntity, Failure>> getCurrentUser() {
+    currentUserCalls++;
     if (!firstCurrentUserRead.isCompleted) firstCurrentUserRead.complete();
     final pendingResult = pendingCurrentUserResult;
     if (pendingResult != null) {
@@ -117,6 +129,7 @@ class _AuthRepository extends Fake implements AuthRepository {
     String email,
     String password,
   ) async {
+    loginCalls++;
     final pendingResult = pendingLoginResult;
     if (pendingResult != null) {
       pendingLoginResult = null;
@@ -133,6 +146,7 @@ class _AuthRepository extends Fake implements AuthRepository {
     String password,
     String name,
   ) async {
+    registrationCalls++;
     final pendingResult = pendingRegistrationResult;
     if (pendingResult != null) {
       pendingRegistrationResult = null;
@@ -147,6 +161,7 @@ class _AuthRepository extends Fake implements AuthRepository {
 
   @override
   Future<Result<UserEntity, Failure>> signInWithGoogle() async {
+    googleCalls++;
     final pendingResult = pendingGoogleResult;
     if (pendingResult != null) {
       pendingGoogleResult = null;
@@ -288,6 +303,109 @@ _Harness _harness({bool restoreSession = false}) {
 }
 
 void main() {
+  const pending = AuthFailure(
+    'A conta foi autenticada. Seu perfil ainda está sendo preparado. Tente entrar novamente em instantes.',
+    code: 'WATER_PROVISIONING_PENDING',
+  );
+  for (final flow in ['email registration', 'email login', 'Google']) {
+    test(
+      'Water pending $flow preserves session and data until explicit resume',
+      () async {
+        final harness = _harness();
+        final notifier = await harness.startNotifier();
+        harness.auth.user = _FirebaseUser(_user);
+        final db = harness.databaseFactory.inspect(_user.uid);
+        // Use the real durable V1 queue, including its exact JSON and retry state.
+        await db.customStatement(
+          'INSERT INTO sync_queue_table '
+          '(owner_uid, collection, doc_id, operation_type, payload_json, '
+          'created_at, status, attempt_count, last_error_code) '
+          'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+          [
+            _user.uid,
+            'health_info',
+            '2026-10-21',
+            'update',
+            ' { "waterIntakeMl" : 650, "nota" : "água" } \r\n',
+            1234,
+            'pending',
+            2,
+            'NETWORK_ERROR',
+          ],
+        );
+        Future<List<Map<String, Object?>>> queue() async => [
+          for (final row
+              in await db
+                  .customSelect('SELECT * FROM sync_queue_table ORDER BY id')
+                  .get())
+            row.data,
+        ];
+        final savedQueue = await queue();
+        final beforeReads = harness.repository.currentUserCalls;
+        harness.repository.currentUserResults.add(const Error(pending));
+        final result = Completer<Result<UserEntity, Failure>>();
+        late Future<void> operation;
+        if (flow == 'email registration') {
+          harness.repository.pendingRegistrationResult = result;
+          operation = notifier.register(
+            'user@example.invalid',
+            'password',
+            'User',
+          );
+        } else if (flow == 'email login') {
+          harness.repository.pendingLoginResult = result;
+          operation = notifier.login('user@example.invalid', 'password');
+        } else {
+          harness.repository.pendingGoogleResult = result;
+          operation = notifier.signInWithGoogle();
+        }
+        result.complete(const Error(pending));
+        await operation;
+        await pumpEventQueue(times: 20);
+        final state = harness.state as AuthError;
+        expect(state.code, pending.code);
+        expect(state.message, pending.message);
+        expect(state.scope, AuthErrorScope.protectedSession);
+        expect(harness.auth.currentUser?.uid, _user.uid);
+        expect(harness.auth.signOutCalls, 0);
+        expect(harness.repository.currentUserCalls, beforeReads);
+        expect(harness.syncManager.processedUserIds, isEmpty);
+        expect(harness.analytics.events, isEmpty);
+        expect(await queue(), savedQueue);
+        // A user-requested retry can still be pending, without new registration.
+        await notifier.checkCurrentUser();
+        expect((harness.state as AuthError).code, pending.code);
+        expect(harness.repository.currentUserCalls, beforeReads + 1);
+        harness.repository.currentUserResults.add(const Success(_user));
+        await notifier.checkCurrentUser();
+        expect(harness.state, isA<AuthAuthenticated>());
+        expect(harness.auth.currentUser?.uid, _user.uid);
+        expect(harness.auth.signOutCalls, 0);
+        expect(
+          harness.repository.registrationCalls,
+          flow == 'email registration' ? 1 : 0,
+        );
+        expect(harness.repository.loginCalls, flow == 'email login' ? 1 : 0);
+        expect(harness.repository.googleCalls, flow == 'Google' ? 1 : 0);
+        expect(await queue(), savedQueue);
+      },
+    );
+  }
+
+  test(
+    'Water pending code survives reconciliation of a different entry failure',
+    () async {
+      final harness = _harness();
+      final notifier = await harness.startNotifier();
+      harness.auth.user = _FirebaseUser(_user);
+      harness.repository.failLogin = true;
+      harness.repository.currentUserResults.add(const Error(pending));
+      await notifier.login('user@example.invalid', 'password');
+      expect((harness.state as AuthError).code, pending.code);
+      expect(harness.auth.signOutCalls, 0);
+    },
+  );
+
   test('explicit email login records exactly one event', () async {
     final harness = _harness();
 

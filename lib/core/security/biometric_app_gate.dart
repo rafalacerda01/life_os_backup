@@ -19,6 +19,7 @@ class _BiometricAppGateState extends ConsumerState<BiometricAppGate>
     with WidgetsBindingObserver {
   bool _authenticationRequestScheduled = false;
   bool _signOutInProgress = false;
+  bool _profileResumeInProgress = false;
   bool _sessionWasAuthenticated = false;
   bool _lifecycleLocked = false;
   bool _wasContentEligible = false;
@@ -131,6 +132,21 @@ class _BiometricAppGateState extends ConsumerState<BiometricAppGate>
     }
   }
 
+  Future<void> _resumeProfile() async {
+    if (_profileResumeInProgress || _signOutInProgress) return;
+    final state = ref.read(authNotifierProvider);
+    if (state is! AuthError ||
+        state.code != 'WATER_PROVISIONING_PENDING' ||
+        ref.read(firebaseAuthProvider).currentUser == null)
+      return;
+    setState(() => _profileResumeInProgress = true);
+    try {
+      await ref.read(authNotifierProvider.notifier).checkCurrentUser();
+    } finally {
+      if (mounted) setState(() => _profileResumeInProgress = false);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final authState = ref.watch(authNotifierProvider);
@@ -143,6 +159,70 @@ class _BiometricAppGateState extends ConsumerState<BiometricAppGate>
         biometricState.isLocked &&
         _lastBiometricStatus != BiometricLockStatus.locked;
     _lastBiometricStatus = biometricState.status;
+
+    if (authState is AuthError &&
+        authState.code == 'WATER_PROVISIONING_PENDING' &&
+        ref.read(firebaseAuthProvider).currentUser != null) {
+      return Stack(
+        children: [
+          // Keep navigation mounted without exposing entry forms or private
+          // content. Auth succeeded, but the profile grants no private access yet.
+          ExcludeFocus(
+            child: TickerMode(
+              enabled: false,
+              child: Offstage(offstage: true, child: widget.child),
+            ),
+          ),
+          Scaffold(
+            backgroundColor: const Color(0xFF070B14),
+            body: SafeArea(
+              child: Center(
+                child: SingleChildScrollView(
+                  padding: const EdgeInsets.all(32),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        'Preparando seu perfil',
+                        textAlign: TextAlign.center,
+                        style: Theme.of(context).textTheme.headlineSmall
+                            ?.copyWith(color: Colors.white),
+                      ),
+                      const SizedBox(height: 16),
+                      Text(
+                        authState.message,
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(color: Colors.white70),
+                      ),
+                      const SizedBox(height: 24),
+                      FilledButton(
+                        onPressed:
+                            _profileResumeInProgress || _signOutInProgress
+                            ? null
+                            : _resumeProfile,
+                        child: Text(
+                          _profileResumeInProgress
+                              ? 'Verificando...'
+                              : 'Retomar preparo',
+                        ),
+                      ),
+                      TextButton(
+                        onPressed: _signOutInProgress ? null : _signOut,
+                        child: Text(
+                          _signOutInProgress
+                              ? 'Encerrando sessão...'
+                              : 'Encerrar sessão',
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
+      );
+    }
 
     final deletionUnconfirmed =
         authState is AuthError &&

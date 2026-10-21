@@ -1745,7 +1745,7 @@ void main() {
       },
     );
   });
-  test('normal provider remains without an active Water V2 processor', () {
+  test('normal provider wires Water V2 while deployment remains disabled', () {
     final db = AppDatabase(executor: NativeDatabase.memory());
     addTearDown(db.close);
     final container = ProviderContainer(
@@ -1756,6 +1756,10 @@ void main() {
       ],
     );
     addTearDown(container.dispose);
-    expect(container.read(syncManagerProvider).waterV2Processor, isNull);
+    expect(container.read(syncManagerProvider).waterV2Processor, isNotNull);
+    expect(
+      container.read(syncManagerProvider).waterV2Processor!.isEnabled,
+      isFalse,
+    );
   });
 }

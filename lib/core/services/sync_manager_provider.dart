@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:life_os/core/database/database_provider.dart';
 import 'package:life_os/core/services/sync_manager.dart';
+import 'package:life_os/core/services/water_v2_provider.dart';
 import 'package:life_os/core/services/sync_queue_store.dart';
 import 'package:life_os/core/services/sync_remote_data_source.dart';
 import 'package:life_os/core/services/sync_ui_event.dart';
@@ -16,6 +17,7 @@ final syncManagerProvider = Provider<SyncManager>((ref) {
   final auth = ref.watch(firebaseAuthProvider);
 
   final manager = SyncManager(
+    waterV2Processor: ref.watch(waterV2ProcessorProvider),
     queueStore: AppDatabaseSyncQueueStore(database),
     remoteDataSource: FirestoreSyncRemoteDataSource(
       firestore,

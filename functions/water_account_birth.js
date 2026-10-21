@@ -123,9 +123,10 @@ function normalize(v, max, fallback) {
 
 /**
  * @param {*} v Trusted code result.
+ * @param {string} projectId Bound server project.
  * @return {Object} Immutable context copy.
  */
-function context(v) {
+function context(v, projectId = TEST_PROJECT) {
   if (!exact(v, ["source", "identity", "cohort"])) {
     fail("WATER_BIRTH_INVALID_ORIGIN");
   }
@@ -135,7 +136,7 @@ function context(v) {
   if (!exact(s, ["type", "eventId", "projectId", "tenantId", "uid",
     "authCreatedAt", "eventAt"]) || s.type !== "FIREBASE_AUTH_CREATE" ||
     !text(s.eventId, 512) || s.eventId.length === 0 ||
-    s.projectId !== TEST_PROJECT || s.tenantId !== null || !uid(s.uid) ||
+    s.projectId !== projectId || s.tenantId !== null || !uid(s.uid) ||
     !time(s.authCreatedAt) || !time(s.eventAt) ||
     after(s.authCreatedAt, s.eventAt) ||
     !exact(i, ["uid", "email", "displayName", "photoUrl"]) ||
@@ -211,10 +212,12 @@ async function recordAccountBirth() {
  * @param {Object} options Explicit fake/emulator dependencies.
  * @return {Object} Zero-argument recorder; never an admission producer.
  */
-function createAccountBirthTestHarness(options) {
+function createAccountBirthRecorder(options) {
   if (!object(options) || !Object.keys(options).every((key) =>
-    ["db", "getTrustedBirth", "getCurrentAuthGeneration", "now"].includes(key),
-  ) || !options.db || options.db.projectId !== TEST_PROJECT ||
+    ["db", "getTrustedBirth", "getCurrentAuthGeneration", "now", "projectId"]
+        .includes(key),
+  ) || !options.db ||
+    options.db.projectId !== (options.projectId || TEST_PROJECT) ||
     typeof options.db.collection !== "function" ||
     typeof options.db.runTransaction !== "function" ||
     typeof options.getTrustedBirth !== "function" ||
@@ -223,22 +226,24 @@ function createAccountBirthTestHarness(options) {
     fail("WATER_BIRTH_INVALID_CONFIGURATION");
   }
   const {db, getTrustedBirth, getCurrentAuthGeneration} = options;
+  const projectId = options.projectId || TEST_PROJECT;
   const now = options.now || (() => Timestamp.now());
   return Object.freeze({record: async (...args) => {
-    if (db.projectId !== TEST_PROJECT) {
+    if (db.projectId !== projectId) {
       fail("WATER_BIRTH_INVALID_CONFIGURATION");
     }
     if (args.length) fail("WATER_BIRTH_INVALID_ORIGIN");
-    const bound = context(await getTrustedBirth());
+    const bound = context(await getTrustedBirth(), projectId);
     const root = db.collection("users").doc(bound.uid);
     const record = db.collection("account_birth_decisions").doc(bound.uid);
     const guard = db.collection("account_deletion_guards").doc(bound.uid);
+    const retired = db.collection("retired_auth_identities").doc(bound.uid);
     let candidateId;
     return db.runTransaction(async (tx) => {
-      if (db.projectId !== TEST_PROJECT) {
+      if (db.projectId !== projectId) {
         fail("WATER_BIRTH_INVALID_CONFIGURATION");
       }
-      if (!same(bound, context(await getTrustedBirth()))) {
+      if (!same(bound, context(await getTrustedBirth(), projectId))) {
         fail("WATER_BIRTH_CONFLICT");
       }
       const clock = now();
@@ -258,6 +263,7 @@ function createAccountBirthTestHarness(options) {
       }
       const existing = await tx.get(record);
       const guardDoc = await tx.get(guard);
+      const retiredDoc = await tx.get(retired);
       const rootDoc = await tx.get(root);
       const deletion = await tx.get(
           root.collection("runtime").doc("account_deletion"),
@@ -268,10 +274,26 @@ function createAccountBirthTestHarness(options) {
       const proof = await tx.get(
           root.collection("runtime").doc("water_admission"),
       );
-      if (guardDoc.exists || deletion.exists) {
+      if (guardDoc.exists || retiredDoc.exists || deletion.exists ||
+          (rootDoc.exists &&
+            Object.hasOwn(rootDoc.data(), "_serverAccountDeletion"))) {
         fail("WATER_ACCOUNT_DELETING");
       }
-      if (rootDoc.exists || eligibility.exists || proof.exists) {
+      const admittedReplay = existing.exists && rootDoc.exists &&
+        eligibility.exists && proof.exists &&
+        proof.data().version === 1 && proof.data().uid === bound.uid &&
+        proof.data().policy === POLICY &&
+        proof.data().legacyWritersExcluded === true &&
+        proof.data().decisionId === existing.data().decisionId &&
+        eligibility.data().uid === bound.uid &&
+        eligibility.data().policy === POLICY &&
+        eligibility.data().legacyWritersExcluded === true &&
+        eligibility.data().runId === proof.data().runId &&
+        rootDoc.createTime && eligibility.createTime && proof.createTime &&
+        rootDoc.createTime.isEqual(eligibility.createTime) &&
+        rootDoc.createTime.isEqual(proof.createTime);
+      if ((rootDoc.exists || eligibility.exists || proof.exists) &&
+          !admittedReplay) {
         fail("WATER_BIRTH_CONFLICT");
       }
       if (existing.exists) {
@@ -291,5 +313,17 @@ function createAccountBirthTestHarness(options) {
 }
 
 module.exports = {
-  recordAccountBirth, createAccountBirthTestHarness, birthError,
+  recordAccountBirth, createAccountBirthTestHarness,
+  createAccountBirthRecorder, birthError,
 };
+
+/**
+ * @param {Object} options Synthetic demo dependencies.
+ * @return {Object} Closed receipt recorder.
+ */
+function createAccountBirthTestHarness(options) {
+  if (options && Object.hasOwn(options, "projectId")) {
+    fail("WATER_BIRTH_INVALID_CONFIGURATION");
+  }
+  return createAccountBirthRecorder(options);
+}

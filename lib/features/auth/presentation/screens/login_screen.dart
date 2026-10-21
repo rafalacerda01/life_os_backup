@@ -118,6 +118,9 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
   @override
   Widget build(BuildContext context) {
     ref.listen<AuthState>(authNotifierProvider, (previous, next) {
+      if (next is AuthError &&
+          next.code == 'WATER_PROVISIONING_PENDING' &&
+          ref.read(firebaseAuthProvider).currentUser != null) return;
       next.maybeWhen(
         error: (message) {
           ScaffoldMessenger.of(context).showSnackBar(

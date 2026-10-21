@@ -482,7 +482,7 @@ class AuthNotifier extends Notifier<AuthState> {
           return;
         }
         await _handleAuthenticationFailure(
-          failure.message,
+          failure,
           finishLocalSignOutWhenNoUser: true,
         );
       },
@@ -569,7 +569,12 @@ class AuthNotifier extends Notifier<AuthState> {
         ),
         (failure) async {
           if (!_disposed && !_accountDeletionInProgress) {
-            state = AuthState.error(failure.message);
+            state = AuthState.error(
+              failure.message,
+              code: failure.code == 'WATER_PROVISIONING_PENDING'
+                  ? failure.code
+                  : null,
+            );
           }
         },
       );
@@ -586,10 +591,17 @@ class AuthNotifier extends Notifier<AuthState> {
   }
 
   Future<void> _handleAuthenticationFailure(
-    String message, {
+    Failure failure, {
     bool finishLocalSignOutWhenNoUser = false,
   }) async {
     if (_disposed || _accountDeletionInProgress) return;
+    if (failure.code == 'WATER_PROVISIONING_PENDING' &&
+        ref.read(firebaseAuthProvider).currentUser != null) {
+      // Auth succeeded. Keep the session pending until an explicit resume or
+      // the existing Auth event asks for the server profile again.
+      state = AuthState.error(failure.message, code: failure.code);
+      return;
+    }
     if (ref.read(firebaseAuthProvider).currentUser != null) {
       await _reconcileCurrentFirebaseSession();
       return;
@@ -600,7 +612,7 @@ class AuthNotifier extends Notifier<AuthState> {
       return;
     }
 
-    state = _entryFailureState(message);
+    state = _entryFailureState(failure.message);
   }
 
   AuthState _entryFailureState(String message) {
@@ -636,7 +648,7 @@ class AuthNotifier extends Notifier<AuthState> {
         }
       },
       (failure) async {
-        await _handleAuthenticationFailure(failure.message);
+        await _handleAuthenticationFailure(failure);
       },
     );
   }
@@ -657,7 +669,7 @@ class AuthNotifier extends Notifier<AuthState> {
         }
       },
       (failure) async {
-        await _handleAuthenticationFailure(failure.message);
+        await _handleAuthenticationFailure(failure);
       },
     );
   }
@@ -674,7 +686,7 @@ class AuthNotifier extends Notifier<AuthState> {
         }
       },
       (failure) async {
-        await _handleAuthenticationFailure(failure.message);
+        await _handleAuthenticationFailure(failure);
       },
     );
   }

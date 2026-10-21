@@ -1,6 +1,11 @@
+import 'dart:async';
+
 import 'package:firebase_auth/firebase_auth.dart' as fb;
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/foundation.dart';
+import 'package:life_os/core/services/water_v2_configuration.dart';
+import 'package:life_os/core/services/water_v2_remote_data_source.dart';
+import 'package:life_os/core/database/remote_send_permit.dart';
 import 'package:multiple_result/multiple_result.dart';
 import '../../../../core/errors/failure.dart';
 import '../../domain/entities/user_entity.dart';
@@ -43,12 +48,17 @@ class AuthRepositoryImpl implements AuthRepository {
   final fb.FirebaseAuth _firebaseAuth;
   final FirebaseFirestore _firestore;
   final AccountRemoteDataSource _accountRemoteDataSource;
+  final Future<void> Function(fb.User)? _waterProfileProvisioner;
 
   AuthRepositoryImpl(
     this._firebaseAuth,
     this._firestore,
-    this._accountRemoteDataSource,
-  );
+    this._accountRemoteDataSource, {
+    // Public test seam keeps the production flag immutable.
+    // ignore: prefer_initializing_formals
+    Future<void> Function(fb.User)? waterProfileProvisioner,
+    // ignore: prefer_initializing_formals
+  }) : _waterProfileProvisioner = waterProfileProvisioner;
 
   String? _normalizePhotoReference(String value) {
     final normalized = value.trim();
@@ -175,11 +185,21 @@ class AuthRepositoryImpl implements AuthRepository {
         return Error(_emailSignUpFailure('unknown'));
       }
 
-      return _getOrProvisionUser(
+      final provisioned = await _getOrProvisionUser(
         credential.user!,
         fallbackEmail: InputSanitizer.sanitize(email),
         fallbackDisplayName: InputSanitizer.sanitize(name),
       );
+      if ((WaterV2Configuration.enabled || _waterProfileProvisioner != null) &&
+          provisioned.isSuccess()) {
+        // The server creates the profile/admission. A normal profile update
+        // preserves the entered name without changing the immutable birth proof.
+        return updateProfile(
+          InputSanitizer.sanitize(name),
+          expectedUid: credential.user!.uid,
+        );
+      }
+      return provisioned;
     } on fb.FirebaseAuthException catch (e) {
       return Error(_emailSignUpFailure(e.code));
     } catch (_) {
@@ -309,8 +329,74 @@ class AuthRepositoryImpl implements AuthRepository {
     String? fallbackDisplayName,
     String? fallbackEmail,
   }) async {
+    final serverProfile =
+        WaterV2Configuration.enabled || _waterProfileProvisioner != null;
+    final uid = firebaseUser.uid;
+    StreamSubscription<fb.User?>? authSubscription;
+    var sessionCurrent = true;
+    var initialAuthEvent = true;
+    bool sameSession() =>
+        sessionCurrent && _firebaseAuth.currentUser?.uid == uid;
+    void checkSession() {
+      if (!sameSession()) throw StateError('Profile session changed');
+    }
+
     try {
-      final userRef = _firestore.collection('users').doc(firebaseUser.uid);
+      final userRef = _firestore.collection('users').doc(uid);
+      if (serverProfile) {
+        checkSession();
+        authSubscription = _firebaseAuth.authStateChanges().listen((current) {
+          // The first event reports the current session. Any later sign-in
+          // or sign-out invalidates this work, including reuse of the UID.
+          if (!initialAuthEvent || current?.uid != uid) sessionCurrent = false;
+          initialAuthEvent = false;
+        }, onError: (Object _) => sessionCurrent = false);
+        // An existing cached profile restores Auth offline; it grants no Water admission.
+        final existing = await userRef.get().timeout(
+          const Duration(seconds: 5),
+        );
+        checkSession();
+        if (existing.exists)
+          return Success(
+            UserModel.fromFirestore(existing.data()!, existing.id),
+          );
+        if (_waterProfileProvisioner != null) {
+          await _waterProfileProvisioner(firebaseUser);
+        } else {
+          final remote = WaterV2RemoteDataSource(
+            _firebaseAuth,
+            captureRemoteSend: (targetUid) =>
+                RemoteSendPermit(() => targetUid == uid && sameSession()),
+          );
+          final result = await remote.bootstrap(
+            firebaseUser.uid,
+            DateTime.now().timeZoneOffset.inMinutes,
+            RemoteSendPermit(sameSession),
+          );
+          checkSession();
+          if (result.error?.code == 'ACCOUNT_DELETION_BLOCKED')
+            return const Error(
+              AuthFailure(
+                'A conta está em exclusão.',
+                code: 'ACCOUNT_DELETION_BLOCKED',
+              ),
+            );
+          if (result.value?.state == 'NOT_ELIGIBLE')
+            return const Error(
+              AuthFailure(
+                'A conta precisa de revisão antes de ser preparada.',
+                code: 'WATER_NOT_ELIGIBLE',
+              ),
+            );
+          if (result.value == null ||
+              !{'READY', 'LEGACY'}.contains(result.value!.state)) {
+            return _profileProvisionPending();
+          }
+        }
+        checkSession();
+        // READY does not make a separate Firestore read atomic with bootstrap.
+        return await _readProvisionedProfile(userRef, checkSession);
+      }
       final doc = await userRef.get();
 
       if (doc.exists) {
@@ -357,16 +443,71 @@ class AuthRepositoryImpl implements AuthRepository {
       }
 
       return Success(newUser);
-    } on FirebaseException catch (error) {
-      if (error.plugin == 'cloud_firestore' &&
+    } catch (error) {
+      if (serverProfile && !sameSession()) {
+        return const Error(
+          AuthFailure(
+            'A sessão mudou. Entre novamente para retomar o preparo do perfil.',
+            code: 'UNAUTHENTICATED',
+          ),
+        );
+      }
+      if (serverProfile && error is TimeoutException) {
+        return _profileProvisionPending();
+      }
+      if (error is FirebaseException &&
+          error.plugin == 'cloud_firestore' &&
           (error.code == 'unavailable' || error.code == 'deadline-exceeded')) {
+        if (serverProfile) return _profileProvisionPending();
         return Error(ServerFailure.connection());
       }
       return _profileProvisionFailure();
-    } catch (_) {
-      return _profileProvisionFailure();
+    } finally {
+      sessionCurrent = false;
+      authSubscription?.cancel().ignore();
     }
   }
+
+  Future<Result<UserEntity, Failure>> _readProvisionedProfile(
+    DocumentReference<Map<String, dynamic>> userRef,
+    void Function() checkSession,
+  ) async {
+    const delays = [
+      Duration.zero,
+      Duration(milliseconds: 250),
+      Duration(milliseconds: 750),
+    ];
+    for (final delay in delays) {
+      checkSession();
+      if (delay != Duration.zero) await Future<void>.delayed(delay);
+      checkSession();
+      try {
+        final doc = await userRef
+            .get(const GetOptions(source: Source.server))
+            .timeout(const Duration(seconds: 5));
+        checkSession();
+        if (doc.id != userRef.id) throw StateError('Profile identity mismatch');
+        if (doc.exists)
+          return Success(UserModel.fromFirestore(doc.data()!, doc.id));
+      } on TimeoutException {
+        checkSession();
+      } on FirebaseException catch (error) {
+        checkSession();
+        if (error.plugin != 'cloud_firestore' ||
+            !{'unavailable', 'deadline-exceeded'}.contains(error.code))
+          rethrow;
+      }
+    }
+    return _profileProvisionPending();
+  }
+
+  Result<UserEntity, Failure> _profileProvisionPending() => const Error(
+    AuthFailure(
+      'A conta foi autenticada. Seu perfil ainda está sendo preparado. '
+      'Tente entrar novamente em instantes.',
+      code: 'WATER_PROVISIONING_PENDING',
+    ),
+  );
 
   Result<UserEntity, Failure> _profileProvisionFailure() => const Error(
     ServerFailure(

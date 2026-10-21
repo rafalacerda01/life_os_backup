@@ -475,3 +475,43 @@ for (const hasBarrier of [false, true]) {
     ]) await assertFails(updateDoc(doc(db, path), fields));
   });
 }
+
+for (const barrier of [ROOT+'/water_protocol/eligibility','account_birth_decisions/'+OWNER,
+  'retired_auth_identities/'+OWNER]) {
+  for (const kind of ['create','absolute','merge','increment','batch','delete-water']) {
+    test('birth/eligibility/retired fence '+barrier+' rejects V1 '+kind,async()=>{
+      if(kind!=='create') await seed([HEALTH,health()]);
+      await seed([barrier,{}]);
+      const db=dbFor(),ref=doc(db,HEALTH);
+      const batch=writeBatch(db); batch.update(ref,{waterIntakeMl:1250});
+      const call=()=>kind==='create' ? setDoc(ref,health(250)) :
+        kind==='merge' ? setDoc(ref,{waterIntakeMl:1250},{merge:true}) :
+        kind==='increment' ? updateDoc(ref,{waterIntakeMl:increment(250)}) :
+        kind==='batch' ? batch.commit() :
+        kind==='delete-water' ? updateDoc(ref,{waterIntakeMl:deleteField()}) :
+        updateDoc(ref,{waterIntakeMl:1250});
+      await assertFails(call());
+      if(kind!=='create') {
+        assert.equal((await readHealth(db)).waterIntakeMl,1000);
+        // Other Health fields stay usable unless a global deletion guard blocks them.
+        await assertSucceeds(updateDoc(ref,{mood:'after'}));
+      }
+    });
+  }
+}
+test('managed birth reserves root creation and no client can forge or remove the receipt',async()=>{
+  await seed(['account_birth_decisions/'+OWNER,{}]);
+  const root={email:'synthetic@example.invalid',displayName:'Synthetic',photoUrl:null,isPremium:false,
+    xp:0,level:1,streak:0,habitsCount:0,tasksCount:0,goalsCount:0,subjectsCount:0,medicationsCount:0,transactionsCount:0};
+  await assertFails(setDoc(doc(dbFor(),ROOT),root));
+  await assertFails(deleteDoc(doc(dbFor(),'account_birth_decisions/'+OWNER)));
+  await assertFails(setDoc(doc(dbFor(),'account_birth_decisions/other'),{}));
+});
+for (const path of [ROOT+'/health_settings/water_v2',ROOT+'/water_goal_receipts/synthetic']) {
+  test('goal settings and receipts are server-only '+path,async()=>{
+    await assertFails(setDoc(doc(dbFor(),path),{goalMl:2000}));
+    await seed([path,{goalMl:2000}]);
+    await assertFails(updateDoc(doc(dbFor(),path),{goalMl:2500}));
+    await assertFails(deleteDoc(doc(dbFor(),path)));
+  });
+}

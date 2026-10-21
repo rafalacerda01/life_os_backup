@@ -43,6 +43,7 @@ part 'app_database.g.dart';
     SyncQueueTable,
     WaterV2DailyStates,
     WaterV2Intents,
+    WaterV2Preferences,
   ],
   daos: [NotificationDao],
 )
@@ -118,7 +119,7 @@ class AppDatabase extends _$AppDatabase {
   // =========================================================================
 
   @override
-  int get schemaVersion => 10;
+  int get schemaVersion => 11;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -203,6 +204,7 @@ class AppDatabase extends _$AppDatabase {
           await migrator.createTable(waterV2Intents);
         });
       }
+      if (from < 11) await migrator.createTable(waterV2Preferences);
     },
   );
 

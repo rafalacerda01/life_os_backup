@@ -63,9 +63,9 @@ void main() {
         (await db.customSelect('PRAGMA user_version').getSingle()).read<int>(
           'user_version',
         ),
-        10,
+        11,
       );
-      expect(db.allTables, hasLength(16));
+      expect(db.allTables, hasLength(17));
       expect(await db.select(db.waterV2DailyStates).get(), isEmpty);
       expect(await db.select(db.waterV2Intents).get(), isEmpty);
     },

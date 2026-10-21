@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+import 'package:life_os/core/services/water_v2_provider.dart';
+import 'package:life_os/core/services/water_v2_controller.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:intl/intl.dart';
@@ -558,9 +560,11 @@ class HealthScreen extends ConsumerWidget {
             );
           },
           data: (health) {
-            final waterProgress = (health.waterIntakeMl / 3000)
-                .clamp(0.0, 1.0)
-                .toDouble();
+            final waterProgress =
+                (health.waterIntakeMl /
+                        (ref.watch(waterGoalProvider).value ?? 3000))
+                    .clamp(0.0, 1.0)
+                    .toDouble();
 
             return RefreshIndicator(
               color: _primary,
@@ -597,7 +601,7 @@ class HealthScreen extends ConsumerWidget {
 
                         _buildSectionLabel(
                           'HIDRATAÇÃO',
-                          'Meta diária de 3 litros',
+                          'Meta diária de ${ref.watch(waterGoalProvider).value ?? 3000} ml',
                         ),
 
                         const SizedBox(height: 12),
@@ -889,7 +893,8 @@ class HealthScreen extends ConsumerWidget {
     HealthModel health,
     double progress,
   ) {
-    final remaining = (3000 - health.waterIntakeMl).clamp(0, 3000);
+    final goal = ref.watch(waterGoalProvider).value ?? 3000;
+    final remaining = (goal - health.waterIntakeMl).clamp(0, goal);
 
     final percentage = (progress * 100).round();
 
@@ -919,7 +924,7 @@ class HealthScreen extends ConsumerWidget {
                 ),
               ),
               const SizedBox(width: 12),
-              const Expanded(
+              Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
@@ -932,7 +937,7 @@ class HealthScreen extends ConsumerWidget {
                     ),
                     SizedBox(height: 3),
                     Text(
-                      'Meta de 3.000 ml',
+                      'Meta de $goal ml',
                       style: TextStyle(color: Colors.white38, fontSize: 11),
                     ),
                   ],
@@ -995,27 +1000,7 @@ class HealthScreen extends ConsumerWidget {
             ],
           ),
           const SizedBox(height: 16),
-          SizedBox(
-            width: double.infinity,
-            height: 46,
-            child: OutlinedButton.icon(
-              onPressed: null,
-              style: OutlinedButton.styleFrom(
-                side: BorderSide(
-                  color: _hydrationColor.withValues(alpha: 0.42),
-                ),
-                foregroundColor: _hydrationColor,
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(14),
-                ),
-              ),
-              icon: const Icon(Icons.add_rounded, size: 19),
-              label: const Text(
-                'Registro temporariamente indisponível',
-                style: TextStyle(fontWeight: FontWeight.w700),
-              ),
-            ),
-          ),
+          const _WaterActions(),
         ],
       ),
     );
@@ -2767,4 +2752,149 @@ class _MoodData {
   final String emoji;
 
   const _MoodData({required this.label, required this.emoji});
+}
+
+class _WaterActions extends ConsumerStatefulWidget {
+  const _WaterActions();
+  @override
+  ConsumerState<_WaterActions> createState() => _WaterActionsState();
+}
+
+class _WaterActionsState extends ConsumerState<_WaterActions> {
+  bool busy = false;
+  String? error;
+  Future<void> perform(Future<void> Function() action) async {
+    if (busy) return;
+    setState(() {
+      busy = true;
+      error = null;
+    });
+    try {
+      await action();
+    } catch (_) {
+      if (mounted)
+        setState(
+          () => error = 'Não foi possível salvar agora. Tente novamente.',
+        );
+    } finally {
+      if (mounted) setState(() => busy = false);
+    }
+  }
+
+  Future<void> chooseGoal() async {
+    var value = ref.read(waterGoalProvider).value ?? 3000;
+    final goal = await showDialog<int>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, set) => AlertDialog(
+          title: const Text('Meta diária de água'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text('$value ml'),
+              Slider(
+                value: value.toDouble(),
+                min: 250,
+                max: 10000,
+                divisions: 39,
+                label: '$value ml',
+                onChanged: (v) => set(() => value = v.round()),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Cancelar'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(context, value),
+              child: const Text('Salvar'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (goal != null && mounted)
+      await perform(() => ref.read(waterV2ControllerProvider).setGoal(goal));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final state =
+        ref.watch(waterAdmissionProvider).value ?? WaterAdmissionState.waiting;
+    final allowed = {
+      WaterAdmissionState.ready,
+      WaterAdmissionState.offline,
+    }.contains(state);
+    final message = switch (state) {
+      WaterAdmissionState.disabled => 'Registro temporariamente indisponível',
+      WaterAdmissionState.waiting =>
+        'Preparando hidratação. Tente novamente em instantes.',
+      WaterAdmissionState.offline =>
+        'Salvo no aparelho. A sincronização será retomada automaticamente.',
+      WaterAdmissionState.legacy =>
+        'Hidratação V2 ainda indisponível para esta conta.',
+      WaterAdmissionState.ineligible =>
+        'Esta conta ainda não pode usar a hidratação V2.',
+      WaterAdmissionState.deleting =>
+        'Conta em exclusão. Novos registros estão bloqueados.',
+      WaterAdmissionState.ready => '',
+    };
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        if (state != WaterAdmissionState.disabled && message.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: Text(
+              message,
+              style: const TextStyle(color: Colors.white60, fontSize: 12),
+            ),
+          ),
+        if (error != null)
+          Text(
+            error!,
+            style: const TextStyle(color: Colors.orangeAccent, fontSize: 12),
+          ),
+        SizedBox(
+          height: 46,
+          child: OutlinedButton.icon(
+            onPressed: allowed && !busy
+                ? () => perform(
+                    () => ref.read(healthRepositoryProvider).addWater(),
+                  )
+                : null,
+            icon: busy
+                ? const SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.add_rounded, size: 19),
+            label: Text(
+              state == WaterAdmissionState.disabled
+                  ? 'Registro temporariamente indisponível'
+                  : '+250 ml',
+            ),
+          ),
+        ),
+        if (allowed)
+          TextButton(
+            onPressed: busy ? null : chooseGoal,
+            child: const Text('Alterar meta diária'),
+          ),
+        if (state == WaterAdmissionState.waiting ||
+            state == WaterAdmissionState.ineligible)
+          TextButton(
+            onPressed: busy
+                ? null
+                : () => perform(
+                    () => ref.read(waterV2ControllerProvider).refresh(),
+                  ),
+            child: const Text('Tentar novamente'),
+          ),
+      ],
+    );
+  }
 }

@@ -52,7 +52,10 @@ service cloud.firestore {
 
     // Any authoritative marker closes client water writes, even if malformed.
     function hasWaterProtocolBarrier(userId) {
-      return exists(/databases/$(database)/documents/users/$(userId)/water_protocol/activation);
+      return exists(/databases/$(database)/documents/users/$(userId)/water_protocol/eligibility)
+        || exists(/databases/$(database)/documents/users/$(userId)/water_protocol/activation)
+        || exists(/databases/$(database)/documents/account_birth_decisions/$(userId))
+        || exists(/databases/$(database)/documents/retired_auth_identities/$(userId));
     }
 
     function circleDeletionPath(circleId) {
@@ -908,7 +911,8 @@ service cloud.firestore {
   allow read: if isOwner(userId);
 
   allow create: if canWriteUserData(userId)
-    && validUserCreate();
+    && validUserCreate()
+        && !exists(/databases/$(database)/documents/account_birth_decisions/$(userId));
 
   allow update: if canWriteUserData(userId)
     && validUserUpdate(userId);

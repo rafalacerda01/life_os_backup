@@ -12,6 +12,8 @@ import 'package:life_os/core/services/biometric_service.dart';
 import 'package:life_os/features/auth/domain/entities/user_entity.dart';
 import 'package:life_os/features/auth/presentation/providers/auth_provider.dart';
 import 'package:life_os/features/auth/presentation/providers/auth_state.dart';
+import 'package:life_os/features/auth/presentation/screens/login_screen.dart';
+import 'package:life_os/features/auth/presentation/screens/register_screen.dart';
 import 'package:life_os/features/settings/presentation/providers/biometric_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -30,6 +32,14 @@ class _StaticAuthNotifier extends AuthNotifier {
 
   final AuthState initialState;
   int logoutCalls = 0;
+  int profileChecks = 0;
+  Future<void> Function()? onCheck;
+
+  @override
+  Future<void> checkCurrentUser() async {
+    profileChecks++;
+    await onCheck?.call();
+  }
 
   @override
   AuthState build() => initialState;
@@ -113,6 +123,125 @@ void main() {
     TestWidgetsFlutterBinding.instance.handleAppLifecycleStateChanged(
       AppLifecycleState.resumed,
     );
+  });
+
+  const pending = AuthError(
+    'A conta foi autenticada. Seu perfil ainda está sendo preparado. Tente entrar novamente em instantes.',
+    code: 'WATER_PROVISIONING_PENDING',
+  );
+  for (final entry in ['/login', '/register']) {
+    testWidgets(
+      'Water pending from $entry hides creation and resumes only on request',
+      (tester) async {
+        final service = _FakeBiometricService();
+        final auth = _FirebaseAuth(hasUser: false);
+        final notifier = _StaticAuthNotifier(const AuthInitial());
+        final refresh = ChangeNotifier();
+        late ProviderContainer container;
+        final router = GoRouter(
+          initialLocation: entry,
+          refreshListenable: refresh,
+          redirect: (_, state) => authRedirectFor(
+            authState: container.read(authNotifierProvider),
+            hasFirebaseUser: auth.currentUser != null,
+            location: state.matchedLocation,
+          ),
+          routes: [
+            GoRoute(path: '/login', builder: (_, _) => const LoginScreen()),
+            GoRoute(
+              path: '/register',
+              builder: (_, _) => const RegisterScreen(),
+            ),
+            GoRoute(
+              path: '/home',
+              builder: (_, _) =>
+                  const Scaffold(body: Text('Sensitive router content')),
+            ),
+          ],
+        );
+        container = ProviderContainer(
+          overrides: [
+            authNotifierProvider.overrideWith(() => notifier),
+            firebaseAuthProvider.overrideWithValue(auth),
+            biometricServiceProvider.overrideWithValue(service),
+            routerProvider.overrideWithValue(router),
+          ],
+        );
+        final subscription = container.listen(
+          authNotifierProvider,
+          (_, _) => refresh.notifyListeners(),
+        );
+        addTearDown(() async {
+          await tester.pumpWidget(const SizedBox());
+          subscription.close();
+          container.dispose();
+          router.dispose();
+          refresh.dispose();
+        });
+        await tester.pumpWidget(
+          UncontrolledProviderScope(
+            container: container,
+            child: MaterialApp.router(
+              routerConfig: router,
+              builder: (_, child) => BiometricAppGate(child: child!),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        auth.hasUser = true;
+        notifier.emit(pending);
+        await tester.pumpAndSettle();
+        expect(find.text(pending.message), findsOneWidget);
+        expect(find.text('Inicializar Conta'), findsNothing);
+        expect(find.text('Criar conta'), findsNothing);
+        expect(find.byType(TextFormField), findsNothing);
+        expect(find.text('Sensitive router content'), findsNothing);
+        expect(find.text('Protegendo sua sessão...'), findsNothing);
+        expect(router.routerDelegate.currentConfiguration.uri.path, entry);
+        expect(notifier.profileChecks, 0);
+        expect(notifier.logoutCalls, 0);
+        expect(service.calls, 0);
+        await tester.pump(const Duration(seconds: 5));
+        expect(notifier.profileChecks, 0);
+        final wait = Completer<void>();
+        notifier.onCheck = () => wait.future;
+        await tester.tap(find.text('Retomar preparo'));
+        await tester.pump();
+        await tester.tap(find.text('Verificando...'));
+        expect(notifier.profileChecks, 1);
+        wait.complete();
+        await tester.pumpAndSettle();
+        expect(find.text('Retomar preparo'), findsOneWidget);
+        notifier.onCheck = () async {
+          notifier.emit(const AuthAuthenticated(_user));
+        };
+        await tester.tap(find.text('Retomar preparo'));
+        await tester.pumpAndSettle();
+        expect(notifier.profileChecks, 2);
+        expect(router.routerDelegate.currentConfiguration.uri.path, '/home');
+        expect(find.text('Sensitive router content'), findsOneWidget);
+        expect(auth.currentUser?.uid, _user.uid);
+        expect(notifier.logoutCalls, 0);
+        expect(tester.takeException(), isNull);
+      },
+    );
+  }
+
+  testWidgets('Water pending remains opaque with enabled biometrics', (
+    tester,
+  ) async {
+    SharedPreferences.setMockInitialValues({
+      BiometricNotifier.storageKey: true,
+    });
+    final service = _FakeBiometricService();
+    await tester.pumpWidget(
+      _app(authState: pending, hasFirebaseUser: true, service: service),
+    );
+    await _pumpAsync(tester);
+    expect(find.text(pending.message), findsOneWidget);
+    expect(find.text('Retomar preparo'), findsOneWidget);
+    expect(find.text('Sensitive router content'), findsNothing);
+    expect(service.calls, 0);
   });
 
   testWidgets('public error metadata cannot unlock Firebase preparation', (

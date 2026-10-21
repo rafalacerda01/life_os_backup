@@ -66,3 +66,22 @@ class WaterV2Intents extends Table {
     "CHECK (sync_queue_id IS NULL OR (typeof(sync_queue_id) = 'integer' AND sync_queue_id > 0))",
   ];
 }
+
+/// Account preference and its confirmed server revision. Pending goals live in
+/// the same durable outbox as consumption, isolated by owner UID.
+@DataClassName('WaterV2Preference')
+class WaterV2Preferences extends Table {
+  TextColumn get initialHealthDay => text().nullable()();
+  TextColumn get epoch => text().nullable()();
+  TextColumn get ownerUid => text()();
+  IntColumn get goalMl => integer().withDefault(const Constant(3000))();
+  IntColumn get revision => integer().withDefault(const Constant(0))();
+  @override
+  Set<Column> get primaryKey => {ownerUid};
+  @override
+  List<String> get customConstraints => [
+    'CHECK (length(owner_uid) BETWEEN 1 AND 128 AND owner_uid = trim(owner_uid))',
+    'CHECK (typeof(goal_ml) = \'integer\' AND goal_ml BETWEEN 250 AND 10000 AND goal_ml % 250 = 0)',
+    'CHECK (typeof(revision) = \'integer\' AND revision BETWEEN 0 AND 9007199254740991)',
+  ];
+}

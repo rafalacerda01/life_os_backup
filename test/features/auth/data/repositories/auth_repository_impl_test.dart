@@ -16,7 +16,22 @@ import 'package:life_os/features/auth/presentation/providers/auth_provider.dart'
 import 'package:life_os/features/auth/presentation/providers/auth_state.dart';
 
 class FakeFirebaseAuth extends Fake implements FirebaseAuth {
-  User? user;
+  User? _user;
+  final _authEvents = StreamController<User?>.broadcast(sync: true);
+  User? get user => _user;
+  set user(User? value) {
+    _user = value;
+    _authEvents.add(value);
+  }
+
+  @override
+  Stream<User?> authStateChanges() => Stream<User?>.multi((controller) {
+    controller.add(user);
+    final subscription = _authEvents.stream.listen(controller.add);
+    controller.onCancel = subscription.cancel;
+  });
+
+  Future<void> dispose() => _authEvents.close();
   UserCredential? signInCredential;
   UserCredential? signUpCredential;
   Object? signInError;
@@ -147,13 +162,17 @@ class FakeUserDocumentReference extends Fake
   int setFailuresRemaining = 0;
   bool persistBeforeSetFailure = false;
   Object? getError;
+  Future<DocumentSnapshot<Map<String, dynamic>>> Function(GetOptions?)? onGet;
+  final getOptions = <GetOptions?>[];
 
   @override
   Future<DocumentSnapshot<Map<String, dynamic>>> get([
     GetOptions? options,
   ]) async {
     getCalls += 1;
+    getOptions.add(options);
     if (getError != null) throw getError!;
+    if (onGet != null) return onGet!(options);
     return FakeUserDocumentSnapshot(id, value);
   }
 
@@ -273,11 +292,453 @@ void main() {
 
   setUp(() {
     auth = FakeFirebaseAuth();
+    addTearDown(auth.dispose);
     user = FakeFirebaseUser('user-a');
     firestore = FakeFirebaseFirestore();
     remote = FakeAccountRemoteDataSource();
     auth.user = user;
     repository = AuthRepositoryImpl(auth, firestore, remote);
+  });
+
+  for (final flow in [
+    'email-signup',
+    'email-login',
+    'restored-google-session',
+  ]) {
+    test(
+      'Water V2 server owns profile for $flow and repeats without client writes',
+      () async {
+        auth.signUpCredential = FakeUserCredential(user);
+        auth.signInCredential = FakeUserCredential(user);
+        var calls = 0;
+        repository = AuthRepositoryImpl(
+          auth,
+          firestore,
+          remote,
+          waterProfileProvisioner: (identity) async {
+            expect(identity.uid, user.uid);
+            calls++;
+            firestore.users.document(user.uid).value ??= _profileData();
+          },
+        );
+        if (flow == 'email-signup') {
+          final result = await repository.signUpWithEmailAndPassword(
+            'user@example.invalid',
+            'password',
+            'User',
+          );
+          expect(result.isSuccess(), isTrue);
+          expect(auth.signUpCalls, 1);
+          expect(
+            firestore.users.document(user.uid).value!['displayName'],
+            'User',
+          );
+          expect(firestore.users.document(user.uid).updateCalls, 1);
+        } else if (flow == 'email-login') {
+          final result = await repository.signInWithEmailAndPassword(
+            'user@example.invalid',
+            'password',
+          );
+          expect(result.isSuccess(), isTrue);
+          expect(auth.signInCalls, 1);
+        } else {
+          expect((await repository.getCurrentUser()).isSuccess(), isTrue);
+        }
+        firestore.users.document(user.uid).value!['xp'] = 750;
+        expect((await repository.getCurrentUser()).isSuccess(), isTrue);
+        expect(calls, 1);
+        expect(firestore.users.document(user.uid).setCalls, 0);
+        expect(firestore.users.document(user.uid).value!['xp'], 750);
+        expect(user.deleteCalls, 0);
+      },
+    );
+  }
+
+  test(
+    'Water V2 restores existing cached profile without network admission or resetting progress',
+    () async {
+      firestore.users.document(user.uid).value = _profileData()..['xp'] = 600;
+      repository = AuthRepositoryImpl(
+        auth,
+        firestore,
+        remote,
+        waterProfileProvisioner: (_) async {
+          throw StateError('NETWORK_FORBIDDEN');
+        },
+      );
+      UserEntity? restored;
+      (await repository.getCurrentUser()).when(
+        (value) => restored = value,
+        (_) {},
+      );
+      expect(restored?.uid, user.uid);
+      expect(firestore.users.document(user.uid).value!['xp'], 600);
+      expect(firestore.users.document(user.uid).setCalls, 0);
+    },
+  );
+  test(
+    'Water V2 signup provisioning failure preserves newly created Auth for a later login retry',
+    () async {
+      auth.signUpCredential = FakeUserCredential(user);
+      repository = AuthRepositoryImpl(
+        auth,
+        firestore,
+        remote,
+        waterProfileProvisioner: (_) async {
+          throw StateError('event delayed');
+        },
+      );
+      expect(
+        (await repository.signUpWithEmailAndPassword(
+          'user@example.invalid',
+          'password',
+          'User',
+        )).isError(),
+        isTrue,
+      );
+      expect(auth.signUpCalls, 1);
+      expect(auth.signOutCalls, 0);
+      expect(user.deleteCalls, 0);
+      expect(firestore.users.document(user.uid).setCalls, 0);
+    },
+  );
+  test(
+    'Water V2 delayed receipt never creates a profile on the client',
+    () async {
+      final wait = Completer<void>();
+      var began = false;
+      repository = AuthRepositoryImpl(
+        auth,
+        firestore,
+        remote,
+        waterProfileProvisioner: (_) async {
+          began = true;
+          await wait.future;
+        },
+      );
+      final work = repository.getCurrentUser();
+      await Future<void>.delayed(Duration.zero);
+      expect(began, isTrue);
+      expect(firestore.users.document(user.uid).getCalls, 1);
+      wait.complete();
+      final result = await work;
+      Failure? failure;
+      result.when((_) {}, (f) => failure = f);
+      expect(failure?.code, 'WATER_PROVISIONING_PENDING');
+      expect(firestore.users.document(user.uid).setCalls, 0);
+      expect(user.deleteCalls, 0);
+    },
+  );
+  test(
+    'Water V2 bootstrap failure preserves Auth identity and does not downgrade to V1',
+    () async {
+      repository = AuthRepositoryImpl(
+        auth,
+        firestore,
+        remote,
+        waterProfileProvisioner: (_) async {
+          throw StateError('temporary');
+        },
+      );
+      expect((await repository.getCurrentUser()).isError(), isTrue);
+      expect(firestore.users.document(user.uid).setCalls, 0);
+      expect(auth.signOutCalls, 0);
+      expect(user.deleteCalls, 0);
+    },
+  );
+  test(
+    'Water V2 UID change while provisioning cannot return or create another profile',
+    () async {
+      repository = AuthRepositoryImpl(
+        auth,
+        firestore,
+        remote,
+        waterProfileProvisioner: (_) async {
+          auth.user = FakeFirebaseUser('other');
+        },
+      );
+      expect((await repository.getCurrentUser()).isError(), isTrue);
+      expect(firestore.users.document(user.uid).getCalls, 1);
+      expect(firestore.users.document('other').setCalls, 0);
+    },
+  );
+
+  test(
+    'Water READY reads the server and returns the available profile',
+    () async {
+      final doc = firestore.users.document(user.uid);
+      var bootstrapCalls = 0;
+      repository = AuthRepositoryImpl(
+        auth,
+        firestore,
+        remote,
+        waterProfileProvisioner: (_) async {
+          bootstrapCalls++;
+          doc.value = _profileData()..['xp'] = 720;
+        },
+      );
+      final result = await repository.getCurrentUser();
+      UserEntity? profile;
+      result.when((value) => profile = value, (_) {});
+      expect(profile?.uid, user.uid);
+      expect(profile?.xp, 720);
+      expect(bootstrapCalls, 1);
+      expect(doc.getCalls, 2);
+      expect(doc.getOptions.last?.source, Source.server);
+      expect(doc.setCalls, 0);
+    },
+  );
+
+  test(
+    'Water READY waits briefly for server visibility without repeating bootstrap',
+    () async {
+      final doc = firestore.users.document(user.uid);
+      var bootstrapCalls = 0;
+      doc.onGet = (options) async => FakeUserDocumentSnapshot(
+        user.uid,
+        doc.getCalls >= 3 ? _profileData() : null,
+      );
+      repository = AuthRepositoryImpl(
+        auth,
+        firestore,
+        remote,
+        waterProfileProvisioner: (_) async {
+          bootstrapCalls++;
+        },
+      );
+      expect((await repository.getCurrentUser()).isSuccess(), isTrue);
+      expect(bootstrapCalls, 1);
+      expect(doc.getCalls, 3);
+      expect(
+        doc.getOptions.skip(1).every((o) => o?.source == Source.server),
+        isTrue,
+      );
+      expect(doc.setCalls, 0);
+    },
+  );
+
+  test(
+    'Water READY without a visible profile leaves signup pending and Auth intact',
+    () async {
+      final doc = firestore.users.document(user.uid);
+      auth.signUpCredential = FakeUserCredential(user);
+      var bootstrapCalls = 0;
+      repository = AuthRepositoryImpl(
+        auth,
+        firestore,
+        remote,
+        waterProfileProvisioner: (_) async {
+          bootstrapCalls++;
+        },
+      );
+      final result = await repository.signUpWithEmailAndPassword(
+        'user@example.invalid',
+        'password',
+        'User',
+      );
+      Failure? failure;
+      result.when(
+        (_) => fail('A missing profile must not be fabricated'),
+        (f) => failure = f,
+      );
+      expect(failure?.code, 'WATER_PROVISIONING_PENDING');
+      expect(failure?.message, contains('A conta foi autenticada'));
+      expect(bootstrapCalls, 1);
+      expect(
+        doc.getCalls,
+        4,
+      ); // Initial cache/server read + at most three server reads.
+      expect(doc.setCalls, 0);
+      expect(doc.updateCalls, 0);
+      expect(user.updateDisplayNameCalls, 0);
+      expect(user.deleteCalls, 0);
+      expect(auth.signOutCalls, 0);
+      expect(auth.currentUser?.uid, user.uid);
+      // A later resume reads the server-created profile and retains its progress.
+      doc.value = _profileData()..['xp'] = 900;
+      expect((await repository.getCurrentUser()).isSuccess(), isTrue);
+      expect(bootstrapCalls, 1);
+      expect(auth.signUpCalls, 1);
+      expect(doc.value!['xp'], 900);
+    },
+  );
+
+  test(
+    'Water delayed Auth receipt resumes after signup without recreating Auth or profile',
+    () async {
+      final doc = firestore.users.document(user.uid);
+      auth.signUpCredential = FakeUserCredential(user);
+      var bootstrapCalls = 0;
+      repository = AuthRepositoryImpl(
+        auth,
+        firestore,
+        remote,
+        waterProfileProvisioner: (_) async {
+          bootstrapCalls++;
+          if (bootstrapCalls == 1) {
+            throw FirebaseException(
+              plugin: 'cloud_firestore',
+              code: 'unavailable',
+            );
+          }
+          doc.value = _profileData();
+        },
+      );
+      Failure? pending;
+      (await repository.signUpWithEmailAndPassword(
+        'user@example.invalid',
+        'password',
+        'User',
+      )).when((_) => fail('Receipt is not ready'), (f) => pending = f);
+      expect(pending?.code, 'WATER_PROVISIONING_PENDING');
+      expect((await repository.getCurrentUser()).isSuccess(), isTrue);
+      expect(bootstrapCalls, 2);
+      expect(auth.signUpCalls, 1);
+      expect(auth.signOutCalls, 0);
+      expect(user.deleteCalls, 0);
+      expect(doc.setCalls, 0);
+    },
+  );
+
+  for (final transient in ['unavailable', 'deadline-exceeded', 'timeout']) {
+    test(
+      'Water READY retries transient $transient only within the read budget',
+      () async {
+        final doc = firestore.users.document(user.uid);
+        doc.onGet = (_) async {
+          if (doc.getCalls > 1) {
+            if (transient == 'timeout')
+              throw TimeoutException('technical-marker');
+            throw FirebaseException(plugin: 'cloud_firestore', code: transient);
+          }
+          return FakeUserDocumentSnapshot(user.uid, null);
+        };
+        repository = AuthRepositoryImpl(
+          auth,
+          firestore,
+          remote,
+          waterProfileProvisioner: (_) async {},
+        );
+        Failure? pending;
+        (await repository.getCurrentUser()).when(
+          (_) => fail('No visible profile'),
+          (f) => pending = f,
+        );
+        expect(pending?.code, 'WATER_PROVISIONING_PENDING');
+        expect(doc.getCalls, 4);
+        expect(doc.setCalls, 0);
+        expect(auth.signOutCalls, 0);
+      },
+    );
+  }
+
+  test(
+    'Water READY permanent read failure stops immediately and is sanitized',
+    () async {
+      final doc = firestore.users.document(user.uid);
+      doc.onGet = (_) async {
+        if (doc.getCalls > 1) {
+          throw FirebaseException(
+            plugin: 'cloud_firestore',
+            code: 'permission-denied',
+            message: 'private-technical-marker',
+          );
+        }
+        return FakeUserDocumentSnapshot(user.uid, null);
+      };
+      repository = AuthRepositoryImpl(
+        auth,
+        firestore,
+        remote,
+        waterProfileProvisioner: (_) async {},
+      );
+      Failure? failure;
+      (await repository.getCurrentUser()).when(
+        (_) => fail('Permission denied'),
+        (f) => failure = f,
+      );
+      expect(failure?.code, 'USER_PROFILE_PROVISION_FAILED');
+      expect(failure?.message, isNot(contains('private-technical-marker')));
+      expect(doc.getCalls, 2);
+      expect(doc.setCalls, 0);
+      expect(user.deleteCalls, 0);
+    },
+  );
+
+  for (final transition in ['other-uid', 'logout', 'same-uid-new-session']) {
+    test(
+      'Water READY rejects $transition while the profile read is pending',
+      () async {
+        final doc = firestore.users.document(user.uid);
+        final started = Completer<void>();
+        final read = Completer<DocumentSnapshot<Map<String, dynamic>>>();
+        doc.onGet = (_) async {
+          if (doc.getCalls == 1)
+            return FakeUserDocumentSnapshot(user.uid, null);
+          started.complete();
+          return read.future;
+        };
+        repository = AuthRepositoryImpl(
+          auth,
+          firestore,
+          remote,
+          waterProfileProvisioner: (_) async {},
+        );
+        final work = repository.getCurrentUser();
+        await started.future;
+        if (transition == 'other-uid') {
+          auth.user = FakeFirebaseUser('other');
+        } else {
+          auth.onSignOut = () async {
+            auth.user = null;
+          };
+          await repository.signOut();
+          if (transition == 'same-uid-new-session')
+            auth.user = FakeFirebaseUser(user.uid);
+        }
+        read.complete(FakeUserDocumentSnapshot(user.uid, _profileData()));
+        Failure? failure;
+        (await work).when(
+          (_) => fail('A changed session must not receive this profile'),
+          (f) => failure = f,
+        );
+        expect(failure?.code, 'UNAUTHENTICATED');
+        expect(doc.getCalls, 2);
+        expect(doc.setCalls, 0);
+        expect(firestore.users.document('other').setCalls, 0);
+      },
+    );
+  }
+
+  test('Water READY logout during backoff stops before another read', () async {
+    final doc = firestore.users.document(user.uid);
+    final firstRead = Completer<void>();
+    doc.onGet = (_) async {
+      if (doc.getCalls == 2) firstRead.complete();
+      return FakeUserDocumentSnapshot(user.uid, null);
+    };
+    repository = AuthRepositoryImpl(
+      auth,
+      firestore,
+      remote,
+      waterProfileProvisioner: (_) async {},
+    );
+    final work = repository.getCurrentUser();
+    await firstRead.future;
+    await Future<void>.delayed(const Duration(milliseconds: 30));
+    expect(doc.getCalls, 2);
+    auth.onSignOut = () async {
+      auth.user = null;
+    };
+    await repository.signOut();
+    Failure? failure;
+    (await work).when(
+      (_) => fail('Logged out during backoff'),
+      (f) => failure = f,
+    );
+    expect(failure?.code, 'UNAUTHENTICATED');
+    expect(doc.getCalls, 2);
+    expect(doc.setCalls, 0);
   });
 
   test('sucesso HTTP faz signOut local best-effort', () async {

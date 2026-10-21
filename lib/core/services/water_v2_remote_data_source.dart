@@ -9,6 +9,9 @@ import 'package:life_os/core/database/remote_send_permit.dart';
 import 'sync_operation_result.dart';
 import 'sync_remote_data_source.dart';
 import 'water_v2_contract.dart';
+import 'water_v2_configuration.dart';
+import 'water_v2_bootstrap.dart';
+import 'water_v2_goal.dart';
 
 final class WaterV2TransportResult<T> {
   const WaterV2TransportResult.value(T this.value) : error = null;
@@ -26,7 +29,7 @@ final class WaterV2RemoteDataSource {
     RemoteSendPermit Function(String)? captureRemoteSend,
   }) : this._(
          auth,
-         false,
+         WaterV2Configuration.enabled,
          captureRemoteSend,
          http.Client.new,
          null,
@@ -93,6 +96,31 @@ final class WaterV2RemoteDataSource {
     permit,
     (body, boundPermit) =>
         WaterV2ReconcileSuccess.parse(body, request, permit: boundPermit),
+  );
+
+  Future<WaterV2TransportResult<WaterV2Bootstrap>> bootstrap(
+    String uid,
+    int offset,
+    RemoteSendPermit permit,
+  ) => _send(
+    uid,
+    {
+      'operation': 'bootstrap_water',
+      'version': 2,
+      'timeZoneOffsetMinutes': offset,
+    },
+    permit,
+    (body, _) => WaterV2Bootstrap.parse(body),
+  );
+
+  Future<WaterV2TransportResult<WaterV2GoalSuccess>> setGoal(
+    WaterV2GoalRequest request,
+    RemoteSendPermit permit,
+  ) => _send(
+    request.ownerUid,
+    request.toJson(),
+    permit,
+    (body, _) => WaterV2GoalSuccess.parse(body, request),
   );
 
   Future<String?> _token(String uid, bool forceRefresh) {
@@ -235,6 +263,10 @@ final class WaterV2RemoteDataSource {
       'WATER_USER_NOT_FOUND': (404, false),
       'WATER_ACCOUNT_DELETING': (403, false),
       'WATER_V2_DISABLED': (503, true),
+      'ACCOUNT_DELETION_BLOCKED': (503, true),
+      'WATER_COHORT_CLOSED': (503, true),
+      'WATER_PROVISIONING_PENDING': (503, true),
+      'WATER_NOT_ELIGIBLE': (503, true),
       'WATER_MIGRATION_NOT_READY': (503, true),
       'WATER_INVALID_REMOTE_STATE': (409, true),
       'WATER_SNAPSHOT_MISMATCH': (409, true),

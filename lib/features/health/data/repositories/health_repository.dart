@@ -12,6 +12,7 @@ import 'package:life_os/core/security/input_sanitizer.dart';
 import 'package:life_os/core/services/notification_preferences.dart';
 import 'package:life_os/core/services/notification_service.dart';
 import 'package:life_os/core/services/sync_manager.dart';
+import 'package:life_os/core/services/water_v2_controller.dart';
 import 'package:life_os/core/services/legacy_water_queue.dart';
 import 'package:life_os/core/utils/app_logger.dart';
 import 'package:life_os/features/health/data/models/health_model.dart';
@@ -41,6 +42,7 @@ class HealthRepository {
   final Future<void> Function()? _beforeCycleSyncEnqueue;
   final MedicationReminderLifecycle _medicationLifecycle;
 
+  final WaterV2Controller? _water;
   final Uuid _uuid = const Uuid();
 
   HealthRepository(
@@ -52,6 +54,7 @@ class HealthRepository {
     DateTime Function()? now,
     Future<void> Function()? beforeCycleSyncEnqueue,
     MedicationReminderLifecycle? medicationLifecycle,
+    WaterV2Controller? waterController,
   }) : this._(
          notifService,
          firestore,
@@ -62,6 +65,7 @@ class HealthRepository {
          beforeCycleSyncEnqueue,
          medicationLifecycle ??
              MedicationReminderLifecycleService(db, notifService, now: now),
+         waterController,
        );
 
   HealthRepository._(
@@ -73,6 +77,7 @@ class HealthRepository {
     this._now,
     this._beforeCycleSyncEnqueue,
     this._medicationLifecycle,
+    this._water,
   );
 
   Future<void> _rebuildMedicationReminders(String userId) async {
@@ -786,7 +791,10 @@ class HealthRepository {
 
   /// No legacy write, local credit or fabricated V2 intent is permitted.
   Future<void> addWater() async {
-    throw const WaterRegistrationUnavailable();
+    final water = _water;
+    if (water == null || !water.isEnabled)
+      throw const WaterRegistrationUnavailable();
+    await water.addWater();
   }
 
   Future<bool?> getPillStatusForToday({required String expectedUid}) async {

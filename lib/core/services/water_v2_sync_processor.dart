@@ -5,16 +5,20 @@ import 'package:life_os/features/health/data/local/water_v2_local_store.dart';
 
 import 'sync_operation_result.dart';
 import 'water_v2_remote_data_source.dart';
+import 'water_v2_goal.dart';
 
 /// Test-injected infrastructure only. No provider or gesture creates V2 work.
 final class WaterV2SyncProcessor {
+  WaterV2SyncProcessor(this._db, this._remote, {DateTime Function()? now})
+    : _store = WaterV2LocalStore(_db),
+      _now = now ?? DateTime.now,
+      _lane = _lanes[_db] ??= _WaterV2Lane();
   WaterV2SyncProcessor.forLocalTests(
-    this._db,
-    this._remote, {
+    AppDatabase db,
+    WaterV2RemoteDataSource remote, {
     DateTime Function()? now,
-  }) : _store = WaterV2LocalStore(_db),
-       _now = now ?? DateTime.now,
-       _lane = _lanes[_db] ??= _WaterV2Lane();
+  }) : this(db, remote, now: now);
+  bool get isEnabled => _remote.isEnabled;
   final AppDatabase _db;
   final WaterV2LocalStore _store;
   final WaterV2RemoteDataSource _remote;
@@ -29,6 +33,18 @@ final class WaterV2SyncProcessor {
     SyncQueueTableData item, {
     required bool Function() canSend,
   }) => _admitted(uid, canSend, (ticket, permit) async {
+    if (item.operationType == 'set_water_goal') {
+      final current = await _db.getSyncItemById(item.id);
+      if (current == null) throw StateError('WATER_QUEUE_CONFLICT');
+      final goal = WaterV2GoalRequest.fromQueue(uid, current);
+      if (current.status == SyncQueuePersistenceStatus.succeeded)
+        return const SyncOperationResult.success();
+      final result = await _remote.setGoal(goal, permit);
+      permit.requireCurrent();
+      if (result.value == null) return result.error!;
+      await acknowledgeWaterGoal(_db, item, result.value!, ticket, permit);
+      return const SyncOperationResult.success();
+    }
     final request = await _store.prepareIncrement(
       uid,
       item,

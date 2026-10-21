@@ -744,3 +744,37 @@ test("untrusted forged public error code is not accepted as a domain error",
         code: "WATER_BIRTH_STORAGE_UNAVAILABLE",
         message: "Não foi possível registrar a origem da conta."});
     });
+
+test("production trigger preserves v1/retry/identity and CLOSED no IO",
+    async () => {
+      const prior=process.env.GCLOUD_PROJECT;
+      process.env.GCLOUD_PROJECT="demo-life-os";
+      try {
+        const trigger=require("../water_birth_runtime").trigger;
+        assert.equal(trigger.__endpoint.platform, "gcfv1");
+        assert.equal(trigger.__endpoint.eventTrigger.retry, true);
+        assert.equal(trigger.__endpoint.eventTrigger.eventType,
+            "providers/firebase.auth/eventTypes/user.create");
+        assert.equal(trigger.__endpoint.serviceAccountEmail,
+            "life-os-cleanup-runtime@life-os-27b92.iam.gserviceaccount.com");
+        assert.equal(require("../package.json").engines.node, "22");
+        const admin=require("firebase-admin/app");
+        const before=admin.getApps().length;
+        // No app exists: any Firestore/Auth lookup would fail this test.
+        await trigger.run({}, {});
+        assert.equal(admin.getApps().length, before);
+        const policy = require("../water_policy.cjs");
+        assert.equal(policy.WATER_COHORT.state, "CLOSED");
+      } finally {
+        if (prior===undefined) delete process.env.GCLOUD_PROJECT;
+        else process.env.GCLOUD_PROJECT=prior;
+      }
+    });
+for (const path of ["retired_auth_identities/"+UID, ROOT]) {
+  test("managed birth respects retirement/root deletion "+path, async ()=>{
+    const f=fixture();
+    f.db.put(path, path===ROOT ?
+      {_serverAccountDeletion: {state: "DENY"}} : {});
+    await unchangedFailure(f, "WATER_ACCOUNT_DELETING");
+  });
+}

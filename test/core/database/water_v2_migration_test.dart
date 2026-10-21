@@ -166,7 +166,71 @@ class _MigrationUser implements QueryExecutorUser {
 
 void main() {
   test(
-    'new database creates schema 10 with 16 tables, empty V2 and all original indexes',
+    'v10 Water state and durable queue survive the additive v11 preferences migration',
+    () async {
+      final raw = sqlite.sqlite3.openInMemory();
+      final original = AppDatabase(
+        executor: NativeDatabase.opened(raw, closeUnderlyingOnClose: false),
+      );
+      await original.select(original.waterV2Preferences).get();
+      raw.execute("INSERT INTO water_v2_daily_states VALUES (?,?,?,?,?,?)", [
+        'user-a',
+        '2026-10-13',
+        '11111111-1111-4111-8111-111111111111',
+        3,
+        750,
+        '2026-10-13T10:00:00.123Z',
+      ]);
+      final queue = await original.insertSyncItem(
+        ownerUid: 'user-a',
+        collection: 'water_v2',
+        docId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+        operationType: 'increment_water',
+        payloadJson: ' { "immutable": "payload á" } ',
+        createdAt: 1234,
+      );
+      // Seed exact preexisting bytes rather than the enqueue API's normalization.
+      raw.execute("UPDATE sync_queue_table SET payload_json=? WHERE id=?", [
+        ' { "immutable": "payload á" } ',
+        queue,
+      ]);
+      await original.close();
+      // The v10 tables are unchanged. Remove only the newly added table.
+      raw.execute('DROP TABLE water_v2_preferences');
+      raw.execute('PRAGMA user_version=10');
+      final oldSchema = schema(raw), before = contents(raw);
+      final water = raw
+          .select('SELECT * FROM water_v2_daily_states')
+          .map((r) => Map<String, Object?>.of(r))
+          .toList();
+      final reopened = AppDatabase(
+        executor: NativeDatabase.opened(raw, closeUnderlyingOnClose: false),
+      );
+      addTearDown(raw.dispose);
+      addTearDown(reopened.close);
+      expect(await reopened.select(reopened.waterV2Preferences).get(), isEmpty);
+      expect(version(raw), 11);
+      expect(contents(raw), before);
+      expect(
+        raw
+            .select('SELECT * FROM water_v2_daily_states')
+            .map((r) => Map<String, Object?>.of(r))
+            .toList(),
+        water,
+      );
+      expect(
+        (await reopened.getSyncItemById(queue))!.payloadJson,
+        ' { "immutable": "payload á" } ',
+      );
+      for (final entry in oldSchema.entries) {
+        expect(schema(raw)[entry.key], entry.value);
+      }
+      expect(raw.select('PRAGMA foreign_key_check'), isEmpty);
+    },
+  );
+
+  test(
+    'new database creates schema 11 with 17 tables, empty V2 and all original indexes',
     () async {
       final raw = sqlite.sqlite3.openInMemory();
       final db = AppDatabase(
@@ -176,8 +240,8 @@ void main() {
       addTearDown(db.close);
       expect(await db.select(db.waterV2DailyStates).get(), isEmpty);
       expect(await db.select(db.waterV2Intents).get(), isEmpty);
-      expect(version(raw), 10);
-      expect(db.allTables, hasLength(16));
+      expect(version(raw), 11);
+      expect(db.allTables, hasLength(17));
       for (final entry in (fixture()['tables'] as Map).entries) {
         expect(schema(raw)[entry.key], entry.value);
       }
@@ -188,7 +252,7 @@ void main() {
   );
 
   test(
-    'real v9 to v10 preserves every old row, schema, queue state and payload bytes',
+    'real v9 to v11 preserves every old row, schema, queue state and payload bytes',
     () async {
       final raw = createV9();
       final before = contents(raw);
@@ -203,14 +267,15 @@ void main() {
       addTearDown(db.close);
       expect(await db.select(db.waterV2Intents).get(), isEmpty);
       expect(await db.select(db.waterV2DailyStates).get(), isEmpty);
-      expect(version(raw), 10);
-      expect(db.allTables, hasLength(16));
+      expect(version(raw), 11);
+      expect(db.allTables, hasLength(17));
       expect(contents(raw), before);
       expect(payloadBytes(raw), bytes);
       for (final entry in beforeSchema.entries) {
         expect(schema(raw)[entry.key], entry.value);
       }
-      expect(schema(raw), hasLength(23));
+      expect(schema(raw), hasLength(24));
+      expect(await db.select(db.waterV2Preferences).get(), isEmpty);
       final rows = await db.select(db.syncQueueTable).get();
       expect(rows.map((r) => r.status), [
         'pending',
@@ -273,7 +338,7 @@ void main() {
         );
         addTearDown(reopened.close);
         expect(await reopened.select(reopened.waterV2Intents).get(), isEmpty);
-        expect(version(raw), 10);
+        expect(version(raw), 11);
         expect(contents(raw), before);
         expect(payloadBytes(raw), bytes);
       },

@@ -138,7 +138,7 @@ void main() {
         (await cold.customSelect('PRAGMA user_version').get()).single.read<int>(
           'user_version',
         ),
-        10,
+        11,
       );
       await expectLater(
         cold
@@ -253,7 +253,7 @@ void main() {
         (await cold.customSelect('PRAGMA user_version').get()).single.read<int>(
           'user_version',
         ),
-        10,
+        11,
       );
       await expectLater(
         cold.insertSyncItem(

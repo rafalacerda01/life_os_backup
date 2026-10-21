@@ -13,6 +13,7 @@ abstract final class WaterV2Queue {
       const {
         'increment_water',
         'reconcile_water',
+        'set_water_goal',
       }.contains(row.operationType.trim().toLowerCase());
 }
 

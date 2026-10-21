@@ -8,6 +8,7 @@ import 'package:life_os/core/database/app_database.dart';
 import 'package:life_os/core/database/database_provider.dart';
 import 'package:life_os/core/services/notification_service.dart';
 import 'package:life_os/core/services/sync_manager_provider.dart';
+import 'package:life_os/core/services/water_v2_provider.dart';
 import 'package:life_os/features/health/data/models/health_model.dart';
 import 'package:life_os/features/health/data/repositories/health_repository.dart';
 import 'package:life_os/features/settings/presentation/providers/notification_provider.dart';
@@ -38,6 +39,7 @@ final healthRepositoryProvider = Provider<HealthRepository>((ref) {
     db,
     ref.watch(syncManagerProvider),
     now: ref.watch(healthDayClockProvider),
+    waterController: ref.watch(waterV2ControllerProvider),
     medicationLifecycle: ref.watch(medicationReminderLifecycleProvider),
   );
 });

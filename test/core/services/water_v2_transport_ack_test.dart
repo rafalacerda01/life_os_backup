@@ -17,6 +17,8 @@ import 'package:life_os/core/services/sync_operation_result.dart';
 import 'package:life_os/core/services/sync_queue_store.dart';
 import 'package:life_os/core/services/sync_remote_data_source.dart';
 import 'package:life_os/core/services/water_v2_contract.dart';
+import 'package:life_os/core/services/water_v2_controller.dart';
+import 'package:life_os/core/services/water_v2_goal.dart';
 import 'package:life_os/core/services/water_v2_remote_data_source.dart';
 import 'package:life_os/core/services/water_v2_sync_processor.dart';
 import 'package:life_os/features/health/data/local/water_v2_local_store.dart';
@@ -508,6 +510,478 @@ void main() {
     raw.dispose();
   });
 
+
+  String bootstrapReply({
+    String state = 'READY',
+    int total = 1000,
+    int revision = 1,
+    int goal = 3000,
+    int goalRevision = 0,
+    String forDay = day,
+  }) => jsonEncode({
+    'success': true,
+    'operation': 'bootstrap_water',
+    'version': 2,
+    'state': state,
+    if (state == 'READY') ...{
+      'initialHealthDay': '2026-08-20',
+      'healthDay': forDay,
+      'epoch': epoch,
+      'revision': revision,
+      'waterIntakeMl': total,
+      'goalMl': goal,
+      'goalRevision': goalRevision,
+    },
+  });
+  WaterV2Controller controller(
+    WaterV2RemoteDataSource transport, {
+    DateTime Function()? clock,
+    Future<bool> Function()? kick,
+  }) {
+    final c = WaterV2Controller(
+      db,
+      transport,
+      processor(transport),
+      () => auth.uid,
+      now: clock ?? now,
+      afterCommit: kick,
+    );
+    addTearDown(c.dispose);
+    return c;
+  }
+
+  test(
+    'full synchronous sync scheduling failure cannot turn a durable gesture into a failed save',
+    () async {
+      final c = controller(
+        remote(),
+        kick: () => throw StateError('disposed sync provider'),
+      );
+      await c.addWater();
+      await Future<void>.delayed(Duration.zero);
+      expect(await db.select(db.waterV2Intents).get(), hasLength(1));
+      expect(await db.getPendingSyncItems(uid), hasLength(1));
+      expect(
+        (await db.select(db.healthEntries).getSingle()).waterIntakeMl,
+        1250,
+      );
+      expect(requests, isEmpty);
+    },
+  );
+
+  test(
+    'full controller commits two rapid gestures durably before any transport and keeps Health fields',
+    () async {
+      final c = controller(remote());
+      await Future.wait([c.addWater(), c.addWater()]);
+      final intents = await db.select(db.waterV2Intents).get(),
+          queue = await db.select(db.syncQueueTable).get();
+      expect(intents, hasLength(2));
+      expect(intents.map((r) => r.mutationId).toSet(), hasLength(2));
+      expect(queue, hasLength(2));
+      expect(requests, isEmpty);
+      expect(
+        intents.every(
+          (r) => queue.any(
+            (q) => q.id == r.syncQueueId && q.docId == r.mutationId,
+          ),
+        ),
+        isTrue,
+      );
+      final health = await db.select(db.healthEntries).getSingle();
+      expect(health.waterIntakeMl, 1500);
+      expect(health.mood, 'bem');
+      expect(health.hasTakenPillToday, isTrue);
+    },
+  );
+  test(
+    'full local transaction failure leaves no intent, queue or optimistic credit',
+    () async {
+      final before = snapshot();
+      raw.execute(
+        "CREATE TRIGGER reject_water_queue BEFORE INSERT ON sync_queue_table BEGIN SELECT RAISE(ABORT, 'synthetic queue failure'); END",
+      );
+      await expectLater(controller(remote()).addWater(), throwsA(anything));
+      expect(snapshot(), before);
+    },
+  );
+  test(
+    'full afterCommit sees durable queue and cannot cancel a saved intention',
+    () async {
+      final c = controller(
+        remote(),
+        kick: () async {
+          expect(await db.select(db.waterV2Intents).get(), hasLength(1));
+          expect(await db.getPendingSyncItems(uid), hasLength(1));
+          throw StateError('temporary network');
+        },
+      );
+      await c.addWater();
+      await Future<void>.delayed(Duration.zero);
+      expect(await db.getPendingSyncItems(uid), hasLength(1));
+      expect(
+        (await db.select(db.healthEntries).getSingle()).waterIntakeMl,
+        1250,
+      );
+    },
+  );
+  for (final state in ['LEGACY', 'NOT_ELIGIBLE']) {
+    test('full server $state never writes V1 or consumption', () async {
+      final c = controller(
+        remote(
+          handler: (_) async =>
+              http.Response(bootstrapReply(state: state), 200),
+        ),
+      );
+      final before = snapshot();
+      await c.refresh();
+      expect(
+        c.state,
+        state == 'LEGACY'
+            ? WaterAdmissionState.legacy
+            : WaterAdmissionState.ineligible,
+      );
+      await expectLater(c.addWater(), throwsStateError);
+      expect(snapshot(), before);
+    });
+  }
+  test(
+    'full first login waits for receipt; no cached V2 authority means no consumption',
+    () async {
+      await db.delete(db.waterV2DailyStates).go();
+      final c = controller(
+        remote(
+          handler: (_) async => http.Response(
+            '{"error":"Aguardando preparo.","code":"WATER_PROVISIONING_PENDING","retryable":true}',
+            503,
+          ),
+        ),
+      );
+      await c.refresh();
+      expect(c.state, WaterAdmissionState.waiting);
+      await expectLater(c.addWater(), throwsStateError);
+      expect(await db.select(db.waterV2Intents).get(), isEmpty);
+    },
+  );
+  test(
+    'full bootstrap adopts server snapshot and per UID goal, preserving other Health fields',
+    () async {
+      final c = controller(
+        remote(
+          handler: (_) async => http.Response(
+            bootstrapReply(
+              total: 1750,
+              revision: 4,
+              goal: 2250,
+              goalRevision: 3,
+            ),
+            200,
+          ),
+        ),
+      );
+      await c.refresh();
+      expect(c.state, WaterAdmissionState.ready);
+      expect(await c.readGoal(), 2250);
+      final health = await db.select(db.healthEntries).getSingle();
+      expect(health.waterIntakeMl, 1750);
+      expect(health.mood, 'bem');
+      expect(health.hasTakenPillToday, isTrue);
+      expect(
+        (await db.select(db.waterV2Preferences).getSingle()).ownerUid,
+        uid,
+      );
+    },
+  );
+  test(
+    'full offline day rollover persists a zero day with stable intention; no absolute V1 fallback',
+    () async {
+      var clock = now();
+      final c = controller(
+        remote(handler: (_) async => throw TimeoutException('offline')),
+        clock: () => clock,
+      );
+      await c.refresh();
+      expect(c.state, WaterAdmissionState.offline);
+      clock = DateTime.utc(2026, 8, 22, 0, 1);
+      await c.addWater();
+      final intent = await db.select(db.waterV2Intents).getSingle();
+      expect(intent.healthDay, '2026-08-22');
+      expect(intent.originEpoch, epoch);
+      final health = await (db.select(
+        db.healthEntries,
+      )..where((t) => t.docId.equals('2026-08-22'))).getSingle();
+      expect(health.waterIntakeMl, 250);
+      expect(
+        (await db.select(db.syncQueueTable).getSingle()).collection,
+        'water_v2',
+      );
+    },
+  );
+  test(
+    'full new controller after restart keeps existing intention UUID and projection',
+    () async {
+      final a = controller(remote());
+      await a.addWater();
+      final before = snapshot(),
+          b = controller(
+            remote(handler: (_) async => throw TimeoutException('offline')),
+          );
+      await b.refresh();
+      expect(snapshot(), before);
+      expect(b.state, WaterAdmissionState.offline);
+      expect(
+        (await db.select(db.waterV2Intents).getSingle()).mutationId,
+        (await db.select(db.syncQueueTable).getSingle()).docId,
+      );
+    },
+  );
+  test(
+    'full deletion response revokes local admission and never ACKs pending consumption',
+    () async {
+      final c = controller(
+        remote(
+          handler: (_) async => http.Response(
+            '{"error":"Conta indisponível para sincronização.","code":"ACCOUNT_DELETION_BLOCKED","retryable":true}',
+            503,
+          ),
+        ),
+      );
+      await c.addWater();
+      final before = snapshot();
+      await c.refresh();
+      expect(c.state, WaterAdmissionState.deleting);
+      await expectLater(c.addWater(), throwsStateError);
+      await c.refresh();
+      expect(snapshot(), before);
+    },
+  );
+  test(
+    'full logout and same UID re-login cannot revive a pending bootstrap ACK',
+    () async {
+      final reached = Completer<void>(), release = Completer<void>();
+      final c = controller(
+        remote(
+          handler: (_) async {
+            reached.complete();
+            await release.future;
+            return http.Response(bootstrapReply(total: 2000, revision: 5), 200);
+          },
+        ),
+      );
+      final before = snapshot(), work = c.refresh();
+      await reached.future;
+      auth.uid = null;
+      db.localMutations.observeSession(null);
+      auth.uid = uid;
+      db.localMutations.observeSession(uid);
+      db.localMutations.openPreparedSession();
+      release.complete();
+      await work;
+      expect(snapshot(), before);
+    },
+  );
+  test(
+    'full refresh coalesces rebuild/lifecycle calls without duplicate network work',
+    () async {
+      final c = controller(
+        remote(handler: (_) async => http.Response(bootstrapReply(), 200)),
+      );
+      await Future.wait([c.refresh(), c.refresh(), c.refresh()]);
+      expect(requests, hasLength(1));
+      expect(c.state, WaterAdmissionState.ready);
+    },
+  );
+  test(
+    'full offline goal is immediate and durable; receipt ACK advances preference atomically',
+    () async {
+      var goal = 3000, revision = 0;
+      final transport = remote(
+        handler: (request) async {
+          final m = jsonDecode(request.body) as Map<String, dynamic>;
+          if (m['operation'] == 'bootstrap_water')
+            return http.Response(
+              bootstrapReply(goal: goal, goalRevision: revision),
+              200,
+            );
+          goal = m['goalMl'];
+          revision++;
+          return http.Response(
+            jsonEncode({
+              'success': true,
+              'operation': 'set_water_goal',
+              'version': 2,
+              'mutationId': m['mutationId'],
+              'requestedGoalMl': m['goalMl'],
+              'epoch': epoch,
+              'appliedRevision': revision,
+              'goalMl': goal,
+              'goalRevision': revision,
+            }),
+            200,
+          );
+        },
+      );
+      final c = controller(transport);
+      await c.refresh();
+      await c.setGoal(2250);
+      expect(await c.readGoal(), 2250);
+      final item = await db.select(db.syncQueueTable).getSingle();
+      final result = await processor(
+        transport,
+      ).process(uid, item, canSend: () => true);
+      expect(result.isSuccess, isTrue);
+      expect((await db.getSyncItemById(item.id))!.status, 'succeeded');
+      final p = await db.select(db.waterV2Preferences).getSingle();
+      expect(p.goalMl, 2250);
+      expect(p.revision, 1);
+      expect(await c.readGoal(), 2250);
+      expect(
+        (await db.select(db.healthEntries).getSingle()).waterIntakeMl,
+        1000,
+      );
+    },
+  );
+  test(
+    'full goal ACK failure rolls back preference and queue together',
+    () async {
+      final transport = remote(
+        handler: (request) async {
+          final m = jsonDecode(request.body) as Map<String, dynamic>;
+          if (m['operation'] == 'bootstrap_water')
+            return http.Response(bootstrapReply(), 200);
+          return http.Response(
+            jsonEncode({
+              'success': true,
+              'operation': 'set_water_goal',
+              'version': 2,
+              'mutationId': m['mutationId'],
+              'requestedGoalMl': m['goalMl'],
+              'epoch': epoch,
+              'appliedRevision': 1,
+              'goalMl': m['goalMl'],
+              'goalRevision': 1,
+            }),
+            200,
+          );
+        },
+      );
+      final c = controller(transport);
+      await c.refresh();
+      await c.setGoal(2500);
+      final row = await db.select(db.syncQueueTable).getSingle();
+      writes.failQueue = true;
+      expect(
+        (await processor(
+          transport,
+        ).process(uid, row, canSend: () => true)).isSuccess,
+        isFalse,
+      );
+      expect((await db.select(db.waterV2Preferences).getSingle()).goalMl, 3000);
+      expect((await db.getSyncItemById(row.id))!.status, 'pending');
+      expect(await c.readGoal(), 2500);
+    },
+  );
+
+  test(
+    'full offline return to a cached earlier civil day wakes Health watchers without changing totals',
+    () async {
+      await store.persistConfirmedState(
+        ownerUid: uid,
+        healthDay: '2026-08-20',
+        epoch: epoch,
+        revision: 2,
+        confirmedWaterIntakeMl: 500,
+        reconciledAtUtc: instant,
+      );
+      await db
+          .into(db.healthEntries)
+          .insert(
+            HealthEntriesCompanion.insert(
+              docId: '2026-08-20',
+              date: DateTime.utc(2026, 8, 20),
+              waterIntakeMl: const Value(500),
+            ),
+          );
+      var clock = now();
+      final c = controller(
+        remote(handler: (_) async => throw TimeoutException('offline')),
+        clock: () => clock,
+      );
+      await c.refresh();
+      final refreshed = Completer<void>();
+      final watch = db.select(db.healthEntries).watch().listen((rows) {
+        if (clock.day == 20 &&
+            rows.singleWhere((r) => r.docId == '2026-08-20').waterIntakeMl ==
+                500 &&
+            !refreshed.isCompleted)
+          refreshed.complete();
+      });
+      await Future<void>.delayed(Duration.zero);
+      clock = DateTime.utc(2026, 8, 20, 12);
+      await c.refresh();
+      await refreshed.future.timeout(const Duration(seconds: 2));
+      await watch.cancel();
+      expect(
+        (await (db.select(
+          db.healthEntries,
+        )..where((t) => t.docId.equals(day))).getSingle()).waterIntakeMl,
+        1000,
+      );
+      expect(await db.select(db.syncQueueTable).get(), isEmpty);
+    },
+  );
+  test(
+    'full goal lost reply reuses UUID and accepts a newer other-device preference on replay',
+    () async {
+      var lost = true;
+      String? firstBody;
+      final transport = remote(
+        handler: (request) async {
+          final m = jsonDecode(request.body) as Map<String, dynamic>;
+          if (m['operation'] == 'bootstrap_water')
+            return http.Response(bootstrapReply(), 200);
+          if (lost) {
+            lost = false;
+            firstBody = request.body;
+            throw TimeoutException('committed but reply lost');
+          }
+          expect(request.body, firstBody);
+          return http.Response(
+            jsonEncode({
+              'success': true,
+              'operation': 'set_water_goal',
+              'version': 2,
+              'mutationId': m['mutationId'],
+              'requestedGoalMl': m['goalMl'],
+              'epoch': epoch,
+              'appliedRevision': 1,
+              'goalMl': 2500,
+              'goalRevision': 2,
+            }),
+            200,
+          );
+        },
+      );
+      final c = controller(transport);
+      await c.refresh();
+      await c.setGoal(2250);
+      final row = await db.select(db.syncQueueTable).getSingle(),
+          p = processor(transport);
+      expect(
+        (await p.process(uid, row, canSend: () => true)).isSuccess,
+        isFalse,
+      );
+      expect((await db.getSyncItemById(row.id))!.status, 'pending');
+      expect(await c.readGoal(), 2250);
+      expect(
+        (await p.process(uid, row, canSend: () => true)).isSuccess,
+        isTrue,
+      );
+      expect((await db.getSyncItemById(row.id))!.status, 'succeeded');
+      expect(await c.readGoal(), 2500);
+      expect((await db.select(db.waterV2Preferences).getSingle()).revision, 2);
+    },
+  );
   test(
     'R2CB confirmed intent with pending queue fails closed without confirming any sibling',
     () async {
@@ -904,7 +1378,7 @@ void main() {
         isTrue,
       );
       expect(await db.getSyncItemById(legacy), before);
-      expect(db.schemaVersion, 10);
+      expect(db.schemaVersion, 11);
       expect(logs.join(), isNot(matches('fake-secret|$uid|$idA|$instant')));
     },
   );

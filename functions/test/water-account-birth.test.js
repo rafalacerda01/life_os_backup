@@ -79,11 +79,13 @@ class FakeFirestore {
    */
   ref(path) {
     return {path, kind: "doc", listCollections: async () => {
-      const names = [...new Set([...this.docs.keys()].filter(p => p.startsWith(path + "/"))
-        .map(p => p.slice(path.length + 1).split("/")[0]))];
-      return names.map(name => ({listDocuments: async () => [...new Set([...this.docs.keys()]
-        .filter(p => p.startsWith(path + "/" + name + "/"))
-        .map(p => p.slice(0, (path + "/" + name + "/").length) +
+      const names = [...new Set([...this.docs.keys()]
+          .filter((p) => p.startsWith(path + "/"))
+          .map((p) => p.slice(path.length + 1).split("/")[0]))];
+      return names.map((name) => ({listDocuments: async () =>
+        [...new Set([...this.docs.keys()]
+            .filter((p) => p.startsWith(path + "/" + name + "/"))
+            .map((p) => p.slice(0, (path + "/" + name + "/").length) +
           p.slice((path + "/" + name + "/").length).split("/")[0]))]}));
     }, collection: (name) =>
       this.collection(`${path}/${name}`),
@@ -568,7 +570,8 @@ test("module is inert on import and index exports no new t" +
   assert.doesNotMatch(index,
       /water_account_birth|account_birth_decisions|\.onCreate\(/);
   assert.deepEqual(Object.keys(require("../water_account_birth")).sort(),
-      ["birthError", "createAccountBirthTestHarness", "recordAccountBirth"]);
+      ["birthError", "createAccountBirthRecorder",
+        "createAccountBirthTestHarness", "recordAccountBirth"]);
 });
 
 test("actual active Auth cleanup removes users tree and global birth record",
@@ -685,3 +688,36 @@ test("cutover compares exact nanos and never admits a birt" +
   f.birth.cohort.cutoverAt = new Timestamp(BORN.seconds, BORN.nanoseconds + 1);
   await unchangedFailure(f, "WATER_BIRTH_BEFORE_CUTOVER");
 });
+
+for (const corrupt of [null, "uid", "decisionId", "policy",
+  "legacyWritersExcluded"]) {
+  test("managed birth replay after server admission "+String(corrupt),
+      async () => {
+        const f=fixture();
+        const receipt=await f.record();
+        const snapshot=f.db.snapshot.bind(f.db);
+        f.db.snapshot=(path, docs)=>({...snapshot(path, docs),
+          createTime: CLOCK});
+        const runId="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        f.db.put(ROOT, {synthetic: "profile"});
+        f.db.put(ROOT+"/water_protocol/eligibility", {version: 1, uid: UID,
+          runId, policy: "NEW_ACCOUNT_V2_ONLY", legacyWritersExcluded: true});
+        const proof={version: 1, uid: UID, decisionId: receipt.decisionId,
+          runId, policy: "NEW_ACCOUNT_V2_ONLY", legacyWritersExcluded: true};
+        if (corrupt) {
+          proof[corrupt]=
+          corrupt==="legacyWritersExcluded" ? false : "divergent";
+        }
+        f.db.put(ROOT+"/runtime/water_admission", proof);
+        if (corrupt) await unchangedFailure(f, "WATER_BIRTH_CONFLICT");
+        else {
+          const before=[...f.db.docs];
+          const writes=f.db.writes.length;
+          const replay=await f.record();
+          assert.equal(replay.alreadyRecorded, true);
+          assert.equal(replay.decisionId, receipt.decisionId);
+          assert.deepEqual([...f.db.docs], before);
+          assert.equal(f.db.writes.length, writes);
+        }
+      });
+}

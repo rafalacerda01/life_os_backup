@@ -3,7 +3,7 @@
 const {Timestamp} = require("firebase-admin/firestore");
 const {UserRecord} = require("firebase-admin/auth");
 const {UserRecordMetadata} = require("firebase-functions/v1/auth");
-const {createAccountBirthTestHarness, birthError} =
+const {createAccountBirthRecorder, birthError} =
   require("./water_account_birth");
 
 const PROJECT = "demo-life-os";
@@ -151,13 +151,14 @@ function providerPolicy(user) {
 /**
  * Resource.type/labels are optional SDK fields, never UID or admission proof.
  * @param {*} resource SDK resource.
+ * @param {string} projectId Bound server project.
  * @return {boolean} Expected Auth project and structurally valid metadata.
  */
-function authResource(resource) {
+function authResource(resource, projectId) {
   return object(resource) && Object.keys(resource).every((key) =>
     ["service", "name", "type", "labels"].includes(key),
   ) && resource.service === "firebaseauth.googleapis.com" &&
-    resource.name === `projects/${PROJECT}` &&
+    resource.name === `projects/${projectId}` &&
     (resource.type === undefined || typeof resource.type === "string") &&
     (resource.labels === undefined || (object(resource.labels) &&
       Object.values(resource.labels).every((value) =>
@@ -168,10 +169,11 @@ function authResource(resource) {
  * Verify the normalized v1 handler contract; never the raw legacy wire form.
  * EventContext has project resource, not an Auth UID/tenant/generation.
  * @param {*} event Result supplied by trusted managed-event test code.
- * @param {Object} cohort Explicit closed test cohort.
+ * @param {Object} cohort Explicit server cohort.
+ * @param {string} projectId Bound server project.
  * @return {Object} Existing B2-A contract; identity normalized by that core.
  */
-function managedBirth(event, cohort) {
+function managedBirth(event, cohort, projectId = PROJECT) {
   if (!exact(event, ["user", "context"])) fail("WATER_BIRTH_INVALID_ORIGIN");
   const {user, context} = event;
   if (!object(user) || !(user.metadata instanceof UserRecordMetadata) ||
@@ -184,14 +186,14 @@ function managedBirth(event, cohort) {
     context.eventId.trim() !== context.eventId ||
     // eslint-disable-next-line no-control-regex
     /[\u0000-\u001f\u007f]/.test(context.eventId) ||
-    !authResource(context.resource) ||
+    !authResource(context.resource, projectId) ||
     (context.params !== undefined && !exact(context.params, []))) {
     fail("WATER_BIRTH_INVALID_ORIGIN");
   }
   const tenantId = defaultTenant(user);
   providerPolicy(user);
   return {source: {type: "FIREBASE_AUTH_CREATE", eventId: context.eventId,
-    projectId: PROJECT, tenantId, uid: user.uid,
+    projectId, tenantId, uid: user.uid,
     authCreatedAt: creationTime(user.metadata.creationTime),
     eventAt: rfc3339(context.timestamp)},
   identity: {uid: user.uid, email: user.email === undefined ? null : user.email,
@@ -216,9 +218,10 @@ async function recordManagedAuthBirth() {
  * @param {Object} options Fake/emulator dependencies and closed cohort.
  * @return {Object} Frozen zero-argument recorder.
  */
-function createAuthBirthAdapterTestHarness(options) {
+function createManagedAuthBirthRecorder(options) {
   if (!object(options) || !Object.keys(options).every((key) =>
-    ["db", "auth", "getManagedEvent", "cohort", "now"].includes(key),
+    ["db", "auth", "getManagedEvent", "cohort", "now", "projectId"]
+        .includes(key),
   ) || typeof options.getManagedEvent !== "function" ||
     !exact(options.cohort, ["version", "id", "policy", "state", "cutoverAt"]) ||
     options.cohort.version !== 1 || options.cohort.state !== "CLOSED" ||
@@ -227,20 +230,21 @@ function createAuthBirthAdapterTestHarness(options) {
     fail("WATER_BIRTH_INVALID_CONFIGURATION");
   }
   const {auth, db, getManagedEvent} = options;
+  const projectId = options.projectId || PROJECT;
   const cohort = Object.freeze({...options.cohort});
   const checkAuth = () => {
     if (!auth || !auth.app || !auth.app.options ||
-      auth.app.options.projectId !== PROJECT ||
+      auth.app.options.projectId !== projectId ||
       (auth.tenantId !== undefined && auth.tenantId !== null) ||
       typeof auth.getUser !== "function") {
       fail("WATER_BIRTH_INVALID_CONFIGURATION");
     }
   };
   checkAuth();
-  const recorder = createAccountBirthTestHarness({db, now: options.now,
+  const recorder = createAccountBirthRecorder({db, projectId, now: options.now,
     getTrustedBirth: async () => {
       checkAuth();
-      return managedBirth(await getManagedEvent(), cohort);
+      return managedBirth(await getManagedEvent(), cohort, projectId);
     },
     getCurrentAuthGeneration: async (uid) => {
       checkAuth();
@@ -255,7 +259,7 @@ function createAuthBirthAdapterTestHarness(options) {
       if (!(current instanceof UserRecord) || current.uid !== uid) {
         fail("WATER_BIRTH_GENERATION_CONFLICT");
       }
-      return {uid: current.uid, projectId: PROJECT,
+      return {uid: current.uid, projectId,
         tenantId: defaultTenant(current),
         authCreatedAt: creationTime(current.metadata.creationTime)};
     }});
@@ -270,4 +274,16 @@ function createAuthBirthAdapterTestHarness(options) {
 }
 
 module.exports = {recordManagedAuthBirth,
-  createAuthBirthAdapterTestHarness, authBirthError};
+  createAuthBirthAdapterTestHarness, createManagedAuthBirthRecorder,
+  authBirthError};
+
+/**
+ * @param {Object} options Synthetic demo dependencies.
+ * @return {Object} Managed receipt recorder.
+ */
+function createAuthBirthAdapterTestHarness(options) {
+  if (options && Object.hasOwn(options, "projectId")) {
+    fail("WATER_BIRTH_INVALID_CONFIGURATION");
+  }
+  return createManagedAuthBirthRecorder(options);
+}

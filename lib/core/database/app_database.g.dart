@@ -7272,6 +7272,376 @@ class WaterV2IntentsCompanion extends UpdateCompanion<WaterV2Intent> {
   }
 }
 
+class $WaterV2PreferencesTable extends WaterV2Preferences
+    with TableInfo<$WaterV2PreferencesTable, WaterV2Preference> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  $WaterV2PreferencesTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _initialHealthDayMeta = const VerificationMeta(
+    'initialHealthDay',
+  );
+  @override
+  late final GeneratedColumn<String> initialHealthDay = GeneratedColumn<String>(
+    'initial_health_day',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+  );
+  static const VerificationMeta _epochMeta = const VerificationMeta('epoch');
+  @override
+  late final GeneratedColumn<String> epoch = GeneratedColumn<String>(
+    'epoch',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+  );
+  static const VerificationMeta _ownerUidMeta = const VerificationMeta(
+    'ownerUid',
+  );
+  @override
+  late final GeneratedColumn<String> ownerUid = GeneratedColumn<String>(
+    'owner_uid',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _goalMlMeta = const VerificationMeta('goalMl');
+  @override
+  late final GeneratedColumn<int> goalMl = GeneratedColumn<int>(
+    'goal_ml',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    defaultValue: const Constant(3000),
+  );
+  static const VerificationMeta _revisionMeta = const VerificationMeta(
+    'revision',
+  );
+  @override
+  late final GeneratedColumn<int> revision = GeneratedColumn<int>(
+    'revision',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    defaultValue: const Constant(0),
+  );
+  @override
+  List<GeneratedColumn> get $columns => [
+    initialHealthDay,
+    epoch,
+    ownerUid,
+    goalMl,
+    revision,
+  ];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'water_v2_preferences';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<WaterV2Preference> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('initial_health_day')) {
+      context.handle(
+        _initialHealthDayMeta,
+        initialHealthDay.isAcceptableOrUnknown(
+          data['initial_health_day']!,
+          _initialHealthDayMeta,
+        ),
+      );
+    }
+    if (data.containsKey('epoch')) {
+      context.handle(
+        _epochMeta,
+        epoch.isAcceptableOrUnknown(data['epoch']!, _epochMeta),
+      );
+    }
+    if (data.containsKey('owner_uid')) {
+      context.handle(
+        _ownerUidMeta,
+        ownerUid.isAcceptableOrUnknown(data['owner_uid']!, _ownerUidMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_ownerUidMeta);
+    }
+    if (data.containsKey('goal_ml')) {
+      context.handle(
+        _goalMlMeta,
+        goalMl.isAcceptableOrUnknown(data['goal_ml']!, _goalMlMeta),
+      );
+    }
+    if (data.containsKey('revision')) {
+      context.handle(
+        _revisionMeta,
+        revision.isAcceptableOrUnknown(data['revision']!, _revisionMeta),
+      );
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {ownerUid};
+  @override
+  WaterV2Preference map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return WaterV2Preference(
+      initialHealthDay: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}initial_health_day'],
+      ),
+      epoch: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}epoch'],
+      ),
+      ownerUid: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}owner_uid'],
+      )!,
+      goalMl: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}goal_ml'],
+      )!,
+      revision: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}revision'],
+      )!,
+    );
+  }
+
+  @override
+  $WaterV2PreferencesTable createAlias(String alias) {
+    return $WaterV2PreferencesTable(attachedDatabase, alias);
+  }
+}
+
+class WaterV2Preference extends DataClass
+    implements Insertable<WaterV2Preference> {
+  final String? initialHealthDay;
+  final String? epoch;
+  final String ownerUid;
+  final int goalMl;
+  final int revision;
+  const WaterV2Preference({
+    this.initialHealthDay,
+    this.epoch,
+    required this.ownerUid,
+    required this.goalMl,
+    required this.revision,
+  });
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (!nullToAbsent || initialHealthDay != null) {
+      map['initial_health_day'] = Variable<String>(initialHealthDay);
+    }
+    if (!nullToAbsent || epoch != null) {
+      map['epoch'] = Variable<String>(epoch);
+    }
+    map['owner_uid'] = Variable<String>(ownerUid);
+    map['goal_ml'] = Variable<int>(goalMl);
+    map['revision'] = Variable<int>(revision);
+    return map;
+  }
+
+  WaterV2PreferencesCompanion toCompanion(bool nullToAbsent) {
+    return WaterV2PreferencesCompanion(
+      initialHealthDay: initialHealthDay == null && nullToAbsent
+          ? const Value.absent()
+          : Value(initialHealthDay),
+      epoch: epoch == null && nullToAbsent
+          ? const Value.absent()
+          : Value(epoch),
+      ownerUid: Value(ownerUid),
+      goalMl: Value(goalMl),
+      revision: Value(revision),
+    );
+  }
+
+  factory WaterV2Preference.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return WaterV2Preference(
+      initialHealthDay: serializer.fromJson<String?>(json['initialHealthDay']),
+      epoch: serializer.fromJson<String?>(json['epoch']),
+      ownerUid: serializer.fromJson<String>(json['ownerUid']),
+      goalMl: serializer.fromJson<int>(json['goalMl']),
+      revision: serializer.fromJson<int>(json['revision']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'initialHealthDay': serializer.toJson<String?>(initialHealthDay),
+      'epoch': serializer.toJson<String?>(epoch),
+      'ownerUid': serializer.toJson<String>(ownerUid),
+      'goalMl': serializer.toJson<int>(goalMl),
+      'revision': serializer.toJson<int>(revision),
+    };
+  }
+
+  WaterV2Preference copyWith({
+    Value<String?> initialHealthDay = const Value.absent(),
+    Value<String?> epoch = const Value.absent(),
+    String? ownerUid,
+    int? goalMl,
+    int? revision,
+  }) => WaterV2Preference(
+    initialHealthDay: initialHealthDay.present
+        ? initialHealthDay.value
+        : this.initialHealthDay,
+    epoch: epoch.present ? epoch.value : this.epoch,
+    ownerUid: ownerUid ?? this.ownerUid,
+    goalMl: goalMl ?? this.goalMl,
+    revision: revision ?? this.revision,
+  );
+  WaterV2Preference copyWithCompanion(WaterV2PreferencesCompanion data) {
+    return WaterV2Preference(
+      initialHealthDay: data.initialHealthDay.present
+          ? data.initialHealthDay.value
+          : this.initialHealthDay,
+      epoch: data.epoch.present ? data.epoch.value : this.epoch,
+      ownerUid: data.ownerUid.present ? data.ownerUid.value : this.ownerUid,
+      goalMl: data.goalMl.present ? data.goalMl.value : this.goalMl,
+      revision: data.revision.present ? data.revision.value : this.revision,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('WaterV2Preference(')
+          ..write('initialHealthDay: $initialHealthDay, ')
+          ..write('epoch: $epoch, ')
+          ..write('ownerUid: $ownerUid, ')
+          ..write('goalMl: $goalMl, ')
+          ..write('revision: $revision')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode =>
+      Object.hash(initialHealthDay, epoch, ownerUid, goalMl, revision);
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is WaterV2Preference &&
+          other.initialHealthDay == this.initialHealthDay &&
+          other.epoch == this.epoch &&
+          other.ownerUid == this.ownerUid &&
+          other.goalMl == this.goalMl &&
+          other.revision == this.revision);
+}
+
+class WaterV2PreferencesCompanion extends UpdateCompanion<WaterV2Preference> {
+  final Value<String?> initialHealthDay;
+  final Value<String?> epoch;
+  final Value<String> ownerUid;
+  final Value<int> goalMl;
+  final Value<int> revision;
+  final Value<int> rowid;
+  const WaterV2PreferencesCompanion({
+    this.initialHealthDay = const Value.absent(),
+    this.epoch = const Value.absent(),
+    this.ownerUid = const Value.absent(),
+    this.goalMl = const Value.absent(),
+    this.revision = const Value.absent(),
+    this.rowid = const Value.absent(),
+  });
+  WaterV2PreferencesCompanion.insert({
+    this.initialHealthDay = const Value.absent(),
+    this.epoch = const Value.absent(),
+    required String ownerUid,
+    this.goalMl = const Value.absent(),
+    this.revision = const Value.absent(),
+    this.rowid = const Value.absent(),
+  }) : ownerUid = Value(ownerUid);
+  static Insertable<WaterV2Preference> custom({
+    Expression<String>? initialHealthDay,
+    Expression<String>? epoch,
+    Expression<String>? ownerUid,
+    Expression<int>? goalMl,
+    Expression<int>? revision,
+    Expression<int>? rowid,
+  }) {
+    return RawValuesInsertable({
+      if (initialHealthDay != null) 'initial_health_day': initialHealthDay,
+      if (epoch != null) 'epoch': epoch,
+      if (ownerUid != null) 'owner_uid': ownerUid,
+      if (goalMl != null) 'goal_ml': goalMl,
+      if (revision != null) 'revision': revision,
+      if (rowid != null) 'rowid': rowid,
+    });
+  }
+
+  WaterV2PreferencesCompanion copyWith({
+    Value<String?>? initialHealthDay,
+    Value<String?>? epoch,
+    Value<String>? ownerUid,
+    Value<int>? goalMl,
+    Value<int>? revision,
+    Value<int>? rowid,
+  }) {
+    return WaterV2PreferencesCompanion(
+      initialHealthDay: initialHealthDay ?? this.initialHealthDay,
+      epoch: epoch ?? this.epoch,
+      ownerUid: ownerUid ?? this.ownerUid,
+      goalMl: goalMl ?? this.goalMl,
+      revision: revision ?? this.revision,
+      rowid: rowid ?? this.rowid,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (initialHealthDay.present) {
+      map['initial_health_day'] = Variable<String>(initialHealthDay.value);
+    }
+    if (epoch.present) {
+      map['epoch'] = Variable<String>(epoch.value);
+    }
+    if (ownerUid.present) {
+      map['owner_uid'] = Variable<String>(ownerUid.value);
+    }
+    if (goalMl.present) {
+      map['goal_ml'] = Variable<int>(goalMl.value);
+    }
+    if (revision.present) {
+      map['revision'] = Variable<int>(revision.value);
+    }
+    if (rowid.present) {
+      map['rowid'] = Variable<int>(rowid.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('WaterV2PreferencesCompanion(')
+          ..write('initialHealthDay: $initialHealthDay, ')
+          ..write('epoch: $epoch, ')
+          ..write('ownerUid: $ownerUid, ')
+          ..write('goalMl: $goalMl, ')
+          ..write('revision: $revision, ')
+          ..write('rowid: $rowid')
+          ..write(')'))
+        .toString();
+  }
+}
+
 abstract class _$AppDatabase extends GeneratedDatabase {
   _$AppDatabase(QueryExecutor e) : super(e);
   $AppDatabaseManager get managers => $AppDatabaseManager(this);
@@ -7291,6 +7661,11 @@ abstract class _$AppDatabase extends GeneratedDatabase {
   late final $NotificationDismissalsTable notificationDismissals =
       $NotificationDismissalsTable(this);
   late final $SyncQueueTableTable syncQueueTable = $SyncQueueTableTable(this);
+  late final $WaterV2DailyStatesTable waterV2DailyStates =
+      $WaterV2DailyStatesTable(this);
+  late final $WaterV2IntentsTable waterV2Intents = $WaterV2IntentsTable(this);
+  late final $WaterV2PreferencesTable waterV2Preferences =
+      $WaterV2PreferencesTable(this);
   late final Index idxTransactionsDate = Index(
     'idx_transactions_date',
     'CREATE INDEX idx_transactions_date ON transactions (date)',
@@ -7319,9 +7694,6 @@ abstract class _$AppDatabase extends GeneratedDatabase {
     'idx_checkin_is_synced',
     'CREATE INDEX idx_checkin_is_synced ON check_in_table (is_synced)',
   );
-  late final $WaterV2DailyStatesTable waterV2DailyStates =
-      $WaterV2DailyStatesTable(this);
-  late final $WaterV2IntentsTable waterV2Intents = $WaterV2IntentsTable(this);
   late final NotificationDao notificationDao = NotificationDao(
     this as AppDatabase,
   );
@@ -7346,6 +7718,7 @@ abstract class _$AppDatabase extends GeneratedDatabase {
     syncQueueTable,
     waterV2DailyStates,
     waterV2Intents,
+    waterV2Preferences,
     idxTransactionsDate,
     idxTransactionsCategory,
     idxTransactionsType,
@@ -10798,7 +11171,6 @@ typedef $$SyncQueueTableTableProcessedTableManager =
       SyncQueueTableData,
       PrefetchHooks Function()
     >;
-
 typedef $$WaterV2DailyStatesTableCreateCompanionBuilder =
     WaterV2DailyStatesCompanion Function({
       required String ownerUid,
@@ -11325,6 +11697,221 @@ typedef $$WaterV2IntentsTableProcessedTableManager =
       WaterV2Intent,
       PrefetchHooks Function()
     >;
+typedef $$WaterV2PreferencesTableCreateCompanionBuilder =
+    WaterV2PreferencesCompanion Function({
+      Value<String?> initialHealthDay,
+      Value<String?> epoch,
+      required String ownerUid,
+      Value<int> goalMl,
+      Value<int> revision,
+      Value<int> rowid,
+    });
+typedef $$WaterV2PreferencesTableUpdateCompanionBuilder =
+    WaterV2PreferencesCompanion Function({
+      Value<String?> initialHealthDay,
+      Value<String?> epoch,
+      Value<String> ownerUid,
+      Value<int> goalMl,
+      Value<int> revision,
+      Value<int> rowid,
+    });
+
+class $$WaterV2PreferencesTableFilterComposer
+    extends Composer<_$AppDatabase, $WaterV2PreferencesTable> {
+  $$WaterV2PreferencesTableFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<String> get initialHealthDay => $composableBuilder(
+    column: $table.initialHealthDay,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get epoch => $composableBuilder(
+    column: $table.epoch,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get ownerUid => $composableBuilder(
+    column: $table.ownerUid,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get goalMl => $composableBuilder(
+    column: $table.goalMl,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get revision => $composableBuilder(
+    column: $table.revision,
+    builder: (column) => ColumnFilters(column),
+  );
+}
+
+class $$WaterV2PreferencesTableOrderingComposer
+    extends Composer<_$AppDatabase, $WaterV2PreferencesTable> {
+  $$WaterV2PreferencesTableOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<String> get initialHealthDay => $composableBuilder(
+    column: $table.initialHealthDay,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get epoch => $composableBuilder(
+    column: $table.epoch,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get ownerUid => $composableBuilder(
+    column: $table.ownerUid,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get goalMl => $composableBuilder(
+    column: $table.goalMl,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get revision => $composableBuilder(
+    column: $table.revision,
+    builder: (column) => ColumnOrderings(column),
+  );
+}
+
+class $$WaterV2PreferencesTableAnnotationComposer
+    extends Composer<_$AppDatabase, $WaterV2PreferencesTable> {
+  $$WaterV2PreferencesTableAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<String> get initialHealthDay => $composableBuilder(
+    column: $table.initialHealthDay,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get epoch =>
+      $composableBuilder(column: $table.epoch, builder: (column) => column);
+
+  GeneratedColumn<String> get ownerUid =>
+      $composableBuilder(column: $table.ownerUid, builder: (column) => column);
+
+  GeneratedColumn<int> get goalMl =>
+      $composableBuilder(column: $table.goalMl, builder: (column) => column);
+
+  GeneratedColumn<int> get revision =>
+      $composableBuilder(column: $table.revision, builder: (column) => column);
+}
+
+class $$WaterV2PreferencesTableTableManager
+    extends
+        RootTableManager<
+          _$AppDatabase,
+          $WaterV2PreferencesTable,
+          WaterV2Preference,
+          $$WaterV2PreferencesTableFilterComposer,
+          $$WaterV2PreferencesTableOrderingComposer,
+          $$WaterV2PreferencesTableAnnotationComposer,
+          $$WaterV2PreferencesTableCreateCompanionBuilder,
+          $$WaterV2PreferencesTableUpdateCompanionBuilder,
+          (
+            WaterV2Preference,
+            BaseReferences<
+              _$AppDatabase,
+              $WaterV2PreferencesTable,
+              WaterV2Preference
+            >,
+          ),
+          WaterV2Preference,
+          PrefetchHooks Function()
+        > {
+  $$WaterV2PreferencesTableTableManager(
+    _$AppDatabase db,
+    $WaterV2PreferencesTable table,
+  ) : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $$WaterV2PreferencesTableFilterComposer($db: db, $table: table),
+          createOrderingComposer: () =>
+              $$WaterV2PreferencesTableOrderingComposer($db: db, $table: table),
+          createComputedFieldComposer: () =>
+              $$WaterV2PreferencesTableAnnotationComposer(
+                $db: db,
+                $table: table,
+              ),
+          updateCompanionCallback:
+              ({
+                Value<String?> initialHealthDay = const Value.absent(),
+                Value<String?> epoch = const Value.absent(),
+                Value<String> ownerUid = const Value.absent(),
+                Value<int> goalMl = const Value.absent(),
+                Value<int> revision = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => WaterV2PreferencesCompanion(
+                initialHealthDay: initialHealthDay,
+                epoch: epoch,
+                ownerUid: ownerUid,
+                goalMl: goalMl,
+                revision: revision,
+                rowid: rowid,
+              ),
+          createCompanionCallback:
+              ({
+                Value<String?> initialHealthDay = const Value.absent(),
+                Value<String?> epoch = const Value.absent(),
+                required String ownerUid,
+                Value<int> goalMl = const Value.absent(),
+                Value<int> revision = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => WaterV2PreferencesCompanion.insert(
+                initialHealthDay: initialHealthDay,
+                epoch: epoch,
+                ownerUid: ownerUid,
+                goalMl: goalMl,
+                revision: revision,
+                rowid: rowid,
+              ),
+          withReferenceMapper: (p0) => p0
+              .map((e) => (e.readTable(table), BaseReferences(db, table, e)))
+              .toList(),
+          prefetchHooksCallback: null,
+        ),
+      );
+}
+
+typedef $$WaterV2PreferencesTableProcessedTableManager =
+    ProcessedTableManager<
+      _$AppDatabase,
+      $WaterV2PreferencesTable,
+      WaterV2Preference,
+      $$WaterV2PreferencesTableFilterComposer,
+      $$WaterV2PreferencesTableOrderingComposer,
+      $$WaterV2PreferencesTableAnnotationComposer,
+      $$WaterV2PreferencesTableCreateCompanionBuilder,
+      $$WaterV2PreferencesTableUpdateCompanionBuilder,
+      (
+        WaterV2Preference,
+        BaseReferences<
+          _$AppDatabase,
+          $WaterV2PreferencesTable,
+          WaterV2Preference
+        >,
+      ),
+      WaterV2Preference,
+      PrefetchHooks Function()
+    >;
 
 class $AppDatabaseManager {
   final _$AppDatabase _db;
@@ -11364,4 +11951,6 @@ class $AppDatabaseManager {
       $$WaterV2DailyStatesTableTableManager(_db, _db.waterV2DailyStates);
   $$WaterV2IntentsTableTableManager get waterV2Intents =>
       $$WaterV2IntentsTableTableManager(_db, _db.waterV2Intents);
+  $$WaterV2PreferencesTableTableManager get waterV2Preferences =>
+      $$WaterV2PreferencesTableTableManager(_db, _db.waterV2Preferences);
 }
