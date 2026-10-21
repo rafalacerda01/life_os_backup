@@ -1,7 +1,8 @@
 "use strict";
 
 const {Timestamp} = require("firebase-admin/firestore");
-const {UserRecord} = require("firebase-admin/auth");
+const {createAuthGenerationReader, AuthGenerationError} =
+  require("./water_auth_generation");
 const {UserRecordMetadata} = require("firebase-functions/v1/auth");
 const {createAccountBirthRecorder, birthError} =
   require("./water_account_birth");
@@ -220,7 +221,8 @@ async function recordManagedAuthBirth() {
  */
 function createManagedAuthBirthRecorder(options) {
   if (!object(options) || !Object.keys(options).every((key) =>
-    ["db", "auth", "getManagedEvent", "cohort", "now", "projectId"]
+    ["db", "auth", "getManagedEvent", "cohort", "now", "projectId",
+      "authGenerationReader"]
         .includes(key),
   ) || typeof options.getManagedEvent !== "function" ||
     !exact(options.cohort, ["version", "id", "policy", "state", "cutoverAt"]) ||
@@ -241,6 +243,12 @@ function createManagedAuthBirthRecorder(options) {
     }
   };
   checkAuth();
+  // Reader is a trusted server/test dependency, never event/client JSON.
+  const generationReader = options.authGenerationReader ||
+    createAuthGenerationReader({auth, projectId});
+  if (!generationReader || typeof generationReader.read !== "function") {
+    fail("WATER_BIRTH_INVALID_CONFIGURATION");
+  }
   const recorder = createAccountBirthRecorder({db, projectId, now: options.now,
     getTrustedBirth: async () => {
       checkAuth();
@@ -248,20 +256,15 @@ function createManagedAuthBirthRecorder(options) {
     },
     getCurrentAuthGeneration: async (uid) => {
       checkAuth();
-      let current;
       try {
-        current = await auth.getUser(uid);
+        const current = await generationReader.read(uid);
+        checkAuth();
+        return current;
       } catch (error) {
-        if (error && error.code === "auth/user-not-found") return null;
+        if (error instanceof AdapterError) throw error;
+        if (error instanceof AuthGenerationError) fail(error.code);
         fail("WATER_BIRTH_AUTH_UNAVAILABLE");
       }
-      checkAuth();
-      if (!(current instanceof UserRecord) || current.uid !== uid) {
-        fail("WATER_BIRTH_GENERATION_CONFLICT");
-      }
-      return {uid: current.uid, projectId,
-        tenantId: defaultTenant(current),
-        authCreatedAt: creationTime(current.metadata.creationTime)};
     }});
   return Object.freeze({record: async (...args) => {
     if (args.length) fail("WATER_BIRTH_INVALID_ORIGIN");

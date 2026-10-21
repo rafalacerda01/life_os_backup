@@ -10,6 +10,9 @@ const {userRecordConstructor, UserBuilder} =
   require("firebase-functions/v1/auth");
 const {recordManagedAuthBirth, createAuthBirthAdapterTestHarness,
   authBirthError} = require("../water_auth_birth_adapter");
+const {createAuthGenerationReader} = require("../water_auth_generation");
+// Constructor input captured by the fixture, never a private SDK field.
+const liveWire = new WeakMap();
 
 const UID = "synthetic-owner";
 const PATH = `account_birth_decisions/${UID}`;
@@ -214,9 +217,12 @@ function eventUser(overrides = {}) {
  * @return {UserRecord} Real installed Admin SDK constructor result.
  */
 function liveUser(overrides = {}) {
-  return new UserRecord({localId: UID, createdAt: String(BORN.toMillis()),
+  const wire = {localId: UID, createdAt: String(BORN.toMillis()),
     providerUserInfo: [{providerId: "password", rawId: "synthetic-owner"}],
-    ...overrides});
+    ...overrides};
+  const user = new UserRecord(wire);
+  liveWire.set(user, wire);
+  return user;
 }
 
 /**
@@ -244,6 +250,16 @@ function fixture() {
       return f.live;
     }};
   f.options = {db: f.db, auth: f.auth, getManagedEvent: () => f.event,
+    authGenerationReader: createAuthGenerationReader({auth: f.auth,
+      projectId: "demo-life-os", emulatorHost: "127.0.0.1:9099",
+      fetchImpl: async (url, request) => {
+        assert.equal(url, "http://127.0.0.1:9099/identitytoolkit.googleapis.com/" +
+          "v1/projects/demo-life-os/accounts:lookup");
+        assert.deepEqual(JSON.parse(request.body), {localId: [UID]});
+        if (f.rawLookupHook) await f.rawLookupHook();
+        if (f.rawError) throw f.rawError;
+        return Response.json(f.rawBody || {users: [liveWire.get(f.live)]});
+      }}),
     cohort: {version: 1, id: "closed-test-v1", policy: "NEW_ACCOUNT_V2_ONLY",
       state: "CLOSED", cutoverAt: CUTOVER}, now: () => f.clock};
   f.api = createAuthBirthAdapterTestHarness(f.options);
@@ -429,17 +445,18 @@ test("pre-cutover event cannot use recent delivery or first sign-in instead",
       await unchangedFailure(f, "WATER_BIRTH_BEFORE_CUTOVER");
     });
 
-test("fractional event creation is never rounded to match Admin metadata",
+test("fractional event matches exact REST milliseconds despite SDK UTC display",
     async () => {
       const f = fixture(); f.event.user = eventUser({metadata: {
         createdAt: "2026-10-13T10:00:00.123Z"}});
       f.live = liveUser({createdAt: String(BORN.toMillis() + 123)});
       assert.equal(f.live.metadata.creationTime,
           "Tue, 13 Oct 2026 10:00:00 GMT");
-      await unchangedFailure(f, "WATER_BIRTH_GENERATION_CONFLICT");
+      assert.equal((await f.record()).eligible, false);
+      assert.equal(f.db.docs.get(PATH).authCreatedAt.nanoseconds, 123000000);
     });
 
-test("SDK loses subsecond generation distinction: CLOSED characterization only",
+test("REST rejects a distinct subsecond generation hidden by SDK UTC display",
     async () => {
       const f = fixture();
       const otherGeneration =
@@ -447,9 +464,7 @@ test("SDK loses subsecond generation distinction: CLOSED characterization only",
       assert.equal(otherGeneration.metadata.creationTime,
           f.live.metadata.creationTime);
       f.live = otherGeneration;
-      assert.equal((await f.record()).eligible, false);
-      // This must never be claimed as proof for opening a production cohort.
-      assert.equal(f.db.docs.get(PATH).authCreatedAt.nanoseconds, 0);
+      await unchangedFailure(f, "WATER_BIRTH_GENERATION_CONFLICT");
     });
 
 test("RFC3339 offset represents the same managed instant", async () => {
@@ -778,3 +793,89 @@ for (const path of ["retired_auth_identities/"+UID, ROOT]) {
     await unchangedFailure(f, "WATER_ACCOUNT_DELETING");
   });
 }
+
+/** @return {Object} Millisecond event and authoritative live generation. */
+function preciseFixture() {
+  const f = fixture(); const millis = BORN.toMillis() + 946;
+  f.event.user = eventUser({metadata: {
+    createdAt: new Date(millis).toISOString()}});
+  f.event.context.timestamp = new Date(BORN.toMillis() + 1000).toISOString();
+  f.live = liveUser({createdAt: String(millis)});
+  return f;
+}
+
+test("R3 exact millisecond birth and legitimate replay preserve one decision",
+    async () => {
+      const f = preciseFixture(); const first = await f.record();
+      const before = copy(f.db.docs.get(PATH));
+      const second =
+        await createAuthBirthAdapterTestHarness(f.options).record();
+      assert.equal(first.decisionId, second.decisionId);
+      assert.equal(second.alreadyRecorded, true);
+      assert.equal(f.db.writes.length, 1);
+      assert.deepEqual(f.db.docs.get(PATH), before);
+      assert.equal(before.authCreatedAt.nanoseconds, 946000000);
+      assert.equal(first.eligible, false);
+      assert.equal(f.db.docs.has(ROOT), false);
+      assert.equal(f.db.docs.has(ROOT + "/water_protocol/eligibility"), false);
+    });
+for (const delta of [1, 54, 1000, 86400000]) {
+  test(`R3 old event rejects generation ${delta}ms later without writes`,
+      async () => {
+        const f = preciseFixture();
+        f.live = liveUser({createdAt: String(BORN.toMillis() + 946 + delta)});
+        await unchangedFailure(f, "WATER_BIRTH_GENERATION_CONFLICT");
+      });
+}
+for (const code of ["auth/user-not-found", "auth/internal-error"]) {
+  test(`R3 precise event with ${code} cannot write`, async () => {
+    const f = preciseFixture(); f.authError = {code};
+    await unchangedFailure(f, code === "auth/user-not-found" ?
+      "WATER_BIRTH_AUTH_NOT_FOUND" : "WATER_BIRTH_AUTH_UNAVAILABLE");
+  });
+}
+test("R3 REST failure propagates before any write", async () => {
+  const f = preciseFixture();
+  f.rawError = new DOMException("offline", "TimeoutError");
+  await unchangedFailure(f, "WATER_BIRTH_AUTH_UNAVAILABLE");
+});
+for (const path of [GUARD, "retired_auth_identities/" + UID,
+  ROOT + "/runtime/account_deletion", ROOT + "/water_protocol/eligibility",
+  ROOT + "/runtime/water_admission", PATH]) {
+  test(`R3 precise birth preserves deletion/proof conflict ${path}`,
+      async () => {
+        const f = preciseFixture();
+        f.db.put(path, {status: "synthetic-conflict"});
+        await unchangedFailure(f, [GUARD, "retired_auth_identities/" + UID,
+          ROOT + "/runtime/account_deletion"].includes(path) ?
+          "WATER_ACCOUNT_DELETING" : "WATER_BIRTH_CONFLICT");
+      });
+}
+test("R3 generation changes during raw read in SAME second", async () => {
+  const f = preciseFixture(); f.rawLookupHook = async () => {
+    f.live = liveUser({createdAt: String(BORN.toMillis() + 947)});
+  };
+  await unchangedFailure(f, "WATER_BIRTH_GENERATION_CONFLICT");
+});
+test("R3 retry rechecks precise generation before any write", async () => {
+  const f = preciseFixture();
+  f.db.hooks.beforeCommit = ({attempt}) => {
+    if (attempt === 1) {
+      f.db.put(PATH, undefined); // Force real MVCC retry via a read conflict.
+      f.live = liveUser({createdAt: String(BORN.toMillis() + 947)});
+    }
+  };
+  await unchangedFailure(f, "WATER_BIRTH_GENERATION_CONFLICT");
+  assert.equal(f.db.attempts, 2);
+});
+test("R3 Auth change AFTER raw lookup remains outside Firestore atomicity",
+    async () => {
+      const f = preciseFixture(); f.db.hooks.beforeCommit = () => {
+        f.live = liveUser({createdAt: String(BORN.toMillis() + 947)});
+      };
+      const result = await f.record();
+      assert.equal(result.eligible, false);
+      assert.equal(f.db.docs.get(PATH).authCreatedAt.nanoseconds, 946000000);
+      assert.equal(f.db.docs.has(ROOT), false);
+      assert.equal(f.db.docs.has(ROOT + "/water_protocol/eligibility"), false);
+    });
