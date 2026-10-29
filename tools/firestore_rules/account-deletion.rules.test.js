@@ -86,8 +86,11 @@ for (const [name, guard] of [
 }
 
 rulesTest('expired COMPLETE guard allows otherwise valid health write', async () => {
+  // Historical title retained; R5 denies by presence even after expiry.
   await seedGuard('owner', {state: 'COMPLETE', retainUntil: past()});
-  await assertSucceeds(setDoc(doc(dbFor('owner'), healthPath('owner')), healthData()));
+  const db = dbFor('owner');
+  await assertFails(setDoc(doc(db, healthPath('owner')), healthData()));
+  assert.equal((await getDoc(doc(db, healthPath('owner')))).exists(), false);
 });
 
 rulesTest('another UID guard does not block owner and cross-account writes remain denied', async () => {
@@ -126,8 +129,10 @@ const privateWrites = [
   {name: 'privacy update', path: '/privacy/ai_consent', operation: 'update', initial: privacyData, data: () => ({accepted: false, revokedAt: serverTimestamp(), updatedAt: serverTimestamp()})},
 ];
 
+// Keep every historical operation; three are now denied even while active.
+const reviewServerOnlyWrites = new Set(['study_info create', 'study_info update', 'review_queue create']);
 for (const item of privateWrites) {
-  rulesTest(`${item.name}: retained guard denies write, absent guard permits it`, async () => {
+  rulesTest(`${item.name}: retained guard denies; active result follows reviewed authority`, async () => {
     const uid = 'owner';
     const path = `${userPath(uid)}${item.path}`;
     if (item.initial) await seed(path, item.initial(uid));
@@ -141,11 +146,69 @@ for (const item of privateWrites) {
     };
     await assertFails(write());
     await env.withSecurityRulesDisabled(context => deleteDoc(doc(context.firestore(), guardPath(uid))));
-    await assertSucceeds(write());
+    if (reviewServerOnlyWrites.has(item.name)) {
+      const beforeActive = await getDoc(reference);
+      await assertFails(write());
+      const afterActive = await getDoc(reference);
+      assert.equal(afterActive.exists(), beforeActive.exists());
+      assert.deepEqual(afterActive.data(), beforeActive.data());
+    } else await assertSucceeds(write());
   });
 }
 
-test('private write matrix covers all twenty currently allowed user writes', () => {
+test('private write matrix preserves twenty historical operations, including three now server-only', () => {
   assert.equal(privateWrites.length, 20);
+  assert.deepEqual(privateWrites.filter(item => reviewServerOnlyWrites.has(item.name)).map(item => item.name),
+    ['study_info create', 'study_info update', 'review_queue create']);
   assert.deepEqual(privateWrites.filter(item => item.operation === 'delete').map(item => item.name), ['notifications delete']);
+});
+
+
+const r5Controls = uid => [
+  'retired_auth_identities/' + uid,
+  'account_deletion_guards/' + uid,
+  'account_deletion_guards/' + uid + '/control/operation',
+];
+const r5States = [
+  ['PRE_AUTH reservation', [[0, {version: 2, state: 'RESERVED', origin: 'PRE_AUTH'}]]],
+  ['AUTH_EVENT reservation', [[0, {version: 2, state: 'RESERVED', origin: 'AUTH_EVENT'}]]],
+  ['IN_PROGRESS guard', [[1, {state: 'IN_PROGRESS', retainUntil: null}]]],
+  ['expired COMPLETE guard', [[1, {state: 'COMPLETE', retainUntil: past()}]]],
+  ['COMPLETE receipt without parent', [[2, {state: 'COMPLETE'}]]],
+  ['REVIEW_REQUIRED receipt', [[2, {state: 'REVIEW_REQUIRED'}]]],
+  ...[0, 1, 2].map(index => ['malformed control ' + index, [[index, {}]]]),
+  ['partial reservation and receipt', [[0, {state: 'RESERVED'}], [2, {state: 'IN_PROGRESS'}]]],
+];
+for (const item of privateWrites) for (const [state, controls] of r5States) {
+  rulesTest('R5 ' + item.name + ': ' + state + ' preserves data and controls', async () => {
+    const uid = 'owner', path = userPath(uid) + item.path;
+    if (item.initial) await seed(path, item.initial(uid));
+    for (const [index, data] of controls) await seed(r5Controls(uid)[index], data);
+    const db = dbFor(uid), reference = doc(db, path);
+    const before = await getDoc(reference);
+    await assertFails(item.operation === 'delete' ? deleteDoc(reference) :
+      item.operation === 'update' ? updateDoc(reference, item.data(uid)) : setDoc(reference, item.data(uid)));
+    const after = await getDoc(reference);
+    assert.equal(after.exists(), before.exists());
+    assert.deepEqual(after.data(), before.data());
+    await env.withSecurityRulesDisabled(async context => {
+      for (const [index, data] of controls) assert.deepEqual((await getDoc(doc(context.firestore(), r5Controls(uid)[index]))).data(), data);
+    });
+  });
+}
+rulesTest('R5 receipt survives removal of guard parent; active UID B is independent', async () => {
+  await seedGuard('owner');
+  await seed(r5Controls('owner')[2], {state: 'COMPLETE'});
+  await env.withSecurityRulesDisabled(context => deleteDoc(doc(context.firestore(), guardPath('owner'))));
+  await assertFails(setDoc(doc(dbFor('owner'), healthPath('owner')), healthData()));
+  await assertSucceeds(setDoc(doc(dbFor('B'), healthPath('B')), healthData()));
+  assert.equal((await getDoc(doc(dbFor('owner'), healthPath('owner')))).exists(), false);
+});
+rulesTest('R5 new UID with the same email creates only its own Free profile', async () => {
+  await seed(r5Controls('old')[0], {state: 'RESERVED'});
+  await seed(r5Controls('old')[2], {state: 'COMPLETE'});
+  await assertFails(setDoc(doc(dbFor('old'), userPath('old')), userData()));
+  await assertSucceeds(setDoc(doc(dbFor('new'), userPath('new')), userData()));
+  assert.deepEqual((await getDoc(doc(dbFor('new'), userPath('new')))).data(), userData());
+  await assertFails(getDoc(doc(dbFor('new'), userPath('old'))));
 });

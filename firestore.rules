@@ -36,13 +36,10 @@ service cloud.firestore {
     }
 
     function accountDeletionBlocked(userId) {
-      let guardPath = /databases/$(database)/documents/account_deletion_guards/$(userId);
-      return exists(guardPath)
-        && (
-          get(guardPath).data.state != 'COMPLETE'
-          || !(get(guardPath).data.retainUntil is timestamp)
-          || request.time <= get(guardPath).data.retainUntil
-        );
+      // R5: any control is permanent deny-only, including malformed records.
+      return exists(/databases/$(database)/documents/retired_auth_identities/$(userId))
+        || exists(/databases/$(database)/documents/account_deletion_guards/$(userId))
+        || exists(/databases/$(database)/documents/account_deletion_guards/$(userId)/control/operation);
     }
 
     function canWriteUserData(userId) {
@@ -60,6 +57,28 @@ service cloud.firestore {
 
     function circleDeletionPath(circleId) {
       return /databases/$(database)/documents/circle_deletions/$(circleId);
+    }
+
+    function circleMutationAllowed(circleId, data) {
+      // Mutation-only helper: read predicates and their permissions stay intact.
+      return isSignedIn()
+        && validCircleDocumentId(circleId)
+        && validCircleDocumentId(data.adminId)
+        && !accountDeletionBlocked(request.auth.uid)
+        && (data.adminId == request.auth.uid || !accountDeletionBlocked(data.adminId))
+        && data.schemaVersion == 2
+        && !data.keys().hasAny(['deletionState'])
+        && !exists(circleDeletionPath(circleId))
+        && !exists(/databases/$(database)/documents/circle_cleanup_guards/$(circleId));
+    }
+
+    function membershipMutationAllowed(circleId) {
+      // Existing Circle ownership is read before the write; a new Circle uses
+      // its post-state, still subject to the original root/member/user rules.
+      let data = exists(circlePath(circleId))
+        ? get(circlePath(circleId)).data
+        : getAfter(circlePath(circleId)).data;
+      return circleMutationAllowed(circleId, data);
     }
 
     function userPath(userId) {
@@ -967,6 +986,9 @@ service cloud.firestore {
         allow read: if isOwner(userId);
         allow create, delete: if false;
         allow update: if canWriteUserData(userId)
+          // Review-create counters are committed only by the backend Sync.
+          && !request.resource.data.diff(resource.data).affectedKeys()
+            .hasAny(['cardsToReview'])
           && isUpdatingOnly([
             'cardsToReview',
             'progress',
@@ -1049,12 +1071,9 @@ service cloud.firestore {
 
       match /study_info/{studyInfoId} {
         allow read: if isOwner(userId);
-        allow create: if canWriteUserData(userId)
-          && studyInfoId == 'main'
-          && validStudyInfoCreate();
-        allow update: if canWriteUserData(userId)
-          && studyInfoId == 'main'
-          && validStudyInfoUpdate();
+        // Its only former Client write field was the server-owned counter.
+        allow create: if false;
+        allow update: if false;
         allow delete: if false;
       }
 
@@ -1074,8 +1093,8 @@ service cloud.firestore {
       match /review_queue/{reviewId} {
   allow read: if isOwner(userId);
 
-  allow create: if canWriteUserData(userId)
-    && validReviewQueueCreate();
+  // Only Sync's four-effect transaction can create a card and its receipt.
+  allow create: if false;
 
   allow update: if false;
 
@@ -1113,11 +1132,14 @@ service cloud.firestore {
       allow create: if isSignedIn()
         && validCircleCreate(circleId);
 
-      allow update:
-        if isAdminTimestampUpdate(circleId)
-        || isAtomicJoin(circleId)
-        || isAtomicLeave(circleId)
-        || validChallengeCounterUpdate(circleId, resource.data, request.resource.data);
+      // The common gate dominates every OR branch; false elsewhere is no veto.
+      allow update: if circleMutationAllowed(circleId, resource.data)
+        && (
+          isAdminTimestampUpdate(circleId)
+          || isAtomicJoin(circleId)
+          || isAtomicLeave(circleId)
+          || validChallengeCounterUpdate(circleId, resource.data, request.resource.data)
+        );
 
       allow delete: if false;
 
@@ -1128,7 +1150,8 @@ service cloud.firestore {
 
         allow list: if isCircleMember(circleId);
 
-        allow create: if isValidMemberCreate(circleId, userId);
+        allow create: if membershipMutationAllowed(circleId)
+          && isValidMemberCreate(circleId, userId);
 
         allow update: if false;
 
@@ -1139,7 +1162,8 @@ service cloud.firestore {
 
         allow read: if isCircleMember(circleId);
 
-        allow create: if isCircleAdmin(circleId)
+        allow create: if circleMutationAllowed(circleId, get(circlePath(circleId)).data)
+          && isCircleAdmin(circleId)
           && isCircleMember(circleId)
           && !get(circlePath(circleId)).data.keys().hasAny([
             'deletionState'

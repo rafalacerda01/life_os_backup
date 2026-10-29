@@ -263,9 +263,12 @@ rulesTest('Completed guard still blocks an unexpired authenticated session after
 
 rulesTest('Expired completed guard permits a newly provisioned session', async () => {
   await seedUser('admin');
+  // Historical title retained; a new session cannot retire an old UID fence.
   await seedGuard('admin', deletionGuard({state: 'COMPLETE',
     retainUntil: Timestamp.fromMillis(1)}));
-  await assertSucceeds(create(3));
+  await assertFails(create(3));
+  assert.equal((await getDoc(doc(dbFor('admin'), 'circles/circle'))).exists(), false);
+  assert.equal((await getDoc(doc(dbFor('admin'), 'users/admin'))).data().activeCircleId, null);
 });
 
 rulesTest('Malformed account guard fails closed; client leave remains blocked', async () => {
@@ -625,3 +628,56 @@ rulesTest('Membership removal revokes progress read even while a legacy orphan r
   await assertFails(getDoc(doc(dbFor('admin'), path)));
   await assertFails(getDoc(doc(dbFor('m1'), path)));
 });
+
+
+const r5Paths = uid => ['retired_auth_identities/' + uid, 'account_deletion_guards/' + uid,
+  'account_deletion_guards/' + uid + '/control/operation'];
+for (const index of [0, 1, 2]) {
+  rulesTest('R5 create denies actor control ' + index + ' without partial Circle writes', async () => {
+    await seedUser('admin'); await env.withSecurityRulesDisabled(context => setDoc(doc(context.firestore(), r5Paths('admin')[index]), {}));
+    await assertFails(create(3));
+    assert.equal((await getDoc(doc(dbFor('admin'), 'circles/circle'))).exists(), false);
+    assert.equal((await getDoc(doc(dbFor('admin'), 'users/admin'))).data().activeCircleId, null);
+  });
+  for (const uid of ['joiner', 'admin']) rulesTest('R5 join denies ' + uid + ' control ' + index, async () => {
+    await seedCircle(3, 1, {isPremium: false});
+    await env.withSecurityRulesDisabled(context => setDoc(doc(context.firestore(), r5Paths(uid)[index]), {}));
+    await assertFails(join());
+    assert.equal((await getDoc(doc(dbFor('admin'), 'circles/circle'))).data().memberCount, 1);
+    assert.equal((await getDoc(doc(dbFor('joiner'), 'users/joiner'))).data().activeCircleId, null);
+    assert.equal((await getDoc(doc(dbFor('joiner'), 'circles/circle/members/joiner'))).exists(), false);
+  });
+  for (const branch of ['timestamp', 'counter', 'challenge']) rulesTest('R5 admin ' + branch + ' cannot bypass control ' + index, async () => {
+    await seedChallengeState(0);
+    await env.withSecurityRulesDisabled(context => setDoc(doc(context.firestore(), r5Paths('admin')[index]), {}));
+    const db = dbFor('admin'), root = doc(db, 'circles/circle'), before = (await getDoc(root)).data();
+    await assertFails(branch === 'timestamp' ? updateDoc(root, {updatedAt: serverTimestamp()}) :
+      branch === 'counter' ? updateDoc(root, {challengeCount: 1, lastChallengeId: 'x', updatedAt: serverTimestamp()}) : createChallengeAt('x'));
+    assert.deepEqual((await getDoc(root)).data(), before);
+    assert.equal((await getDocs(collection(db, 'circles/circle/challenges'))).size, 0);
+  });
+}
+for (const marker of ['circle_deletions/circle', 'circle_cleanup_guards/circle']) {
+  for (const branch of ['join', 'timestamp', 'challenge', 'counter']) rulesTest('R5 ' + marker + ' blocks ' + branch + ' independently of deletionState', async () => {
+    await seedCircle(3, 1, {isPremium: false});
+    await env.withSecurityRulesDisabled(context => setDoc(doc(context.firestore(), marker), {state: 'incompatible', circleId: 'other'}));
+    const db = dbFor('admin'), root = doc(db, 'circles/circle'), before = (await getDoc(root)).data();
+    await assertFails(branch === 'join' ? join() : branch === 'timestamp' ? updateDoc(root, {updatedAt: serverTimestamp()}) :
+      branch === 'counter' ? updateDoc(root, {challengeCount: 1, lastChallengeId: 'x', updatedAt: serverTimestamp()}) : createChallengeAt('x'));
+    assert.deepEqual((await getDoc(root)).data(), before);
+  });
+}
+for (const kind of ['create', 'join']) for (const omitted of ['circle', 'membership', 'profile']) {
+  rulesTest('R5 atomic ' + kind + ' rejects omitted ' + omitted + ' write', async () => {
+    if (kind === 'create') await seedUser('admin'); else await seedCircle(3, 1, {isPremium: false});
+    const uid = kind === 'create' ? 'admin' : 'joiner', db = dbFor(uid), batch = writeBatch(db);
+    if (omitted !== 'circle') {
+      if (kind === 'create') batch.set(doc(db, 'circles/circle'), circle(3));
+      else batch.update(doc(db, 'circles/circle'), {memberCount: increment(1), updatedAt: serverTimestamp()});
+    }
+    if (omitted !== 'membership') batch.set(doc(db, 'circles/circle/members', uid), member(kind === 'create' ? 'admin' : 'member'));
+    if (omitted !== 'profile') batch.update(doc(db, 'users', uid), {activeCircleId: 'circle'});
+    await assertFails(batch.commit());
+    assert.equal((await getDoc(doc(db, 'users', uid))).data().activeCircleId, null);
+  });
+}

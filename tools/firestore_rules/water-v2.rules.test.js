@@ -224,7 +224,7 @@ for (const [label, write] of [
 const guards = [
   ['IN_PROGRESS', {state: 'IN_PROGRESS', retainUntil: null}, false],
   ['retained COMPLETE', {state: 'COMPLETE', retainUntil: Timestamp.fromMillis(Date.now() + 86400000)}, false],
-  ['expired COMPLETE', {state: 'COMPLETE', retainUntil: Timestamp.fromMillis(1)}, true],
+  ['expired COMPLETE', {state: 'COMPLETE', retainUntil: Timestamp.fromMillis(1)}, false],
   ['empty malformed', {}, false],
   ['missing retention', {state: 'COMPLETE'}, false],
   ['invalid retention', {state: 'COMPLETE', retainUntil: 'expired'}, false],
@@ -340,9 +340,11 @@ for (const hasBarrier of [false, true]) {
         const batch = writeBatch(db);
         for (let i = 0; i < size; i++) batch.set(doc(db, `${HEALTH}-${i}`),
           hasBarrier ? {mood: 'new', date: date()} : health(250));
-        await assertSucceeds(batch.commit());
+        // Preserve both original active sizes; expired guard is now deny-only.
+        if (hasExpiredGuard) await assertFails(batch.commit());
+        else await assertSucceeds(batch.commit());
         const result = await getDocs(collection(db, `${ROOT}/health_info`));
-        assert.equal(result.size, size);
+        assert.equal(result.size, hasExpiredGuard ? 0 : size);
       });
     }
   }
@@ -493,8 +495,11 @@ for (const barrier of [ROOT+'/water_protocol/eligibility','account_birth_decisio
       await assertFails(call());
       if(kind!=='create') {
         assert.equal((await readHealth(db)).waterIntakeMl,1000);
-        // Other Health fields stay usable unless a global deletion guard blocks them.
-        await assertSucceeds(updateDoc(ref,{mood:'after'}));
+        // R5 retirement closes all private writes; Water-only barriers do not.
+        if (barrier === 'retired_auth_identities/' + OWNER) {
+          await assertFails(updateDoc(ref,{mood:'after'}));
+          assert.deepEqual(await readHealth(db), health());
+        } else await assertSucceeds(updateDoc(ref,{mood:'after'}));
       }
     });
   }
