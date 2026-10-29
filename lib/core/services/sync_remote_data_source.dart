@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'package:crypto/crypto.dart';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_app_check/firebase_app_check.dart';
@@ -28,7 +29,55 @@ abstract interface class SessionBoundSyncRemoteDataSource
   });
 }
 
+/// Classification uses only the original operation contract, never its payload
+/// or attempt metadata. The same record remains recognizable after restart.
+abstract final class LegacyStudyInfoOperation {
+  static const holdCode = 'STUDY_INFO_LEGACY_HOLD';
+
+  static bool isBlocked(SyncQueueTableData item) =>
+      item.collection.trim() == 'study_info' &&
+      item.docId.trim() == 'main' &&
+      const {
+        'create',
+        'update',
+      }.contains(item.operationType.trim().toLowerCase());
+}
+
 typedef SyncAppCheckTokenProvider = Future<String?> Function();
+
+/// A persisted domain failure is a local HOLD, not another send attempt.
+/// Match the operation family as well as the code; unrelated 409s stay terminal.
+abstract final class StudyStateHoldOperation {
+  static String? forBackendOperation(Object? operation) => switch (operation) {
+    'apply_study_review' => 'STUDY_REVIEW_STATE_INVALID',
+    'delete_subject' => 'STUDY_REVIEW_QUEUE_STATE_INVALID',
+    _ => null,
+  };
+
+  static bool isReview(SyncQueueTableData item) =>
+      item.collection.trim() == 'review_queue' &&
+      item.operationType.trim().toLowerCase() == 'update';
+
+  static bool isSubjectDelete(SyncQueueTableData item) =>
+      item.collection.trim() == 'subjects' &&
+      item.operationType.trim().toLowerCase() == 'delete';
+
+  static bool matches(SyncQueueTableData item, String? code) =>
+      code != null &&
+      ((isReview(item) && code == forBackendOperation('apply_study_review')) ||
+          (isSubjectDelete(item) &&
+              code == forBackendOperation('delete_subject')));
+
+  static bool isHeld(SyncQueueTableData item) =>
+      item.status == SyncQueuePersistenceStatus.pending &&
+      matches(item, item.lastErrorCode);
+
+  // Older transports lost the backend code. Do not infer which remote effects
+  // occurred, requeue the row or treat it as a failed creation.
+  static bool isHistoricalRejected(SyncQueueTableData item) =>
+      item.status == SyncQueuePersistenceStatus.rejected &&
+      (isReview(item) || isSubjectDelete(item));
+}
 
 class FirestoreSyncRemoteDataSource
     implements SessionBoundSyncRemoteDataSource {
@@ -101,6 +150,17 @@ class FirestoreSyncRemoteDataSource
       return const SyncOperationResult.retryable(code: 'LEGACY_WATER_BLOCKED');
     }
 
+    // Also protect direct callers: no SDK access, payload decode, or HTTP fallback.
+    if (LegacyStudyInfoOperation.isBlocked(item)) {
+      return const SyncOperationResult.retryable(
+        code: LegacyStudyInfoOperation.holdCode,
+      );
+    }
+
+    if (StudyStateHoldOperation.isHeld(item)) {
+      return SyncOperationResult.retryable(code: item.lastErrorCode);
+    }
+
     if (collection.isEmpty || docId.isEmpty) {
       return const SyncOperationResult.invalidPayload(
         message: 'Collection ou docId inválidos.',
@@ -140,13 +200,17 @@ class FirestoreSyncRemoteDataSource
               .doc(docId);
           // No await between final admission and starting the transaction.
           sessionPermit.requireCurrent();
-          await _firestore.runTransaction((transaction) async {
+          final confirmed = await _firestore.runTransaction<bool>((
+            transaction,
+          ) async {
             // Firestore retries this callback; retain the original admission.
             // This also checks immediately before the first remote read.
             sessionPermit.requireCurrent();
             final snapshot = await transaction.get(ref);
             sessionPermit.requireCurrent();
-            if (!snapshot.exists) return;
+            // A cached/pending local snapshot cannot confirm a remote no-op.
+            if (!_isServerConfirmed(snapshot)) return false;
+            if (!snapshot.exists) return true;
             final remote = NotificationModel.fromFirestore(snapshot);
             final remoteKey = NotificationOccurrence.key(
               id: docId,
@@ -163,8 +227,14 @@ class FirestoreSyncRemoteDataSource
               sessionPermit.requireCurrent();
               transaction.delete(ref);
             }
+            return true;
           });
           sessionPermit.requireCurrent();
+          if (!confirmed) {
+            return const SyncOperationResult.retryable(
+              code: 'FIRESTORE_RESULT_UNCONFIRMED',
+            );
+          }
           return const SyncOperationResult.success();
         } catch (_) {
           // A failed await must not turn canceled work into a permanent reject.
@@ -274,6 +344,14 @@ class FirestoreSyncRemoteDataSource
         );
       }
 
+      if (collection == 'review_queue' && operationType == 'create') {
+        return await _createReviewCardServerSide(
+          expectedUid: uid,
+          item: item,
+          permit: permit,
+        );
+      }
+
       if (collection == 'review_queue' && operationType == 'update') {
         return _applyStudyReviewServerSide(
           expectedUid: uid,
@@ -362,46 +440,11 @@ class FirestoreSyncRemoteDataSource
 
       if (collection == 'study_info' &&
           (operationType == 'create' || operationType == 'update')) {
-        if (docId != 'main') {
-          return const SyncOperationResult.invalidPayload(
-            message: 'Documento de informações de estudo inválido.',
-          );
-        }
-
-        final data = _decodePayload(item.payloadJson);
-        await documentRef.set(
-          _prepareStudyInfoPayload(data),
-          SetOptions(merge: true),
+        // main was held before reaching any SDK access. Other IDs retain
+        // their existing definitive validation error.
+        return const SyncOperationResult.invalidPayload(
+          message: 'Documento de informações de estudo inválido.',
         );
-        return const SyncOperationResult.success();
-      }
-
-      if (collection == 'review_queue' && operationType == 'create') {
-        final data = _decodePayload(item.payloadJson);
-        final prepared = _prepareReviewQueueCreatePayload(data);
-        final subjectId = prepared['subjectId']! as String;
-        final userRef = _firestore.collection('users').doc(uid);
-        final subjectRef = userRef.collection('subjects').doc(subjectId);
-        final studyInfoRef = userRef.collection('study_info').doc('main');
-
-        await _firestore.runTransaction((transaction) async {
-          final cardSnapshot = await transaction.get(documentRef);
-          final subjectSnapshot = await transaction.get(subjectRef);
-
-          if (cardSnapshot.exists) return;
-          if (!subjectSnapshot.exists) {
-            throw const FormatException('Matéria remota não encontrada.');
-          }
-
-          transaction.set(documentRef, prepared);
-          transaction.set(studyInfoRef, {
-            'reviewQueue': FieldValue.increment(1),
-          }, SetOptions(merge: true));
-          transaction.update(subjectRef, {
-            'cardsToReview': FieldValue.increment(1),
-          });
-        });
-        return const SyncOperationResult.success();
       }
 
       switch (operationType) {
@@ -459,6 +502,8 @@ class FirestoreSyncRemoteDataSource
       return _mapFirebaseError(error);
     } on RemoteSessionStopped {
       return const SyncOperationResult.retryable(code: 'SESSION_STOPPED');
+    } on TimeoutException {
+      return const SyncOperationResult.retryable(code: 'SYNC_TIMEOUT');
     } on FormatException catch (error) {
       return SyncOperationResult.invalidPayload(message: error.message);
     } catch (error) {
@@ -467,18 +512,6 @@ class FirestoreSyncRemoteDataSource
         code: 'UNEXPECTED_SYNC_ERROR',
       );
     }
-  }
-
-  Map<String, dynamic> _prepareStudyInfoPayload(Map<String, dynamic> data) {
-    if (!_hasExactFields(data, const {'reviewQueue'})) {
-      throw const FormatException('Payload de informações de estudo inválido.');
-    }
-
-    final reviewQueue = data['reviewQueue'];
-    if (reviewQueue is! int || reviewQueue < 0) {
-      throw const FormatException('Fila de revisão inválida.');
-    }
-    return {'reviewQueue': reviewQueue};
   }
 
   Map<String, dynamic> _prepareFocusLogCreatePayload(
@@ -520,30 +553,157 @@ class FirestoreSyncRemoteDataSource
     };
   }
 
-  Map<String, dynamic> _prepareReviewQueueCreatePayload(
-    Map<String, dynamic> data,
-  ) {
-    const fields = {'subjectId', 'question', 'answer', 'createdAt'};
-    if (!_hasExactFields(data, fields)) {
-      throw const FormatException('Payload de criação de flashcard inválido.');
+  // v1 is prospective. Legacy queue rows must never acquire a new identity,
+  // timestamp, receipt or Client SDK fallback merely because they are retried.
+  Future<SyncOperationResult> _createReviewCardServerSide({
+    required String expectedUid,
+    required SyncQueueTableData item,
+    required RemoteSendPermit permit,
+  }) async {
+    final Map<String, dynamic> data;
+    try {
+      data = _decodePayload(item.payloadJson);
+    } on FormatException {
+      return const SyncOperationResult.retryable(
+        code: 'REVIEW_CREATE_LEGACY_UNVERIFIED',
+      );
     }
-
-    for (final field in const ['subjectId', 'question', 'answer']) {
-      final value = data[field];
-      if (value is! String || value.trim().isEmpty) {
-        throw const FormatException('Conteúdo do flashcard inválido.');
-      }
+    if (data['creationProtocolVersion'] is! int ||
+        data['creationProtocolVersion'] != 1) {
+      return const SyncOperationResult.retryable(
+        code: 'REVIEW_CREATE_LEGACY_UNVERIFIED',
+      );
     }
-
-    return {
-      'subjectId': data['subjectId'],
+    if (item.ownerUid != expectedUid || !permit.isCurrent) {
+      return const SyncOperationResult.retryable(code: 'SESSION_STOPPED');
+    }
+    const fields = {
+      'creationProtocolVersion',
+      'cardId',
+      'subjectId',
+      'question',
+      'answer',
+      'createdAt',
+    };
+    final id = RegExp(r'^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$');
+    final cardId = data['cardId'];
+    final subjectId = data['subjectId'];
+    final createdAt = data['createdAt'];
+    if (!_hasExactFields(data, fields) ||
+        cardId is! String ||
+        !id.hasMatch(cardId) ||
+        cardId != item.docId ||
+        subjectId is! String ||
+        !id.hasMatch(subjectId) ||
+        !_reviewText(data['question']) ||
+        !_reviewText(data['answer']) ||
+        createdAt is! String ||
+        !_reviewUtc(createdAt) ||
+        !_wellFormedReviewText(expectedUid)) {
+      return const SyncOperationResult.invalidPayload(
+        message: 'Payload de criação de flashcard inválido.',
+      );
+    }
+    final payload = <String, dynamic>{
+      'operation': 'create_review_card',
+      'version': 1,
+      'cardId': cardId,
+      'subjectId': subjectId,
       'question': data['question'],
       'answer': data['answer'],
-      'createdAt': _parseQueuedTimestamp(
-        data['createdAt'],
-        fieldName: 'Data de criação',
-      ),
+      'createdAt': createdAt,
     };
+    if (utf8.encode(jsonEncode(payload)).length > 512 * 1024) {
+      return const SyncOperationResult.invalidPayload(
+        code: 'REVIEW_CREATE_PAYLOAD_TOO_LARGE',
+      );
+    }
+    final frame = <int>[];
+    for (final value in <String>[
+      'review-create-v1',
+      expectedUid,
+      cardId,
+      subjectId,
+      data['question'] as String,
+      data['answer'] as String,
+      createdAt,
+    ]) {
+      final bytes = utf8.encode(value);
+      frame
+        ..addAll(ascii.encode('${bytes.length}:'))
+        ..addAll(bytes);
+    }
+    return _postToSyncBackend(
+      expectedUid,
+      permit,
+      payload,
+      reviewCreateFingerprint: sha256.convert(frame).toString(),
+      reviewCreateCardId: cardId,
+    );
+  }
+
+  bool _wellFormedReviewText(String text) {
+    final units = text.codeUnits;
+    for (var i = 0; i < units.length; i++) {
+      final unit = units[i];
+      if (unit >= 0xd800 && unit <= 0xdbff) {
+        if (++i >= units.length || units[i] < 0xdc00 || units[i] > 0xdfff) {
+          return false;
+        }
+      } else if (unit >= 0xdc00 && unit <= 0xdfff) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  bool _reviewText(Object? text) =>
+      text is String && text.trim().isNotEmpty && _wellFormedReviewText(text);
+
+  bool _reviewUtc(String text) {
+    if (!RegExp(
+      r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}(\d{3})?Z$',
+    ).hasMatch(text))
+      return false;
+    final date = DateTime.tryParse(text);
+    return date != null &&
+        date.year >= 1 &&
+        date.year <= 9999 &&
+        date.isUtc &&
+        date.toIso8601String() == text;
+  }
+
+  bool _validReviewCreateAck(
+    String body,
+    String uid,
+    String cardId,
+    String fingerprint,
+  ) {
+    try {
+      final data = jsonDecode(body);
+      return data is Map<String, dynamic> &&
+          _hasExactFields(data, const {
+            'success',
+            'operation',
+            'version',
+            'uid',
+            'operationId',
+            'fingerprint',
+            'outcome',
+            'effectsCommitted',
+          }) &&
+          data['success'] == true &&
+          data['operation'] == 'create_review_card' &&
+          data['version'] is int &&
+          data['version'] == 1 &&
+          data['uid'] == uid &&
+          data['operationId'] == cardId &&
+          data['fingerprint'] == fingerprint &&
+          (data['outcome'] == 'APPLIED' || data['outcome'] == 'REPLAYED') &&
+          data['effectsCommitted'] == true;
+    } on FormatException {
+      return false;
+    }
   }
 
   bool _hasExactFields(Map<String, dynamic> data, Set<String> fields) {
@@ -1049,8 +1209,10 @@ class FirestoreSyncRemoteDataSource
   Future<SyncOperationResult> _postToSyncBackend(
     String expectedUid,
     RemoteSendPermit operationPermit,
-    Map<String, dynamic> payload,
-  ) async {
+    Map<String, dynamic> payload, {
+    String? reviewCreateFingerprint,
+    String? reviewCreateCardId,
+  }) async {
     http.Client? client;
     try {
       // All backend operations share prepared-session admission; direct
@@ -1125,6 +1287,17 @@ class FirestoreSyncRemoteDataSource
       }
 
       if (response.statusCode >= 200 && response.statusCode < 300) {
+        if (reviewCreateFingerprint != null &&
+            !_validReviewCreateAck(
+              response.body,
+              expectedUid,
+              reviewCreateCardId!,
+              reviewCreateFingerprint,
+            )) {
+          return const SyncOperationResult.retryable(
+            code: 'REVIEW_CREATE_ACK_INVALID',
+          );
+        }
         return const SyncOperationResult.success();
       }
 
@@ -1137,6 +1310,24 @@ class FirestoreSyncRemoteDataSource
         return const SyncOperationResult.retryable(
           code: 'AUTHENTICATION_REQUIRED',
         );
+      }
+
+      if (reviewCreateFingerprint != null) {
+        const recoveryStatuses = <String, int>{
+          'REVIEW_CREATE_LEGACY_UNVERIFIED': 409,
+          'REVIEW_CREATE_FINGERPRINT_CONFLICT': 409,
+          'REVIEW_CREATE_RECEIPT_INVALID': 503,
+          'REVIEW_CREATE_ROOT_UNAVAILABLE': 503,
+          'REVIEW_CREATE_SUBJECT_UNAVAILABLE': 409,
+          'REVIEW_CREATE_SUBJECT_TOMBSTONED': 409,
+          'REVIEW_CREATE_STATE_INVALID': 503,
+          'REVIEW_CREATE_UNCONFIRMED': 500,
+          'ACCOUNT_DELETION_BLOCKED': 503,
+        };
+        final code = _extractBackendCode(response.body);
+        if (code != null && recoveryStatuses[code] == response.statusCode) {
+          return SyncOperationResult.retryable(code: code);
+        }
       }
 
       if (response.statusCode == 403) {
@@ -1172,6 +1363,13 @@ class FirestoreSyncRemoteDataSource
       if (response.statusCode == 409) {
         final backendCode = _extractBackendCode(response.body);
         final backendMessage = _extractBackendMessage(response.body);
+        if (backendCode != null &&
+            backendCode ==
+                StudyStateHoldOperation.forBackendOperation(
+                  payload['operation'],
+                )) {
+          return SyncOperationResult.retryable(code: backendCode);
+        }
 
         return SyncOperationResult.invalidPayload(
           message: backendCode == null
@@ -1327,9 +1525,19 @@ class FirestoreSyncRemoteDataSource
     throw const FormatException('Data de saúde inválida.');
   }
 
+  bool _isServerConfirmed(DocumentSnapshot<Map<String, dynamic>> snapshot) =>
+      !snapshot.metadata.isFromCache && !snapshot.metadata.hasPendingWrites;
+
   SyncOperationResult _mapFirebaseError(FirebaseException error) {
     switch (error.code) {
       case 'permission-denied':
+        if (error.plugin == 'cloud_firestore') {
+          // Rules do not identify R5 as the cause. A denied/unknown write is
+          // unconfirmed, not acknowledged; SyncManager owns controlled backoff.
+          return const SyncOperationResult.retryable(
+            code: 'FIRESTORE_PERMISSION_UNCONFIRMED',
+          );
+        }
         return const SyncOperationResult.permissionDenied();
 
       case 'unauthenticated':

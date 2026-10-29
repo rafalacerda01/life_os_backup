@@ -216,6 +216,15 @@ class SyncManager {
             continue;
           }
 
+          if (LegacyStudyInfoOperation.isBlocked(item) ||
+              StudyStateHoldOperation.isHeld(item)) {
+            // A local classification is not a send attempt. Leave the row,
+            // including its status/attempts, intact and keep this FIFO head.
+            // Every drain rediscovers the condition from the persisted contract.
+            _resetRetry();
+            return false;
+          }
+
           final isWater = WaterV2Queue.isWater(item);
           if (!isWater && LegacyWaterQueue.isBlocked(item)) {
             // Leave every byte/status/attempt intact and process unrelated work.
@@ -287,6 +296,12 @@ class SyncManager {
                 ownerUid,
                 code,
               );
+              if (StudyStateHoldOperation.matches(item, code)) {
+                // This was a real HTTP attempt. Its persisted code now holds
+                // the FIFO across restarts without timers or fake attempts.
+                _resetRetry();
+                return false;
+              }
               _scheduleRetry(ownerUid);
               return false;
 

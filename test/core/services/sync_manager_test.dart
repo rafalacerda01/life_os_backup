@@ -1,4 +1,6 @@
 import 'dart:async';
+import 'dart:io';
+import 'package:drift/drift.dart' show Value;
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -6,6 +8,9 @@ import 'package:life_os/core/database/database_provider.dart';
 import 'package:life_os/core/services/sync_manager_provider.dart';
 import 'package:life_os/features/auth/presentation/providers/auth_provider.dart';
 import 'dart:convert';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
+import 'package:life_os/core/database/remote_send_permit.dart';
 
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -15,6 +20,71 @@ import 'package:life_os/core/services/sync_operation_result.dart';
 import 'package:life_os/core/services/sync_queue_store.dart';
 import 'package:life_os/core/services/sync_remote_data_source.dart';
 import 'package:life_os/core/services/sync_ui_event.dart';
+
+// Synthetic Firestore boundary; the actual datasource and Manager are exercised.
+class _P1Firestore extends Fake implements FirebaseFirestore {
+  final data = <String, Map<String, dynamic>>{};
+  final sends = <String>[];
+  Object? beforeError;
+  Object? afterError;
+  Future<void> Function(String path)? beforeWrite;
+  @override
+  CollectionReference<Map<String, dynamic>> collection(String path) =>
+      _P1Collection(this, path);
+}
+
+// SDK sealed interfaces are implemented only by this IO-free test fake.
+// ignore: subtype_of_sealed_class
+class _P1Collection extends Fake
+    implements CollectionReference<Map<String, dynamic>> {
+  final _P1Firestore owner;
+  @override
+  final String path;
+  _P1Collection(this.owner, this.path);
+  @override
+  DocumentReference<Map<String, dynamic>> doc([String? path]) =>
+      _P1Document(owner, '${this.path}/$path');
+}
+
+// SDK sealed interfaces are implemented only by this IO-free test fake.
+// ignore: subtype_of_sealed_class
+class _P1Document extends Fake
+    implements DocumentReference<Map<String, dynamic>> {
+  final _P1Firestore owner;
+  @override
+  final String path;
+  _P1Document(this.owner, this.path);
+  @override
+  CollectionReference<Map<String, dynamic>> collection(String path) =>
+      _P1Collection(owner, '${this.path}/$path');
+  @override
+  Future<void> update(Map<Object, Object?> data) =>
+      set(data.cast<String, dynamic>(), SetOptions(merge: true));
+
+  @override
+  Future<void> set(Map<String, dynamic> data, [SetOptions? options]) async {
+    owner.sends.add(path);
+    await owner.beforeWrite?.call(path);
+    final before = owner.beforeError;
+    if (before != null) throw before;
+    owner.data[path] = {...?owner.data[path], ...data};
+    final after = owner.afterError;
+    if (after != null) throw after;
+  }
+}
+
+class _P1User extends Fake implements User {
+  @override
+  final String uid;
+  _P1User(this.uid);
+}
+
+class _P1Auth extends Fake implements FirebaseAuth {
+  String? uid;
+  _P1Auth(this.uid);
+  @override
+  User? get currentUser => uid == null ? null : _P1User(uid!);
+}
 
 class FakeSyncQueueStore
     implements SyncQueueStore, SyncQueueDiscardSafetyStore {
@@ -94,11 +164,23 @@ class FakeSyncQueueStore
     String errorCode,
   ) async {
     retried.add(id);
-    _updateItem(id, ownerUid, SyncQueuePersistenceStatus.pending, false);
+    _updateItem(
+      id,
+      ownerUid,
+      SyncQueuePersistenceStatus.pending,
+      false,
+      errorCode: errorCode,
+    );
     return 1;
   }
 
-  void _updateItem(int id, String ownerUid, String status, bool isSynced) {
+  void _updateItem(
+    int id,
+    String ownerUid,
+    String status,
+    bool isSynced, {
+    String? errorCode,
+  }) {
     final index = items.indexWhere(
       (item) => item.id == id && item.ownerUid == ownerUid,
     );
@@ -108,6 +190,7 @@ class FakeSyncQueueStore
       status: status,
       isSynced: isSynced,
       attemptCount: item.attemptCount + 1,
+      lastErrorCode: Value(errorCode ?? item.lastErrorCode),
     );
   }
 }
@@ -1761,5 +1844,1084 @@ void main() {
       container.read(syncManagerProvider).waterV2Processor!.isEnabled,
       isFalse,
     );
+  });
+
+  group('P1 R5 pending persistence through the real datasource and Manager', () {
+    const payload = '{ "currentValue": 1 }';
+    Future<int> enqueue(AppDatabase db, String uid) => db.insertSyncItem(
+      ownerUid: uid,
+      collection: 'goals',
+      docId: 'main',
+      operationType: 'update',
+      payloadJson: payload,
+      createdAt: 1,
+    );
+    for (final code in ['permission-denied', 'unauthenticated']) {
+      test(
+        '$code retains A across session change, restart and independent B database',
+        () async {
+          final dbA = AppDatabase(executor: NativeDatabase.memory()),
+              dbB = AppDatabase(executor: NativeDatabase.memory());
+          addTearDown(dbA.close);
+          addTearDown(dbB.close);
+          final idA = await enqueue(dbA, 'uid-a'),
+              idB = await enqueue(dbB, 'uid-b');
+          final original = await dbA.getSyncItemById(idA);
+          final auth = _P1Auth('uid-a');
+          final firestore = _P1Firestore()
+            ..beforeError = FirebaseException(
+              plugin: 'cloud_firestore',
+              code: code,
+            );
+          final source = FirestoreSyncRemoteDataSource(firestore, auth);
+          final managerA = SyncManager(
+            queueStore: AppDatabaseSyncQueueStore(dbA),
+            remoteDataSource: source,
+            currentUserId: () => auth.uid,
+          );
+          addTearDown(managerA.dispose);
+          expect(await managerA.processPendingItems(), isFalse);
+          final pending =
+              (await dbA.getSyncItemById(idA))! as SyncQueueTableData;
+          expect(pending.status, SyncQueuePersistenceStatus.pending);
+          expect(pending.isSynced, isFalse);
+          expect(pending.ownerUid, 'uid-a');
+          expect(pending.docId, 'main');
+          expect(pending.id, idA);
+          expect(pending.payloadJson, payload);
+          expect(pending.createdAt, (original as SyncQueueTableData).createdAt);
+          expect(pending.attemptCount, 1);
+          expect(pending.lastAttemptAt, isNotNull);
+          expect(
+            pending.lastErrorCode,
+            code == 'permission-denied'
+                ? 'FIRESTORE_PERMISSION_UNCONFIRMED'
+                : 'AUTHENTICATION_REQUIRED',
+          );
+          expect(await dbA.hasRejectedSyncItems('uid-a'), isFalse);
+          expect(await managerA.prepareForSessionDetach('uid-a'), isTrue);
+          auth.uid = 'uid-b';
+          firestore.beforeError = null;
+          final managerB = SyncManager(
+            queueStore: AppDatabaseSyncQueueStore(dbB),
+            remoteDataSource: source,
+            currentUserId: () => auth.uid,
+          );
+          addTearDown(managerB.dispose);
+          expect(await managerB.processPendingItems(), isTrue);
+          expect(
+            (await dbB.getSyncItemById(idB)).status,
+            SyncQueuePersistenceStatus.succeeded,
+          );
+          expect((await dbB.getSyncItemById(idB)).isSynced, isTrue);
+          expect(await dbA.getSyncItemById(idA), pending);
+          expect(await dbA.getPendingSyncItems('uid-b'), isEmpty);
+          expect(firestore.data['users/uid-a/goals/main'], isNull);
+          expect(firestore.data['users/uid-b/goals/main'], {'currentValue': 1});
+          managerA.dispose();
+          auth.uid = 'uid-a';
+          final restarted = SyncManager(
+            queueStore: AppDatabaseSyncQueueStore(dbA),
+            remoteDataSource: source,
+            currentUserId: () => auth.uid,
+          );
+          addTearDown(restarted.dispose);
+          expect(await restarted.processPendingItems(), isTrue);
+          final done = (await dbA.getSyncItemById(idA))! as SyncQueueTableData;
+          expect(done.status, SyncQueuePersistenceStatus.succeeded);
+          expect(done.isSynced, isTrue);
+          expect(done.payloadJson, payload);
+          expect(done.id, idA);
+          expect(done.attemptCount, 2);
+          expect(firestore.data['users/uid-b/goals/main'], {'currentValue': 1});
+          expect(await dbB.getSyncItemById(idB), isNotNull);
+        },
+      );
+    }
+    test(
+      'late successful SDK write after detach cannot ACK A or mutate B local queue',
+      () async {
+        final dbA = AppDatabase(executor: NativeDatabase.memory()),
+            dbB = AppDatabase(executor: NativeDatabase.memory());
+        addTearDown(dbA.close);
+        addTearDown(dbB.close);
+        final idA = await enqueue(dbA, 'uid-a'),
+            idB = await enqueue(dbB, 'uid-b');
+        final originalA = await dbA.getSyncItemById(idA),
+            originalB = await dbB.getSyncItemById(idB);
+        final auth = _P1Auth('uid-a'),
+            reached = Completer<void>(),
+            release = Completer<void>();
+        final firestore = _P1Firestore()
+          ..beforeWrite = (path) async {
+            if (path.contains('/uid-a/')) {
+              reached.complete();
+              await release.future;
+            }
+          };
+        final manager = SyncManager(
+          queueStore: AppDatabaseSyncQueueStore(dbA),
+          remoteDataSource: FirestoreSyncRemoteDataSource(firestore, auth),
+          currentUserId: () => auth.uid,
+        );
+        addTearDown(manager.dispose);
+        final processing = manager.processPendingItems();
+        await reached.future;
+        expect(await manager.prepareForSessionDetach('uid-a'), isTrue);
+        auth.uid = 'uid-b';
+        release.complete();
+        expect(await processing, isFalse);
+        await Future<void>.delayed(Duration.zero);
+        expect(await dbA.getSyncItemById(idA), originalA);
+        expect(await dbB.getSyncItemById(idB), originalB);
+        expect((await dbA.getSyncItemById(idA)).isSynced, isFalse);
+        expect(firestore.sends, ['users/uid-a/goals/main']);
+      },
+    );
+    test(
+      'unknown after-write result persists without ACK, stable replay then confirms',
+      () async {
+        final db = AppDatabase(executor: NativeDatabase.memory());
+        addTearDown(db.close);
+        final id = await enqueue(db, 'uid-a');
+        final firestore = _P1Firestore()
+          ..afterError = FirebaseException(
+            plugin: 'cloud_firestore',
+            code: 'deadline-exceeded',
+          );
+        final manager = SyncManager(
+          queueStore: AppDatabaseSyncQueueStore(db),
+          remoteDataSource: FirestoreSyncRemoteDataSource(
+            firestore,
+            _P1Auth('uid-a'),
+          ),
+          currentUserId: () => 'uid-a',
+        );
+        addTearDown(manager.dispose);
+        expect(await manager.processPendingItems(), isFalse);
+        final pending = (await db.getSyncItemById(id))! as SyncQueueTableData;
+        expect(pending.status, SyncQueuePersistenceStatus.pending);
+        expect(pending.isSynced, isFalse);
+        expect(pending.payloadJson, payload);
+        expect(pending.lastErrorCode, 'DEADLINE-EXCEEDED');
+        expect(firestore.data.length, 1);
+        firestore.afterError = null;
+        expect(await manager.processPendingItems(), isTrue);
+        final done = (await db.getSyncItemById(id))! as SyncQueueTableData;
+        expect(done.status, SyncQueuePersistenceStatus.succeeded);
+        expect(done.isSynced, isTrue);
+        expect(done.id, id);
+        expect(done.payloadJson, payload);
+        expect(firestore.data.length, 1);
+        expect(firestore.sends, hasLength(2));
+      },
+    );
+    testWidgets(
+      'ambiguous denial uses existing bounded delays, no tight loop or false ACK',
+      (tester) async {
+        final store = FakeSyncQueueStore([
+          createSyncItem(
+            collection: 'goals',
+            docId: 'main',
+            operationType: 'update',
+            payloadJson: payload,
+          ),
+        ]);
+        final remote = FakeSyncRemoteDataSource(
+          (_, _) async => const SyncOperationResult.retryable(
+            code: 'FIRESTORE_PERMISSION_UNCONFIRMED',
+          ),
+        );
+        final manager = SyncManager(
+          queueStore: store,
+          remoteDataSource: remote,
+          currentUserId: () => 'user-123',
+        );
+        expect(await manager.processPendingItems(), isFalse);
+        for (final seconds in [5, 15, 30, 60, 300, 300]) {
+          final calls = remote.processedItems.length;
+          await tester.pump(Duration(seconds: seconds - 1));
+          expect(remote.processedItems, hasLength(calls));
+          await tester.pump(const Duration(seconds: 1));
+          expect(remote.processedItems, hasLength(calls + 1));
+          expect(store.items.single.status, SyncQueuePersistenceStatus.pending);
+          expect(store.items.single.isSynced, isFalse);
+          expect(store.items.single.payloadJson, payload);
+        }
+        expect(store.markedAsSynced, isEmpty);
+        expect(store.rejected, isEmpty);
+        manager.dispose();
+        final calls = remote.processedItems.length;
+        await tester.pump(const Duration(minutes: 10));
+        expect(remote.processedItems, hasLength(calls));
+      },
+    );
+    test(
+      'review indeterminate result preserves pending queue and blocks destructive discard',
+      () async {
+        final db = AppDatabase(executor: NativeDatabase.memory());
+        addTearDown(db.close);
+        final id = await db.insertSyncItem(
+          ownerUid: 'uid-a',
+          collection: 'review_queue',
+          docId: 'card-1',
+          operationType: 'create',
+          payloadJson:
+              '{"subjectId":"s","question":"q","answer":"a","createdAt":"2026-10-28T00:00:00Z"}',
+        );
+        final original = await db.getSyncItemById(id);
+        final remote = FakeSyncRemoteDataSource(
+          (_, _) async => const SyncOperationResult.retryable(
+            code: 'REVIEW_CREATE_UNCONFIRMED',
+          ),
+        );
+        final manager = SyncManager(
+          queueStore: AppDatabaseSyncQueueStore(db),
+          remoteDataSource: remote,
+          currentUserId: () => 'uid-a',
+        );
+        addTearDown(manager.dispose);
+        expect(await manager.processPendingItems(), isFalse);
+        expect(await manager.prepareForLocalDataDiscard(), isFalse);
+        final row = (await db.getSyncItemById(id))! as SyncQueueTableData;
+        expect(row.status, SyncQueuePersistenceStatus.pending);
+        expect(row.isSynced, isFalse);
+        expect(row.id, id);
+        expect(row.payloadJson, (original as SyncQueueTableData).payloadJson);
+        expect(await db.hasRejectedSyncItems('uid-a'), isFalse);
+        expect(await db.getPendingSyncItems('uid-a'), hasLength(1));
+      },
+    );
+  });
+  group('ReviewQueue v1 ACK transport through actual Manager', () {
+    Map<String, dynamic> payload() => {
+      'creationProtocolVersion': 1,
+      'cardId': 'card-1',
+      'subjectId': 'subject-1',
+      'question': 'Q',
+      'answer': 'A',
+      'createdAt': '2026-10-28T12:34:56.123456Z',
+    };
+    Map<String, dynamic> ack() => {
+      'success': true,
+      'operation': 'create_review_card',
+      'version': 1,
+      'uid': 'uid-a',
+      'operationId': 'card-1',
+      'fingerprint':
+          'd3ee2953c47ce71eb071d3e27447c1689359ff7c913c8666329991efce20ca99',
+      'outcome': 'REPLAYED',
+      'effectsCommitted': true,
+    };
+    for (final mode in [
+      'valid',
+      'invalid-ack',
+      'legacy',
+      'fingerprint-conflict',
+      'deletion-blocked',
+      'timeout',
+      'terminal-403',
+    ])
+      test('$mode preserves FIFO identity and correct status', () async {
+        final db = AppDatabase(executor: NativeDatabase.memory());
+        addTearDown(db.close);
+        final original = payload();
+        if (mode == 'legacy') original.remove('creationProtocolVersion');
+        final id = await db.insertSyncItem(
+          ownerUid: 'uid-a',
+          collection: 'review_queue',
+          docId: 'card-1',
+          operationType: 'create',
+          payloadJson: jsonEncode(original),
+        );
+        final second = await db.insertSyncItem(
+          ownerUid: 'uid-a',
+          collection: 'review_queue',
+          docId: 'card-2',
+          operationType: 'create',
+          payloadJson: jsonEncode({...payload(), 'cardId': 'card-2'}),
+        );
+        final firestore = _P1Firestore();
+        var calls = 0;
+        final source = FirestoreSyncRemoteDataSource(
+          firestore,
+          _P1Auth('uid-a'),
+          captureRemoteSend: (_) => RemoteSendPermit(() => true),
+          idTokenProvider: (_, _) async => 'synthetic',
+          appCheckTokenProvider: () async => 'synthetic',
+          clientFactory: () => MockClient((request) async {
+            calls++;
+            expect(
+              jsonDecode(request.body)['cardId'],
+              mode == 'valid' && calls > 1 ? 'card-2' : 'card-1',
+            );
+            if (mode == 'timeout') throw TimeoutException('synthetic');
+            if (mode == 'terminal-403')
+              return http.Response('{"code":"PERMISSION_DENIED"}', 403);
+            if (mode == 'fingerprint-conflict')
+              return http.Response(
+                '{"code":"REVIEW_CREATE_FINGERPRINT_CONFLICT"}',
+                409,
+              );
+            if (mode == 'deletion-blocked')
+              return http.Response('{"code":"ACCOUNT_DELETION_BLOCKED"}', 503);
+            if (mode == 'invalid-ack') return http.Response('{}', 200);
+            return http.Response(jsonEncode(ack()), 200);
+          }),
+        );
+        final manager = SyncManager(
+          queueStore: AppDatabaseSyncQueueStore(db),
+          remoteDataSource: source,
+          currentUserId: () => 'uid-a',
+        );
+        addTearDown(manager.dispose);
+        await manager.processPendingItems();
+        final row = (await db.getSyncItemById(id))! as SyncQueueTableData;
+        expect(row.id, id);
+        expect(row.docId, 'card-1');
+        expect(row.ownerUid, 'uid-a');
+        expect(row.payloadJson, jsonEncode(original));
+        expect(
+          row.status,
+          mode == 'valid'
+              ? SyncQueuePersistenceStatus.succeeded
+              : mode == 'terminal-403'
+              ? SyncQueuePersistenceStatus.rejected
+              : SyncQueuePersistenceStatus.pending,
+        );
+        expect(row.isSynced, mode == 'valid');
+        expect(firestore.sends, isEmpty);
+        expect(firestore.data, isEmpty);
+        if (mode != 'valid' && mode != 'terminal-403') {
+          expect(calls, mode == 'legacy' ? 0 : 1);
+          expect(
+            (await db.getSyncItemById(second) as SyncQueueTableData)
+                .attemptCount,
+            0,
+          );
+          expect(await manager.prepareForLocalDataDiscard(), isFalse);
+        }
+      });
+    test(
+      'actual Manager detach invalidates late v1 ACK; same UID remains pending',
+      () async {
+        final db = AppDatabase(executor: NativeDatabase.memory());
+        addTearDown(db.close);
+        final id = await db.insertSyncItem(
+          ownerUid: 'uid-a',
+          collection: 'review_queue',
+          docId: 'card-1',
+          operationType: 'create',
+          payloadJson: jsonEncode(payload()),
+        );
+        final reached = Completer<void>(), release = Completer<void>();
+        final source = FirestoreSyncRemoteDataSource(
+          _P1Firestore(),
+          _P1Auth('uid-a'),
+          captureRemoteSend: (_) => RemoteSendPermit(() => true),
+          idTokenProvider: (_, _) async => 'synthetic',
+          appCheckTokenProvider: () async => 'synthetic',
+          clientFactory: () => MockClient((_) async {
+            reached.complete();
+            await release.future;
+            return http.Response(jsonEncode(ack()), 200);
+          }),
+        );
+        final manager = SyncManager(
+          queueStore: AppDatabaseSyncQueueStore(db),
+          remoteDataSource: source,
+          currentUserId: () => 'uid-a',
+        );
+        addTearDown(manager.dispose);
+        final execution = manager.processPendingItems();
+        await reached.future;
+        final detached = manager.prepareForSessionDetach('uid-a');
+        release.complete();
+        await execution;
+        expect(await detached, isTrue);
+        final row = (await db.getSyncItemById(id))! as SyncQueueTableData;
+        expect(row.status, SyncQueuePersistenceStatus.pending);
+        expect(row.isSynced, isFalse);
+        expect(row.payloadJson, jsonEncode(payload()));
+        expect(row.ownerUid, 'uid-a');
+        expect(row.id, id);
+      },
+    );
+    testWidgets(
+      'new recovery code uses existing backoff and never advances FIFO',
+      (tester) async {
+        final first = createSyncItem(
+          id: 1,
+          ownerUid: 'uid-a',
+          collection: 'review_queue',
+          docId: 'card-1',
+          payloadJson: jsonEncode(payload()),
+        );
+        final second = createSyncItem(
+          id: 2,
+          ownerUid: 'uid-a',
+          collection: 'review_queue',
+          docId: 'card-2',
+          payloadJson: jsonEncode({...payload(), 'cardId': 'card-2'}),
+        );
+        final store = FakeSyncQueueStore([first, second]);
+        final remote = FakeSyncRemoteDataSource((_, item) async {
+          expect(item.id, 1);
+          return const SyncOperationResult.retryable(
+            code: 'REVIEW_CREATE_ACK_INVALID',
+          );
+        });
+        final manager = SyncManager(
+          queueStore: store,
+          remoteDataSource: remote,
+          currentUserId: () => 'uid-a',
+        );
+        await manager.processPendingItems();
+        expect(remote.processedItems, hasLength(1));
+        for (final seconds in [5, 15, 30, 60, 300, 300]) {
+          final calls = remote.processedItems.length;
+          await tester.pump(Duration(seconds: seconds - 1));
+          expect(remote.processedItems, hasLength(calls));
+          await tester.pump(const Duration(seconds: 1));
+          expect(remote.processedItems, hasLength(calls + 1));
+          expect(store.items.first.payloadJson, first.payloadJson);
+          expect(store.items.first.docId, 'card-1');
+        }
+        expect(store.markedAsSynced, isEmpty);
+        expect(store.rejected, isEmpty);
+        manager.dispose();
+      },
+    );
+  });
+  group('S2 StudyInfo retention and persistent HOLD', () {
+    const rawPayload = '  { "reviewQueue" : 9, "historical" : true }\n';
+    Future<int> row(
+      AppDatabase db, {
+      String uid = 'uid-a',
+      String collection = 'study_info',
+      String docId = 'main',
+      String operation = 'update',
+      String status = SyncQueuePersistenceStatus.pending,
+      int createdAt = 1,
+      int? lastAttemptAt = 1,
+      int attempts = 7,
+      String? error = 'HISTORICAL_UNCONFIRMED',
+    }) => db
+        .into(db.syncQueueTable)
+        .insert(
+          SyncQueueTableCompanion.insert(
+            ownerUid: Value(uid),
+            collection: collection,
+            docId: docId,
+            operationType: operation,
+            payloadJson: rawPayload,
+            createdAt: createdAt,
+            status: Value(status),
+            isSynced: Value(status == SyncQueuePersistenceStatus.succeeded),
+            attemptCount: Value(attempts),
+            lastAttemptAt: Value(lastAttemptAt),
+            lastErrorCode: Value(error),
+          ),
+        );
+    const cutoff = 100000000;
+
+    for (final operation in ['create', 'update']) {
+      for (final lastAttempt in <int?>[null, 1]) {
+        test(
+          'SQL retains old $operation succeeded with lastAttempt=$lastAttempt byte for byte',
+          () async {
+            final db = AppDatabase(executor: NativeDatabase.memory());
+            addTearDown(db.close);
+            final id = await row(
+              db,
+              operation: operation,
+              status: SyncQueuePersistenceStatus.succeeded,
+              lastAttemptAt: lastAttempt,
+            );
+            final original = await db.getSyncItemById(id);
+            expect(await db.cleanupSucceededSyncItems('uid-a', cutoff), 0);
+            expect(await db.cleanupSucceededSyncItems('uid-a', cutoff), 0);
+            expect(await db.getSyncItemById(id), original);
+            expect((await db.getSyncItemById(id)).payloadJson, rawPayload);
+          },
+        );
+      }
+    }
+    test(
+      'SQL trim agrees with datasource Dart trim for whitespace and literal non-whitespace',
+      () async {
+        final db = AppDatabase(executor: NativeDatabase.memory());
+        addTearDown(db.close);
+        // Includes runtime-dependent NEL and formerly whitespace U+180E;
+        // zero-width space and ASCII punctuation must NOT be silently trimmed.
+        final codePoints = [
+          0x09,
+          0x0a,
+          0x0b,
+          0x0c,
+          0x0d,
+          0x20,
+          0x85,
+          0xa0,
+          0x1680,
+          0x180e,
+          ...List.generate(11, (i) => 0x2000 + i),
+          0x2028,
+          0x2029,
+          0x202f,
+          0x205f,
+          0x3000,
+          0xfeff,
+          0x200b,
+          0x2e,
+        ];
+        for (final cp in codePoints) {
+          final space = String.fromCharCode(cp);
+          for (final operation in ['CrEaTe', 'uPdAtE']) {
+            final id = await row(
+              db,
+              collection: '${space}study_info$space',
+              docId: '${space}main$space',
+              operation: '$space$operation$space',
+              status: SyncQueuePersistenceStatus.succeeded,
+            );
+            final original =
+                (await db.getSyncItemById(id))! as SyncQueueTableData;
+            final held = space.trim().isEmpty;
+            expect(LegacyStudyInfoOperation.isBlocked(original), held);
+            await db.cleanupSucceededSyncItems('uid-a', cutoff);
+            expect(
+              await db.getSyncItemById(id),
+              held ? original : null,
+              reason: 'codepoint $cp/$operation',
+            );
+          }
+        }
+      },
+    );
+    for (final spec in [
+      ('study_info', 'other', 'update'),
+      ('study_info', 'MAIN', 'create'),
+      ('study_info', 'main', 'delete'),
+      ('study_info', 'main', 'batch_delete'),
+      ('Study_info', 'main', 'update'),
+      ('habits', 'habit-1', 'create'),
+      ('transactions', 'finance-1', 'create'),
+      ('tasks', 'task-1', 'update'),
+      ('focus_logs', 'focus-1', 'create'),
+      ('review_queue', 'card-1', 'create'),
+    ]) {
+      test(
+        'SQL still expires old succeeded ${spec.$1}/${spec.$2}/${spec.$3}',
+        () async {
+          final db = AppDatabase(executor: NativeDatabase.memory());
+          addTearDown(db.close);
+          final id = await row(
+            db,
+            collection: spec.$1,
+            docId: spec.$2,
+            operation: spec.$3,
+            status: SyncQueuePersistenceStatus.succeeded,
+          );
+          expect(await db.cleanupSucceededSyncItems('uid-a', cutoff), 1);
+          expect(await db.getSyncItemById(id), isNull);
+        },
+      );
+    }
+    test(
+      'SQL keeps original Health, recent success, rejected, pending, other UID and date rules',
+      () async {
+        final db = AppDatabase(executor: NativeDatabase.memory());
+        addTearDown(db.close);
+        final preserved = <int>[];
+        preserved.add(
+          await row(
+            db,
+            collection: 'health_info',
+            docId: 'day',
+            status: SyncQueuePersistenceStatus.succeeded,
+          ),
+        );
+        preserved.add(
+          await row(
+            db,
+            collection: 'tasks',
+            docId: 'recent',
+            status: SyncQueuePersistenceStatus.succeeded,
+            createdAt: cutoff + 1,
+            lastAttemptAt: null,
+          ),
+        );
+        preserved.add(
+          await row(
+            db,
+            collection: 'tasks',
+            docId: 'recent-attempt',
+            status: SyncQueuePersistenceStatus.succeeded,
+            lastAttemptAt: cutoff + 1,
+          ),
+        );
+        preserved.add(
+          await row(db, status: SyncQueuePersistenceStatus.rejected),
+        );
+        preserved.add(await row(db));
+        preserved.add(
+          await row(
+            db,
+            uid: 'uid-b',
+            collection: 'habits',
+            status: SyncQueuePersistenceStatus.succeeded,
+          ),
+        );
+        final originals = await Future.wait(preserved.map(db.getSyncItemById));
+        final expired = await row(
+          db,
+          collection: 'habits',
+          status: SyncQueuePersistenceStatus.succeeded,
+          lastAttemptAt: null,
+        );
+        expect(await db.cleanupSucceededSyncItems('uid-a', cutoff), 1);
+        expect(await db.getSyncItemById(expired), isNull);
+        expect(await Future.wait(preserved.map(db.getSyncItemById)), originals);
+        expect(await db.cleanupSucceededSyncItems('uid-a', cutoff), 0);
+        expect(await Future.wait(preserved.map(db.getSyncItemById)), originals);
+      },
+    );
+    for (final operation in ['create', 'update']) {
+      test(
+        'Manager preserves $operation HOLD, later FIFO and metadata while maintaining other succeeded',
+        () async {
+          final db = AppDatabase(executor: NativeDatabase.memory());
+          addTearDown(db.close);
+          final history = await row(
+            db,
+            status: SyncQueuePersistenceStatus.succeeded,
+            operation: operation,
+          );
+          final rejected = await row(
+            db,
+            status: SyncQueuePersistenceStatus.rejected,
+            operation: operation,
+          );
+          final earlier = await row(
+            db,
+            collection: 'tasks',
+            docId: 'before',
+            attempts: 0,
+          );
+          final head = await row(db, operation: operation);
+          final later = await row(
+            db,
+            collection: 'tasks',
+            docId: 'after',
+            attempts: 0,
+          );
+          final other = await row(
+            db,
+            uid: 'uid-b',
+            collection: 'tasks',
+            docId: 'other',
+            attempts: 0,
+          );
+          final expired = await row(
+            db,
+            collection: 'habits',
+            status: SyncQueuePersistenceStatus.succeeded,
+          );
+          final ids = [history, rejected, head, later, other];
+          final originals = await Future.wait(ids.map(db.getSyncItemById));
+          final remote = FakeSyncRemoteDataSource(
+            (_, _) async => const SyncOperationResult.success(),
+          );
+          final manager = SyncManager(
+            queueStore: AppDatabaseSyncQueueStore(db),
+            remoteDataSource: remote,
+            currentUserId: () => 'uid-a',
+          );
+          addTearDown(manager.dispose);
+          expect(await manager.processPendingItems(), isFalse);
+          expect(
+            (await db.getSyncItemById(earlier)).status,
+            SyncQueuePersistenceStatus.succeeded,
+          );
+          expect(await db.getSyncItemById(expired), isNull);
+          expect(remote.processedItems, ['uid-a:tasks:before:update']);
+          for (var n = 0; n < 3; n++)
+            expect(await manager.processPendingItems(), isFalse);
+          expect(await manager.prepareForLocalDataDiscard(), isFalse);
+          expect(await Future.wait(ids.map(db.getSyncItemById)), originals);
+          expect(remote.processedItems, hasLength(1));
+          expect((await db.getPendingSyncItems('uid-a')).map((x) => x.id), [
+            head,
+            later,
+          ]);
+          expect(await manager.prepareForSessionDetach('uid-a'), isTrue);
+        },
+      );
+    }
+    testWidgets(
+      'local HOLD has no send, retry timer, fake attempt or manual bypass',
+      (tester) async {
+        final head =
+            createSyncItem(
+              collection: 'study_info',
+              docId: 'main',
+              operationType: 'update',
+              payloadJson: rawPayload,
+              attemptCount: 11,
+            ).copyWith(
+              lastAttemptAt: const Value(123),
+              lastErrorCode: const Value('EXISTING_CODE'),
+            );
+        final later = createSyncItem(id: 2);
+        final store = FakeSyncQueueStore([head, later]);
+        final remote = FakeSyncRemoteDataSource(
+          (_, _) async => const SyncOperationResult.success(),
+        );
+        final manager = SyncManager(
+          queueStore: store,
+          remoteDataSource: remote,
+          currentUserId: () => 'user-123',
+        );
+        addTearDown(manager.dispose);
+        final events = <SyncUiEvent>[];
+        final subscription = manager.uiEvents.listen(events.add);
+        addTearDown(subscription.cancel);
+        expect(await manager.processPendingItems(), isFalse);
+        final reads = store.events.length;
+        await tester.pump(const Duration(hours: 1));
+        expect(store.events, hasLength(reads));
+        expect(await manager.processPendingItems(), isFalse);
+        expect(
+          await Future.wait([
+            manager.processPendingItems(),
+            manager.processPendingItems(),
+          ]),
+          [false, false],
+        );
+        expect(store.items, [head, later]);
+        expect(store.markedAsSynced, isEmpty);
+        expect(store.retried, isEmpty);
+        expect(store.rejected, isEmpty);
+        expect(remote.processedItems, isEmpty);
+        expect(events, isEmpty);
+      },
+    );
+    test(
+      'persisted HOLD survives database reopen, manager restart, A-B-A and closed SQLite',
+      () async {
+        // Dedicated synthetic SQLite files retained in this runner's empty TEMP.
+        final folder = await Directory.systemTemp.createTemp('s2-study-hold-');
+        final fileA = File('${folder.path}/a.sqlite'),
+            fileB = File('${folder.path}/b.sqlite');
+        var dbA = AppDatabase(executor: NativeDatabase(fileA));
+        final dbB = AppDatabase(executor: NativeDatabase(fileB));
+        addTearDown(dbB.close);
+        final idA = await row(
+          dbA,
+          attempts: 0,
+          error: null,
+          lastAttemptAt: null,
+        );
+        final afterA = await row(
+          dbA,
+          collection: 'tasks',
+          docId: 'after-a',
+          attempts: 0,
+        );
+        final idB = await row(
+          dbB,
+          uid: 'uid-b',
+          collection: 'tasks',
+          docId: 'b',
+          attempts: 0,
+        );
+        final originalA = await dbA.getSyncItemById(idA),
+            originalAfter = await dbA.getSyncItemById(afterA);
+        var uid = 'uid-a';
+        final remote = FakeSyncRemoteDataSource(
+          (_, _) async => const SyncOperationResult.success(),
+        );
+        final first = SyncManager(
+          queueStore: AppDatabaseSyncQueueStore(dbA),
+          remoteDataSource: remote,
+          currentUserId: () => uid,
+        );
+        expect(await first.processPendingItems(), isFalse);
+        expect(await first.prepareForSessionDetach('uid-a'), isTrue);
+        first.dispose();
+        await dbA.close();
+        uid = 'uid-b';
+        final b = SyncManager(
+          queueStore: AppDatabaseSyncQueueStore(dbB),
+          remoteDataSource: remote,
+          currentUserId: () => uid,
+        );
+        addTearDown(b.dispose);
+        expect(await b.processPendingItems(), isTrue);
+        final confirmedB = await dbB.getSyncItemById(idB);
+        expect(confirmedB.status, SyncQueuePersistenceStatus.succeeded);
+        expect(await b.prepareForSessionDetach('uid-b'), isTrue);
+        uid = 'uid-a';
+        dbA = AppDatabase(executor: NativeDatabase(fileA));
+        final restarted = SyncManager(
+          queueStore: AppDatabaseSyncQueueStore(dbA),
+          remoteDataSource: remote,
+          currentUserId: () => uid,
+        );
+        addTearDown(restarted.dispose);
+        expect(await restarted.processPendingItems(), isFalse);
+        expect(await dbA.getSyncItemById(idA), originalA);
+        expect(await dbA.getSyncItemById(afterA), originalAfter);
+        expect(await dbB.getSyncItemById(idB), confirmedB);
+        expect(remote.processedItems, ['uid-b:tasks:b:update']);
+        await dbA.close();
+        expect(
+          await restarted.processPendingItems(),
+          isFalse,
+        ); // closed SQLite is never success
+        final verified = AppDatabase(executor: NativeDatabase(fileA));
+        addTearDown(verified.close);
+        expect(await verified.getSyncItemById(idA), originalA);
+        expect(await verified.getSyncItemById(afterA), originalAfter);
+      },
+    );
+  });
+  group('F01 persistent HOLD through transport Manager and SQLite', () {
+    const reviewCode = 'STUDY_REVIEW_STATE_INVALID';
+    const deleteCode = 'STUDY_REVIEW_QUEUE_STATE_INVALID';
+    Future<int> row(
+      AppDatabase db, {
+      bool deleting = false,
+      String uid = 'uid-a',
+      String status = SyncQueuePersistenceStatus.pending,
+      String? code,
+    }) => db
+        .into(db.syncQueueTable)
+        .insert(
+          SyncQueueTableCompanion.insert(
+            ownerUid: Value(uid),
+            collection: deleting ? 'subjects' : 'review_queue',
+            docId: deleting ? 'subject-1' : 'card-1',
+            operationType: deleting ? 'delete' : 'update',
+            payloadJson: deleting
+                ? '{}'
+                : jsonEncode({
+                    'subjectId': 'subject-1',
+                    'lastReviewed': '2026-10-29T12:00:00.000Z',
+                    'timeZoneOffsetMinutes': -180,
+                  }),
+            createdAt: 1,
+            status: Value(status),
+            lastErrorCode: Value(code),
+          ),
+        );
+    for (final deleting in [false, true]) {
+      final code = deleting ? deleteCode : reviewCode;
+      test(
+        '$code remains pending with one real attempt across restart, preserves FIFO and owner',
+        () async {
+          final folder = Directory.systemTemp.createTempSync('f01-409-');
+          final file = File('${folder.path}/queue.sqlite');
+          var db = AppDatabase(executor: NativeDatabase(file));
+          final head = await row(db, deleting: deleting);
+          final later = await row(db, deleting: !deleting);
+          final other = await row(db, uid: 'uid-b');
+          final originalHead = await db.getSyncItemById(head);
+          final originalLater = await db.getSyncItemById(later);
+          final originalOther = await db.getSyncItemById(other);
+          var sends = 0;
+          final source = FirestoreSyncRemoteDataSource(
+            _P1Firestore(),
+            _P1Auth('uid-a'),
+            captureRemoteSend: (_) => RemoteSendPermit(() => true),
+            clientFactory: () => MockClient((request) async {
+              sends++;
+              expect(
+                jsonDecode(request.body)['operation'],
+                deleting ? 'delete_subject' : 'apply_study_review',
+              );
+              return http.Response(
+                jsonEncode({'code': code, 'error': 'private-detail'}),
+                409,
+              );
+            }),
+            idTokenProvider: (_, _) async => 'synthetic-token',
+            appCheckTokenProvider: () async => 'synthetic-app-check',
+          );
+          SyncManager manager() => SyncManager(
+            queueStore: AppDatabaseSyncQueueStore(db),
+            remoteDataSource: source,
+            currentUserId: () => 'uid-a',
+          );
+          var m = manager();
+          final events = <SyncUiEvent>[];
+          var subscription = m.uiEvents.listen(events.add);
+          expect(await m.processPendingItems(), isFalse);
+          final held = await db.getSyncItemById(head);
+          expect(held.status, SyncQueuePersistenceStatus.pending);
+          expect(held.isSynced, isFalse);
+          expect(held.lastErrorCode, code);
+          expect(held.attemptCount, 1);
+          expect(held.lastAttemptAt, isNotNull);
+          expect(held.payloadJson, originalHead.payloadJson);
+          expect(held.docId, originalHead.docId);
+          expect(held.ownerUid, originalHead.ownerUid);
+          expect(held.operationType, originalHead.operationType);
+          expect(held.createdAt, originalHead.createdAt);
+          for (var n = 0; n < 3; n++)
+            expect(await m.processPendingItems(), isFalse);
+          expect(await m.prepareForLocalDataDiscard(), isFalse);
+          expect(await db.getSyncItemById(head), held);
+          expect(await db.getSyncItemById(later), originalLater);
+          expect(await db.getSyncItemById(other), originalOther);
+          expect(events, isEmpty);
+          await subscription.cancel();
+          m.dispose();
+          await db.close();
+          db = AppDatabase(executor: NativeDatabase(file));
+          m = manager();
+          subscription = m.uiEvents.listen(events.add);
+          expect(await m.processPendingItems(), isFalse);
+          expect(await db.getSyncItemById(head), held);
+          expect(await db.getSyncItemById(later), originalLater);
+          expect(await db.getSyncItemById(other), originalOther);
+          expect((await db.getPendingSyncItems('uid-a')).map((x) => x.id), [
+            head,
+            later,
+          ]);
+          expect(await m.prepareForSessionDetach('uid-a'), isTrue);
+          expect(sends, 1);
+          expect(events, isEmpty);
+          await subscription.cancel();
+          m.dispose();
+          await db.close();
+        },
+      );
+      testWidgets(
+        '$code has no automatic resend, fake attempts or A-B-A bypass',
+        (tester) async {
+          var uid = 'user-123';
+          final head = createSyncItem(
+            collection: deleting ? 'subjects' : 'review_queue',
+            operationType: deleting ? 'delete' : 'update',
+          );
+          final later = createSyncItem(id: 2);
+          final b = createSyncItem(id: 3, ownerUid: 'uid-b');
+          final store = FakeSyncQueueStore([head, later, b]);
+          final remote = FakeSyncRemoteDataSource(
+            (_, item) async => item.id == 1
+                ? SyncOperationResult.retryable(code: code)
+                : const SyncOperationResult.success(),
+          );
+          final m = SyncManager(
+            queueStore: store,
+            remoteDataSource: remote,
+            currentUserId: () => uid,
+          );
+          addTearDown(m.dispose);
+          final first = m.processPendingItems(),
+              coalesced = m.processPendingItems();
+          expect(await first, isFalse);
+          expect(await coalesced, isFalse);
+          final held = store.items.first;
+          expect(held.lastErrorCode, code);
+          expect(held.attemptCount, 1);
+          await tester.pump(const Duration(hours: 24));
+          expect(remote.processedItems, hasLength(1));
+          expect(await m.prepareForSessionDetach(uid), isTrue);
+          expect(m.resumeForPreparedSession(uid), isTrue);
+          await tester.pump(const Duration(seconds: 6));
+          expect(store.items.first, held);
+          uid = 'uid-b';
+          expect(await m.processPendingItems(), isTrue);
+          uid = 'user-123';
+          expect(await m.processPendingItems(), isFalse);
+          await tester.pump(const Duration(hours: 24));
+          expect(store.items.first, held);
+          expect(store.items[1], later);
+          expect(remote.processedItems, hasLength(2));
+          expect(store.rejected, isEmpty);
+          expect(store.retried, [1]);
+        },
+      );
+      test(
+        '$code historical rejection stays unchanged while unrelated pending work drains',
+        () async {
+          final db = AppDatabase(executor: NativeDatabase.memory());
+          addTearDown(db.close);
+          final rejected = await row(
+            db,
+            deleting: deleting,
+            status: SyncQueuePersistenceStatus.rejected,
+            code: 'INVALID_PAYLOAD',
+          );
+          final before = await db.getSyncItemById(rejected);
+          final next = await row(db, deleting: !deleting);
+          final remote = FakeSyncRemoteDataSource(
+            (_, _) async => const SyncOperationResult.success(),
+          );
+          final m = SyncManager(
+            queueStore: AppDatabaseSyncQueueStore(db),
+            remoteDataSource: remote,
+            currentUserId: () => 'uid-a',
+          );
+          addTearDown(m.dispose);
+          expect(await m.processPendingItems(), isTrue);
+          expect(await db.getSyncItemById(rejected), before);
+          expect(
+            (await db.getSyncItemById(next)).status,
+            SyncQueuePersistenceStatus.succeeded,
+          );
+          expect(remote.processedItems, hasLength(1));
+        },
+      );
+      test(
+        '$code late HTTP response after logout cannot persist or ACK in returning A session',
+        () async {
+          final db = AppDatabase(executor: NativeDatabase.memory());
+          addTearDown(db.close);
+          final id = await row(db, deleting: deleting), later = await row(db);
+          final before = await db.getSyncItemById(id),
+              after = await db.getSyncItemById(later);
+          final entered = Completer<void>(), release = Completer<void>();
+          final auth = _P1Auth('uid-a');
+          var uid = 'uid-a', sends = 0;
+          final source = FirestoreSyncRemoteDataSource(
+            _P1Firestore(),
+            auth,
+            captureRemoteSend: (_) => RemoteSendPermit(() => true),
+            clientFactory: () => MockClient((_) async {
+              sends++;
+              entered.complete();
+              await release.future;
+              return http.Response(jsonEncode({'code': code}), 409);
+            }),
+            idTokenProvider: (_, _) async => 'synthetic-token',
+            appCheckTokenProvider: () async => 'synthetic-app-check',
+          );
+          final m = SyncManager(
+            queueStore: AppDatabaseSyncQueueStore(db),
+            remoteDataSource: source,
+            currentUserId: () => uid,
+          );
+          addTearDown(m.dispose);
+          final drain = m.processPendingItems();
+          await entered.future;
+          expect(await m.prepareForSessionDetach('uid-a'), isTrue);
+          expect(await drain, isFalse);
+          uid = 'uid-b';
+          auth.uid = uid;
+          uid = 'uid-a';
+          auth.uid = uid;
+          release.complete();
+          await Future<void>.delayed(Duration.zero);
+          expect(await db.getSyncItemById(id), before);
+          expect(await db.getSyncItemById(later), after);
+          expect(sends, 1);
+          expect(await m.processPendingItems(), isFalse);
+        },
+      );
+    }
   });
 }

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
 import 'providers/study_provider.dart';
+import 'package:life_os/features/study/data/study_repository.dart';
 import 'package:life_os/features/study/presentation/screens/revisar_screen.dart';
 import 'package:life_os/features/focus/presentation/providers/screens/focus_screen.dart'; // ⏱️ Importação da Tela de Foco
 import 'package:life_os/features/premium/domain/services/plan_limits.dart';
@@ -29,6 +30,228 @@ String? validateSubjectExamDate({
   return null;
 }
 
+/// One aggregated local notice. It never reads a remote receipt or changes rows.
+class _ReviewCreationNotice extends StatefulWidget {
+  const _ReviewCreationNotice({super.key, required this.repository});
+  final StudyRepository repository;
+  @override
+  State<_ReviewCreationNotice> createState() => _ReviewCreationNoticeState();
+}
+
+class _ReviewCreationNoticeState extends State<_ReviewCreationNotice> {
+  late final Stream<ReviewCreationSyncState> _states;
+  Object? _activeSession;
+  Object? _requestedSession;
+  Object? _request;
+  bool _requesting = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _states = widget.repository.watchReviewCreationSync();
+  }
+
+  Future<void> _retry(ReviewCreationSyncState status) async {
+    if (!status.canRequestRetry ||
+        _requesting ||
+        identical(_requestedSession, status.sessionToken))
+      return;
+    final request = Object();
+    setState(() {
+      _requestedSession = status.sessionToken;
+      _request = request;
+      _requesting = true;
+    });
+    await widget.repository.retryReviewCreationSync(status);
+    if (!mounted || !identical(_request, request)) return;
+    setState(() => _requesting = false);
+  }
+
+  @override
+  Widget build(BuildContext context) => StreamBuilder<ReviewCreationSyncState>(
+    stream: _states,
+    builder: (context, snapshot) {
+      final status = snapshot.data;
+      if (status == null || !status.isCurrent || !status.hasNotice) {
+        _activeSession = null;
+        _requestedSession = null;
+        _request = null;
+        _requesting = false;
+        return const SizedBox.shrink();
+      }
+      if (!identical(_activeSession, status.sessionToken)) {
+        _activeSession = status.sessionToken;
+        _requestedSession = null;
+        _request = null;
+        _requesting = false;
+      }
+      final recovery = status.needsVerification;
+      final unknown = !recovery && status.indeterminate > 0;
+      final title = recovery
+          ? 'Verificação necessária'
+          : unknown
+          ? 'Confirmação pendente'
+          : 'Sincronização pendente';
+      final message = recovery
+          ? 'A sincronização precisa de verificação. Seus registros foram preservados.'
+          : unknown
+          ? 'Não foi possível confirmar a sincronização de alguns cartões. Os dados locais foram preservados.'
+          : 'Seus cartões estão salvos neste dispositivo e aguardam sincronização.';
+      final requested = identical(_requestedSession, status.sessionToken);
+      return Padding(
+        padding: const EdgeInsets.only(top: 14),
+        child: Semantics(
+          container: true,
+          liveRegion: true,
+          child: Container(
+            key: const Key('review-creation-sync-notice'),
+            width: double.infinity,
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              color: _surfaceColor,
+              borderRadius: BorderRadius.circular(20),
+              border: Border.all(
+                color: recovery ? const Color(0xFFB58CFF) : Colors.white24,
+              ),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    ExcludeSemantics(
+                      child: Icon(
+                        recovery
+                            ? Icons.fact_check_outlined
+                            : unknown
+                            ? Icons.cloud_off_outlined
+                            : Icons.cloud_upload_outlined,
+                        color: const Color(0xFFD8C5FF),
+                        size: 22,
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        title,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 14,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  message,
+                  style: const TextStyle(
+                    color: Color(0xFFD1D5E0),
+                    fontSize: 13,
+                    height: 1.45,
+                  ),
+                ),
+                if (status.affected > 1)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 6),
+                    child: Text(
+                      '${status.affected} cartões aguardam confirmação.',
+                      style: const TextStyle(
+                        color: Color(0xFFD1D5E0),
+                        fontSize: 12,
+                      ),
+                    ),
+                  ),
+                if (status.pendingWithoutCard > 0)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 6),
+                    child: Text(
+                      status.pendingWithoutCard == 1
+                          ? '1 operação pendente sem cartão neste dispositivo.'
+                          : '${status.pendingWithoutCard} operações pendentes sem cartão neste dispositivo.',
+                      style: const TextStyle(
+                        color: Color(0xFFD1D5E0),
+                        fontSize: 12,
+                      ),
+                    ),
+                  ),
+                if (status.studyInfoHold > 0)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 6),
+                    child: Text(
+                      status.studyInfoHold == 1
+                          ? '1 registro antigo de estudos precisa de verificação.'
+                          : '${status.studyInfoHold} registros antigos de estudos precisam de verificação.',
+                      style: const TextStyle(
+                        color: Color(0xFFD1D5E0),
+                        fontSize: 12,
+                      ),
+                    ),
+                  ),
+                if (status.studyVerification > 0)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 6),
+                    child: Text(
+                      status.studyVerification == 1
+                          ? '1 operação de estudos precisa de verificação.'
+                          : '${status.studyVerification} operações de estudos precisam de verificação.',
+                      style: const TextStyle(
+                        color: Color(0xFFD1D5E0),
+                        fontSize: 12,
+                      ),
+                    ),
+                  ),
+                if (status.queueVerified &&
+                    status.headBlocked &&
+                    status.waitingBehindHead > 0)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 6),
+                    child: Text(
+                      status.waitingBehindHead == 1
+                          ? '1 operação posterior aguarda nesta fila.'
+                          : '${status.waitingBehindHead} operações posteriores aguardam nesta fila.',
+                      style: const TextStyle(
+                        color: Color(0xFFD1D5E0),
+                        fontSize: 12,
+                      ),
+                    ),
+                  ),
+                if (status.canRequestRetry && !requested)
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: TextButton.icon(
+                      onPressed: _requesting ? null : () => _retry(status),
+                      icon: const Icon(Icons.sync_rounded, size: 18),
+                      label: const Text('Tentar sincronizar novamente'),
+                      style: TextButton.styleFrom(
+                        foregroundColor: const Color(0xFFE2CEFF),
+                        minimumSize: const Size(48, 48),
+                      ),
+                    ),
+                  ),
+                if (requested)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 8),
+                    child: Text(
+                      _requesting
+                          ? 'Tentativa solicitada…'
+                          : 'A confirmação ainda está pendente.',
+                      style: const TextStyle(
+                        color: Color(0xFFD1D5E0),
+                        fontSize: 12,
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ),
+      );
+    },
+  );
+}
+
 class StudyScreen extends ConsumerStatefulWidget {
   const StudyScreen({super.key});
 
@@ -41,6 +264,7 @@ class _StudyScreenState extends ConsumerState<StudyScreen> {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
       ref.read(studyRepositoryProvider).syncStudyFromFirebaseToLocal();
     });
   }
@@ -539,6 +763,7 @@ class _StudyScreenState extends ConsumerState<StudyScreen> {
   Widget build(BuildContext context) {
     final studyAsync = ref.watch(studyStreamProvider);
     final subjectsAsync = ref.watch(subjectsStreamProvider);
+    final repository = ref.watch(studyRepositoryProvider);
 
     return Scaffold(
       backgroundColor: _backgroundColor,
@@ -587,6 +812,10 @@ class _StudyScreenState extends ConsumerState<StudyScreen> {
                         ),
                       );
                     },
+                  ),
+                  _ReviewCreationNotice(
+                    key: ObjectKey(repository),
+                    repository: repository,
                   ),
                   const SizedBox(height: 16),
                   _StudyMetricsCard(

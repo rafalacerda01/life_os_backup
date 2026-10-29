@@ -478,9 +478,30 @@ class AppDatabase extends _$AppDatabase {
     return localMutations.systemWrite(
       ownerUid,
       () =>
-          (delete(syncQueueTable)..where(
-                (table) =>
-                    table.ownerUid.equals(cleanOwnerUid) &
+          (delete(syncQueueTable)..where((table) {
+                // Match Dart trim, including runtime-dependent U+0085, without
+                // rewriting stored bytes. SQLite's default trim only strips spaces.
+                final trimCharacters =
+                    '\u0009\u000a\u000b\u000c\u000d\u0020\u0085\u00a0\u1680'
+                            '\u180e\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007'
+                            '\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff'
+                        .split('')
+                        .where((character) => character.trim().isEmpty)
+                        .join();
+                Expression<String> normalizedTrim(Expression<String> value) =>
+                    FunctionCallExpression<String>('trim', [
+                      value,
+                      Variable<String>(trimCharacters),
+                    ]);
+                final preservedStudyInfo =
+                    normalizedTrim(table.collection).equals('study_info') &
+                    normalizedTrim(table.docId).equals('main') &
+                    normalizedTrim(
+                      table.operationType,
+                    ).lower().isIn(const ['create', 'update']);
+                // Revisit only under a separately authorized disposition protocol.
+                return table.ownerUid.equals(cleanOwnerUid) &
+                    preservedStudyInfo.not() &
                     table.status.equals(SyncQueuePersistenceStatus.succeeded) &
                     // Preserve historical Health payloads until reviewed cleanup.
                     // Do not infer safe deletion from a legacy absolute or status.
@@ -489,8 +510,8 @@ class AppDatabase extends _$AppDatabase {
                         (table.lastAttemptAt.isNull() &
                             table.createdAt.isSmallerThanValue(
                               olderThanEpochMs,
-                            ))),
-              ))
+                            )));
+              }))
               .go(),
     );
   }

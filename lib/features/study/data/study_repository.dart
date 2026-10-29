@@ -7,6 +7,8 @@ import 'package:life_os/core/database/app_database.dart';
 import 'package:life_os/core/database/local_mutation_gate.dart';
 import 'package:life_os/core/security/input_sanitizer.dart';
 import 'package:life_os/core/services/sync_manager.dart';
+import 'package:life_os/core/services/sync_remote_data_source.dart'
+    show LegacyStudyInfoOperation, StudyStateHoldOperation;
 import 'package:life_os/core/utils/app_logger.dart';
 import 'package:life_os/features/study/data/models/flashcard_model.dart';
 import 'package:life_os/features/study/data/models/study_model.dart';
@@ -69,6 +71,96 @@ class _RemoteFlashcard {
   });
 }
 
+/// Local visibility only: card counts, operation counts and FIFO proof are distinct.
+class ReviewCreationSyncState {
+  const ReviewCreationSyncState(
+    this._isCurrent, {
+    this.pending = 0,
+    this.indeterminate = 0,
+    this.recovery = 0,
+    this.pendingWithoutCard = 0,
+    this.studyInfoHold = 0,
+    this.studyStateHold = 0,
+    this.studyStateRejected = 0,
+    this.rejectedWithoutCard = 0,
+    this.legacyPending = 0,
+    this.headBlocked = false,
+    this.waitingBehindHead = 0,
+    this.queueVerified = true,
+    this.retryEligible = false,
+    int? retryOperationId,
+    required this.sessionToken,
+    // Public parameter, private field: keep row identity out of the view API.
+    // ignore: prefer_initializing_formals
+  }) : _retryOperationId = retryOperationId;
+
+  const ReviewCreationSyncState.empty()
+    : pending = 0,
+      indeterminate = 0,
+      recovery = 0,
+      pendingWithoutCard = 0,
+      studyInfoHold = 0,
+      studyStateHold = 0,
+      studyStateRejected = 0,
+      rejectedWithoutCard = 0,
+      legacyPending = 0,
+      headBlocked = false,
+      waitingBehindHead = 0,
+      queueVerified = false,
+      retryEligible = false,
+      _retryOperationId = null,
+      sessionToken = null,
+      _isCurrent = null;
+
+  final int pending;
+  final int indeterminate;
+  final int recovery;
+  final int pendingWithoutCard;
+  final int studyInfoHold;
+  final int studyStateHold;
+  final int studyStateRejected;
+  int get studyVerification => studyStateHold + studyStateRejected;
+  final int rejectedWithoutCard;
+  final int legacyPending;
+  final bool headBlocked;
+  final int waitingBehindHead;
+  final bool queueVerified;
+  final bool retryEligible;
+  final int? _retryOperationId;
+  final Object? sessionToken;
+  final bool Function()? _isCurrent;
+  bool get isCurrent {
+    try {
+      return _isCurrent?.call() ?? false;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  // Historical E counts still mean distinct cards that actually exist locally.
+  int get affected => pending + indeterminate + recovery;
+  bool get hasNotice =>
+      affected > 0 ||
+      pendingWithoutCard > 0 ||
+      studyInfoHold > 0 ||
+      studyVerification > 0;
+  bool get needsVerification =>
+      recovery > 0 ||
+      pendingWithoutCard > 0 ||
+      studyInfoHold > 0 ||
+      studyVerification > 0 ||
+      (!queueVerified && hasNotice);
+  bool get canRequestRetry =>
+      isCurrent &&
+      queueVerified &&
+      retryEligible &&
+      recovery == 0 &&
+      pendingWithoutCard == 0 &&
+      studyInfoHold == 0 &&
+      studyVerification == 0 &&
+      indeterminate > 0;
+}
+
 class StudyRepository {
   static const _dueCardsPredicate =
       '(cards.last_reviewed IS NULL OR cards.last_reviewed < ?)';
@@ -87,6 +179,332 @@ class StudyRepository {
     this._syncManager, {
     DateTime Function()? reviewNow,
   }) : _reviewNow = reviewNow ?? DateTime.now;
+
+  Selectable<QueryRow> _reviewCreationRows(String uid) => _db.customSelect(
+    '''SELECT q.*, c.id AS local_card_id, c.subject_id AS local_subject_id,
+              c.question AS local_question, c.answer AS local_answer,
+              s.id AS local_subject_present
+       FROM sync_queue_table AS q
+       LEFT JOIN flashcards AS c ON c.id = q.doc_id
+       LEFT JOIN subjects AS s ON s.id = c.subject_id
+       WHERE q.owner_uid = ? AND q.status != ? ORDER BY q.id ASC''',
+    variables: [
+      Variable<String>(uid),
+      Variable<String>(SyncQueuePersistenceStatus.succeeded),
+    ],
+    readsFrom: {_db.syncQueueTable, _db.flashcards, _db.subjects},
+  );
+
+  // Conservative UI admission, not a replacement for the transport's validator.
+  // No repair/normalization of payloads or inference of a historical ACK.
+  bool _eligibleReviewCreation(QueryRow row, SyncQueueTableData item) {
+    try {
+      final data = jsonDecode(item.payloadJson);
+      const keys = {
+        'creationProtocolVersion',
+        'cardId',
+        'subjectId',
+        'question',
+        'answer',
+        'createdAt',
+      };
+      final id = RegExp(r'^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$');
+      if (data is! Map<String, dynamic> ||
+          data.length != keys.length ||
+          !data.keys.every(keys.contains) ||
+          data['creationProtocolVersion'] is! int ||
+          data['creationProtocolVersion'] != 1 ||
+          data['cardId'] != item.docId ||
+          !id.hasMatch(item.docId) ||
+          data['subjectId'] is! String ||
+          !id.hasMatch(data['subjectId'] as String) ||
+          row.readNullable<String>('local_card_id') == null ||
+          row.readNullable<String>('local_subject_present') !=
+              data['subjectId'] ||
+          row.readNullable<String>('local_subject_id') != data['subjectId'])
+        return false;
+      for (final field in ['question', 'answer']) {
+        final text = data[field];
+        if (text is! String ||
+            text.trim().isEmpty ||
+            utf8.decode(utf8.encode(text)) != text ||
+            row.readNullable<String>('local_$field') != text)
+          return false;
+      }
+      final time = data['createdAt'];
+      if (time is! String ||
+          !RegExp(
+            r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}(\d{3})?Z$',
+          ).hasMatch(time))
+        return false;
+      final date = DateTime.tryParse(time);
+      if (date == null ||
+          !date.isUtc ||
+          date.year < 1 ||
+          date.year > 9999 ||
+          date.toIso8601String() != time)
+        return false;
+      return utf8
+              .encode(
+                jsonEncode({
+                  'operation': 'create_review_card',
+                  'version': 1,
+                  'cardId': data['cardId'],
+                  'subjectId': data['subjectId'],
+                  'question': data['question'],
+                  'answer': data['answer'],
+                  'createdAt': time,
+                }),
+              )
+              .length <=
+          512 * 1024;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  ReviewCreationSyncState _summarizeReviewCreation(
+    List<QueryRow> rows,
+    bool Function() admitted,
+    Object sessionToken,
+  ) {
+    final cards = <String, int>{};
+    int? head;
+    var missing = 0, hold = 0, rejectedMissing = 0, legacy = 0;
+    var stateHold = 0, stateRejected = 0;
+    var blockedHead = false, eligibleHead = false;
+    final pendingIds = <int>[];
+    const recoveryCodes = {
+      'REVIEW_CREATE_LEGACY_UNVERIFIED',
+      'REVIEW_CREATE_FINGERPRINT_CONFLICT',
+      'REVIEW_CREATE_RECEIPT_INVALID',
+      'REVIEW_CREATE_ROOT_UNAVAILABLE',
+      'REVIEW_CREATE_SUBJECT_UNAVAILABLE',
+      'REVIEW_CREATE_SUBJECT_TOMBSTONED',
+      'REVIEW_CREATE_STATE_INVALID',
+    };
+    for (final row in rows) {
+      final item = _db.syncQueueTable.map(row.data);
+      final pending = item.status == SyncQueuePersistenceStatus.pending;
+      if (pending) {
+        head ??= item.id;
+        pendingIds.add(item.id);
+      }
+      final atHead = pending && item.id == head;
+      if (LegacyStudyInfoOperation.isBlocked(item)) {
+        if (pending) {
+          hold++;
+          if (atHead) blockedHead = true;
+        }
+        continue;
+      }
+      if (StudyStateHoldOperation.isHeld(item)) {
+        stateHold++;
+        if (atHead) blockedHead = true;
+        continue;
+      }
+      if (StudyStateHoldOperation.isHistoricalRejected(item)) {
+        stateRejected++;
+        continue;
+      }
+      if (item.collection.trim() != 'review_queue' ||
+          item.operationType.trim().toLowerCase() != 'create')
+        continue;
+      final hasCard = row.readNullable<String>('local_card_id') != null;
+      var versioned = false;
+      try {
+        final data = jsonDecode(item.payloadJson);
+        versioned =
+            data is Map<String, dynamic> &&
+            data['creationProtocolVersion'] is int &&
+            data['creationProtocolVersion'] == 1;
+      } catch (_) {
+        /* Unknown legacy is preserved, never promoted. */
+      }
+      if (pending && !versioned) legacy++;
+      if (!hasCard) {
+        if (pending) {
+          missing++;
+          if (atHead) blockedHead = true;
+        } else if (item.status == SyncQueuePersistenceStatus.rejected) {
+          rejectedMissing++;
+        }
+        continue;
+      }
+      final valid = _eligibleReviewCreation(row, item);
+      final needsVerification =
+          !pending ||
+          !versioned ||
+          !valid ||
+          recoveryCodes.contains(item.lastErrorCode);
+      final attempted =
+          item.lastErrorCode != null ||
+          item.attemptCount > 0 ||
+          item.lastAttemptAt != null;
+      final severity = needsVerification
+          ? 2
+          : attempted
+          ? 1
+          : 0;
+      if (!cards.containsKey(item.docId) || cards[item.docId]! < severity)
+        cards[item.docId] = severity;
+      if (atHead) {
+        blockedHead = needsVerification;
+        eligibleHead = !needsVerification && attempted;
+      }
+    }
+    return ReviewCreationSyncState(
+      admitted,
+      pending: cards.values.where((v) => v == 0).length,
+      indeterminate: cards.values.where((v) => v == 1).length,
+      recovery: cards.values.where((v) => v == 2).length,
+      pendingWithoutCard: missing,
+      studyInfoHold: hold,
+      studyStateHold: stateHold,
+      studyStateRejected: stateRejected,
+      rejectedWithoutCard: rejectedMissing,
+      legacyPending: legacy,
+      headBlocked: blockedHead,
+      waitingBehindHead: blockedHead
+          ? pendingIds.where((id) => id > head!).length
+          : 0,
+      retryEligible: eligibleHead,
+      retryOperationId: eligibleHead ? head : null,
+      sessionToken: sessionToken,
+    );
+  }
+
+  /// Observe only persisted local rows belonging to this prepared session.
+  /// No pull, remote receipt read, polling, queue mutation or payload exposure.
+  Stream<ReviewCreationSyncState> watchReviewCreationSync() {
+    late StreamController<ReviewCreationSyncState> output;
+    StreamSubscription<User?>? authSubscription;
+    StreamSubscription<List<QueryRow>>? rowsSubscription;
+    var generation = 0;
+    var cancelled = false;
+
+    void observeSession() {
+      final currentGeneration = ++generation;
+      final previous = rowsSubscription;
+      rowsSubscription = null;
+      if (previous != null)
+        unawaited(previous.cancel().catchError((Object _) {}));
+      output.add(const ReviewCreationSyncState.empty());
+      final uid = _currentUid;
+      if (uid == null || cancelled) return;
+      final sessionToken = Object();
+      final bool Function() admitted;
+      try {
+        final permit = _db.localMutations.captureRemoteSend(expectedUid: uid);
+        admitted = () =>
+            !cancelled &&
+            generation == currentGeneration &&
+            _isCurrentUser(uid) &&
+            permit.isCurrent;
+      } catch (_) {
+        return;
+      }
+      var last = const ReviewCreationSyncState.empty();
+      var revision = 0;
+      void readFailed() {
+        if (cancelled || generation != currentGeneration || !admitted()) return;
+        final currentRevision = ++revision;
+        last = ReviewCreationSyncState(
+          () => admitted() && revision == currentRevision,
+          indeterminate: last.pending + last.indeterminate,
+          recovery: last.recovery,
+          pendingWithoutCard: last.pendingWithoutCard,
+          studyInfoHold: last.studyInfoHold,
+          studyStateHold: last.studyStateHold,
+          studyStateRejected: last.studyStateRejected,
+          rejectedWithoutCard: last.rejectedWithoutCard,
+          legacyPending: last.legacyPending,
+          queueVerified: false,
+          sessionToken: sessionToken,
+        );
+        output.add(last);
+      }
+
+      try {
+        rowsSubscription = _reviewCreationRows(uid).watch().listen((rows) {
+          if (cancelled || generation != currentGeneration) return;
+          if (!admitted()) {
+            output.add(const ReviewCreationSyncState.empty());
+            return;
+          }
+          final currentRevision = ++revision;
+          try {
+            last = _summarizeReviewCreation(
+              rows,
+              () => admitted() && revision == currentRevision,
+              sessionToken,
+            );
+            if (last.isCurrent) output.add(last);
+          } catch (_) {
+            readFailed();
+          }
+        }, onError: (Object _) => readFailed());
+      } catch (_) {
+        readFailed();
+      }
+    }
+
+    output = StreamController<ReviewCreationSyncState>(
+      onListen: () {
+        observeSession();
+        // Every event invalidates old callbacks, including queued A -> B -> A.
+        authSubscription = _auth.authStateChanges().listen(
+          (_) => observeSession(),
+          onError: (Object _) {
+            if (cancelled) return;
+            generation++;
+            output.add(const ReviewCreationSyncState.empty());
+            final previous = rowsSubscription;
+            rowsSubscription = null;
+            if (previous != null)
+              unawaited(previous.cancel().catchError((Object _) {}));
+          },
+        );
+      },
+      onCancel: () async {
+        cancelled = true;
+        generation++;
+        await authSubscription?.cancel();
+        await rowsSubscription?.cancel();
+      },
+    );
+    return output.stream;
+  }
+
+  /// Explicit user request for the current UID's existing FIFO drain only.
+  /// Rejected/legacy operations are never promoted, requeued or repaired here.
+  Future<void> retryReviewCreationSync(ReviewCreationSyncState observed) async {
+    if (!observed.canRequestRetry) return;
+    final uid = _currentUid;
+    if (uid == null) return;
+    try {
+      final permit = _db.localMutations.captureRemoteSend(expectedUid: uid);
+      if (!observed.isCurrent ||
+          !permit.isCurrent ||
+          observed._retryOperationId == null)
+        return;
+      // A queued SQL notification can lag the user's tap. Re-read the actual
+      // FIFO/context without writes before admitting a manual drain.
+      final rows = await _reviewCreationRows(uid).get();
+      if (!observed.isCurrent || !permit.isCurrent) return;
+      final fresh = _summarizeReviewCreation(
+        rows,
+        () => observed.isCurrent && permit.isCurrent,
+        observed.sessionToken!,
+      );
+      if (!fresh.canRequestRetry ||
+          fresh._retryOperationId != observed._retryOperationId)
+        return;
+      await _syncManager.processPendingItems();
+    } catch (_) {
+      /* Persisted queue remains the only delivery truth. */
+    }
+  }
 
   // ===========================================================================
   // 1. LEITURA (STREAMS LOCAIS)
@@ -403,7 +821,7 @@ class StudyRepository {
     final id = _uuid.v4();
     final cleanQuestion = InputSanitizer.sanitize(question);
     final cleanAnswer = InputSanitizer.sanitize(answer);
-    final createdAt = DateTime.now();
+    final createdAt = DateTime.now().toUtc().toIso8601String();
     var didMutate = false;
 
     try {
@@ -443,7 +861,9 @@ class StudyRepository {
             'subjectId': subjectId,
             'question': cleanQuestion,
             'answer': cleanAnswer,
-            'createdAt': createdAt.toIso8601String(),
+            'createdAt': createdAt,
+            'cardId': id,
+            'creationProtocolVersion': 1,
           },
         );
         _requireCurrentUser(expectedUid);
@@ -583,38 +1003,10 @@ class StudyRepository {
     }
   }
 
+  /// Absolute legacy counters cannot identify the reviewed card or its effects.
+  /// Keep the signature until old callers are removed; never enqueue this intent.
   Future<void> completeReview(StudyModel currentStatus) async {
-    final expectedUid = _currentUid;
-    if (expectedUid == null || currentStatus.reviewQueue <= 0) return;
-
-    final safeNewQueue = (currentStatus.reviewQueue - 1)
-        .clamp(0, 99999)
-        .toInt();
-
-    try {
-      await _db.transactionWithSync(
-        ownerUid: expectedUid,
-        localOperation: () async {
-          _requireCurrentUser(expectedUid);
-          final stats = await _db.select(_db.studyStats).getSingleOrNull();
-          await _upsertStudyStats(
-            current: stats,
-            fallback: currentStatus,
-            reviewQueue: safeNewQueue,
-          );
-          _requireCurrentUser(expectedUid);
-        },
-        collection: 'study_info',
-        docId: 'main',
-        operationType: 'update',
-        payloadJson: jsonEncode({'reviewQueue': safeNewQueue}),
-      );
-      _schedulePendingStudySync();
-    } on _StudySessionChanged {
-      return;
-    } catch (e, stack) {
-      AppLogger.e('Erro ao completar revisão geral', e, stack);
-    }
+    throw UnsupportedError('STUDY_INFO_LEGACY_REVIEW_DISABLED');
   }
 
   Future<void> resetDailyProgress(StudyModel currentStatus) async {
@@ -871,10 +1263,49 @@ class StudyRepository {
               ))
               .get();
 
-      final reviewMutations = authoritativeItems.where(
+      // A rejected creation remains unresolved while its original local card
+      // exists. Scope by queue owner/family/type/docId, never by e-mail or by
+      // inferred remote effects. Resolved/removed local cards do not pin pulls.
+      final rejectedCreates =
+          await (_db.select(_db.syncQueueTable)..where(
+                (item) =>
+                    item.ownerUid.equals(expectedUid) &
+                    item.collection.equals('review_queue') &
+                    item.operationType.equals('create') &
+                    item.status.equals(SyncQueuePersistenceStatus.rejected),
+              ))
+              .get();
+      final historicalStudy =
+          (await (_db.select(_db.syncQueueTable)..where(
+                    (item) =>
+                        item.ownerUid.equals(expectedUid) &
+                        item.status.equals(SyncQueuePersistenceStatus.rejected),
+                  ))
+                  .get())
+              .where(StudyStateHoldOperation.isHistoricalRejected)
+              .toList();
+      final rejectedReviews = historicalStudy.where(
+        StudyStateHoldOperation.isReview,
+      );
+      final unresolvedSubjectDeletes =
+          [...authoritativeItems, ...historicalStudy]
+              .where(StudyStateHoldOperation.isSubjectDelete)
+              .map((item) => item.docId.trim())
+              .toSet();
+      final unresolvedIds = [
+        ...rejectedCreates,
+        ...rejectedReviews,
+      ].map((item) => item.docId).toSet();
+      final unresolvedCards = (await _db.select(_db.flashcards).get())
+          .where((card) => unresolvedIds.contains(card.id))
+          .toList();
+      _requireCurrentUser(expectedUid);
+
+      final reviewMutations = [...authoritativeItems, ...rejectedReviews].where(
         (item) =>
-            item.collection == 'review_queue' &&
-            (item.operationType == 'create' || item.operationType == 'update'),
+            StudyStateHoldOperation.isReview(item) ||
+            (item.collection == 'review_queue' &&
+                item.operationType == 'create'),
       );
       final studyActivities = authoritativeItems.where(
         (item) =>
@@ -891,8 +1322,10 @@ class StudyRepository {
             (item) => item.collection == 'study_info' && item.docId == 'main',
           ) ||
           reviewMutations.isNotEmpty ||
+          unresolvedCards.isNotEmpty ||
           studyActivities.isNotEmpty ||
-          progressResets.isNotEmpty;
+          progressResets.isNotEmpty ||
+          unresolvedSubjectDeletes.isNotEmpty;
       final protectSubjects = authoritativeItems
           .where((item) => item.collection == 'subjects')
           .map((item) => item.docId)
@@ -910,6 +1343,8 @@ class StudyRepository {
           // Stats remain protected even when the subject cannot be identified.
         }
       }
+      protectSubjects.addAll(unresolvedCards.map((card) => card.subjectId));
+      protectSubjects.addAll(unresolvedSubjectDeletes);
       var protectAllSubjects = false;
       for (final item in reviewMutations) {
         try {
@@ -930,6 +1365,7 @@ class StudyRepository {
           .where((item) => item.collection == 'review_queue')
           .map((item) => item.docId)
           .toSet();
+      protectCards.addAll(unresolvedCards.map((card) => card.id));
       _requireCurrentUser(expectedUid);
 
       if (!protectStats && remoteStats != null) {
@@ -958,7 +1394,9 @@ class StudyRepository {
 
       for (final card in remoteFlashcards) {
         _requireCurrentUser(expectedUid);
-        if (protectCards.contains(card.id)) continue;
+        if (protectCards.contains(card.id) ||
+            unresolvedSubjectDeletes.contains(card.subjectId))
+          continue;
         final subject = await (_db.select(
           _db.subjects,
         )..where((table) => table.id.equals(card.subjectId))).getSingleOrNull();
@@ -986,7 +1424,8 @@ class StudyRepository {
       _requireCurrentUser(expectedUid);
       for (final card in localFlashcards) {
         if (remoteFlashcardDocIds.contains(card.id) ||
-            protectCards.contains(card.id)) {
+            protectCards.contains(card.id) ||
+            unresolvedSubjectDeletes.contains(card.subjectId)) {
           protectSubjects.add(card.subjectId);
           continue;
         }
