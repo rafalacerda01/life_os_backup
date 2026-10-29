@@ -7,10 +7,6 @@ const birthCleanup = require("./birth_ledger_cleanup");
 
 const CIRCLE_SCHEMA_VERSION = 2;
 const MAX_CIRCLE_MEMBERS = 30;
-const SERVER_DELETING = "SERVER_DELETING";
-const CIRCLE_DELETION_COLLECTION = "circle_deletions";
-const AUTH_DELETE_ORPHAN_VERSION = 1;
-const AUTH_DELETE_ORPHAN_STATE = "AUTH_DELETE_ORPHAN_CLEANUP";
 const BILLING_ACCOUNT_COLLECTION = "billing_google_accounts";
 const BILLING_TOKEN_COLLECTION = "billing_google_tokens";
 const BILLING_ACCOUNT_ACTIVE = "ACTIVE";
@@ -289,210 +285,6 @@ function resolveMemberState(db, uid, circleId, commit) {
 }
 
 /**
- * Limpa o vinculo de um membro restante sem sobrescrever outro Circle.
- * @param {Object} db Firestore Admin.
- * @param {string} memberUid UID restante.
- * @param {string} circleId Circle sendo removido.
- * @return {Promise<void>} Conclusao da transacao.
- */
-function clearMemberCircleReference(db, memberUid, circleId) {
-  const userRef = db.collection("users").doc(memberUid);
-  return db.runTransaction(async (transaction) => {
-    const snapshot = await transaction.get(userRef);
-    const userData = snapshot.data();
-    if (snapshot.exists && userData.activeCircleId === circleId) {
-      transaction.update(userRef, {activeCircleId: null});
-    }
-  });
-}
-
-/**
- * Limpa referencias de todos os membros restantes conhecidos.
- * @param {Object} db Firestore Admin.
- * @param {string} deletedUid UID ja excluido do Auth.
- * @param {string} circleId Circle sendo removido.
- * @param {Array<Object>} members Memberships validadas.
- * @return {Promise<void>} Conclusao da limpeza.
- */
-async function clearRemainingMemberReferences(
-    db, deletedUid, circleId, members) {
-  for (const memberSnapshot of members) {
-    const memberUid = documentId(memberSnapshot.ref);
-    if (memberUid !== deletedUid) {
-      await clearMemberCircleReference(db, memberUid, circleId);
-    }
-  }
-}
-
-/**
- * Valida o tombstone permanente da limpeza pos-exclusao de Auth.
- * @param {Object} marker Dados do tombstone existente.
- * @param {string} circleId Circle esperado.
- * @return {void}
- */
-function validateAuthDeleteOrphanMarker(marker, circleId) {
-  if (!marker || Object.keys(marker).length !== 4 ||
-      marker.version !== AUTH_DELETE_ORPHAN_VERSION ||
-      marker.state !== AUTH_DELETE_ORPHAN_STATE ||
-      marker.circleId !== circleId ||
-      !(marker.createdAt instanceof Timestamp)) {
-    throw new Error("INVALID_ORPHAN_CLEANUP_MARKER");
-  }
-}
-
-/**
- * Garante o tombstone sem sobrescrever um marker existente.
- * @param {Object} transaction Transacao com todas as leituras concluidas.
- * @param {Object} markerRef Referencia do tombstone.
- * @param {Object} markerSnapshot Snapshot lido na mesma transacao.
- * @param {string} circleId Circle esperado.
- * @return {void}
- */
-function ensureAuthDeleteOrphanMarkerInTransaction(
-    transaction, markerRef, markerSnapshot, circleId) {
-  if (markerSnapshot.exists) {
-    validateAuthDeleteOrphanMarker(markerSnapshot.data(), circleId);
-    return;
-  }
-  transaction.set(markerRef, {
-    version: AUTH_DELETE_ORPHAN_VERSION,
-    state: AUTH_DELETE_ORPHAN_STATE,
-    circleId,
-    createdAt: Timestamp.now(),
-  });
-}
-
-/**
- * Marca um Circle administrado pelo UID como server-deleting.
- * @param {Object} db Firestore Admin.
- * @param {string} uid UID administrativo excluido.
- * @param {string} circleId Circle ativo.
- * @return {Promise<Array<Object>>} Memberships a desvincular.
- */
-function markAdminCircleDeleting(db, uid, circleId) {
-  const userRef = db.collection("users").doc(uid);
-  const circleRef = db.collection("circles").doc(circleId);
-  const markerRef = db.collection(CIRCLE_DELETION_COLLECTION).doc(circleId);
-  const membersRef = circleRef.collection("members");
-
-  return db.runTransaction(async (transaction) => {
-    const userSnapshot = await transaction.get(userRef);
-    if (!userSnapshot.exists ||
-        activeCircleIdFrom(userSnapshot.data()) !== circleId) {
-      throw new Error("USER_CIRCLE_CHANGED");
-    }
-
-    const circleSnapshot = await transaction.get(circleRef);
-    if (!circleSnapshot.exists) throw new Error("CIRCLE_ROOT_MISSING");
-    const circle = validateCircle(circleSnapshot.data());
-    if (circle.adminId !== uid) throw new Error("CIRCLE_ADMIN_CHANGED");
-    if (circle.deletionState !== undefined &&
-        circle.deletionState !== SERVER_DELETING) {
-      throw new Error("INVALID_DELETION_STATE");
-    }
-
-    const markerSnapshot = await transaction.get(markerRef);
-    const membersSnapshot = await transaction.get(
-        membersRef.limit(MAX_CIRCLE_MEMBERS + 1),
-    );
-    const isRetry = circle.deletionState === SERVER_DELETING;
-    const members = validateMembers(membersSnapshot, uid, !isRetry);
-    if ((!isRetry && members.length !== circle.memberCount) ||
-        (isRetry && members.length > circle.memberCount)) {
-      throw new Error("CIRCLE_MEMBER_COUNT_MISMATCH");
-    }
-
-    ensureAuthDeleteOrphanMarkerInTransaction(
-        transaction, markerRef, markerSnapshot, circleId,
-    );
-    if (!isRetry) {
-      transaction.update(circleRef, {
-        deletionState: SERVER_DELETING,
-        updatedAt: Timestamp.now(),
-      });
-    }
-    return members;
-  });
-}
-
-/**
- * Finaliza o Circle cujo administrador ja foi excluido do Auth.
- * @param {Object} db Firestore Admin.
- * @param {string} uid UID administrativo excluido.
- * @param {string} circleId Circle ativo.
- * @return {Promise<void>} Conclusao da exclusao integral.
- */
-async function cleanupAdminCircle(db, uid, circleId) {
-  const circleRef = db.collection("circles").doc(circleId);
-  const members = await markAdminCircleDeleting(db, uid, circleId);
-  await clearRemainingMemberReferences(db, uid, circleId, members);
-  await db.recursiveDelete(circleRef);
-}
-
-/**
- * Reserva um Circle ausente antes de apagar seus descendentes.
- * @param {Object} db Firestore Admin.
- * @param {string} uid UID excluido.
- * @param {string} circleId Circle ativo.
- * @return {Promise<Array<Object>>} Memberships validadas no claim.
- */
-function claimMissingCircleRoot(db, uid, circleId) {
-  const userRef = db.collection("users").doc(uid);
-  const circleRef = db.collection("circles").doc(circleId);
-  const markerRef = db.collection(CIRCLE_DELETION_COLLECTION).doc(circleId);
-
-  return db.runTransaction(async (transaction) => {
-    const userSnapshot = await transaction.get(userRef);
-    if (!userSnapshot.exists ||
-        activeCircleIdFrom(userSnapshot.data()) !== circleId) {
-      throw new Error("USER_CIRCLE_CHANGED");
-    }
-
-    const circleSnapshot = await transaction.get(circleRef);
-    if (circleSnapshot.exists) throw new Error("CIRCLE_ROOT_REAPPEARED");
-
-    const markerSnapshot = await transaction.get(markerRef);
-    const snapshot = await transaction.get(
-        circleRef.collection("members").limit(MAX_CIRCLE_MEMBERS + 1),
-    );
-    const members = snapshot.docs;
-    if (members.length > MAX_CIRCLE_MEMBERS) {
-      throw new Error("CIRCLE_MEMBER_LIMIT_EXCEEDED");
-    }
-    for (const memberSnapshot of members) {
-      const memberUid = documentId(memberSnapshot.ref);
-      const member = memberSnapshot.data();
-      const role = member ? member.role : undefined;
-      if (!isSafeDocumentId(memberUid) ||
-          (role !== "admin" && role !== "member")) {
-        throw new Error("INVALID_MEMBER_STATE");
-      }
-    }
-
-    ensureAuthDeleteOrphanMarkerInTransaction(
-        transaction, markerRef, markerSnapshot, circleId,
-    );
-    return members;
-  });
-}
-
-/**
- * Finaliza descendentes mantendo o tombstone que bloqueia recriacao.
- * @param {Object} db Firestore Admin.
- * @param {string} uid UID excluido.
- * @param {string} circleId Circle ativo.
- * @return {Promise<void>} Conclusao da exclusao residual.
- */
-async function cleanupMissingCircleRoot(db, uid, circleId) {
-  const circleRef = db.collection("circles").doc(circleId);
-  const members = await claimMissingCircleRoot(db, uid, circleId);
-  await clearRemainingMemberReferences(db, uid, circleId, members);
-  // O root estava ausente: nunca apagar um root recriado apos o claim.
-  await db.recursiveDelete(circleRef.collection("members"));
-  await db.recursiveDelete(circleRef.collection("challenges"));
-}
-
-/**
  * Remove membership e dados de challenges de um membro comum.
  * @param {Object} db Firestore Admin.
  * @param {string} uid UID excluido.
@@ -511,20 +303,20 @@ async function cleanupNormalMember(db, uid, circleId) {
  * @param {Object} userSnapshot Snapshot inicial do usuario.
  * @return {Promise<void>} Conclusao da limpeza externa.
  */
-async function cleanupExternalCircleData(db, uid, userSnapshot) {
+async function cleanupExternalCircleData(db, uid, userSnapshot, guard) {
   const circleId = activeCircleIdFrom(userSnapshot.data());
   if (circleId === null) return;
 
   const circleRef = db.collection("circles").doc(circleId);
   const circleSnapshot = await circleRef.get();
   if (!circleSnapshot.exists) {
-    await cleanupMissingCircleRoot(db, uid, circleId);
+    await circleCleanup.cleanupMissingCircle(db, uid, guard, circleId);
     return;
   }
 
   const circle = validateCircle(circleSnapshot.data());
   if (circle.adminId === uid) {
-    await cleanupAdminCircle(db, uid, circleId);
+    await circleCleanup.cleanupOwned(db, uid, guard, true);
     return;
   }
   await cleanupNormalMember(db, uid, circleId);
@@ -544,18 +336,19 @@ exports.cleanupUserData = functions
             (uid) => admin.auth().getUser(uid));
         const {guard} = admission;
         const uid = admission.bound.uid;
-        if (guard.state === "COMPLETE") {
+        if (await birthCleanup.currentState(db, admission) === "COMPLETE") {
           await birthCleanup.finish(db, admission);
           return;
         }
-        const cleanupDb = circleCleanup.withActiveGuard(db, uid, guard);
+        const cleanupDb = birthCleanup.cleanupDatabase(db, admission);
         const userRef = db.collection("users").doc(uid);
+        await birthCleanup.verifyStep(db, admission);
         const billingCleanup = await ensureBillingDeletionBarrier(cleanupDb, uid);
         await cleanupBillingTokenIndexes(cleanupDb, billingCleanup.accountHash);
         await circleCleanup.cleanupPendingMarkers(cleanupDb, uid, guard);
         const userSnapshot = await userRef.get();
         if (userSnapshot.exists) {
-          await cleanupExternalCircleData(cleanupDb, uid, userSnapshot);
+          await cleanupExternalCircleData(cleanupDb, uid, userSnapshot, guard);
         }
         await circleCleanup.cleanupOwned(cleanupDb, uid, guard, true);
         await circleCleanup.cleanupMemberships(cleanupDb, uid, guard);
@@ -565,18 +358,11 @@ exports.cleanupUserData = functions
           await circleCleanup.requireGuard(transaction, db, uid, guard);
           await circleCleanup.assertEmpty(transaction, db, uid);
         });
-        // Defense in depth only: earlier Billing/Circle effects already ran.
-        // Auth may reappear after this lookup; this is not an atomic fence.
-        const auth = admin.auth();
-        let authAbsent = false;
-        try {
-          await auth.getUser(uid);
-        } catch (error) {
-          authAbsent = !!error && error.code === "auth/user-not-found";
-        }
-        // Normalize unsafe Auth results; never adopt a completion sentinel.
-        if (!authAbsent) throw new Error("AUTH_ABSENCE_RECHECK_FAILED");
-        await db.recursiveDelete(userRef);
+        // The original operation and Auth absence are rechecked before removal.
+        // An unrestricted Admin can still recreate Auth after the last lookup.
+        await birthCleanup.beforeRootRemoval(db, admission);
+        await cleanupDb.recursiveDelete(userRef);
+        await birthCleanup.verifyStep(db, admission);
         await finalizeBillingDeletionBarrier(cleanupDb, uid, billingCleanup);
         await birthCleanup.finish(db, admission);
       } catch (error) {

@@ -1,5 +1,6 @@
 "use strict";
 
+const control = require("./deletion_control");
 const {randomUUID} = require("node:crypto");
 const {Timestamp, FieldPath} = require("firebase-admin/firestore");
 
@@ -49,10 +50,15 @@ function validateGuard(data) {
           data.retainUntil.toMillis() > data.startedAt.toMillis()))) conflict();
   return data;
 }
+// A bare legacy guard is deny-only, never a cleanup capability. This legacy
+// producer remains for existing internal fixtures; new deletion uses R5 admit.
 async function beginGuard(db, uid, preflight = async () => {}) {
   const ref = guardRef(db, uid);
+  const operationRef = ref.collection("control").doc("operation");
   return db.runTransaction(async (tx) => {
+    const operation = await tx.get(operationRef);
     const snapshot = await tx.get(ref);
+    if (operation.exists) conflict();
     if (snapshot.exists) return validateGuard(snapshot.data());
     await preflight(tx);
     const guard = {version: 1, state: "IN_PROGRESS", deletionId: randomUUID(),
@@ -61,42 +67,109 @@ async function beginGuard(db, uid, preflight = async () => {}) {
     return guard;
   });
 }
-async function requireGuard(tx, db, uid, guard) {
-  const snapshot = await tx.get(guardRef(db, uid));
-  if (!snapshot.exists || validateGuard(snapshot.data()).deletionId !== guard.deletionId) conflict();
+
+const guardBindings = new WeakMap();
+// Server-only adapter: the supplied handle is checked by its actual controller.
+function bindOperation(db, uid, controller, handle, beforeEffect) {
+  const operation = controller.originalOperation(handle);
+  if (operation.uid !== uid || operation.projectId !== db.projectId ||
+      operation.databaseId !== db.databaseId ||
+      typeof beforeEffect !== "function") conflict();
+  const guard = Object.freeze({version: 1, state: operation.state,
+    deletionId: operation.deletionId, startedAt: operation.scope.guardStartedAt,
+    retainUntil: operation.completedAt === null ? null :
+      Timestamp.fromMillis(operation.completedAt.toMillis() + 65 * 60 * 1000)});
+  guardBindings.set(guard, {db, uid, controller, handle, beforeEffect});
+  return guard;
 }
 
-// Read the CURRENT guard in the same transaction as every preparatory write.
-// Retried callbacks must acquire authority again; a captured guard is not enough.
-async function requireActiveGuard(tx, db, uid, guard) {
-  const snapshot = await tx.get(guardRef(db, uid));
-  if (!snapshot.exists) conflict();
-  const current = validateGuard(snapshot.data());
-  if (current.deletionId !== guard.deletionId) conflict();
-  if (current.state !== "IN_PROGRESS") conflict("ACCOUNT_CLEANUP_COMPLETE");
+function binding(db, uid, guard) {
+  const value = guard && guardBindings.get(guard);
+  if (!value || value.uid !== uid ||
+      (value.db !== db && value.wrapper !== db)) conflict();
+  return value;
 }
-// Internal cleanup capability only. Callbacks receive the original transaction,
-// so no nested transactions or callbacks replayed outside Firestore are needed.
-// Native references are used only for reads; mutations use this transaction seam.
+
+async function requireActiveGuard(tx, db, uid, guard) {
+  const value = binding(db, uid, guard);
+  try {
+    await value.controller.assertOperationTransaction(tx, value.handle);
+  } catch (error) {
+    if (error instanceof control.DeletionControlError) {
+      if (error.code === "COMPLETE") conflict("ACCOUNT_CLEANUP_COMPLETE");
+      conflict();
+    }
+    throw error;
+  }
+}
+async function requireGuard(tx, db, uid, guard) {
+  return requireActiveGuard(tx, db, uid, guard);
+}
+
+// Every preparation/deletion transaction is fenced by the original operation.
+// Existing ownership and durable Circle closure claims remain in the cleaners.
+async function requireRecursiveScope(tx, db, uid, ref) {
+  if (ref?.path === "users/" + uid) return;
+  const parts = typeof ref?.path === "string" ? ref.path.split("/") : [];
+  if (parts.length !== 2 || parts[0] !== "circles" ||
+      !storedPathSegment(parts[1])) conflict();
+  const circleId = parts[1];
+  const root = await tx.get(ref);
+  const closure = await tx.get(db.collection("circle_cleanup_guards").doc(circleId));
+  const marker = await tx.get(db.collection("circle_deletions").doc(circleId));
+  const user = await tx.get(db.collection("users").doc(uid));
+  if (!closure.exists ||
+      !exact(closure.data(), ["version", "state", "createdAt"]) ||
+      closure.data().version !== 1 || closure.data().state !== "SERVER_DELETING" ||
+      !time(closure.data().createdAt)) conflict();
+  if (marker.exists) {
+    const claim = validatePendingMarker(marker);
+    if (!claim.memberUids.includes(uid)) conflict();
+    if (root.exists && (root.data().adminId !== claim.initiatedBy ||
+        root.data().deletionState !== "SERVER_DELETING")) conflict();
+    if (root.exists) validateCircle(root.data());
+    return;
+  }
+  const claim = user.data()?._serverAccountDeletion;
+  if (root.exists || claim?.version !== 1 || claim.mode !== "SOLE_ADMIN_CIRCLE" ||
+      claim.circleId !== circleId || !time(claim.startedAt)) conflict();
+}
+
 function withActiveGuard(db, uid, guard) {
-  return Object.freeze({projectId: db.projectId,
+  const value = binding(db, uid, guard);
+  if (value.wrapper) return value.wrapper;
+  value.wrapper = Object.freeze({projectId: db.projectId,
+    databaseId: db.databaseId, doc: db.doc.bind(db),
     collection: db.collection.bind(db), collectionGroup: db.collectionGroup.bind(db),
     runTransaction: (callback, ...options) => db.runTransaction(async (tx) => {
       await requireActiveGuard(tx, db, uid, guard);
       return callback(tx);
     }, ...options),
-    // Existing batches contain only ownership-checked token deletes. They cannot
-    // recreate an obligation. Do not expose any preparatory batch write method.
+    // Convert delete-only batches to one fenced transaction. No native commit
+    // can cross COMPLETE after a detached read of the guard.
     batch: () => {
-      const batch = db.batch();
-      const writer = {delete: (ref) => {batch.delete(ref); return writer;},
-        commit: () => batch.commit()};
+      const refs = [];
+      const writer = {delete: ref => {refs.push(ref); return writer;},
+        commit: async () => {
+          await value.beforeEffect();
+          return db.runTransaction(async tx => {
+            await requireActiveGuard(tx, db, uid, guard);
+            for (const ref of refs) tx.delete(ref);
+          });
+        }};
       return writer;
     },
-    // Pure deletion follows an ownership/closure claim made under the fence.
-    // Durable circle reservations and the UID non-reuse contract still apply.
-    recursiveDelete: db.recursiveDelete.bind(db)});
+    recursiveDelete: async ref => {
+      await value.beforeEffect(ref);
+      await db.runTransaction(async tx => {
+        await requireActiveGuard(tx, db, uid, guard);
+        await requireRecursiveScope(tx, db, uid, ref);
+      });
+      return db.recursiveDelete(ref);
+    }});
+  return value.wrapper;
 }
+
 // listDocuments includes missing parent documents with existing descendants.
 // Querying only existing documents would miss an orphaned nested subcollection.
 // This inventory is outside the transaction. The only cleanup writer able to
@@ -188,6 +261,189 @@ async function preflightOwned(tx, db, uid) {
         members.docs[0].data()?.role !== "admin") conflict();
   }
 }
+// Only the managed post-Auth admission uses this reader. The restrictive
+// preflightOwned above remains unchanged for coordinated pre-Auth deletion.
+async function preflightManagedOwned(tx, db, uid) {
+  const owned = await tx.get(db.collection("circles").where("adminId", "==", uid).limit(PAGE_SIZE + 1));
+  if (owned.docs.length > PAGE_SIZE) conflict();
+  for (const doc of owned.docs) {
+    pathParts({ref: {path: doc.ref.path + "/members/" + uid}}, "members");
+    const circle = doc.data();
+    validateCircle(circle);
+    const marker = await tx.get(db.collection("circle_deletions").doc(doc.id));
+    const members = await tx.get(doc.ref.collection("members").limit(31));
+    if (marker.exists && marker.data()?.state === "SERVER_DELETING") {
+      const claim = validatePendingMarker(marker);
+      if (circle.deletionState !== "SERVER_DELETING" || claim.initiatedBy !== uid ||
+          claim.memberUids.length !== circle.memberCount) conflict();
+      checkClaimMembers(members.docs, claim, uid);
+    } else {
+      if (marker.exists) validateLegacyMarker(marker.data(), doc.id);
+      if (members.docs.length !== circle.memberCount || members.docs.length > 30 ||
+          !members.docs.some(member => member.id === uid && member.data()?.role === "admin")) conflict();
+      for (const member of members.docs) {
+        if (!safeId(member.id) || member.data()?.role !== (member.id === uid ? "admin" : "member")) conflict();
+      }
+    }
+  }
+}
+
+function validateLegacyMarker(value, circleId) {
+  if (!exact(value, ["version", "state", "circleId", "createdAt"]) ||
+      value.version !== 1 || value.state !== "AUTH_DELETE_ORPHAN_CLEANUP" ||
+      value.circleId !== circleId || !time(value.createdAt)) conflict();
+}
+function validateClosure(value) {
+  if (!exact(value, ["version", "state", "createdAt"]) || value.version !== 1 ||
+      value.state !== "SERVER_DELETING" || !time(value.createdAt)) conflict();
+}
+function checkClaimMembers(docs, claim, uid) {
+  if (docs.length > 30 || !claim.memberUids.includes(uid)) conflict();
+  for (const doc of docs) {
+    if (!claim.memberUids.includes(doc.id) ||
+        doc.data()?.role !== (doc.id === claim.initiatedBy ? "admin" : "member")) conflict();
+  }
+}
+function sameClaim(a, b) {
+  return ["version", "state", "circleId", "initiatedBy"].every(key => a[key] === b[key]) &&
+    JSON.stringify(a.memberUids) === JSON.stringify(b.memberUids) &&
+    a.createdAt instanceof Timestamp && b.createdAt instanceof Timestamp && a.createdAt.isEqual(b.createdAt);
+}
+
+// No collection gets recursiveDelete authority. Walk only the two historical
+// orphan families and delete concrete documents in bounded, fenced transactions.
+// listDocuments includes absent parents; a query of existing parents would miss
+// nested orphans. Its SDK inventory is outside transactions, as for private-tree
+// inventory. Closure/writer fences and the operational Admin boundary still apply.
+async function orphanPage(db, circleId) {
+  const found = [];
+  const prefix = "circles/" + circleId + "/";
+  async function visit(value) {
+    const path = typeof value === "string" ? value : value?.path;
+    const parts = typeof path === "string" ? path.split("/") : [];
+    if (!path?.startsWith(prefix) || parts.length < 4 || parts.length % 2 !== 0 ||
+        !parts.every(storedPathSegment)) conflict();
+    if (!["members", "challenges"].includes(parts[2])) return;
+    const ref = db.doc(path);
+    for (const collection of await ref.listCollections()) {
+      for (const child of await collection.listDocuments()) {
+        await visit(child);
+        if (found.length === PAGE_SIZE) return;
+      }
+    }
+    const doc = await ref.get();
+    if (doc.exists) found.push(ref);
+  }
+  for (const collection of await db.collection("circles").doc(circleId).listCollections()) {
+    for (const doc of await collection.listDocuments()) {
+      await visit(doc);
+      if (found.length === PAGE_SIZE) return found;
+    }
+  }
+  return found;
+}
+
+async function cleanupMissingCircle(db, uid, guard, circleId) {
+  const capability = binding(db, uid, guard);
+  if (!storedPathSegment(circleId)) conflict();
+  const circleRef = db.collection("circles").doc(circleId);
+  const markerRef = db.collection("circle_deletions").doc(circleId);
+  const closureRef = db.collection("circle_cleanup_guards").doc(circleId);
+  const userRef = db.collection("users").doc(uid);
+  await capability.beforeEffect();
+  const claim = await db.runTransaction(async tx => {
+    await requireGuard(tx, db, uid, guard);
+    const root = await tx.get(circleRef);
+    const user = await tx.get(userRef);
+    const marker = await tx.get(markerRef);
+    const closure = await tx.get(closureRef);
+    const members = await tx.get(circleRef.collection("members").limit(31));
+    if (root.exists) conflict();
+    if (closure.exists) validateClosure(closure.data());
+    if (marker.exists && marker.data()?.state === "SERVER_DELETING") {
+      const original = validatePendingMarker(marker);
+      if (!closure.exists || !original.memberUids.includes(uid)) conflict();
+      checkClaimMembers(members.docs, original, uid);
+      return original;
+    }
+    if (!user.exists || user.data().activeCircleId !== circleId) conflict();
+    if (marker.exists) validateLegacyMarker(marker.data(), circleId);
+    const owner = members.docs.find(doc => doc.id === uid && doc.data()?.role === "admin");
+    // A legacy tombstone is not authority. This no-owner branch can only prove
+    // a previous empty result read-only below; it must never resume deletion.
+    if (!owner) {
+      if (marker.exists && closure.exists) return null;
+      conflict();
+    }
+    if (members.docs.length > 30) conflict();
+    for (const member of members.docs) {
+      if (!safeId(member.id) || member.data()?.role !== (member.id === uid ? "admin" : "member")) conflict();
+    }
+    const prepared = {version: 1, state: "SERVER_DELETING", circleId,
+      initiatedBy: uid, memberUids: members.docs.map(doc => doc.id),
+      createdAt: marker.exists ? marker.data().createdAt : Timestamp.now()};
+    if (!closure.exists) tx.set(closureRef, {version: 1, state: "SERVER_DELETING", createdAt: Timestamp.now()});
+    tx.set(markerRef, prepared);
+    return prepared;
+  });
+  async function current(tx) {
+    await requireGuard(tx, db, uid, guard);
+    const root = await tx.get(circleRef);
+    const user = await tx.get(userRef);
+    const marker = await tx.get(markerRef);
+    const closure = await tx.get(closureRef);
+    if (root.exists || !marker.exists || !closure.exists) conflict();
+    validateClosure(closure.data());
+    if (claim === null) {
+      if (!user.exists || user.data().activeCircleId !== circleId) conflict();
+      validateLegacyMarker(marker.data(), circleId);
+    }
+    else {
+      if (!sameClaim(validatePendingMarker(marker), claim)) conflict();
+      const members = await tx.get(circleRef.collection("members").limit(31));
+      checkClaimMembers(members.docs, claim, uid);
+    }
+  }
+  if (claim === null) {
+    if ((await orphanPage(db, circleId)).length) conflict();
+    await capability.beforeEffect();
+    await db.runTransaction(tx => current(tx));
+    return; // Empty replay, no mutation and no newly inferred ownership.
+  }
+  for (const memberUid of claim.memberUids) {
+    if (memberUid === uid) continue; // The private root is removed by its original operation later.
+    await capability.beforeEffect();
+    await db.runTransaction(async tx => {
+      await current(tx);
+      const ref = db.collection("users").doc(memberUid);
+      const member = await tx.get(ref);
+      if (member.exists && member.data().activeCircleId === circleId) tx.update(ref, {activeCircleId: null});
+    });
+  }
+  for (;;) {
+    const page = await orphanPage(db, circleId);
+    await capability.beforeEffect();
+    if (!page.length) {
+      await db.runTransaction(async tx => {
+        await current(tx);
+        for (const name of ["members", "challenges"]) {
+          if ((await tx.get(circleRef.collection(name).limit(1))).docs.length) conflict();
+        }
+        tx.set(markerRef, {version: 1, state: "AUTH_DELETE_ORPHAN_CLEANUP", circleId, createdAt: claim.createdAt});
+      });
+      // A late writer observed here is a recovery incident, never permission to
+      // reconstitute a completed orphan claim from its UID-free tombstone.
+      if ((await orphanPage(db, circleId)).length) conflict();
+      return;
+    }
+    await db.runTransaction(async tx => {
+      await current(tx);
+      const docs = await Promise.all(page.map(ref => tx.get(ref)));
+      for (const doc of docs) if (doc.exists) tx.delete(doc.ref);
+    });
+  }
+}
+
 async function cleanupOwned(db, uid, guard, allowShared) {
   let removed = false;
   for (;;) {
@@ -196,6 +452,7 @@ async function cleanupOwned(db, uid, guard, allowShared) {
     const circleRef = owned.docs[0].ref;
     const circleId = circleRef.path.split("/").at(-1);
     const markerRef = db.collection("circle_deletions").doc(circleId);
+    await binding(db, uid, guard).beforeEffect();
     const members = await db.runTransaction(async (tx) => {
       await requireGuard(tx, db, uid, guard);
       const root = await tx.get(circleRef);
@@ -204,6 +461,12 @@ async function cleanupOwned(db, uid, guard, allowShared) {
       if (!root.exists) return null;
       const data = root.data();
       validateCircle(data);
+      if (marker.exists && marker.data()?.state === "SERVER_DELETING") {
+        const original = validatePendingMarker(marker);
+        if (original.initiatedBy !== uid || data.adminId !== uid || data.deletionState !== "SERVER_DELETING") conflict();
+        checkClaimMembers(list.docs, original, uid);
+        return list.docs;
+      }
       if (data.adminId !== uid || list.docs.length > 30 ||
           list.docs.length !== data.memberCount) conflict();
       if (!allowShared && data.memberCount > 1) conflict("CIRCLE_ADMIN_ACTION_REQUIRED");
@@ -259,13 +522,16 @@ async function cleanupPendingMarkers(db, uid, guard) {
     if (data?.initiatedBy !== uid && !data?.memberUids?.includes(uid)) return;
     const marker = validatePendingMarker(doc);
     const circleRef = db.collection("circles").doc(marker.circleId);
+    await binding(db, uid, guard).beforeEffect();
     const claimed = await db.runTransaction(async (tx) => {
       await requireGuard(tx, db, uid, guard);
       const current = await tx.get(doc.ref);
       const root = await tx.get(circleRef);
       const closureRef = db.collection('circle_cleanup_guards').doc(marker.circleId);
       const closure = await tx.get(closureRef);
+      const members = await tx.get(circleRef.collection("members").limit(31));
       if (!current.exists) return false;
+      checkClaimMembers(members.docs, marker, uid);
       const latest = validatePendingMarker(current);
       if (JSON.stringify(latest) !== JSON.stringify(marker)) conflict();
       if (root.exists && (root.data().adminId !== marker.initiatedBy ||
@@ -276,12 +542,23 @@ async function cleanupPendingMarkers(db, uid, guard) {
             closure.data().version !== 1 || closure.data().state !== 'SERVER_DELETING' ||
             !time(closure.data().createdAt)) conflict();
       } else {
+        if (!root.exists) conflict(); // A legacy marker alone cannot mint a closure.
         tx.set(closureRef, {version: 1, state: 'SERVER_DELETING', createdAt: Timestamp.now()});
       }
-      return true;
+      return {rootPresent: root.exists};
     });
     if (!claimed) return;
-    for (const memberUid of marker.memberUids) await clearLink(db, memberUid, marker.circleId);
+    if (!claimed.rootPresent) {
+      // A partial native delete may have removed the root. Resume through
+      // concrete descendant transactions, never a broad missing-root RPC.
+      await cleanupMissingCircle(db, uid, guard, marker.circleId);
+      removed = true;
+      return;
+    }
+    for (const memberUid of marker.memberUids) {
+      await binding(db, uid, guard).beforeEffect();
+      await clearLink(db, memberUid, marker.circleId);
+    }
     await db.recursiveDelete(circleRef);
     await db.runTransaction(async (tx) => {
       await requireGuard(tx, db, uid, guard);
@@ -364,6 +641,6 @@ async function verifyReferences(db, uid, tx) {
     if (doc.data()?.initiatedBy === uid || doc.data()?.memberUids?.includes(uid)) conflict();
   }, tx);
 }
-module.exports = {PAGE_SIZE, storedPathSegment, guardRef, validateGuard, beginGuard, requireGuard, requireActiveGuard, withActiveGuard,
-  assertUserTreeEmpty, preflightOwned, cleanupOwned, cleanupPendingMarkers, cleanupMemberships,
+module.exports = {PAGE_SIZE, storedPathSegment, guardRef, validateGuard, beginGuard, bindOperation, requireGuard, requireActiveGuard, withActiveGuard,
+  assertUserTreeEmpty, preflightOwned, preflightManagedOwned, cleanupMissingCircle, cleanupOwned, cleanupPendingMarkers, cleanupMemberships,
   cleanupHistory, assertEmpty, verifyReferences};

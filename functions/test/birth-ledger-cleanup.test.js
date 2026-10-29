@@ -4,8 +4,8 @@ const assert = require("node:assert/strict");
 const test = require("node:test");
 const {Timestamp} = require("firebase-admin/firestore");
 const {userRecordConstructor} = require("firebase-functions/v1/auth");
-const {prepare, finish} = require("../birth_ledger_cleanup");
-const {createAccountBirthTestHarness} = require("../water_account_birth");
+const {prepare, finish, originalOperation} = require("../birth_ledger_cleanup");
+const {createAccountBirthRecorder} = require("../water_account_birth");
 
 const UID = "synthetic-owner";
 const PATH = `account_birth_decisions/${UID}`;
@@ -51,7 +51,8 @@ class FakeFirestore {
    * Construct the synthetic namespace.
    */
   constructor() {
-    this.projectId = "demo-life-os";
+    this.projectId = "demo-life-os-p1";
+    this.databaseId = "(default)";
     this.docs = new Map(); this.versions = new Map(); this.writes = [];
     this.commitClock = CLOCK;
     this.hooks = {}; this.attempts = 0; this.conflicts = 0;
@@ -73,6 +74,7 @@ class FakeFirestore {
    * @param {string} path Document path.
    * @return {Object} Reference.
    */
+  doc(path) { return this.ref(path); }
   ref(path) {
     return {path, kind: "doc", listCollections: async () => {
       const names = [...new Set([...this.docs.keys()].filter(p => p.startsWith(path + "/"))
@@ -181,7 +183,7 @@ class FakeFirestore {
           w.type === "update" ? {...this.docs.get(w.ref.path), ...data} : data);
         this.writes.push(w);
       }
-      if (this.hooks.afterCommit) await this.hooks.afterCommit();
+      if (this.hooks.afterCommit) await this.hooks.afterCommit({pending});
       return result;
     }
     throw new Error("MVCC retry exhaustion");
@@ -209,7 +211,7 @@ function fixture() {
   f.context = {eventType: "google.firebase.auth.user.delete",
     eventId: "synthetic-delete-1", timestamp: "2026-10-13T13:00:00Z",
     resource: {service: "firebaseauth.googleapis.com",
-      name: "projects/demo-life-os"}, params: {}};
+      name: "projects/demo-life-os-p1"}, params: {}};
   f.lookups = [];
   f.lookup = async (uid) => {
     f.lookups.push(uid);
@@ -218,17 +220,18 @@ function fixture() {
     throw Object.assign(new Error("synthetic not found"),
         {code: "auth/user-not-found"});
   };
-  f.birth = createAccountBirthTestHarness({db, now: () => CLOCK,
+  f.birth = createAccountBirthRecorder({db, projectId: db.projectId, now: () => CLOCK,
     getTrustedBirth: () => ({source: {type: "FIREBASE_AUTH_CREATE",
-      eventId: "synthetic-create-1", uid: UID, projectId: "demo-life-os",
+      eventId: "synthetic-create-1", uid: UID, projectId: "demo-life-os-p1",
       tenantId: null, authCreatedAt: BORN, eventAt: BORN},
     identity: {uid: UID, email: "synthetic@example.invalid",
       displayName: "Synthetic", photoUrl: null},
     cohort: {version: 1, id: "closed-r3", policy: "NEW_ACCOUNT_V2_ONLY",
       state: "CLOSED", cutoverAt: Timestamp.fromMillis(1)}}),
-    getCurrentAuthGeneration: () => ({uid: UID, projectId: "demo-life-os",
+    getCurrentAuthGeneration: () => ({uid: UID, projectId: "demo-life-os-p1",
       tenantId: null, authCreatedAt: BORN})});
-  f.prepare = () => prepare(db, f.user, f.context, f.lookup);
+  f.prepare = () => prepare(db, f.user, f.context, f.lookup,
+      {verified: true, notBefore: Timestamp.fromMillis(1)});
   return f;
 }
 
@@ -236,9 +239,14 @@ function fixture() {
  * @param {Object} f Fixture.
  * @return {Promise<void>} Refusal before any writes.
  */
-async function refused(f) {
+async function refused(f, code = "ACCOUNT_STATE_CONFLICT") {
   const docs = [...f.db.docs]; const writes = f.db.writes.length;
-  await assert.rejects(f.prepare(), {message: "BIRTH_CLEANUP_CONFLICT"});
+  await assert.rejects(f.prepare(), error => {
+    assert.equal(error.code, code);
+    if (code === "ACCOUNT_DELETION_BLOCKED") assert.equal(error.retryable, true);
+    assert.doesNotMatch(error.message, /auth\/internal-error|synthetic not found/);
+    return true;
+  });
   assert.deepEqual([...f.db.docs], docs);
   assert.equal(f.db.writes.length, writes);
 }
@@ -248,15 +256,18 @@ test("atomic finalization removes PII and COMPLETE in exactly one commit",
       const f = fixture(); await f.birth.record(); const a = await f.prepare();
       let seen = false;
       f.db.hooks.beforeCommit = ({pending}) => {
+        if (!pending.length) return;
         assert.deepEqual(pending.map((w) => [w.type, w.ref.path]),
-            [["delete", PATH], ["update", GUARD]]);
+            [["delete", PATH], ["update", GUARD], ["update", GUARD + "/control/operation"]]);
         assert.ok(f.db.docs.get(PATH).originalIdentity.email);
         assert.equal(f.db.docs.get(GUARD).state, "IN_PROGRESS"); seen = true;
       };
       await finish(f.db, a); assert.equal(seen, true);
       assert.equal(f.db.docs.has(PATH), false);
       assert.equal(f.db.docs.get(GUARD).state, "COMPLETE");
-      assert.deepEqual(f.lookups, [UID]);
+      assert.ok(f.lookups.length >= 2);
+      assert.ok(f.lookups.every(value => value === UID));
+      assert.equal(f.db.docs.get(GUARD + "/control/operation").state, "COMPLETE");
     });
 
 for (const mutation of [
@@ -275,7 +286,7 @@ for (const mutation of [
 ]) {
   test(`preflight refuses: ${mutation.toString()}`, async () => {
     const f = fixture(); await f.birth.record();
-    await mutation(f); await refused(f);
+    await mutation(f); await refused(f, f.authError ? "ACCOUNT_DELETION_BLOCKED" : "ACCOUNT_STATE_CONFLICT");
   });
 }
 
@@ -306,26 +317,29 @@ test("explicit later root is preserved before a guard", async () => {
   await refused(f); assert.equal(f.db.docs.has(GUARD), false);
 });
 
-test("legacy COMPLETE with residual ledger is reclaimed without reopening UID",
-    async () => {
-      const f = fixture(); await f.birth.record();
-      const record = copy(f.db.docs.get(PATH));
-      const original = await f.prepare(); await finish(f.db, original);
-      const g = f.db.docs.get(GUARD);
-      // Synthetic historical state left by the pre-R3 cleanup.
-      f.db.put(PATH, record);
-      const a = await f.prepare();
-      assert.equal(f.db.docs.get(GUARD).deletionId, g.deletionId);
-      assert.equal(f.db.docs.get(GUARD).state, "IN_PROGRESS");
-      f.db.hooks.beforeCommit = () => {
-        throw new Error("synthetic commit fail");
-      };
-      await assert.rejects(finish(f.db, a), /synthetic commit fail/);
-      assert.equal(f.db.docs.get(GUARD).state, "IN_PROGRESS");
-      assert.equal(f.db.docs.has(PATH), true);
-      f.db.hooks = {}; await finish(f.db, a);
-      assert.equal(f.db.docs.has(PATH), false);
-    });
+test("R5 COMPLETE with residual ledger stays terminal and requires review", async () => {
+  const f = fixture(); await f.birth.record();
+  const record = copy(f.db.docs.get(PATH));
+  const original = await f.prepare(); await finish(f.db, original);
+  const g = copy(f.db.docs.get(GUARD));
+  f.db.put(PATH, record);
+  const before = [...f.db.docs], writes = f.db.writes.length;
+  const a = await f.prepare();
+  assert.equal(f.db.docs.get(GUARD).deletionId, g.deletionId);
+  assert.equal(f.db.docs.get(GUARD).state, "COMPLETE");
+  let writeAttempts = 0;
+  f.db.hooks.beforeCommit = ({pending}) => {
+    if (pending.length) {writeAttempts++; throw new Error("synthetic commit fail");}
+  };
+  await assert.rejects(finish(f.db, a), {code: "ACCOUNT_STATE_CONFLICT"});
+  assert.equal(writeAttempts, 0);
+  assert.equal(f.db.docs.has(PATH), true);
+  assert.deepEqual([...f.db.docs], before); assert.equal(f.db.writes.length, writes);
+  f.db.hooks = {};
+  await assert.rejects(finish(f.db, a), {code: "ACCOUNT_STATE_CONFLICT"});
+  assert.equal(f.db.docs.get(GUARD).state, "COMPLETE");
+  assert.deepEqual([...f.db.docs], before);
+});
 
 test("changed ledger after admission is preserved and cannot confirm COMPLETE",
     async () => {
@@ -333,7 +347,7 @@ test("changed ledger after admission is preserved and cannot confirm COMPLETE",
       const r = copy(f.db.docs.get(PATH));
       r.originalIdentity.displayName = "Changed";
       f.db.put(PATH, r);
-      await assert.rejects(finish(f.db, a), /BIRTH_CLEANUP_CONFLICT/);
+      await assert.rejects(finish(f.db, a), {code: "ACCOUNT_STATE_CONFLICT"});
       assert.deepEqual(f.db.docs.get(PATH), r);
       assert.equal(f.db.docs.get(GUARD).state, "IN_PROGRESS");
     });
@@ -342,7 +356,7 @@ test("late inserted ledger cannot be erased using an absent-ledger admission",
     async () => {
       const f = fixture(); const old = fixture(); await old.birth.record();
       const a = await f.prepare(); f.db.put(PATH, copy(old.db.docs.get(PATH)));
-      await assert.rejects(finish(f.db, a), /BIRTH_CLEANUP_CONFLICT/);
+      await assert.rejects(finish(f.db, a), {code: "ACCOUNT_STATE_CONFLICT"});
       assert.equal(f.db.docs.has(PATH), true);
       assert.equal(f.db.docs.get(GUARD).state, "IN_PROGRESS");
     });
@@ -351,17 +365,21 @@ test("root present at finalization prevents ledger delete and COMPLETE",
     async () => {
       const f = fixture(); await f.birth.record(); const a = await f.prepare();
       f.db.put(ROOT, {displayName: "Synthetic root"});
-      await assert.rejects(finish(f.db, a), /BIRTH_CLEANUP_CONFLICT/);
+      await assert.rejects(finish(f.db, a), {code: "ACCOUNT_STATE_CONFLICT"});
       assert.equal(f.db.docs.has(PATH), true);
       assert.equal(f.db.docs.get(GUARD).state, "IN_PROGRESS");
     });
 
 test("lost final reply replays without another ledger delete", async () => {
   const f = fixture(); await f.birth.record(); const a = await f.prepare();
-  f.db.hooks.afterCommit = () => {
-    throw new Error("synthetic lost reply");
+  let lost = 0;
+  f.db.hooks.afterCommit = ({pending}) => {
+    if (!lost && pending.some(w => w.ref.path === GUARD + "/control/operation" && w.data?.state === "COMPLETE")) {
+      lost++; throw new Error("synthetic lost reply");
+    }
   };
-  await assert.rejects(finish(f.db, a), /synthetic lost reply/);
+  const result = await finish(f.db, a);
+  assert.equal(lost, 1); assert.equal(result.status, "COMPLETE_RECHECKED");
   assert.equal(f.db.docs.has(PATH), false);
   assert.equal(f.db.docs.get(GUARD).state, "COMPLETE");
   f.db.hooks = {}; const before = f.db.writes.length;
@@ -389,9 +407,16 @@ test("birth commits before guard: claim retries and includes the real ledger",
           paused = true; await hold.hold();
         }
       };
-      const pending = f.prepare(); await hold.reached;
-      await f.birth.record(); hold.release(); const a = await pending;
-      assert.notEqual(a.digest, null); await finish(f.db, a);
+      const pending = assert.rejects(f.prepare(), {code: "ACCOUNT_STATE_CONFLICT"});
+      await hold.reached;
+      await f.birth.record(); hold.release(); await pending;
+      assert.equal(f.db.docs.has(GUARD), false);
+      assert.equal(f.db.docs.has(GUARD + "/control/operation"), false);
+      assert.equal(f.db.docs.has(PATH), true);
+      f.db.hooks = {};
+      const a = await f.prepare();
+      assert.notEqual(originalOperation(f.db, a).scope.birthDigest, null);
+      await finish(f.db, a);
       assert.equal(f.db.docs.has(PATH), false); assert.ok(f.db.conflicts >= 1);
     });
 

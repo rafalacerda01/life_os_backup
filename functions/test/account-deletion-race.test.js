@@ -26,7 +26,9 @@ function gate() {
 // optimistic fake retries the real callback, discards rejected buffered writes,
 // and catches query phantoms. Real Admin Firestore normally uses pessimistic locks.
 class FakeFirestore {
-  projectId = "demo-life-os";
+  projectId = "demo-life-os-p1";
+  databaseId = "(default)";
+  doc(path) { return this.ref(path); }
   docs = new Map(); versions = new Map(); created = new Map();
   attempts = []; conflicts = []; writes = []; hooks = {}; recursiveDeletes = [];
   query(path, group = false, filters = [], limit = Infinity) {
@@ -127,7 +129,7 @@ class FakeFirestore {
   }
 }
 function ledger(owner = UID) {
-  return {version: 1, uid: owner, projectId: 'demo-life-os', tenantId: null,
+  return {version: 1, uid: owner, projectId: 'demo-life-os-p1', tenantId: null,
     authCreatedAt: CREATED, sourceType: 'FIREBASE_AUTH_CREATE', sourceEventId: 'synthetic-create',
     eventAt: CLOCK, cohort: {version: 1, id: 'closed-cohort', policy: 'NEW_ACCOUNT_V2_ONLY',
       state: 'CLOSED', cutoverAt: Timestamp.fromMillis(CREATED.toMillis() - 1000)},
@@ -140,6 +142,13 @@ function ledger(owner = UID) {
 require('firebase-functions/v1');
 const adminPath = require.resolve('firebase-admin');
 require(adminPath);
+// Test-only server configuration through the existing R6B2 seam. The installed
+// callback still invokes prepare at its real boundary; no admission is faked.
+const fixtureBirthCleanup = require("../birth_ledger_cleanup");
+const productionPrepare = fixtureBirthCleanup.prepare;
+fixtureBirthCleanup.prepare = (...args) => productionPrepare(...args,
+    {verified: true, notBefore: Timestamp.fromMillis(1)});
+
 const originalAdmin = require.cache[adminPath].exports;
 let active;
 require.cache[adminPath].exports = {initializeApp() {}, firestore: () => active.db,
@@ -154,6 +163,27 @@ const circles = require('../circle_cleanup');
 function guarded(state = 'IN_PROGRESS') {
   return {version: 1, state, deletionId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
     startedAt: CLOCK, retainUntil: state === 'COMPLETE' ? Timestamp.now() : null};
+}
+async function admitCleanupGuard(f) {
+  const user = {uid: UID, metadata: {creationTime: CREATED.toDate().toUTCString()}};
+  const event = {eventId: 'synthetic-delete', eventType: 'google.firebase.auth.user.delete',
+    timestamp: new Date().toISOString(), resource: {service: 'firebaseauth.googleapis.com',
+      name: 'projects/demo-life-os-p1'}};
+  const admission = await fixtureBirthCleanup.prepare(f.db, user, event, async () => {
+    throw Object.assign(new Error('synthetic absent'), {code: 'auth/user-not-found'});
+  });
+  f.preparationWrites = [...f.db.writes];
+  f.preparedAdmission = admission;
+  return admission.guard;
+}
+async function admitCompletedGuard(f) {
+  await admitCleanupGuard(f);
+  // This fixture is intentionally empty for the target UID. Use the actual
+  // terminal proof/finalization; never construct a COMPLETE receipt by hand.
+  await fixtureBirthCleanup.finish(f.db, f.preparedAdmission);
+  f.preparationWrites = [...f.db.writes];
+  f.db.writes.length = 0; // From here the oracle observes only the two replays.
+  return copy(f.db.docs.get(G));
 }
 const hash = createHash('sha256').update(UID).digest('hex');
 const B = 'billing_google_accounts/' + hash;
@@ -171,7 +201,7 @@ function call(f, label = 'functions') {
     metadata: {creationTime: CREATED.toDate().toUTCString()}}, {
     eventId: 'synthetic-delete', eventType: 'google.firebase.auth.user.delete',
     timestamp: new Date().toISOString(),
-    resource: {service: 'firebaseauth.googleapis.com', name: 'projects/demo-life-os'}, params: {},
+    resource: {service: 'firebaseauth.googleapis.com', name: 'projects/demo-life-os-p1'}, params: {},
   }));
 }
 function integral(f) {
@@ -210,7 +240,7 @@ for (const root of [true, false]) for (const birth of [true, false]) {
     });
 }
 test('R2 real onDelete empty COMPLETE is read-only including duplicates', async () => {
-  const f = fixture({root: false, birth: false}); const g = guarded('COMPLETE'); f.db.put(G, g);
+  const f = fixture({root: false, birth: false}); const g = await admitCompletedGuard(f);
   await call(f); await call(f); integral(f);
   assert.deepEqual(f.db.docs.get(G), g); assert.equal(f.db.writes.length, 0);
   assert.deepEqual(f.db.recursiveDeletes, []);
@@ -242,8 +272,8 @@ for (const lost of [false, true]) test('R2 real onDelete recovers Billing ' + (l
   await call(f); integral(f);
 });
 for (const operation of ['owned marker', 'closure reservation', 'member link', 'history anonymization']) {
-  test('R2 real Circles cleanup cannot write ' + operation + ' after COMPLETE', async () => {
-    const f = fixture({root: false, birth: false}); const g = guarded(); f.db.put(G, g);
+  test('R2 real Circles cleanup cannot write ' + operation + ' after COMPLETE', async (t) => {
+    const f = fixture({root: false, birth: false}); const g = await admitCleanupGuard(f);
     const db = circles.withActiveGuard(f.db, UID, g), ready = gate(); let held = false;
     const target = operation === 'owned marker' ? 'circle_deletions/owned' :
       operation === 'closure reservation' ? 'circle_cleanup_guards/owned' :
@@ -270,9 +300,22 @@ for (const operation of ['owned marker', 'closure reservation', 'member link', '
       }
     };
     const stale = context.run('stale', cleanup).then(() => null, e => e);
-    await ready.reached; f.db.put(G, {...g, state: 'COMPLETE', retainUntil: Timestamp.now()});
+    await ready.reached;
+    const receipt = f.db.docs.get(G + '/control/operation');
+    const retired = f.db.docs.get('retired_auth_identities/' + UID);
+    assert.equal(receipt.state, 'IN_PROGRESS');
+    const writesBefore = f.db.writes.length, nativeBefore = [...f.db.recursiveDeletes];
+    f.db.put(G, {...g, state: 'COMPLETE', retainUntil: Timestamp.now()});
     const before = [...f.db.docs]; ready.release();
-    assert.equal((await stale).code, 'ACCOUNT_CLEANUP_COMPLETE');
+    assert.equal((await stale).code, 'ACCOUNT_STATE_CONFLICT');
+    assert.equal(held, true);
+    assert.deepEqual(f.db.docs.get(G + '/control/operation'), receipt);
+    assert.deepEqual(f.db.docs.get('retired_auth_identities/' + UID), retired);
+    assert.equal(f.db.writes.length, writesBefore);
+    assert.deepEqual(f.db.recursiveDeletes, nativeBefore);
+    t.diagnostic(JSON.stringify({historicalR5Evidence: true, operation, target, held,
+      conflicts: f.db.conflicts.length, guard: f.db.docs.get(G).state, receipt: receipt.state,
+      deletionId: receipt.deletionId, scope: receipt.scope, extraWrites: f.db.writes.length - writesBefore}));
     assert.deepEqual([...f.db.docs], before); assert.ok(f.db.conflicts.length);
   });
 }
