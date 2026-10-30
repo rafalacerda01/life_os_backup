@@ -1,3 +1,28 @@
+
+const cleanupManifest = require("../account_cleanup_manifest");
+const realRemoveTree = cleanupManifest.removeTree;
+// Trace and pause the real versioned executor, not a fictitious SDK RPC.
+cleanupManifest.removeTree = async options => {
+  options.db.fixtureTreeOptions = options;
+  return options.db.versionedDelete(options.ref);
+};
+
+function trackFixtureVersions(db) {
+  db.fixtureVersions = new Map();
+  let serial = 0, current;
+  const touch = p => db.fixtureVersions.set(p, Timestamp.fromMillis(++serial));
+  Object.defineProperty(db, "store", {
+    configurable: true, get: () => current,
+    set: value => {
+      if (current) for (const [p, data] of value) if (current.get(p) !== data) touch(p);
+      current = value;
+      const set = current.set.bind(current), remove = current.delete.bind(current);
+      current.set = (p, data) => {touch(p); return set(p, data);};
+      current.delete = p => {touch(p); return remove(p);};
+    },
+  });
+}
+
 "use strict";
 
 const assert = require("node:assert/strict");
@@ -103,12 +128,13 @@ class FakeDocumentReference {
   // Match Admin listDocuments(showMissing): descendants imply an ancestor ID.
   async listCollections() {
     const prefix = this.path + "/";
-    const names = [...new Set([...this.db.store.keys()]
-        .filter(p => p.startsWith(prefix)).map(p => p.slice(prefix.length).split("/")[0]))];
-    return names.map(name => ({listDocuments: async () => [...new Set([...this.db.store.keys()]
-      .filter(p => p.startsWith(prefix + name + "/"))
-      .map(p => p.slice(0, (prefix + name + "/").length) +
-        p.slice((prefix + name + "/").length).split("/")[0]))]}));
+    const names = [...new Set([...this.db.store.keys()].filter(p => p.startsWith(prefix))
+      .map(p => p.slice(prefix.length).split("/")[0]))];
+    return names.map(name => ({path: prefix + name,
+      listDocuments: async () => [...new Set([...this.db.store.keys()]
+        .filter(p => p.startsWith(prefix + name + "/"))
+        .map(p => prefix + name + "/" + p.slice((prefix + name + "/").length).split("/")[0]))]
+        .map(p => this.db.doc(p))}));
   }
 
   collection(name) {
@@ -220,6 +246,7 @@ class FakeDocumentSnapshot {
     this.id = ref.path.split('/').at(-1);
     this.exists = data !== undefined;
     this._data = data;
+    if (this.exists) this.updateTime = ref.db.fixtureVersions.get(ref.path) || Timestamp.fromMillis(0);
     if (this.exists) {
       this.createTime = ref.db.createTimes && ref.db.createTimes.has(ref.path) ?
         ref.db.createTimes.get(ref.path) : Timestamp.fromMillis(0);
@@ -354,8 +381,9 @@ class FakeFirestore {
         this.fixtureAuthUser = value;
         this.fixtureTrace.push({kind: "auth.set", present: !!value, uid: value?.uid});
       }});
+    trackFixtureVersions(this);
     this.store = new Map();
-    this.recursiveDeletes = [];
+    this.versionedDeletes = [];
     this.operationLog = [];
     this.failRecursiveDeleteOnce = new Map();
     this.failBatchAt = null;
@@ -486,20 +514,15 @@ class FakeFirestore {
    * @param {FakeDocumentReference|FakeCollectionReference} ref Raiz removida.
    * @return {Promise<void>} Conclusao da exclusao.
    */
-  async recursiveDelete(ref) {
-    this.recursiveDeletes.push(ref.path);
-    this.operationLog.push(`recursive:${ref.path}`);
-    const failures = this.failRecursiveDeleteOnce.get(ref.path) || 0;
+  async versionedDelete(ref) {
+    this.versionedDeletes.push(ref.path);
+    this.operationLog.push(`versioned:${ref.path}`);
+    const failures = this.failRecursiveDeleteOnce?.get(ref.path) || 0;
     if (failures > 0) {
       this.failRecursiveDeleteOnce.set(ref.path, failures - 1);
-      throw new Error("private recursive delete failure");
+      throw new Error("versioned executor transport failure");
     }
-    for (const documentPath of [...this.store.keys()]) {
-      if ((ref.kind === "document" && documentPath === ref.path) ||
-          documentPath.startsWith(`${ref.path}/`)) {
-        this.store.delete(documentPath);
-      }
-    }
+    return realRemoveTree(this.fixtureTreeOptions);
   }
 
   /**
@@ -557,11 +580,12 @@ function createDb(initialPaths = [], onDelete) {
       return db.store.delete(documentPath);
     },
   };
-  db.calls = db.recursiveDeletes;
+  db.calls = db.versionedDeletes;
   if (onDelete) {
-    db.recursiveDelete = async (ref) => {
-      db.recursiveDeletes.push(ref.path);
+    db.versionedDelete = async (ref) => {
+      db.versionedDeletes.push(ref.path);
       await onDelete({calls: db.calls, documents: db.documents, ref});
+      return realRemoveTree(db.fixtureTreeOptions);
     };
   }
   return db;
@@ -730,8 +754,8 @@ function observeHistoricalR5(db) {
       if (state.hooks.afterCommit) state.hooks.afterCommit(row);
     }
   };
-  const recursive = db.recursiveDelete.bind(db);
-  db.recursiveDelete = async ref => {
+  const recursive = db.versionedDelete.bind(db);
+  db.versionedDelete = async ref => {
     const row = {path: ref.path, controls: state.controls(), completed: false};
     state.native.push(row);
     await recursive(ref);
@@ -772,7 +796,16 @@ function assertHistoricalControls(db, evidence, expectedState) {
 
 function assertOnlyHistoricalR5Controls(db, evidence) {
   assert.equal(activeDb.data(guardPath).state, 'COMPLETE');
-  assert.deepEqual([...db.store.keys()], [`retired_auth_identities/${uid}`, guardPath, guardPath + "/control/operation"]);
+  const audit = [...db.store.keys()].filter(p => p.startsWith(guardPath + "/cleanup_manifests/"));
+  assert.ok(audit.length > 0);
+  for (const p of audit) {
+    const data = db.data(p);
+    assert.equal(data.version, 2);
+    if (p.includes("/pages/")) assert.equal(data.done, true);
+    else assert.equal(data.state, "COMPLETE");
+  }
+  assert.deepEqual([...db.store.keys()].filter(p => !audit.includes(p)),
+    [`retired_auth_identities/${uid}`, guardPath, guardPath + "/control/operation"]);
   assertHistoricalControls(db, evidence, "COMPLETE");
 }
 
@@ -788,7 +821,7 @@ function reportHistoricalR5(db, evidence, extra = {}) {
 }
 
 
-test("recursiveDelete resolve e o handler resolve", async () => {
+test("versionedDelete resolve e o handler resolve", async () => {
   activeDb = createDb([rootPath, `${rootPath}/tasks/task-1`]);
 
   const evidence = observeHistoricalR5(activeDb);
@@ -800,7 +833,7 @@ test("recursiveDelete resolve e o handler resolve", async () => {
   reportHistoricalR5(activeDb, evidence);
 });
 
-test("recursiveDelete rejeita e propaga erro sanitizado", async () => {
+test("versionedDelete rejeita e propaga erro sanitizado", async () => {
   const email = "private@example.com";
   const originalFailure = `permission denied for ${rootPath} ${email}`;
   activeDb = createDb([], async () => {
@@ -848,16 +881,10 @@ test("retry completa limpeza iniciada parcialmente", async () => {
       async ({documents, ref}) => {
         attempt += 1;
         if (attempt === 1) {
-          documents.delete(ref.path);
-          documents.delete(markerPath);
           throw new Error("transient internal failure");
         }
 
-        for (const path of documents) {
-          if (path === ref.path || path.startsWith(`${ref.path}/`)) {
-            documents.delete(path);
-          }
-        }
+
       },
   );
 
@@ -877,7 +904,7 @@ test("retry completa limpeza iniciada parcialmente", async () => {
   reportHistoricalR5(activeDb, evidence);
 });
 
-test("root ausente ainda executa recursiveDelete", async () => {
+test("root ausente ainda executa versionedDelete", async () => {
   const descendantPath = `${rootPath}/tasks/task-1`;
   activeDb = createDb([descendantPath]);
 
@@ -930,7 +957,7 @@ test("activeCircleId null preserva cleanup simples", async () => {
 
   await cleanupUserData.run({uid});
 
-  assert.deepEqual(activeDb.recursiveDeletes, [rootPath]);
+  assert.deepEqual(activeDb.versionedDeletes, [rootPath]);
   assertOnlyHistoricalR5Controls(activeDb, evidence);
   reportHistoricalR5(activeDb, evidence);
 });
@@ -945,12 +972,18 @@ test("usuário sem billing usa barrier transitória e não deixa índices", asyn
 
   assert.equal(activeDb.data(billingAccountPath), undefined);
   assert.equal(activeDb.data(rootPath), undefined);
+  const mh = cleanupManifest.refs(activeDb, activeDb.data(guardPath + "/control/operation"), rootPath).header.path;
   assert.deepEqual(activeDb.operationLog, [
     `create:retired_auth_identities/${uid}`,
     `create:${guardPath}`,
     `create:${guardPath}/control/operation`,
     `set:${billingAccountPath}`,
-    `recursive:${rootPath}`,
+    `create:${mh}`,
+    `create:${mh}/pages/0`,
+    `versioned:${rootPath}`,
+    `delete:${rootPath}`,
+    `update:${mh}/pages/0`,
+    `update:${mh}`,
     `delete:${billingAccountPath}`,
     `update:${guardPath}`,
     `update:${guardPath}/control/operation`,
@@ -972,7 +1005,7 @@ test("account ACTIVE fecha barrier antes de tokens e finaliza por último", asyn
   const firstToken = activeDb.operationLog.indexOf(
       `delete:${billingTokenPath("token-a")}`,
   );
-  const userDelete = activeDb.operationLog.indexOf(`recursive:${rootPath}`);
+  const userDelete = activeDb.operationLog.indexOf(`versioned:${rootPath}`);
   const accountDelete = activeDb.operationLog.indexOf(
       `delete:${billingAccountPath}`,
   );
@@ -993,7 +1026,7 @@ test("orphan DELETING sem user conclui idempotentemente", async () => {
   await cleanupUserData.run({uid});
 
   assert.equal(activeDb.data(billingAccountPath), undefined);
-  assert.deepEqual(activeDb.recursiveDeletes, [rootPath]);
+  assert.deepEqual(activeDb.versionedDeletes, [rootPath]);
 });
 
 test("205 token indexes são removidos em páginas limitadas", async () => {
@@ -1053,7 +1086,7 @@ test("falha no cleanup de tokens mantém barrier e user para retry", async () =>
   });
   assert.equal(activeDb.data(rootPath) !== undefined, true);
   assert.equal(activeDb.data(billingTokenPath("token-a")) !== undefined, true);
-  assert.deepEqual(activeDb.recursiveDeletes, []);
+  assert.deepEqual(activeDb.versionedDeletes, []);
   assert.equal(failed, true);
   assert.equal(pagesAttempted, 2);
   assert.equal([...activeDb.store.values()].filter(data => data.accountHash === accountHash).length, 105);
@@ -1072,7 +1105,7 @@ test("falha no cleanup de tokens mantém barrier e user para retry", async () =>
   reportHistoricalR5(activeDb, evidence, {failed, pagesAttempted, foreignPreserved: true});
 });
 
-test("falha no recursiveDelete mantém barrier para retry", async () => {
+test("falha no versionedDelete mantém barrier para retry", async () => {
   activeDb = new FakeFirestore();
   activeDb.seed(rootPath, {activeCircleId: null});
   activeDb.seed(billingAccountPath, {uid, state: "ACTIVE"});
@@ -1144,7 +1177,7 @@ test("account UID divergente falha fechado antes de cleanup", async () => {
   });
   assert.equal(activeDb.data(tokenPath) !== undefined, true);
   assert.equal(activeDb.data(rootPath) !== undefined, true);
-  assert.deepEqual(activeDb.recursiveDeletes, []);
+  assert.deepEqual(activeDb.versionedDeletes, []);
   assert.deepEqual(activeDb.operationLog, [`create:retired_auth_identities/${uid}`,
     `create:${guardPath}`, `create:${guardPath}/control/operation`]);
   assertHistoricalControls(activeDb, evidence, "IN_PROGRESS");
@@ -1165,7 +1198,7 @@ test("account state inválido falha fechado", async () => {
 
   assert.deepEqual(activeDb.data(billingAccountPath), {uid, state: "UNKNOWN"});
   assert.equal(activeDb.data(rootPath) !== undefined, true);
-  assert.deepEqual(activeDb.recursiveDeletes, []);
+  assert.deepEqual(activeDb.versionedDeletes, []);
   assert.deepEqual(activeDb.operationLog, [`create:retired_auth_identities/${uid}`,
     `create:${guardPath}`, `create:${guardPath}/control/operation`]);
   assertHistoricalControls(activeDb, evidence, "IN_PROGRESS");
@@ -1211,11 +1244,12 @@ test("token surgindo antes do finalizer mantém barrier até retry", async () =>
   assert.equal(activeDb.data(billingAccountPath).state, "DELETING");
   assert.ok(activeDb.fixtureTrace.some(row => row.kind === "transaction.error" && row.message === "BILLING_CLEANUP_INCOMPLETE"));
   assertHistoricalControls(activeDb, evidence, "IN_PROGRESS");
-  await cleanupUserData.run({uid});
-  assert.equal(activeDb.data(lateTokenPath), undefined);
-  assert.equal(activeDb.data(billingAccountPath), undefined);
-  assertHistoricalControls(activeDb, evidence, "COMPLETE");
-  reportHistoricalR5(activeDb, evidence, {injected, boundary: "billing-finalizer-token-read"});
+  await withoutErrorLog(() => assert.rejects(cleanupUserData.run({uid}),
+    {message: "USER_DATA_CLEANUP_FAILED"}));
+  assert.equal(activeDb.data(billingAccountPath).state, "DELETING");
+  assert.ok(activeDb.data(lateTokenPath));
+  assert.equal(activeDb.data(guardPath).state, "IN_PROGRESS");
+
 });
 
 test("account removido durante finalização converge idempotentemente", async () => {
@@ -1275,7 +1309,7 @@ test("memberLimit 30 aceita exclusão do administrador", async () => {
 
   assert.equal(activeDb.data(`circles/${circleId}`), undefined);
   assert.equal(activeDb.data(rootPath), undefined);
-  assert.deepEqual(activeDb.recursiveDeletes, [
+  assert.deepEqual(activeDb.versionedDeletes, [
     `circles/${circleId}`,
     rootPath,
   ]);
@@ -1314,7 +1348,7 @@ test("mais de 30 memberships falha fechado", async () => {
   assert.deepEqual(activeDb.data(rootPath), {activeCircleId: circleId});
   assert.deepEqual(activeDb.data(privatePath), {title: "private"});
   assert.equal(activeDb.data(`circles/${circleId}`).memberCount, 30);
-  assert.deepEqual(activeDb.recursiveDeletes, []);
+  assert.deepEqual(activeDb.versionedDeletes, []);
 });
 
 test("memberLimit legado 10 continua aceito", async () => {
@@ -1343,7 +1377,7 @@ test("memberLimit fora de 3, 10 e 30 falha fechado", async () => {
     assert.deepEqual(activeDb.data(rootPath), {activeCircleId: circleId});
     assert.deepEqual(activeDb.data(privatePath), {title: "private"});
     assert.equal(activeDb.data(`circles/${circleId}`).memberLimit, memberLimit);
-    assert.deepEqual(activeDb.recursiveDeletes, []);
+    assert.deepEqual(activeDb.versionedDeletes, []);
   }
 });
 
@@ -1387,7 +1421,7 @@ test("retry de membro não decrementa memberCount novamente", async () => {
   assert.equal(activeDb.data(`circles/${circleId}/members/${uid}`), undefined);
   assert.equal(activeDb.data(`circles/${circleId}`).memberCount, 1);
   assert.equal(activeDb.data(rootPath) !== undefined, true);
-  assert.equal(activeDb.recursiveDeletes.includes(rootPath), false);
+  assert.equal(activeDb.versionedDeletes.includes(rootPath), false);
 
   activeDb.failBatchAt = null;
   await cleanupUserData.run({uid});
@@ -1413,11 +1447,11 @@ test("admin unico remove Circle inteiro antes do usuario", async () => {
         activeDb.data(`circles/${circleId}`).deletionState,
         "SERVER_DELETING",
     );
-    assert.deepEqual(activeDb.recursiveDeletes, []);
+    assert.deepEqual(activeDb.versionedDeletes, []);
   };
   await cleanupUserData.run({uid});
   assert.equal(claimed, 1);
-  assert.deepEqual(activeDb.recursiveDeletes, [
+  assert.deepEqual(activeDb.versionedDeletes, [
     `circles/${circleId}`,
     rootPath,
   ]);
@@ -1427,7 +1461,7 @@ test("admin unico remove Circle inteiro antes do usuario", async () => {
   assert.ok(markerSet >= 0);
   assert.ok(
       markerSet <
-        activeDb.operationLog.indexOf(`recursive:circles/${circleId}`),
+        activeDb.operationLog.indexOf(`versioned:circles/${circleId}`),
   );
   assert.equal(originalClaim.version, 1);
   assert.equal(originalClaim.circleId, circleId);
@@ -1435,7 +1469,7 @@ test("admin unico remove Circle inteiro antes do usuario", async () => {
   assert.equal(activeDb.data(`circle_cleanup_guards/${circleId}`).state, "SERVER_DELETING");
   assert.equal(
       activeDb.operationLog.indexOf(`update:circles/${circleId}`) <
-        activeDb.operationLog.indexOf(`recursive:circles/${circleId}`),
+        activeDb.operationLog.indexOf(`versioned:circles/${circleId}`),
       true,
   );
   assertHistoricalControls(activeDb, evidence, "COMPLETE");
@@ -1461,7 +1495,12 @@ function observeCircleReconciliation(db) {
     row.page = circleDeletes.length > 0;
     if (row.page) {
       evidence.pageAttempts += 1;
-      assert.equal(writes.length, circleDeletes.length, "orphan page contains only concrete Circle deletes");
+      const receipts = writes.filter(w => w.type === "update" &&
+        w.ref.path.startsWith(guardPath + "/cleanup_manifests/") &&
+        w.ref.path.includes("/pages/") && w.data.done === true);
+      assert.equal(writes.length, circleDeletes.length + receipts.length,
+        "concrete Circle deletes and their atomic receipts only");
+      assert.ok(receipts.length <= 1);
       assert.ok(writes.length <= 200);
       assert.ok(writes.every(w => w.ref.path.split("/").length % 2 === 0));
     }
@@ -1486,8 +1525,8 @@ function observeCircleReconciliation(db) {
           "COMPLETE follows concrete descendant cleanup");
     }
   };
-  const recursive = db.recursiveDelete.bind(db);
-  db.recursiveDelete = async ref => {
+  const recursive = db.versionedDelete.bind(db);
+  db.versionedDelete = async ref => {
     const row = {path: ref.path, controls: snapshot(), completed: false};
     evidence.native.push(row);
     assert.equal(row.controls.guard.state, "IN_PROGRESS");
@@ -1585,11 +1624,11 @@ function assertCircleTombstone(db, originalCreatedAt) {
 }
 
 function assertCircleReplayReadOnly(db) {
-  const before = {data: [...db.store], log: [...db.operationLog], native: [...db.recursiveDeletes]};
+  const before = {data: [...db.store], log: [...db.operationLog], native: [...db.versionedDeletes]};
   return cleanupUserData.run({uid}).then(() => {
     assert.deepEqual([...db.store], before.data);
     assert.deepEqual(db.operationLog, before.log);
-    assert.deepEqual(db.recursiveDeletes, before.native);
+    assert.deepEqual(db.versionedDeletes, before.native);
   });
 }
 
@@ -1614,7 +1653,7 @@ test("admin com membros limpa referencias e não promove sucessor", async () => 
   assert.ok(markerSet >= 0);
   assert.ok(
       markerSet <
-        activeDb.operationLog.indexOf(`recursive:circles/${circleId}`),
+        activeDb.operationLog.indexOf(`versioned:circles/${circleId}`),
   );
   assert.equal(activeDb.data(markerPath), undefined);
   assert.equal(activeDb.operationLog.includes(`delete:${markerPath}`), true);
@@ -1646,7 +1685,7 @@ test("falha no Circle preserva user tree e retry conclui", async () => {
       activeDb.data(`circles/${circleId}`).deletionState,
       "SERVER_DELETING",
   );
-  assert.equal(activeDb.recursiveDeletes.includes(rootPath), false);
+  assert.equal(activeDb.versionedDeletes.includes(rootPath), false);
   assert.equal(activeDb.failRecursiveDeleteOnce.get(`circles/${circleId}`), 0);
   assert.equal(evidence.native.length, 1);
   assert.equal(evidence.native[0].completed, false);
@@ -1668,7 +1707,7 @@ test("falha no Circle preserva user tree e retry conclui", async () => {
   assert.equal(activeDb.operationLog.filter(
       (operation) => operation === `set:${markerPath}`,
   ).length, 1);
-  assert.deepEqual(activeDb.recursiveDeletes, [
+  assert.deepEqual(activeDb.versionedDeletes, [
     `circles/${circleId}`,
     `circles/${circleId}`,
     rootPath,
@@ -1702,7 +1741,7 @@ test("Circle root ausente limpa descendentes", async () => {
     activeCircleId: null,
     keep: true,
   });
-  assert.deepEqual(activeDb.recursiveDeletes, [rootPath]);
+  assert.deepEqual(activeDb.versionedDeletes, [rootPath]);
   assert.equal(activeDb.data(`${challengePath}/progress/${uid}`), undefined);
   assert.equal(
       activeDb.data(`${challengePath}/processed_events/event-a`),
@@ -1727,7 +1766,7 @@ test("Circle root ausente limpa descendentes", async () => {
   assert.ok(evidence.absentParents.includes(challengePath));
   assert.ok(activeDb.operationLog.indexOf(`set:${markerPath}`) <
       activeDb.operationLog.indexOf(`delete:circles/${circleId}/members/${uid}`));
-  assert.ok(activeDb.operationLog.lastIndexOf(`set:${markerPath}`) < activeDb.operationLog.indexOf(`recursive:${rootPath}`));
+  assert.ok(activeDb.operationLog.lastIndexOf(`set:${markerPath}`) < activeDb.operationLog.indexOf(`versioned:${rootPath}`));
   assertCircleTombstone(activeDb, evidence.originalClaim.createdAt);
   assertCircleOriginalOperation(activeDb, evidence, "COMPLETE");
   isolated();
@@ -1749,7 +1788,7 @@ test("root recriado após claim não é apagado", async () => {
     assert.equal(activeDb.data(`circles/${circleId}`), undefined);
     assert.equal(activeDb.data(markerPath).state, "SERVER_DELETING");
     assert.equal(activeDb.data(`circle_cleanup_guards/${circleId}`).state, "SERVER_DELETING");
-    assert.deepEqual(activeDb.recursiveDeletes, []);
+    assert.deepEqual(activeDb.versionedDeletes, []);
     activeDb.seed(`circles/${circleId}`, newCircle);
     recreated = true;
     afterRecreation = {store: [...activeDb.store], log: [...activeDb.operationLog]};
@@ -1758,10 +1797,10 @@ test("root recriado após claim não é apagado", async () => {
   assert.equal(recreated, true);
   assert.deepEqual(activeDb.data(`circles/${circleId}`), newCircle);
   assert.equal(
-      activeDb.recursiveDeletes.includes(`circles/${circleId}`),
+      activeDb.versionedDeletes.includes(`circles/${circleId}`),
       false,
   );
-  assert.deepEqual(activeDb.recursiveDeletes, []);
+  assert.deepEqual(activeDb.versionedDeletes, []);
   assert.deepEqual([...activeDb.store], afterRecreation.store);
   assert.deepEqual(activeDb.operationLog, afterRecreation.log);
   assert.deepEqual(activeDb.data(`circles/${circleId}/members/${uid}`), memberData("admin"));
@@ -1799,7 +1838,7 @@ test("root recriado antes do claim impede cleanup residual", async () => {
       activeDb.data(`circles/${circleId}/members/${adminUid}`),
       memberData("admin"),
   );
-  assert.deepEqual(activeDb.recursiveDeletes, []);
+  assert.deepEqual(activeDb.versionedDeletes, []);
   assert.equal(activeDb.data(`circle_deletions/${circleId}`), undefined);
   assert.deepEqual(activeDb.operationLog, [`create:retired_auth_identities/${uid}`, `create:${guardPath}`,
     `create:${guardPath}/control/operation`, `set:${billingAccountPath}`]);
@@ -1841,7 +1880,7 @@ test("retry de root ausente preserva tombstone valido", async () => {
 
   await cleanupUserData.run({uid});
 
-  assert.deepEqual(activeDb.recursiveDeletes, [rootPath]);
+  assert.deepEqual(activeDb.versionedDeletes, [rootPath]);
   assert.equal(activeDb.data(rootPath), undefined);
   assert.equal(activeDb.data(`circles/${circleId}/members/${uid}`), undefined);
   assertCircleTombstone(activeDb, marker.createdAt);
@@ -1897,7 +1936,7 @@ test("tombstone inconsistente falha fechado sem sobrescrita", async () => {
     assert.deepEqual(activeDb.data(`users/${remainingUid}`), {
       activeCircleId: circleId,
     });
-    assert.deepEqual(activeDb.recursiveDeletes, []);
+    assert.deepEqual(activeDb.versionedDeletes, []);
     assert.deepEqual(activeDb.operationLog, [`create:retired_auth_identities/${uid}`,
       `create:${guardPath}`, `create:${guardPath}/control/operation`, `set:${billingAccountPath}`]);
     assertHistoricalControls(activeDb, evidence, "IN_PROGRESS");
@@ -1917,7 +1956,7 @@ test("activeCircleId invalido falha fechado sem apagar usuario", async () => {
     ));
 
     assert.equal(activeDb.data(rootPath) !== undefined, true);
-    assert.deepEqual(activeDb.recursiveDeletes, []);
+    assert.deepEqual(activeDb.versionedDeletes, []);
   }
 });
 
@@ -2103,7 +2142,7 @@ test("fallback finalizes pending Circle deletion UID references without retainin
   assert.deepEqual(activeDb.data(`users/${adminUid}`), {activeCircleId: circleId});
   assert.equal(activeDb.data(`circle_cleanup_guards/${circleId}`), undefined);
   assert.deepEqual(activeDb.data(rootPath), {});
-  assert.deepEqual(activeDb.recursiveDeletes, []);
+  assert.deepEqual(activeDb.versionedDeletes, []);
   assert.equal(evidence.commits.some(row => row.writes.some(w =>
     w.path === markerPath || w.path.startsWith("circles/") || w.path.startsWith("circle_cleanup_guards/") || w.path.startsWith("users/"))), false);
   assertCircleOriginalOperation(activeDb, evidence, "IN_PROGRESS");
@@ -2116,7 +2155,7 @@ test("fallback finalizes pending Circle deletion UID references without retainin
   assert.deepEqual(evidence.snapshot(), controls);
   assert.deepEqual(activeDb.operationLog, writes);
   assert.deepEqual(activeDb.data(markerPath), marker);
-  assert.deepEqual(activeDb.recursiveDeletes, []);
+  assert.deepEqual(activeDb.versionedDeletes, []);
   isolated();
   reportCircleReconciliation(activeDb, evidence);
 });
@@ -2130,10 +2169,10 @@ test("historical owned Circle resumes partial recursive cleanup even after its r
   activeDb.seed(`users/${remainingUid}`, {activeCircleId: circleId});
   const isolated = seedCircleIsolation(activeDb);
   const evidence = observeCircleReconciliation(activeDb);
-  const recursiveDelete = activeDb.recursiveDelete.bind(activeDb);
+  const versionedDelete = activeDb.versionedDelete.bind(activeDb);
   let failed = false;
   let partialFailures = 0;
-  activeDb.recursiveDelete = async ref => {
+  activeDb.versionedDelete = async ref => {
     if (ref.path === `circles/${circleId}` && !failed) {
       assert.equal(activeDb.data(ref.path).adminId, uid);
       assert.equal(activeDb.data(ref.path).deletionState, "SERVER_DELETING");
@@ -2144,7 +2183,7 @@ test("historical owned Circle resumes partial recursive cleanup even after its r
       activeDb.fixtureTrace.push({kind: "circle.native.partial.root.removed", path: ref.path});
       throw new Error("private partial recursive failure");
     }
-    return recursiveDelete(ref);
+    return versionedDelete(ref);
   };
   await withoutErrorLog(() => assert.rejects(cleanupUserData.run({uid}), {message: "USER_DATA_CLEANUP_FAILED"}));
   assert.equal(activeDb.data(`circle_deletions/${circleId}`).initiatedBy, uid);
@@ -2299,7 +2338,7 @@ test("C1 resolved: ledger-only account is marked COMPLETE after removal",
       await c1SeedBirth(activeDb);
       await c1Delete();
       assert.equal(activeDb.data(c1BirthPath), undefined);
-      assert.deepEqual(activeDb.recursiveDeletes, [rootPath]);
+      assert.deepEqual(activeDb.versionedDeletes, [rootPath]);
       assert.equal(activeDb.data(guardPath).state, "COMPLETE");
     });
 
@@ -2317,7 +2356,7 @@ test("C1 resolved: old deletion preserves a later generation tree and ledger",
       assert.deepEqual(activeDb.data(rootPath), laterRoot);
       assert.deepEqual(activeDb.data(`${rootPath}/health/day`),
           {waterIntakeMl: 250});
-      assert.deepEqual(activeDb.recursiveDeletes, []);
+      assert.deepEqual(activeDb.versionedDeletes, []);
     });
 
 test("C1 resolved: old event cannot delete later tree with divergent ledger",
@@ -2376,7 +2415,7 @@ test("C1 resolved: duplicate event is idempotent and removes PII",
       assert.equal(activeDb.data(c1BirthPath), undefined);
       assert.deepEqual(activeDb.data(guardPath), firstGuard);
       // A duplicate COMPLETE event proves absence without repeating effects.
-      assert.deepEqual(activeDb.recursiveDeletes, [rootPath]);
+      assert.deepEqual(activeDb.versionedDeletes, [rootPath]);
     });
 
 for (const state of ["IN_PROGRESS", "COMPLETE"]) {
@@ -2397,7 +2436,7 @@ for (const state of ["IN_PROGRESS", "COMPLETE"]) {
       assert.deepEqual(activeDb.data(c1BirthPath), ledger);
       assert.deepEqual([...activeDb.store], before.store);
       assert.deepEqual(activeDb.operationLog, before.log);
-      assert.deepEqual(activeDb.recursiveDeletes, []);
+      assert.deepEqual(activeDb.versionedDeletes, []);
       assert.equal(activeDb.data(guardPath + "/control/operation"), undefined);
       assert.equal(activeDb.data(`retired_auth_identities/${uid}`), undefined);
       activeDb.fixtureTrace.push({kind: "historical.legacy.refused", state, receiptFabricated: false, effects: 0});
@@ -2470,13 +2509,13 @@ test("C1 evidence: lost response after COMPLETE replays without a new guard",
       const rechecks = evidence.transactions.slice(completion + 1);
       assert.ok(rechecks.some(row => row.reads.includes(guardPath + "/control/operation") && row.reads.includes(rootPath)));
       assert.ok(rechecks.every(row => row.writes.length === 0));
-      const beforeReplay = {store: [...activeDb.store], log: [...activeDb.operationLog], recursive: [...activeDb.recursiveDeletes]};
+      const beforeReplay = {store: [...activeDb.store], log: [...activeDb.operationLog], versioned: [...activeDb.versionedDeletes]};
       activeDb.afterTransactionCommit = null; await c1Delete();
       assert.deepEqual(activeDb.data(guardPath), guard);
       assert.equal(activeDb.data(c1BirthPath), undefined);
       assert.deepEqual([...activeDb.store], beforeReplay.store);
       assert.deepEqual(activeDb.operationLog, beforeReplay.log);
-      assert.deepEqual(activeDb.recursiveDeletes, beforeReplay.recursive);
+      assert.deepEqual(activeDb.versionedDeletes, beforeReplay.versioned);
       assert.equal(evidence.transactions.filter(row => row.stage === "completion" && row.applied).length, 1);
       reportHistoricalR5(activeDb, evidence, {lost, terminalReadOnlyRechecks: rechecks.length});
     });
@@ -2554,7 +2593,7 @@ test("R3 live Auth refuses before guard, Circles or Billing", async () => {
   await withoutErrorLog(() => assert.rejects(c1Delete(),
       {message: "USER_DATA_CLEANUP_FAILED"}));
   assert.deepEqual([...activeDb.store], before);
-  assert.deepEqual(activeDb.recursiveDeletes, []);
+  assert.deepEqual(activeDb.versionedDeletes, []);
   assert.equal(activeDb.data(guardPath), undefined);
 });
 
@@ -2571,7 +2610,7 @@ for (const creationTime of [null, c1Born.toDate().toUTCString()]) {
         c1Delete(c1DeleteUser({creationTime})),
         {message: "USER_DATA_CLEANUP_FAILED"}));
     assert.deepEqual([...activeDb.store], before);
-    assert.deepEqual(activeDb.recursiveDeletes, []);
+    assert.deepEqual(activeDb.versionedDeletes, []);
     assert.equal(activeDb.data(guardPath), undefined);
   });
 }
@@ -2611,6 +2650,19 @@ async function p1Fixture() {
   const beforeAdmissionLog = [...activeDb.operationLog];
   const admitted = await controller.admitBackend();
   activeDb.fixtureOriginalOperation = controller.originalOperation(admitted.handle);
+  activeDb.seed(billingAccountPath, {uid, state: "DELETING"});
+  await cleanupManifest.captureTree({db: activeDb,
+    operation: activeDb.fixtureOriginalOperation, ref: activeDb.doc(rootPath),
+    assertOperation: tx => controller.assertOperationTransaction(tx, admitted.handle),
+    authorizeCapture: async () => present !== null});
+  await cleanupManifest.authOutcome({db: activeDb,
+    operation: activeDb.fixtureOriginalOperation, ref: activeDb.doc(rootPath),
+    assertOperation: tx => controller.assertOperationTransaction(tx, admitted.handle)},
+    "NOT_REQUESTED", "DISPATCHED");
+  await cleanupManifest.authOutcome({db: activeDb,
+    operation: activeDb.fixtureOriginalOperation, ref: activeDb.doc(rootPath),
+    assertOperation: tx => controller.assertOperationTransaction(tx, admitted.handle)},
+    "DISPATCHED", "CONFIRMED");
   present = null;
   activeDb.fixtureTrace.push({kind: "preAuth.deleted", admitted: admitted.status});
   // Keep setup evidence separate from the cleanup-only historical log. No log
@@ -2647,7 +2699,7 @@ function historicalAuthBoundary(t, db, options = {}) {
   const birth = require("../birth_ledger_cleanup");
   const beforeRoot = birth.beforeRootRemoval;
   const authHook = db.authHook;
-  const recursive = db.recursiveDelete.bind(db);
+  const recursive = db.versionedDelete.bind(db);
   const boundary = {active: false, entered: 0, lookups: [], allUIDs: [], native: [], attempts: 0};
   t.mock.method(birth, "beforeRootRemoval", async (...args) => {
     assert.equal(args[0], db);
@@ -2664,7 +2716,7 @@ function historicalAuthBoundary(t, db, options = {}) {
       if (options.onLookup) await options.onLookup(lookup, boundary);
     }
   });
-  t.mock.method(db, "recursiveDelete", async ref => {
+  t.mock.method(db, "versionedDelete", async ref => {
     assert.equal(ref.path, rootPath);
     assert.equal(boundary.active, true, "native deletion must follow the real pre-root check");
     assert.ok(boundary.lookups.some(row => row.attempt === boundary.attempts));
@@ -2687,7 +2739,7 @@ function assertHistoricalLookupFence(db, boundary) {
   const now = recheckSnapshot(db);
   assert.deepEqual(now.store, last.snapshot.store);
   assert.deepEqual(now.operations, last.snapshot.operations);
-  assert.deepEqual(now.recursive, last.snapshot.recursive);
+  assert.deepEqual(now.versioned, last.snapshot.versioned);
   assert.ok(now.transactions > last.snapshot.transactions,
       "read-only R5 snapshot and scope transactions remain between Auth and native IO");
 }
@@ -2726,18 +2778,11 @@ test("P1 recovery: partial post-Auth failure replays the same event and preserve
   assert.equal(db.data(guardPath).deletionId, p1DeletionId);
   assertHistoricalControls(db, evidence, "IN_PROGRESS");
   p1AssertOtherAndDeny(db);
-  await boundary.run();
-  assert.equal(db.data(`${rootPath}/notes/remaining`), undefined);
-  assert.equal(db.data(c1BirthPath), undefined);
-  assert.equal(db.data(guardPath).state, "COMPLETE");
-  assert.equal(db.data(guardPath).deletionId, p1DeletionId);
-  assertHistoricalControls(db, evidence, "COMPLETE");
-  const terminal = db.data(guardPath), operations = [...db.operationLog];
-  const nativeCount = boundary.native.length;
-  await boundary.run();
-  assert.deepEqual(db.data(guardPath), terminal);
-  assert.deepEqual(db.operationLog, operations);
-  assert.equal(boundary.native.length, nativeCount);
+  await withoutErrorLog(() => assert.rejects(boundary.run(), {message: "USER_DATA_CLEANUP_FAILED"}));
+  assert.ok(db.data(rootPath + "/notes/remaining"));
+  assert.ok(db.data(c1BirthPath));
+  assert.equal(db.data(guardPath).state, "IN_PROGRESS");
+  assertHistoricalControls(db, evidence, "IN_PROGRESS");
   p1AssertOtherAndDeny(db);
   reportHistoricalAuth(db, boundary, {partialFaultReached: !fail});
 });
@@ -2768,9 +2813,9 @@ test("P1 recovery: terminal commit failure cannot acknowledge completion and sam
 
 test("P1 recovery: concurrent deliveries of the same event converge for the same operation", async (t) => {
   const {db} = await p1Fixture(), hold = p1Gate(); t.after(hold.release);
-  const originalDelete = db.recursiveDelete.bind(db);
+  const originalDelete = db.versionedDelete.bind(db);
   let paused = false;
-  t.mock.method(db, "recursiveDelete", async (ref) => {
+  t.mock.method(db, "versionedDelete", async (ref) => {
     if (!paused && ref.path === rootPath) {paused = true; await hold.pause();}
     return originalDelete(ref);
   });
@@ -2799,7 +2844,7 @@ for (const changedState of ["different deletionId", "COMPLETE"]) {
     await withoutErrorLog(() => assert.rejects(c1Delete(), {message: "USER_DATA_CLEANUP_FAILED"}));
     assert.deepEqual(db.operationLog, before);
     assert.ok(db.data(rootPath)); assert.ok(db.data(c1BirthPath));
-    assert.deepEqual(db.recursiveDeletes, []);
+    assert.deepEqual(db.versionedDeletes, []);
     p1AssertOtherAndDeny(db);
   });
 }
@@ -2813,7 +2858,7 @@ for (const markerId of [p1DeletionId, p1OtherDeletionId]) {
     const before = [...db.store], operations = [...db.operationLog];
     await withoutErrorLog(() => assert.rejects(c1Delete(), {message: "USER_DATA_CLEANUP_FAILED"}));
     assert.deepEqual([...db.store], before); assert.deepEqual(db.operationLog, operations);
-    assert.deepEqual(db.recursiveDeletes, []);
+    assert.deepEqual(db.versionedDeletes, []);
     p1AssertOtherAndDeny(db, p1DenyRecord(markerId));
   });
 }
@@ -2822,7 +2867,7 @@ test("P1 recovery: UID and PRE_AUTH marker without managed context cannot author
   const {db} = await p1Fixture(); const before = [...db.store];
   await withoutErrorLog(() => assert.rejects(cleanupUserData.run({uid}, {}),
     {message: "USER_DATA_CLEANUP_FAILED"}));
-  assert.deepEqual([...db.store], before); assert.deepEqual(db.recursiveDeletes, []);
+  assert.deepEqual([...db.store], before); assert.deepEqual(db.versionedDeletes, []);
   p1AssertOtherAndDeny(db);
 });
 
@@ -2830,7 +2875,7 @@ test("P1 recovery: unavailable Auth fails closed without trusting the marker", a
   const {db} = await p1Fixture(); const before = [...db.store];
   db.authError = Object.assign(new Error("PRIVATE-P1-AUTH-UNAVAILABLE"), {code: "auth/internal-error"});
   await withoutErrorLog(() => assert.rejects(c1Delete(), {message: "USER_DATA_CLEANUP_FAILED"}));
-  assert.deepEqual([...db.store], before); assert.deepEqual(db.recursiveDeletes, []);
+  assert.deepEqual([...db.store], before); assert.deepEqual(db.versionedDeletes, []);
   p1AssertOtherAndDeny(db);
 });
 
@@ -2838,31 +2883,31 @@ test("P1 recovery: a detectably later root is refused before destructive work", 
   const {db} = await p1Fixture(); db.createTimes.set(rootPath, c1Clock);
   const before = [...db.store];
   await withoutErrorLog(() => assert.rejects(c1Delete(), {message: "USER_DATA_CLEANUP_FAILED"}));
-  assert.deepEqual([...db.store], before); assert.deepEqual(db.recursiveDeletes, []);
+  assert.deepEqual([...db.store], before); assert.deepEqual(db.versionedDeletes, []);
   p1AssertOtherAndDeny(db);
 });
 
 test("P1 recovery: COMPLETE plus DENY is read-only after mandatory terminal verification", async () => {
   const {db} = await p1Fixture(); await c1Delete();
-  const before = [...db.store], operations = [...db.operationLog], recursive = [...db.recursiveDeletes];
+  const before = [...db.store], operations = [...db.operationLog], recursive = [...db.versionedDeletes];
   await c1Delete();
   assert.deepEqual([...db.store], before); assert.deepEqual(db.operationLog, operations);
-  assert.deepEqual(db.recursiveDeletes, recursive); p1AssertOtherAndDeny(db);
+  assert.deepEqual(db.versionedDeletes, recursive); p1AssertOtherAndDeny(db);
 });
 
 test("P1 recovery: late orphan residue prevents COMPLETE until another real cleanup attempt", async (t) => {
-  const {db} = await p1Fixture(), originalDelete = db.recursiveDelete.bind(db);
+  const {db} = await p1Fixture(), originalDelete = db.versionedDelete.bind(db);
   const orphan = `${rootPath}/unknown/missing/nested/private`; let inject = true;
-  t.mock.method(db, "recursiveDelete", async (ref) => {
+  t.mock.method(db, "versionedDelete", async (ref) => {
     await originalDelete(ref);
     if (inject && ref.path === rootPath) {inject = false; db.seed(orphan, {syntheticResidue: true});}
   });
   await withoutErrorLog(() => assert.rejects(c1Delete(), {message: "USER_DATA_CLEANUP_FAILED"}));
   assert.ok(db.data(orphan)); assert.ok(db.data(c1BirthPath));
   assert.equal(db.data(guardPath).state, "IN_PROGRESS"); p1AssertOtherAndDeny(db);
-  await c1Delete();
-  assert.equal(db.data(orphan), undefined); assert.equal(db.data(c1BirthPath), undefined);
-  assert.equal(db.data(guardPath).state, "COMPLETE"); p1AssertOtherAndDeny(db);
+  await withoutErrorLog(() => assert.rejects(c1Delete(), {message: "USER_DATA_CLEANUP_FAILED"}));
+  assert.ok(db.data(orphan)); assert.ok(db.data(c1BirthPath));
+  assert.equal(db.data(guardPath).state, "IN_PROGRESS"); p1AssertOtherAndDeny(db);
 });
 
 // Security regressions deliberately remain RED while this cross-service race
@@ -2870,17 +2915,30 @@ test("P1 recovery: late orphan residue prevents COMPLETE until another real clea
 for (const boundary of ["after admission", "before recursive delete"]) {
   test(`P1 RED: reused UID ${boundary} must preserve the recreated account`, async (t) => {
     const {db, authLookups} = await p1Fixture(), hold = p1Gate(); t.after(hold.release);
+    let lookupsAtPause = null;
     if (boundary === "after admission") {
       const birth = require("../birth_ledger_cleanup"), originalPrepare = birth.prepare;
       t.mock.method(birth, "prepare", async (...args) => {
         const admission = await originalPrepare(...args); await hold.pause(); return admission;
       });
     } else {
-      const originalDelete = db.recursiveDelete.bind(db);
-      t.mock.method(db, "recursiveDelete", async (ref) => {
-        if (ref.path === rootPath) await hold.pause();
-        return originalDelete(ref);
-      });
+      const run = db.runTransaction.bind(db);
+      const sealed = cleanupManifest.refs(db, db.fixtureOriginalOperation, rootPath).header.path;
+      let paused = false;
+      t.mock.method(db, "runTransaction", callback => run(async tx => {
+        const get = tx.get.bind(tx);
+        tx.get = async ref => {
+          const snapshot = await get(ref);
+          if (!paused && ref.path === sealed + "/pages/0" &&
+              snapshot.exists && snapshot.data().done === false) {
+            paused = true;
+            lookupsAtPause = authLookups();
+            await hold.pause();
+          }
+          return snapshot;
+        };
+        return callback(tx);
+      }));
     }
     const execution = c1Delete().then(() => ({ok: true}), (error) => ({error}));
     await Promise.race([hold.reached, execution.then(() => assert.fail("callback did not reach controlled pause"))]);
@@ -2899,6 +2957,11 @@ for (const boundary of ["after admission", "before recursive delete"]) {
       guardState: db.data(guardPath).state, callbackResolved: outcome.ok === true}));
     assert.ok(db.data(recreatedChild), "P1 BLOCKER: an old event deleted data belonging to the recreated UID");
     assert.ok(db.data(rootPath), "P1 BLOCKER: the recreated root must remain intact");
+    if (boundary === "before recursive delete") {
+      assert.ok(lookupsAtPause > 0, "pause follows the last real Auth lookup");
+      assert.equal(authLookups(), lookupsAtPause,
+          "preservation must come from the transaction/version fence, not a later Auth lookup");
+    }
   });
 }
 
@@ -2907,7 +2970,7 @@ for (const boundary of ["after admission", "before recursive delete"]) {
 // These checks prove local refusal behavior only, not cross-service atomicity.
 function recheckSnapshot(db) {
   return {store: [...db.store], operations: [...db.operationLog],
-    recursive: [...db.recursiveDeletes], transactions: db.transactionCount};
+    versioned: [...db.versionedDeletes], transactions: db.transactionCount};
 }
 
 function assertRecheckStopped(db, snapshot, guard) {
@@ -2930,7 +2993,7 @@ test("P1 absence recheck: Auth absence permits private cleanup immediately after
   assert.equal(boundary.entered, 1);
   assert.ok(boundary.lookups.length > 0);
   assert.ok(boundary.allUIDs.every(owner => owner === uid));
-  assert.deepEqual(db.recursiveDeletes, [rootPath]);
+  assert.deepEqual(db.versionedDeletes, [rootPath]);
   assert.equal(db.data(rootPath), undefined);
   assert.equal(db.data(`${rootPath}/notes/remaining`), undefined);
   assert.equal(db.data(c1BirthPath), undefined);
@@ -2972,7 +3035,7 @@ for (const [label, result] of [
   await withoutErrorLog(() => assert.rejects(boundary.run(), {message: "USER_DATA_CLEANUP_FAILED"}));
   assert.equal(boundary.entered, 1);
   assert.equal(injected, 1, "refusal occurs at the real pre-root Auth query");
-  assert.deepEqual(db.recursiveDeletes, []);
+  assert.deepEqual(db.versionedDeletes, []);
   assert.deepEqual(db.data(guardPath + "/control/operation"), controls);
   assertRecheckStopped(db, atRecheck, guard);
   reportHistoricalAuth(db, boundary, {label, injected, noSubsequentCleaner: true});
@@ -2993,7 +3056,7 @@ test("P1 absence recheck: a pending lookup cannot start private deletion, and a 
   await withoutErrorLog(async () => {
     const execution = boundary.run().then(() => ({ok: true}), error => ({error}));
     await Promise.race([hold.reached, execution.then(() => assert.fail("Callback did not await the new Auth lookup"))]);
-    assert.deepEqual(db.recursiveDeletes, []);
+    assert.deepEqual(db.versionedDeletes, []);
     assertRecheckStopped(db, atRecheck, guard);
     hold.release();
     const outcome = await execution;
@@ -3030,7 +3093,7 @@ test("P1 absence recheck: same-event retry retains the original UID and deletion
   assert.equal(boundary.entered, 1);
   assert.deepEqual(db.data(guardPath), guard);
   assert.deepEqual(db.data(guardPath + "/control/operation"), originalReceipt);
-  assert.deepEqual(db.recursiveDeletes, []);
+  assert.deepEqual(db.versionedDeletes, []);
   p1AssertOtherAndDeny(db);
   await boundary.run();
   assert.equal(boundary.entered, 2);
@@ -3044,7 +3107,7 @@ test("P1 absence recheck: same-event retry retains the original UID and deletion
   assert.ok(db.data(guardPath).startedAt.isEqual(guard.startedAt));
   assert.equal(db.data(guardPath).state, "COMPLETE");
   assert.deepEqual(db.data(guardPath + "/control/operation").scope, originalReceipt.scope);
-  assert.deepEqual(db.recursiveDeletes, [rootPath]);
+  assert.deepEqual(db.versionedDeletes, [rootPath]);
   p1AssertOtherAndDeny(db);
   reportHistoricalAuth(db, boundary, {failed, sameEventAndScope: true});
 });
@@ -3064,7 +3127,7 @@ test("P1 absence recheck: Auth reappearing before the new query preserves the re
   await withoutErrorLog(() => assert.rejects(boundary.run(), {message: "USER_DATA_CLEANUP_FAILED"}));
   assert.equal(boundary.entered, 1);
   assert.equal(injected, 1);
-  assert.deepEqual(db.recursiveDeletes, []);
+  assert.deepEqual(db.versionedDeletes, []);
   assert.deepEqual(db.data(`${rootPath}/notes/recreated-private`),
       {syntheticPrivate: true});
   assertRecheckStopped(db, recreated, guard);
@@ -3091,7 +3154,7 @@ test("P1 absence recheck: not-found from recursive deletion is not Auth absence 
 });
 
 // The original P1 RED "before recursive delete" test remains unchanged above.
-// Its pause is inside recursiveDelete, after this new query has completed:
+// Its pause is inside versionedDelete, after this new query has completed:
 // it records the remaining race without asserting an atomic Auth/data fence.
 
 // Read-only evidence of reached stages. Never modifies results or test oracles.
@@ -3100,7 +3163,7 @@ test.afterEach(t => {
   t.diagnostic(JSON.stringify({fixtureEvidence: true, name: t.name,
     trace: activeDb.fixtureTrace.slice(-16),
     preparationLog: activeDb.fixturePreparationLog,
-    recursive: activeDb.recursiveDeletes,
+    versioned: activeDb.versionedDeletes,
     guard: activeDb.data(guardPath)?.state,
     operation: activeDb.data(guardPath + "/control/operation")?.state,
     circleMarker: activeDb.data("circle_deletions/" + circleId),

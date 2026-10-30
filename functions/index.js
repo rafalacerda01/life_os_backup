@@ -342,8 +342,24 @@ exports.cleanupUserData = functions
         }
         const cleanupDb = birthCleanup.cleanupDatabase(db, admission);
         const userRef = db.collection("users").doc(uid);
+        const operation = birthCleanup.originalOperation(db, admission);
+        let billingCleanup;
+        const prepared = await circleCleanup.treeState(db, uid, guard, userRef, true);
+        if (prepared === null &&
+            !(await circleCleanup.capturePermitted(db, uid, guard))) {
+          // Production has no certified post-Auth capture policy. The existing
+          // demo-only rollout seam remains available to historical fixtures.
+          await circleCleanup.captureTree(db, uid, guard, userRef);
+          throw new Error("ACCOUNT_CLEANUP_REVIEW_REQUIRED");
+        }
+        if (prepared !== null) {
+          if (operation.origin === "PRE_AUTH" && prepared.authOutcome !== "CONFIRMED") throw new Error("ACCOUNT_AUTH_OUTCOME_UNKNOWN");
+          billingCleanup = {accountHash: operation.scope.billingAccountHash,
+            accountRef: db.collection(BILLING_ACCOUNT_COLLECTION).doc(operation.scope.billingAccountHash)};
+          await circleCleanup.verifyReferences(cleanupDb, uid);
+        } else {
         await birthCleanup.verifyStep(db, admission);
-        const billingCleanup = await ensureBillingDeletionBarrier(cleanupDb, uid);
+        billingCleanup = await ensureBillingDeletionBarrier(cleanupDb, uid);
         await cleanupBillingTokenIndexes(cleanupDb, billingCleanup.accountHash);
         await circleCleanup.cleanupPendingMarkers(cleanupDb, uid, guard);
         const userSnapshot = await userRef.get();
@@ -358,10 +374,11 @@ exports.cleanupUserData = functions
           await circleCleanup.requireGuard(transaction, db, uid, guard);
           await circleCleanup.assertEmpty(transaction, db, uid);
         });
+        }
         // The original operation and Auth absence are rechecked before removal.
         // An unrestricted Admin can still recreate Auth after the last lookup.
         await birthCleanup.beforeRootRemoval(db, admission);
-        await cleanupDb.recursiveDelete(userRef);
+        await cleanupDb.deleteTree(userRef);
         await birthCleanup.verifyStep(db, admission);
         await finalizeBillingDeletionBarrier(cleanupDb, uid, billingCleanup);
         await birthCleanup.finish(db, admission);

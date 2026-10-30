@@ -1,3 +1,9 @@
+const cleanupManifest = require("../account_cleanup_manifest");
+const realRemoveTree = cleanupManifest.removeTree;
+cleanupManifest.removeTree = options => {
+  options.db.fixtureTreeOptions = options;
+  return options.db.recursiveDelete(options.ref);
+};
 "use strict";
 const assert = require('node:assert/strict');
 const test = require('node:test');
@@ -46,16 +52,17 @@ class FakeFirestore {
     return { path, kind: 'doc', listCollections: async () => {
       const names = [...new Set([...this.docs.keys()].filter(p => p.startsWith(path + "/"))
         .map(p => p.slice(path.length + 1).split("/")[0]))];
-      return names.map(name => ({listDocuments: async () => [...new Set([...this.docs.keys()]
-        .filter(p => p.startsWith(path + "/" + name + "/"))
-        .map(p => p.slice(0, (path + "/" + name + "/").length) +
-          p.slice((path + "/" + name + "/").length).split("/")[0]))]}));
+      return names.map(name => ({path: path + "/" + name,
+        listDocuments: async () => [...new Set([...this.docs.keys()]
+          .filter(p => p.startsWith(path + "/" + name + "/"))
+          .map(p => path + "/" + name + "/" +
+            p.slice((path + "/" + name + "/").length).split("/")[0]))].map(p => this.ref(p))}));
     }, collection: name => this.collection(`${path}/${name}`),
       get: async () => this.snapshot(path, this.docs, this.created) };
   }
-  snapshot(path, docs, created) {
+  snapshot(path, docs, created, versions = this.versions) {
     return { ref: this.ref(path), id: path.split('/').at(-1), exists: docs.has(path),
-      createTime: created.get(path), data: () => copy(docs.get(path)) };
+      createTime: created.get(path), updateTime: docs.has(path) ? Timestamp.fromMillis(versions.get(path) || 0) : undefined, data: () => copy(docs.get(path)) };
   }
   querySnapshot(q, docs, created) {
     const found = [...docs.keys()].sort().filter(p =>
@@ -84,7 +91,7 @@ class FakeFirestore {
           const key = ref.kind === 'query' ? `${ref.group ? 'group' : 'query'}:${ref.path}` : ref.path;
           reads.set(key, versions.get(key) ?? 0);
           await this.hooks.onRead?.({ ...record, path: ref.path });
-          return ref.kind === 'query' ? this.querySnapshot(ref, docs, created) : this.snapshot(ref.path, docs, created);
+          return ref.kind === 'query' ? this.querySnapshot(ref, docs, created) : this.snapshot(ref.path, docs, created, versions);
         },
         create: (ref, data) => buffer('create', ref, data),
         set: (ref, data) => buffer('set', ref, data),
@@ -117,15 +124,7 @@ class FakeFirestore {
       commit: () => db.runTransaction(async tx => {for (const ref of refs) tx.delete(ref);})};
   }
   async recursiveDelete(ref) {
-    await this.hooks.beforeRecursive?.(ref);
-    this.recursiveDeletes.push(ref.path);
-    const keys = [...this.docs.keys()].filter(p => p === ref.path || p.startsWith(`${ref.path}/`));
-    if (this.partialCleanup) {
-      this.partialCleanup = false;
-      this.put(ref.path, undefined);
-      throw new Error('partial recursive cleanup');
-    }
-    for (const p of keys) this.put(p, undefined);
+    return realRemoveTree(this.fixtureTreeOptions);
   }
 }
 function ledger(owner = UID) {

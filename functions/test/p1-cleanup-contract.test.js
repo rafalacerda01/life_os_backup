@@ -1,3 +1,17 @@
+const cleanupManifest = require("../account_cleanup_manifest");
+const realRemoveTree = cleanupManifest.removeTree;
+cleanupManifest.removeTree = async options => {
+  // These certified legacy fixtures model a known original Auth release.
+  // Record that modeled result through the real journal transitions so retries
+  // do not pretend that an unknown release is confirmed. No production hook.
+  if (options.operation.origin === "PRE_AUTH" &&
+      (await cleanupManifest.state(options)).authOutcome === "NOT_REQUESTED") {
+    await cleanupManifest.authOutcome(options, "NOT_REQUESTED", "DISPATCHED");
+    await cleanupManifest.authOutcome(options, "DISPATCHED", "CONFIRMED");
+  }
+  options.db.fixtureTreeOptions = options;
+  return options.db.recursiveDelete(options.ref);
+};
 "use strict";
 /* eslint-disable require-jsdoc -- Synthetic MVCC fixture and contract cases. */
 // Offline only: fail on any network or ADC attempt.
@@ -93,10 +107,11 @@ class FakeFirestore {
     return {path, kind: "doc", listCollections: async () => {
       const names = [...new Set([...this.docs.keys()].filter(p => p.startsWith(path + "/"))
         .map(p => p.slice(path.length + 1).split("/")[0]))];
-      return names.map(name => ({listDocuments: async () => [...new Set([...this.docs.keys()]
-        .filter(p => p.startsWith(path + "/" + name + "/"))
-        .map(p => p.slice(0, (path + "/" + name + "/").length) +
-          p.slice((path + "/" + name + "/").length).split("/")[0]))]}));
+      return names.map(name => ({path: path + "/" + name,
+        listDocuments: async () => [...new Set([...this.docs.keys()]
+          .filter(p => p.startsWith(path + "/" + name + "/"))
+          .map(p => path + "/" + name + "/" +
+            p.slice((path + "/" + name + "/").length).split("/")[0]))].map(p => this.ref(p))}));
     }, collection: (name) =>
       this.collection(`${path}/${name}`),
     get: async () => this.snapshot(path, this.docs)};
@@ -106,9 +121,9 @@ class FakeFirestore {
    * @param {Map} docs Snapshot data.
    * @return {Object} Snapshot.
    */
-  snapshot(path, docs) {
+  snapshot(path, docs, versions = this.versions) {
     return {ref: this.ref(path), id: path.split("/").at(-1),
-      exists: docs.has(path), data: () => copy(docs.get(path))};
+      exists: docs.has(path), updateTime: docs.has(path) ? Timestamp.fromMillis(versions.get(path) || 0) : undefined, data: () => copy(docs.get(path))};
   }
   /**
    * @param {string} path Query path.
@@ -172,7 +187,7 @@ class FakeFirestore {
         reads.set(key, versions.get(key) || 0);
         if (this.hooks.onRead) await this.hooks.onRead(ref);
         return ref.kind === "query" ? this.querySnapshot(ref, docs) :
-          this.snapshot(ref.path, docs);
+          this.snapshot(ref.path, docs, versions);
       }, create: (ref, data) => buffer("create", ref, data),
       set: (ref, data) => buffer("set", ref, data),
       update: (ref, data) => buffer("update", ref, data),
@@ -207,11 +222,7 @@ class FakeFirestore {
    * @return {Promise<void>} Test tree deletion.
    */
   async recursiveDelete(ref) {
-    for (const path of [...this.docs.keys()]) {
-      if (path === ref.path || path.startsWith(`${ref.path}/`)) {
-        this.put(path, undefined);
-      }
-    }
+    return realRemoveTree(this.fixtureTreeOptions);
   }
 }
 
@@ -244,12 +255,18 @@ function fixture() {
       state: "CLOSED", cutoverAt: Timestamp.fromMillis(1)}}),
     getCurrentAuthGeneration: () => ({uid: UID, projectId: "demo-life-os-p1",
       tenantId: null, authCreatedAt: BORN})});
-  f.prepare = () => prepare(db, f.user, f.context, f.lookup,
-      {verified: true, notBefore: Timestamp.fromMillis(1)});
+  f.prepare = () => {f.certifiedFixture = true; return prepare(db, f.user, f.context, f.lookup,
+      {verified: true, notBefore: Timestamp.fromMillis(1)});};
   return f;
 }
 
 const cleanup = require("../birth_ledger_cleanup");
+const originalPrepareForCallback = cleanup.prepare;
+// Propagate the SAME explicit synthetic rollout used to admit this fixture.
+// No event/payload can select it; unprepared cases remain CLOSED.
+cleanup.prepare = (...args) => active?.certifiedFixture ?
+  originalPrepareForCallback(...args, {verified: true, notBefore: Timestamp.fromMillis(1)}) :
+  originalPrepareForCallback(...args);
 const core = require("../deletion_control");
 const {createHash} = require("node:crypto");
 // Reuse the existing MVCC fixture above; replace only Admin IO at the SDK seam.
@@ -282,12 +299,13 @@ function realFixture() {
     assert.equal(f.db.docs.get(GUARD).deletionId, f.db.docs.get(OP).deletionId);
     f.effects.push(ref.path);
     if (f.failRoot && ref.path === ROOT) {
-      f.failRoot = false; f.db.put(ROOT, undefined); throw new Error("private root failure");
+      f.failRoot = false; throw new Error("private chunk failure before commit");
     }
     await recursive(ref);
   };
   f.run = () => {active = f; return cleanupUserData.run(f.user, f.context);};
   f.preAuth = async () => {
+    f.certifiedFixture = true;
     const binding = {projectId: f.db.projectId, databaseId: f.db.databaseId, uid: UID};
     const c = core.createController({db: f.db, binding, clock: () => Timestamp.now(),
       uuid: require("node:crypto").randomUUID, ports: {
@@ -394,7 +412,7 @@ test("R6B2 guard disappearance blocks retry and never recreates parent", async (
 test("R6B2 partial root failure leaves pending, same scope retry and no false completion", async () => {
   const f = realFixture(); await f.preAuth(); const original = copy(f.db.docs.get(OP));
   f.failRoot = true; await blocked(f.run()); pending(f);
-  assert.equal(f.failRoot, false); assert.equal(f.db.docs.has(ROOT), false); assert.equal(f.db.docs.has(CHILD), true);
+  assert.equal(f.failRoot, false); assert.equal(f.db.docs.has(ROOT), true); assert.equal(f.db.docs.has(CHILD), true);
   assert.deepEqual(f.db.docs.get(OP), original);
   await f.run(); terminal(f, original); assert.deepEqual(f.effects, [ROOT, ROOT]);
 });
@@ -472,7 +490,7 @@ test("R6B2 PRE_AUTH event predating operation cannot acquire original authority"
   const before = [...f.db.docs]; await blocked(f.run()); assert.deepEqual([...f.db.docs], before);
   assert.deepEqual(f.effects, []);
 });
-test("R6B2 documents residual privileged race after last lookup; this is not an atomic fence", async () => {
+test("R6B2 preserves replaced data after last lookup without claiming an atomic Auth fence", async () => {
   const f = realFixture(); await f.preAuth();
   const recursive = f.db.recursiveDelete.bind(f.db);
   f.db.recursiveDelete = async ref => {
@@ -480,7 +498,7 @@ test("R6B2 documents residual privileged race after last lookup; this is not an 
     return recursive(ref);
   };
   await blocked(f.run());
-  assert.equal(f.db.docs.has(CHILD), false, "known privileged counterexample reproduced, not a protection PASS");
+  assert.equal(f.db.docs.has(CHILD), true, "sealed versions must preserve the privileged replacement");
   assert.equal(f.live.uid, UID); pending(f);
 });
 test("R6B2 partial Circle history failure preserves remaining page and original controls", async () => {
@@ -864,7 +882,7 @@ test("R6C4-D rootless account and missing receipt parent remain enumerable priva
   f.db.put(deep, {syntheticOrphan: true}); f.db.put(ROOT, undefined);
   assert.equal(f.db.docs.has(missing), false);
   const children = (await Promise.all((await f.db.doc(ROOT).listCollections()).map(c => c.listDocuments()))).flat();
-  assert.equal(children.includes(missing), true);
+  assert.equal(children.some(ref => ref.path === missing), true);
   await assert.rejects(circles.assertUserTreeEmpty(f.db, UID), {code: "ACCOUNT_STATE_CONFLICT"});
   await f.run(); terminal(f, original); reviewOriginal(f, original); reviewPeerPreserved(f);
   assert.equal(f.db.docs.has(deep), false); assert.equal(f.db.docs.has(reviewReceiptPath(UID)), false);
@@ -885,37 +903,28 @@ for (const orphan of [false, true]) test("R6C4-D detectable residual prevents fa
   assert.equal(f.db.docs.has(ROOT), false); assert.deepEqual(f.db.docs.get(path), data);
   assert.deepEqual(f.db.docs.get(OP), original);
   assert.equal(f.db.writes.some(w => w.ref.path === OP && w.data?.state === "COMPLETE"), false);
-  retain = false; await f.run(); terminal(f, original); reviewPeerPreserved(f);
-  assert.equal(f.db.docs.has(path), false); assert.deepEqual(f.effects, [ROOT, ROOT]);
+  retain = false; await blocked(f.run()); pending(f); reviewPeerPreserved(f);
+  assert.deepEqual(f.db.docs.get(path), data); assert.deepEqual(f.effects, [ROOT, ROOT]);
 });
 
 for (const phase of ["before-receipt-removal", "after-first-receipt"]) test("R6C4-D partial receipt failure " + phase + " keeps original trace and blocks writer", async () => {
   const f = await reviewFixture(["card-1", "card-2"]); await f.preAuth();
   const original = copy(f.db.docs.get(OP)), reservation = copy(f.db.docs.get(RES));
-  const native = f.db.recursiveDelete.bind(f.db); let failed = 0;
-  f.db.recursiveDelete = async ref => {
-    if (ref.path === ROOT && !failed) {
-      failed++; assert.equal(f.db.docs.get(OP).state, "IN_PROGRESS");
-      assert.equal(original.scope.privateRoot, ref.path); f.effects.push(ref.path);
-      // Synthetic partial native IO only. Authority was checked by the real
-      // cleanupDb wrapper before reaching this existing SDK seam.
-      f.db.put(ROOT, undefined);
-      if (phase === "after-first-receipt") {
-        f.db.put(ROOT + "/review_queue/card-1", undefined);
-        f.db.put(reviewReceiptPath(UID), undefined);
-      }
-      throw new Error("synthetic receipt removal failure");
+  let failed = 0;
+  f.db.hooks[phase === "after-first-receipt" ? "afterCommit" : "beforeCommit"] = ({pending: writes}) => {
+    if (!failed && writes.some(w => w.type === "delete" && w.ref.path === reviewReceiptPath(UID))) {
+      failed++; throw new Error("synthetic atomic receipt chunk failure");
     }
-    return native(ref);
   };
   await blocked(f.run()); pending(f); reviewOriginal(f, original); reviewPeerPreserved(f);
-  assert.equal(failed, 1); assert.equal(f.db.docs.has(reviewReceiptPath(UID, "card-2")), true);
+  assert.equal(failed, 1); assert.equal(f.db.docs.has(reviewReceiptPath(UID, "card-2")), phase === "before-receipt-removal");
+  assert.equal(f.db.docs.has(ROOT), true);
   assert.equal(f.db.docs.has(reviewReceiptPath(UID)), phase === "before-receipt-removal");
   assert.deepEqual(f.db.docs.get(OP), original); assert.deepEqual(f.db.docs.get(RES), reservation);
   const beforeWriter = [...f.db.docs];
   await assert.rejects(reviewCreate(f, "late-card"), {code: "ACCOUNT_DELETION_BLOCKED"});
   assert.deepEqual([...f.db.docs], beforeWriter);
-  await f.run(); terminal(f, original); reviewOriginal(f, original); reviewPeerPreserved(f);
+  f.db.hooks = {}; await f.run(); terminal(f, original); reviewOriginal(f, original); reviewPeerPreserved(f);
   assert.deepEqual(f.effects, [ROOT, ROOT]);
   const count = f.db.writes.length, state = [...f.db.docs]; await f.run();
   assert.deepEqual([...f.db.docs], state); assert.equal(f.db.writes.length, count);
@@ -1033,4 +1042,38 @@ test("R6C4-D actual normal writer commits before held admission; original cleanu
 test.after(() => {
   assert.equal(network.attempts, 0);
   assert.equal(require("firebase-admin/app").getApps().length, 0);
+});
+
+test("unprepared historical AUTH_EVENT is quarantined before Billing or Circle mutations", async () => {
+  const f = realFixture();
+  await f.prepare();
+  f.certifiedFixture = false;
+  const original = copy(f.db.docs.get(OP));
+  f.db.put(BILL, {uid: UID, state: "ACTIVE"});
+  f.db.put(TOKEN, {accountHash: HASH});
+  const root = copy(f.db.docs.get(ROOT));
+  await blocked(f.run());
+  assert.deepEqual(f.db.docs.get(ROOT), root);
+  assert.equal(f.db.docs.get(BILL).state, "ACTIVE");
+  assert.deepEqual(f.db.docs.get(TOKEN), {accountHash: HASH});
+  assert.deepEqual(f.db.docs.get(OP), original);
+  assert.deepEqual(f.effects, []);
+  assert.deepEqual(f.db.docs.get(FOREIGN), {waterIntakeMl: 750});
+});
+
+test("quarantine committed before terminal commit prevents false R5 COMPLETE", async () => {
+  const f = realFixture(); await f.preAuth();
+  const original = copy(f.db.docs.get(OP)); let injected = 0;
+  f.db.hooks.beforeCommit = async ({pending: writes}) => {
+    if (!injected && writes.some(w => w.ref.path === OP && w.data?.state === "COMPLETE")) {
+      injected++;
+      await cleanupManifest.quarantine(f.db.fixtureTreeOptions, "SYNTHETIC_CONCURRENT_REVIEW");
+    }
+  };
+  await blocked(f.run());
+  assert.equal(injected, 1); pending(f);
+  assert.deepEqual(f.db.docs.get(OP), original);
+  assert.equal(f.db.docs.get(cleanupManifest.refs(f.db, original, ROOT).header.path).state, "QUARANTINED");
+  assert.equal(f.db.writes.some(w => w.ref.path === OP && w.data?.state === "COMPLETE"), false);
+  assert.deepEqual(f.db.docs.get(FOREIGN), {waterIntakeMl: 750});
 });

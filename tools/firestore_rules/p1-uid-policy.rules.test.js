@@ -25,7 +25,11 @@ async function seed(path, data) {
   await env.withSecurityRulesDisabled(c => setDoc(doc(c.firestore(), path), data));
 }
 async function trustedRead(path) {
-  return env.withSecurityRulesDisabled(async c => (await getDoc(doc(c.firestore(), path))).data());
+  let data;
+  await env.withSecurityRulesDisabled(async c => {
+    data = (await getDocFromServer(doc(c.firestore(), path))).data();
+  });
+  return data;
 }
 async function retire(uid, index = 0, data = {}) {await seed(controls(uid)[index], data);}
 async function seedCircle() {
