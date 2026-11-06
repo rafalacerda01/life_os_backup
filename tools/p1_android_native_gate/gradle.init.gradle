@@ -1,0 +1,37 @@
+// Applied explicitly. No production importer, build flag or release variant.
+// Explicit opt-in only: gradlew -I ../tools/p1_android_native_gate/gradle.init.gradle
+gradle.beforeProject { p ->
+    if (p.path != ':app') return
+if (gradle.startParameter.taskNames.any { !it.endsWith('P1NativeGateDebug') }) throw new GradleException('NATIVE_GATE_DEBUG_TASK_ONLY')
+if (gradle.startParameter.projectProperties['target'] != 'tools/p1_android_native_gate/main.dart') throw new GradleException('NATIVE_GATE_TARGET_ONLY')
+    p.plugins.withId('com.android.application') {
+        def source = new File(p.rootProject.projectDir, '../tools/p1_android_native_gate').canonicalFile
+        p.android.flavorDimensions += 'isolatedTest'
+        p.android.productFlavors.create('p1NativeGate') {
+            dimension = 'isolatedTest'
+            applicationIdSuffix = '.p1nativegate'
+            versionNameSuffix = '-native-gate-NOT-DISTRIBUTABLE'
+        }
+        p.android.sourceSets.getByName('p1NativeGate') {
+            manifest.srcFile new File(source, 'android/AndroidManifest.xml')
+            java.srcDir new File(source, 'android/java')
+            res.srcDir new File(source, 'android/res')
+        }
+        // Already installed transitively by FlutterFire. Native pinning needs
+        // compile visibility; versions remain those of the existing fixed BOM.
+        p.dependencies.add('p1NativeGateImplementation', 'com.google.firebase:firebase-appcheck')
+        p.dependencies.add('p1NativeGateImplementation', 'com.google.firebase:firebase-appcheck-debug')
+        p.tasks.matching { it.name == 'assembleP1NativeGateDebug' }.configureEach {
+            doLast { p.configurations.getByName('p1NativeGateDebugRuntimeClasspath').incoming.resolutionResult.allComponents.findAll { it.moduleVersion?.group == 'com.google.firebase' }.each { p.logger.lifecycle('P1_FIREBASE_ARTIFACT ' + it.moduleVersion.toString()) } }
+        }
+        p.dependencies.add('p1NativeGateImplementation', 'com.google.firebase:firebase-auth')
+        p.dependencies.add('p1NativeGateImplementation', 'com.google.firebase:firebase-firestore')
+        p.androidComponents.beforeVariants(p.androidComponents.selector().all()) { variant ->
+            if (variant.buildType != 'debug') variant.enable = false
+        }
+        // No google-services.json is processed for this synthetic variant.
+        p.tasks.configureEach { task ->
+            if (task.name == 'processP1NativeGateDebugGoogleServices') task.enabled = false
+        }
+    }
+}

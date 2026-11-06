@@ -1,0 +1,34 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" xmlns:tools="http://schemas.android.com/tools">
+  <application android:name="com.rafalacerda.lifeos.nativegate.NativeGateApplication"
+      android:label="Life OS NATIVE GATE - NOT DISTRIBUTABLE" android:networkSecurityConfig="@xml/native_gate_network"
+      tools:replace="android:name,android:label">
+    <activity android:name="com.rafalacerda.lifeos.MainActivity" tools:node="remove" />
+    <activity android:name="com.rafalacerda.lifeos.nativegate.NativeGateActivity"
+        android:exported="true" android:launchMode="singleTop" android:theme="@style/LaunchTheme"
+        android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
+        android:hardwareAccelerated="true" android:windowSoftInputMode="adjustResize">
+      <meta-data android:name="io.flutter.embedding.android.NormalTheme" android:resource="@style/NormalTheme" />
+      <intent-filter><action android:name="android.intent.action.MAIN" /><category android:name="android.intent.category.LAUNCHER" /></intent-filter>
+    </activity>
+    <provider android:name="com.google.firebase.provider.FirebaseInitProvider" tools:node="remove" />
+    <meta-data android:name="firebase_analytics_collection_deactivated" android:value="true" />
+    <meta-data android:name="firebase_crashlytics_collection_enabled" android:value="false" />
+    <!-- Explicit native SDK allowlist. Official App Check debug only; external network blocked by disposable-AVD guard. No telemetry components. -->
+    <service android:name="com.google.firebase.components.ComponentDiscoveryService"
+        android:directBootAware="true" android:exported="false" tools:node="replace">
+      <meta-data android:name="com.google.firebase.components:io.flutter.plugins.firebase.core.FlutterFirebaseCoreRegistrar" android:value="com.google.firebase.components.ComponentRegistrar" />
+      <meta-data android:name="com.google.firebase.components:io.flutter.plugins.firebase.auth.FlutterFirebaseAuthRegistrar" android:value="com.google.firebase.components.ComponentRegistrar" />
+      <meta-data android:name="com.google.firebase.components:io.flutter.plugins.firebase.firestore.FlutterFirebaseFirestoreRegistrar" android:value="com.google.firebase.components.ComponentRegistrar" />
+      <meta-data android:name="com.google.firebase.components:io.flutter.plugins.firebase.appcheck.FlutterFirebaseAppRegistrar" android:value="com.google.firebase.components.ComponentRegistrar" />
+      <meta-data android:name="com.google.firebase.components:com.google.firebase.appcheck.debug.FirebaseAppCheckDebugRegistrar" android:value="com.google.firebase.components.ComponentRegistrar" />
+      <meta-data android:name="com.google.firebase.components:com.google.firebase.appcheck.FirebaseAppCheckRegistrar" android:value="com.google.firebase.components.ComponentRegistrar" />
+      <meta-data android:name="com.google.firebase.components:com.google.firebase.installations.FirebaseInstallationsRegistrar" android:value="com.google.firebase.components.ComponentRegistrar" />
+      <meta-data android:name="com.google.firebase.components:com.google.firebase.auth.FirebaseAuthRegistrar" android:value="com.google.firebase.components.ComponentRegistrar" />
+      <meta-data android:name="com.google.firebase.components:com.google.firebase.firestore.FirestoreRegistrar" android:value="com.google.firebase.components.ComponentRegistrar" />
+    </service>
+    <receiver android:name="com.google.android.gms.measurement.AppMeasurementReceiver" tools:node="remove" />
+    <service android:name="com.google.android.gms.measurement.AppMeasurementService" tools:node="remove" />
+    <service android:name="com.google.android.gms.measurement.AppMeasurementJobService" tools:node="remove" />
+    <service android:name="com.google.firebase.sessions.SessionLifecycleService" tools:node="remove" />
+  </application>
+</manifest>
