@@ -1,5 +1,9 @@
+import 'package:drift/drift.dart';
+import '../network/generational_http_transport.dart';
+import '../network/generational_http_store.dart';
 import 'dart:async';
 import 'dart:convert';
+import 'trusted_account_access.dart';
 import 'package:crypto/crypto.dart';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -86,6 +90,9 @@ class FirestoreSyncRemoteDataSource
     caseSensitive: false,
   );
 
+  final Set<String>? allowedCollections;
+  final GenerationalHttpTransport? trustedTransport;
+  static final Object _httpQueueRow = Object();
   final FirebaseFirestore _firestore;
   final FirebaseAuth _auth;
   final http.Client Function() _clientFactory;
@@ -100,6 +107,8 @@ class FirestoreSyncRemoteDataSource
     this._firestore,
     this._auth, {
     this.beforeNotificationDelete,
+    this.trustedTransport,
+    this.allowedCollections,
     RemoteSendPermit Function(String uid)? captureRemoteSend,
     http.Client Function()? clientFactory,
     Future<String?> Function(User user, bool forceRefresh)? idTokenProvider,
@@ -132,11 +141,23 @@ class FirestoreSyncRemoteDataSource
     String uid,
     SyncQueueTableData item, {
     required bool Function() canSend,
+  }) => runZoned(
+    () => _processBound(uid, item, canSend: canSend),
+    zoneValues: {_httpQueueRow: item},
+  );
+
+  Future<SyncOperationResult> _processBound(
+    String uid,
+    SyncQueueTableData item, {
+    required bool Function() canSend,
   }) async {
     final permit = RemoteSendPermit(
       () => canSend() && _auth.currentUser?.uid == uid,
     );
     final collection = item.collection.trim();
+    if (allowedCollections != null && !allowedCollections!.contains(collection)) {
+      return const SyncOperationResult.retryable(code: 'SYNC_FAMILY_CLOSED', preserveQueueState: true);
+    }
     final docId = item.docId.trim();
     final operationType = item.operationType.trim().toLowerCase();
 
@@ -179,6 +200,100 @@ class FirestoreSyncRemoteDataSource
     }
 
     try {
+      if (trustedTransport == null && TrustedAccountAccess.localSessionClosed) {
+        return const SyncOperationResult.retryable(
+          code: 'TRUSTED_LOCAL_SESSION_CLOSED',
+        );
+      }
+      if (trustedTransport == null)
+        await TrustedAccountAccess.ensureReady(
+          _auth,
+          _firestore,
+          uid,
+          allowBootstrap: false,
+        );
+      permit.requireCurrent();
+      if (trustedTransport != null &&
+          !(({'tasks', 'habits'}.contains(collection) &&
+                  {'create', 'update', 'delete'}.contains(operationType)) ||
+              {'transactions', 'medications'}.contains(collection) &&
+                  {'create', 'delete'}.contains(operationType) ||
+              collection == 'goals' && {'create','update','delete'}.contains(operationType) ||
+              collection == 'subjects' && operationType == 'create' ||
+              collection == 'review_queue' &&
+                  {'create', 'update'}.contains(operationType) ||
+              {'study_activity', 'study_progress_reset'}.contains(collection) &&
+                  operationType == 'create' ||
+              collection == 'checkins' && operationType == 'update' ||
+              collection == 'notifications' && operationType == 'delete' ||
+              collection == 'batch' && operationType == 'batch_delete')) {
+        return const SyncOperationResult.retryable(
+          code: 'HTTP_CUSTODY_ROUTE_CLOSED',
+        );
+      }
+      if (collection == 'checkins' && operationType == 'update') {
+        final data = _decodePayload(item.payloadJson);
+        final revision = data['localRowId'];
+        if (revision is! int || revision <= 0) {
+          return const SyncOperationResult.retryable(
+            code: 'CHECKIN_LOCAL_REVISION_REQUIRED',
+            preserveQueueState: true,
+          );
+        }
+        final transport = trustedTransport;
+        if (transport == null) {
+          return const SyncOperationResult.retryable(
+            code: 'HTTP_CUSTODY_ROUTE_CLOSED',
+            preserveQueueState: true,
+          );
+        }
+        final payload = <String, dynamic>{
+          'operation': 'upsert_checkin',
+          'checkInId': docId,
+          'energy': data['energy'],
+          'focus': data['focus'],
+          'motivation': data['motivation'],
+        };
+        return _postToSyncBackend(
+          uid,
+          permit,
+          payload,
+          validateDomainResponse: (response) {
+            if (response['success'] != true ||
+                response['operation'] != 'upsert_checkin' ||
+                response['checkInId'] != docId ||
+                response['energy'] != data['energy'] ||
+                response['focus'] != data['focus'] ||
+                response['motivation'] != data['motivation']) {
+              throw const HttpCustodyException('CHECKIN_ACK_INVALID');
+            }
+          },
+          acknowledgeDomain: () async {
+            final db = transport.store.database,
+                table = db.checkInTable,
+                q = db.syncQueueTable;
+            final newer =
+                await (db.select(q)
+                      ..where(
+                        (t) =>
+                            t.ownerUid.equals(uid) &
+                            t.collection.equals('checkins') &
+                            t.docId.equals(docId) &
+                            t.id.isBiggerThanValue(item.id),
+                      )
+                      ..limit(1))
+                    .get();
+            if (newer.isNotEmpty) return;
+            await (db.update(table)..where(
+                  (t) =>
+                      t.id.equals(docId) &
+                      t.rowId.equals(revision) &
+                      t.isSynced.equals(false),
+                ))
+                .write(const CheckInTableCompanion(isSynced: Value(true)));
+          },
+        );
+      }
       if (collection == 'notifications' && operationType == 'delete') {
         if (item.ownerUid?.trim() != uid || _auth.currentUser?.uid != uid) {
           return const SyncOperationResult.retryable(code: 'SESSION_STOPPED');
@@ -187,6 +302,35 @@ class FirestoreSyncRemoteDataSource
         if (!NotificationOccurrence.isKeyForId(expectedKey, docId)) {
           return const SyncOperationResult.invalidPayload(
             message: 'Notification delete requires its occurrenceKey',
+          );
+        }
+        if (trustedTransport != null) {
+          permit.requireCurrent();
+          await beforeNotificationDelete?.call();
+          permit.requireCurrent();
+          return _postToSyncBackend(
+            uid,
+            permit,
+            {
+              'operation': 'delete_notification',
+              'notificationId': docId,
+              'occurrenceKey': expectedKey,
+            },
+            validateDomainResponse: (response) {
+              if (response['success'] != true ||
+                  response['operation'] != 'delete_notification' ||
+                  response['notificationId'] != docId ||
+                  response['occurrenceKey'] != expectedKey ||
+                  !{
+                    'DELETED',
+                    'ABSENT',
+                    'OBSOLETE',
+                  }.contains(response['outcome'])) {
+                throw const HttpCustodyException(
+                  'NOTIFICATION_DELETE_ACK_INVALID',
+                );
+              }
+            },
           );
         }
         final sessionPermit = _captureOperationPermit(uid, permit);
@@ -299,6 +443,17 @@ class FirestoreSyncRemoteDataSource
         );
       }
 
+      if (collection == 'goals' && operationType == 'update' && trustedTransport != null) {
+        final data = _decodePayload(item.payloadJson), value=data['currentValue'];
+        if (data.keys.any((key)=>!const {'currentValue','lastReset'}.contains(key)) || value is! int || value < 0 || value > 9007199254740991 ||
+            (data.containsKey('lastReset') && (data['lastReset'] is! String || DateTime.tryParse(data['lastReset'] as String)==null))) {
+          throw const FormatException('Invalid goal update');
+        }
+        return _postToSyncBackend(uid,permit,{'operation':'update_goal','goalId':docId,'currentValue':value,if(data.containsKey('lastReset'))'lastReset':data['lastReset']},
+          validateDomainResponse:(response){
+            if(response['success']!=true || response['operation']!='update_goal' || response['goalId']!=docId || response['currentValue']!=value || !const {'UPDATED','ABSENT','DELETED'}.contains(response['outcome'])) throw const HttpCustodyException('GOAL_ACK_INVALID');
+          });
+      }
       if (collection == 'goals' && operationType == 'delete') {
         return _deleteGoalServerSide(
           expectedUid: uid,
@@ -484,6 +639,9 @@ class FirestoreSyncRemoteDataSource
       return const SyncOperationResult.unsupportedOperation(
         message: 'OperationType não suportado.',
       );
+    } on TrustedAccountPending catch (error) {
+      // Preserve the queue without an ACK or a remote write while closed.
+      return SyncOperationResult.retryable(code: error.code);
     } on FirebaseException catch (error) {
       if (collection == 'health_info' &&
           (error.code == 'permission-denied' ||
@@ -1212,7 +1370,68 @@ class FirestoreSyncRemoteDataSource
     Map<String, dynamic> payload, {
     String? reviewCreateFingerprint,
     String? reviewCreateCardId,
+    void Function(Map<String, dynamic>)? validateDomainResponse,
+    Future<void> Function()? acknowledgeDomain,
   }) async {
+    final transport = trustedTransport;
+    if (transport != null) {
+      var committed = false;
+      try {
+        operationPermit.requireCurrent();
+        final row = Zone.current[_httpQueueRow] as SyncQueueTableData?;
+        if (row == null ||
+            row.ownerUid != expectedUid ||
+            transport.store.identity.uid != expectedUid)
+          throw const HttpCustodyException('HTTP_QUEUE_BINDING_REQUIRED');
+        final intent = await transport.store.prepare(
+          stableKey: 'sync/${row.id}',
+          route: 'sync',
+          body: payload,
+          syncRow: row,
+        );
+        operationPermit.requireCurrent();
+        await transport.send(
+          intent,
+          acknowledgeDomain: acknowledgeDomain,
+          validateResponse: (response) {
+            validateDomainResponse?.call(response);
+            if (reviewCreateFingerprint != null &&
+                !_validReviewCreateAck(
+                  jsonEncode(response),
+                  expectedUid,
+                  reviewCreateCardId!,
+                  reviewCreateFingerprint,
+                )) {
+              throw const HttpCustodyException('REVIEW_CREATE_ACK_INVALID');
+            }
+          },
+        );
+        committed = true;
+        operationPermit.requireCurrent();
+        return const SyncOperationResult.success(acknowledgedByTransport: true);
+      } catch (error) {
+        if (committed || error is HttpCustodyException && error.acknowledged) {
+          return const SyncOperationResult.success(
+            acknowledgedByTransport: true,
+            sessionStopped: true,
+          );
+        }
+        return SyncOperationResult.retryable(
+          code: error is HttpCustodyException
+              ? error.code
+              : error is StateError &&
+                    error.message == 'HTTP_LEGACY_INTENT_REVIEW_REQUIRED'
+              ? 'HTTP_LEGACY_INTENT_REVIEW_REQUIRED'
+              : 'HTTP_CUSTODY_PENDING',
+          preserveQueueState: true,
+          sessionStopped:
+              !transport.lease.isCurrent ||
+              error is RemoteSessionStopped ||
+              error is HttpCustodyException &&
+                  error.code == 'HTTP_SESSION_CHANGED',
+        );
+      }
+    }
     http.Client? client;
     try {
       // All backend operations share prepared-session admission; direct

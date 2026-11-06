@@ -1,3 +1,4 @@
+import 'package:life_os/core/services/emulator_account_runtime.dart';
 import 'dart:async';
 
 import 'package:firebase_auth/firebase_auth.dart';
@@ -51,6 +52,7 @@ class AnalyticsPreferenceNotifier extends Notifier<AnalyticsPreferenceState> {
   @override
   AnalyticsPreferenceState build() {
     _operationInProgress = false;
+    if (ref.watch(emulatorAccountRuntimeProvider) != null) return const AnalyticsPreferenceState(AnalyticsPreferenceStatus.disabled);
     unawaited(_load());
     return const AnalyticsPreferenceState.loading();
   }
@@ -79,6 +81,7 @@ class AnalyticsPreferenceNotifier extends Notifier<AnalyticsPreferenceState> {
   }
 
   Future<bool> setEnabled(bool enabled) async {
+    if (ref.read(emulatorAccountRuntimeProvider) != null) return false;
     if (state.status == AnalyticsPreferenceStatus.loading ||
         _operationInProgress ||
         state.isEnabled == enabled) {

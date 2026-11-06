@@ -1,3 +1,6 @@
+import 'package:life_os/core/database/local_database_identity.dart';
+import 'package:life_os/core/database/local_account_session.dart';
+import 'package:life_os/core/storage/generational_local_store.dart';
 import 'dart:async';
 import 'dart:convert';
 
@@ -194,8 +197,41 @@ class SecureCycleReminderPreferencesStorage
   Future<void> delete(String key) => _storage.delete(key: key);
 }
 
+class _ScopedCyclePreferences implements CycleReminderPreferencesStorage {
+  _ScopedCyclePreferences(this.scope);
+  final GenerationalLocalStore scope;
+  @override
+  Future<String?> read(String key) => scope.read(key);
+  @override
+  Future<void> write(String key, String value) => scope.write(key, value);
+  @override
+  Future<void> delete(String key) => scope.delete(key);
+}
+
 class CycleReminderPreferencesStore {
   const CycleReminderPreferencesStore(this._storage);
+  factory CycleReminderPreferencesStore.scoped(
+    CycleReminderPreferencesStorage storage,
+    LocalDatabaseIdentity identity, {
+    Future<Set<String>> Function()? listKeys,
+  }) => CycleReminderPreferencesStore(
+    _ScopedCyclePreferences(
+      GenerationalLocalStore(
+        identity: identity,
+        domain: 'cycle_preferences',
+        read: storage.read,
+        write: storage.write,
+        delete: storage.delete,
+        listKeys: listKeys,
+      ),
+    ),
+  );
+  Future<void> retire() async {
+    final storage = _storage;
+    if (storage is! _ScopedCyclePreferences)
+      throw StateError('LOCAL_GENERATION_BINDING_REQUIRED');
+    await storage.scope.retire();
+  }
 
   static const String _keyPrefix = 'life_os_cycle_reminder_v1_';
 
@@ -232,6 +268,10 @@ class CycleReminderPreferencesStore {
 
   String _keyFor(String userId) {
     final normalizedUserId = userId.trim();
+    final storage = _storage;
+    if (storage is _ScopedCyclePreferences &&
+        storage.scope.identity.uid != normalizedUserId)
+      throw StateError('LOCAL_OWNER_MISMATCH');
     if (normalizedUserId.isEmpty) {
       throw ArgumentError('CYCLE_REMINDER_USER_REQUIRED');
     }
@@ -265,7 +305,11 @@ final cycleReminderUserIdReaderProvider = Provider<CycleReminderUserIdReader>((
 ) {
   final sessionAuthority = ref.watch(cycleReminderSessionAuthorityProvider);
   final firebaseUserId = ref.watch(cycleReminderFirebaseUserIdReaderProvider);
-  return () => sessionAuthority.admittedUserId(firebaseUserId());
+  final captured = ref.watch(localAccountSessionProvider);
+  return () =>
+      ref.read(localAccountSessionProvider).revision == captured.revision
+      ? sessionAuthority.admittedUserId(firebaseUserId())
+      : null;
 });
 
 final cycleReminderPreferencesStoreProvider =
@@ -273,9 +317,16 @@ final cycleReminderPreferencesStoreProvider =
       const storage = FlutterSecureStorage(
         aOptions: AndroidOptions(encryptedSharedPreferences: true),
       );
-      return const CycleReminderPreferencesStore(
-        SecureCycleReminderPreferencesStorage(storage),
-      );
+      final identity = ref.watch(localAccountSessionProvider).identity;
+      return identity == null
+          ? const CycleReminderPreferencesStore(
+              SecureCycleReminderPreferencesStorage(storage),
+            )
+          : CycleReminderPreferencesStore.scoped(
+              const SecureCycleReminderPreferencesStorage(storage),
+              identity,
+              listKeys: () async => (await storage.readAll()).keys.toSet(),
+            );
     });
 
 final cycleReminderPreferencesProvider =
@@ -288,6 +339,7 @@ class CycleReminderPreferencesNotifier
     extends AsyncNotifier<CycleReminderPreferences?> {
   @override
   Future<CycleReminderPreferences?> build() async {
+    ref.watch(localAccountSessionProvider);
     final userId = _normalizeUserId(
       ref.watch(cycleReminderUserIdProvider).asData?.value,
     );
@@ -296,6 +348,7 @@ class CycleReminderPreferencesNotifier
   }
 
   Future<String> save(CycleReminderPreferences preferences) async {
+    final captured = ref.read(localAccountSessionProvider);
     final userId = _currentUserId();
     if (userId == null) {
       throw StateError('CYCLE_REMINDER_SESSION_REQUIRED');
@@ -305,7 +358,8 @@ class CycleReminderPreferencesNotifier
         .read(cycleReminderPreferencesStoreProvider)
         .save(userId, preferences);
 
-    if (_currentUserId() == userId) {
+    if (ref.read(localAccountSessionProvider).revision == captured.revision &&
+        _currentUserId() == userId) {
       state = AsyncData(preferences);
     }
     return userId;

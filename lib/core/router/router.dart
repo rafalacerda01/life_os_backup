@@ -1,9 +1,11 @@
 import 'dart:async';
 import 'package:life_os/core/errors/failure.dart';
 import 'package:flutter/material.dart';
+import 'package:life_os/core/services/emulator_account_runtime.dart';
 import 'package:go_router/go_router.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:life_os/features/circles/presentation/circles_screen.dart';
+import 'package:life_os/features/checkin/presentation/checkin_screen.dart';
 import 'package:life_os/features/focus/presentation/providers/screens/focus_screen.dart';
 import 'package:life_os/features/auth/presentation/screens/login_screen.dart';
 import 'package:life_os/features/auth/presentation/screens/register_screen.dart';
@@ -12,7 +14,6 @@ import 'package:life_os/features/auth/presentation/providers/auth_state.dart';
 import 'package:life_os/features/onboarding/presentation/splash_screen.dart';
 import 'package:life_os/features/onboarding/presentation/onboarding_screen.dart';
 import 'package:life_os/features/ai_companion/presentation/ai_companion_screen.dart';
-import 'package:life_os/features/ai_companion/data/models/ai_insight.dart';
 import 'package:life_os/features/goals/presentation/goals_screen.dart';
 import 'package:life_os/features/settings/presentation/settings_screen.dart';
 import 'package:life_os/features/home/presentation/screens/home_screen.dart';
@@ -50,6 +51,10 @@ String? authRedirectFor({
       location == '/register';
   final isPublicRoute = location == '/privacy-policy';
 
+  if (authState is AuthError && authState.code == 'TRUSTED_LOCAL_SESSION_CLOSED') {
+    return !isAuthEntryRoute && !isPublicRoute ? '/splash' : null;
+  }
+
   if (authState is AuthError &&
       authState.code == AccountDeletionUnconfirmedFailure.failureCode) {
     return !isAuthEntryRoute && !isPublicRoute ? '/splash' : null;
@@ -75,6 +80,12 @@ final routerProvider = Provider<GoRouter>((ref) {
     refreshListenable: refreshListenable,
     redirect: (context, state) {
       final authState = ref.read(authNotifierProvider);
+      if (ref.read(emulatorAccountRuntimeProvider) != null && authState is! AuthAuthenticated &&
+          !const {'/splash','/onboarding','/login','/register','/privacy-policy'}.contains(state.matchedLocation)) return '/splash';
+      if (ref.read(emulatorAccountRuntimeProvider) != null && authState is AuthAuthenticated &&
+          !ref.read(emulatorAccountRuntimeProvider)!.allowsRoute(state.matchedLocation)) {
+        return '/module-closed';
+      }
       return authRedirectFor(
         authState: authState,
         hasFirebaseUser: ref.read(firebaseAuthProvider).currentUser != null,
@@ -105,6 +116,9 @@ final routerProvider = Provider<GoRouter>((ref) {
           return MainNavigationScreen(child: child);
         },
         routes: [
+          GoRoute(path: '/checkin', builder: (context, state) => const CheckInScreen()),
+          GoRoute(path: '/module-closed', builder: (context, state) => const Scaffold(
+            body: Center(child: Text('Este módulo aguarda homologação.')))),
           GoRoute(
             path: '/home',
             builder: (context, state) => const HomeScreen(),
@@ -131,11 +145,7 @@ final routerProvider = Provider<GoRouter>((ref) {
           ),
           GoRoute(
             path: '/ai-companion',
-            builder: (context, state) => AICompanionScreen(
-              initialIntent: AIInsightIntent.fromWireValue(
-                state.uri.queryParameters['intent'],
-              ),
-            ),
+            builder: (context, state) => AICompanionScreen.releaseUnavailable(),
           ),
           GoRoute(
             path: '/goals',

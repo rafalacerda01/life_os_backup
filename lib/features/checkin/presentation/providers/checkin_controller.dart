@@ -4,6 +4,7 @@ import 'package:life_os/core/database/app_database.dart';
 import 'package:life_os/features/checkin/presentation/providers/check_in_provider.dart';
 import 'package:life_os/core/utils/app_logger.dart'; // 🚀 Nosso Logger injetado
 import 'checkin_state.dart';
+import 'package:life_os/core/services/emulator_account_runtime.dart';
 
 part 'checkin_controller.g.dart';
 
@@ -24,6 +25,7 @@ final checkInHistoryProvider = StreamProvider.autoDispose<List<CheckInEntry>>((
 class CheckInController extends _$CheckInController {
   @override
   CheckInState build() {
+    ref.watch(checkInRepositoryProvider);
     // Gatilho de sincronização em background ao abrir a tela
     _triggerBackgroundSync();
     return const CheckInState();
@@ -34,6 +36,7 @@ class CheckInController extends _$CheckInController {
     try {
       final repository = ref.read(checkInRepositoryProvider);
       await repository.syncPendingCheckIns();
+      if (ref.mounted && ref.read(emulatorAccountRuntimeProvider) != null) await repository.syncCheckinsFromFirebaseToLocal();
     } catch (error, stackTrace) {
       // 🚀 Falha silenciosa para o usuário, mas registrada para o desenvolvedor!
       AppLogger.e(
@@ -66,12 +69,12 @@ class CheckInController extends _$CheckInController {
         motivation: state.motivation,
       );
 
-      onSuccess();
+      if (ref.mounted) onSuccess();
     } catch (error, stackTrace) {
       AppLogger.e('Erro ao submeter check-in', error, stackTrace);
-      onError();
+      if (ref.mounted) onError();
     } finally {
-      state = state.copyWith(isLoading: false);
+      if (ref.mounted) state = state.copyWith(isLoading: false);
     }
   }
 }

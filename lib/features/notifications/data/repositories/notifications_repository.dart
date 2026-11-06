@@ -1,4 +1,8 @@
+import 'package:life_os/core/services/generational_read_policy.dart';
 import 'dart:async';
+import 'package:life_os/core/database/local_account_session.dart';
+import 'package:life_os/core/services/firebase_auth_provider.dart';
+import 'package:life_os/core/services/emulator_account_runtime.dart';
 import 'package:life_os/core/database/app_database.dart';
 import 'package:life_os/core/database/local_mutation_gate.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -18,6 +22,8 @@ import 'package:life_os/features/notifications/domain/models/notification_occurr
 /// A UI lê do Drift. O Firestore é utilizado para sincronização remota.
 /// Dispensas usam o Drift e a SyncQueue; demais efeitos preservam seu barrier.
 class NotificationsRepository {
+  final LocalAccountLease? sessionLease;
+  final bool readAndDismissOnly;
   final FirebaseFirestore firestore;
   final FirebaseAuth auth;
   final NotificationDao? localDao;
@@ -31,6 +37,8 @@ class NotificationsRepository {
     this.localDao,
     this.remoteDelete,
     this.replayDeletes,
+    this.sessionLease,
+    this.readAndDismissOnly = false,
     NotificationRemoteEffectsBarrier? remoteEffects,
   }) : firestore = firestore ?? FirebaseFirestore.instance,
        auth = auth ?? FirebaseAuth.instance,
@@ -43,6 +51,7 @@ class NotificationsRepository {
       remoteEffects.isCurrent(generation);
 
   Stream<List<NotificationModel>> getNotificationsStream() {
+    if (readAndDismissOnly) throw StateError('NOTIFICATION_SDK_LISTENER_CLOSED');
     final user = auth.currentUser;
 
     if (user == null) {
@@ -101,6 +110,7 @@ class NotificationsRepository {
 
   /// Salva primeiro no Drift e sincroniza em background.
   Future<void> saveLocalNotification(NotificationModel notification) {
+    if (readAndDismissOnly) throw StateError('NOTIFICATION_WRITER_CLOSED');
     final expectedUid = auth.currentUser?.uid.trim();
     final generation = remoteEffects.generation;
     return remoteEffects.track(() async {
@@ -133,6 +143,7 @@ class NotificationsRepository {
   }
 
   Future<void> markAsReadLocal(String id) {
+    if (readAndDismissOnly) throw StateError('NOTIFICATION_WRITER_CLOSED');
     final expectedUid = auth.currentUser?.uid.trim();
     final generation = remoteEffects.generation;
     return remoteEffects.track(() async {
@@ -157,6 +168,7 @@ class NotificationsRepository {
   }
 
   Future<void> markAsCompletedLocal(String id) {
+    if (readAndDismissOnly) throw StateError('NOTIFICATION_WRITER_CLOSED');
     final expectedUid = auth.currentUser?.uid.trim();
     final generation = remoteEffects.generation;
     return remoteEffects.track(() async {
@@ -202,6 +214,7 @@ class NotificationsRepository {
 
   /// Derived invalid state/category disabled, without a user dismissal.
   Future<void> deleteDerivedNotification(String id) {
+    if (readAndDismissOnly) throw StateError('NOTIFICATION_WRITER_CLOSED');
     final expectedUid = auth.currentUser?.uid.trim();
     final generation = remoteEffects.generation;
     return remoteEffects.track(() async {
@@ -229,12 +242,28 @@ class NotificationsRepository {
       final admission = dao.attachedDatabase.localMutations.capture(
         expectedUid: user.uid,
       );
+      await GenerationalReadPolicy.verify(identity:dao.attachedDatabase.identity,lease:sessionLease,auth:auth,store:firestore,expectedUid:user.uid);
       final snapshot = await firestore
           .collection('users')
           .doc(user.uid)
           .collection('notifications')
-          .get();
+          .get(
+            GenerationalReadPolicy.options(
+              dao.attachedDatabase.identity,
+              firestore,
+            ),
+          );
+      if (dao.attachedDatabase.identity?.generation != null &&
+          !GenerationalReadPolicy.accepts(
+            dao.attachedDatabase.identity,
+            fromCache: snapshot.metadata.isFromCache,
+            pendingWrites: snapshot.metadata.hasPendingWrites,
+          )) {
+        throw StateError('GENERATIONAL_SNAPSHOT_UNCONFIRMED');
+      }
 
+      await GenerationalReadPolicy.verify(identity:dao.attachedDatabase.identity,lease:sessionLease,auth:auth,store:firestore,expectedUid:user.uid);
+      Future<void> mergeSnapshot() async {
       for (final doc in snapshot.docs) {
         final remote = NotificationModel.fromFirestore(doc);
         await dao.upsertFromRemote(
@@ -243,6 +272,14 @@ class NotificationsRepository {
         );
       }
 
+      }
+      if (dao.attachedDatabase.identity?.generation != null) {
+        await dao.attachedDatabase.transactionWithCommitGuard(mergeSnapshot,admission:admission,waitForReopen:false,validateBeforeCommit:()=>GenerationalReadPolicy.requireCurrent(identity:dao.attachedDatabase.identity,lease:sessionLease,auth:auth,expectedUid:user.uid));
+      } else {
+        // The historical unbound store retains per-row merge concurrency.
+        // This branch grants no admission to the always-bound local runtime.
+        await mergeSnapshot();
+      }
       AppLogger.i('SYNC Notificações: hidratação concluída.');
     } catch (error, stackTrace) {
       // O Drift continua sendo utilizável offline.
@@ -340,12 +377,16 @@ final notificationsRepositoryProvider = Provider<NotificationsRepository>((
 ) {
   final db = ref.watch(databaseProvider);
   return NotificationsRepository(
-    firestore: FirebaseFirestore.instance,
-    auth: FirebaseAuth.instance,
+    firestore: ref.watch(firebaseFirestoreProvider),
+    auth: ref.watch(firebaseAuthProvider),
     localDao: db.notificationDao,
+    sessionLease:ref.watch(localAccountSessionProvider).identity==null?null:ref.read(localAccountSessionProvider.notifier).capture(),
+    readAndDismissOnly:ref.watch(emulatorAccountRuntimeProvider)!=null,
     remoteEffects: ref.watch(notificationRemoteEffectsBarrierProvider),
     replayDeletes: () async {
       await ref.read(syncManagerProvider).processPendingItems();
     },
   );
 });
+
+final localNotificationInboxProvider = StreamProvider.autoDispose((ref)=>ref.watch(notificationsRepositoryProvider).watchLocalNotifications());

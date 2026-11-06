@@ -1,8 +1,9 @@
 import 'dart:async';
+import 'package:life_os/core/services/emulator_account_runtime.dart';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:firebase_auth/firebase_auth.dart';
+import 'package:life_os/core/services/firebase_auth_provider.dart';
+import 'package:life_os/core/database/local_account_session.dart';
 import 'package:life_os/core/database/database_provider.dart';
 import 'package:life_os/features/settings/presentation/providers/analytics_provider.dart';
 import 'package:life_os/features/habits/data/models/habit_model.dart';
@@ -13,8 +14,9 @@ import 'package:life_os/features/habits/data/repositories/habits_repository.dart
 final habitsRepositoryProvider = Provider((ref) {
   return HabitsRepository(
     ref.watch(databaseProvider),
-    FirebaseFirestore.instance,
-    FirebaseAuth.instance,
+    ref.watch(firebaseFirestoreProvider),
+    ref.watch(firebaseAuthProvider),
+    sessionLease: ref.watch(localAccountSessionProvider).identity == null ? null : ref.read(localAccountSessionProvider.notifier).capture(),
   );
 });
 
@@ -27,6 +29,7 @@ typedef ManualHabitTodayToggle =
 
 final manualHabitTodayToggleProvider = Provider<ManualHabitTodayToggle>((ref) {
   final repository = ref.watch(habitsRepositoryProvider);
+  if (ref.watch(emulatorAccountRuntimeProvider) != null) return (id, dates, wasDone) => repository.toggleHabitToday(id, dates);
   final analytics = ref.watch(analyticsServiceProvider);
   final isSessionActive = ref.watch(analyticsSessionActiveProvider);
   return (habitId, currentDates, wasCompletedToday) async {
@@ -39,6 +42,6 @@ final manualHabitTodayToggleProvider = Provider<ManualHabitTodayToggle>((ref) {
 });
 
 // 2. STREAM PROVIDER: Escuta o banco LOCAL (Drift) através do Repositório
-final habitsStreamProvider = StreamProvider<List<HabitModel>>((ref) {
+final habitsStreamProvider = StreamProvider.autoDispose<List<HabitModel>>((ref) {
   return ref.watch(habitsRepositoryProvider).getHabitsStream();
 });

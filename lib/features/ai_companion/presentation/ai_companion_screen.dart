@@ -11,6 +11,14 @@ import 'package:life_os/features/ai_companion/presentation/screens/ai_consent_vi
 class AICompanionScreen extends ConsumerStatefulWidget {
   const AICompanionScreen({super.key, this.initialIntent});
 
+  // All app navigation uses this CLOSED entry until launch approval. It does
+  // not construct Premium/consent providers or schedule a request.
+  static Widget releaseUnavailable() => const Scaffold(
+    body: SafeArea(
+      child: Center(child: Text('Companion IA indisponível nesta versão.')),
+    ),
+  );
+
   final AIInsightIntent? initialIntent;
 
   @override

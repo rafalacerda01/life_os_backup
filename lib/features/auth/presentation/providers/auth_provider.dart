@@ -1,4 +1,7 @@
+import 'package:life_os/core/database/local_account_session.dart';
 import 'dart:async';
+import 'package:life_os/core/services/emulator_account_runtime.dart';
+import 'package:life_os/core/services/trusted_account_access.dart';
 
 import 'package:life_os/core/errors/failure.dart';
 
@@ -59,7 +62,7 @@ export 'package:life_os/core/services/firebase_auth_provider.dart';
 export 'package:life_os/features/health/services/medication_reminder_providers.dart'
     show medicationReminderSessionReconcilerProvider;
 
-final firestoreProvider = Provider((ref) => FirebaseFirestore.instance);
+final firestoreProvider = firebaseFirestoreProvider;
 
 typedef AuthNotificationCleanup = Future<void> Function();
 
@@ -76,13 +79,19 @@ final secureStorageProvider = Provider<FlutterSecureStorage>((ref) {
 
 final secureStorageServiceProvider = Provider<SecureStorageService>((ref) {
   final storage = ref.watch(secureStorageProvider);
-  return SecureStorageService(storage);
+  final identity = ref.watch(localAccountSessionProvider).identity;
+  return identity == null
+      ? SecureStorageService(storage)
+      : SecureStorageService.scoped(storage, identity);
 });
 
 final accountDeletionCleanupBarrierProvider =
     Provider<AccountDeletionCleanupBarrier>((ref) {
       return AccountDeletionCleanupBarrier(
         SecureAuthCleanupBarrierStorage(ref.read(secureStorageProvider)),
+        identity: ref.watch(localAccountSessionProvider).identity,
+        listKeys: () async =>
+            (await ref.read(secureStorageProvider).readAll()).keys.toSet(),
       );
     });
 
@@ -105,6 +114,7 @@ final authRepositoryProvider = Provider<AuthRepository>((ref) {
     ref.watch(firebaseAuthProvider),
     ref.watch(firestoreProvider),
     ref.watch(accountRemoteDataSourceProvider),
+    emulatorRuntime: ref.watch(emulatorAccountRuntimeProvider),
   );
 });
 
@@ -113,6 +123,170 @@ class AuthNotifier extends Notifier<AuthState> {
   AuthRepository get _repository => ref.read(authRepositoryProvider);
   SecureStorageService get _secureStorage =>
       ref.read(secureStorageServiceProvider);
+  bool get _localTasksSession => ref.read(emulatorAccountRuntimeProvider) != null;
+  bool _localAuthBusy = false;
+  int _localAuthOperation = 0;
+
+  void _initializeLocalTasksAuth() {
+    final auth = ref.read(firebaseAuthProvider);
+    final subscription = auth.authStateChanges().listen((user) {
+      _sessionGeneration++;
+      ref.read(localAccountSessionProvider.notifier).clear();
+      _databases.observeSession(null);
+      _databases.observeSession(user?.uid);
+      if (_localAuthBusy || _disposed) return;
+      final operation = ++_localAuthOperation;
+      unawaited(_restoreLocalTasksSession(operation));
+    }, onError: (Object _) {
+      if (!_disposed) {
+        ref.read(localAccountSessionProvider.notifier).clear();
+        _databases.observeSession(null);
+        state = AuthState.error('Não foi possível confirmar a sessão.');
+      }
+    });
+    ref.onDispose(() {
+      _disposed = true;
+      _localAuthOperation++;
+      subscription.cancel();
+    });
+  }
+
+  Future<void> _detachLocalTasksSession() async {
+    final previous = _databases.attachedDatabase?.identity;
+    ref.read(localAccountSessionProvider.notifier).clear();
+    if (previous != null) {
+      // Stop the actual Drift consumers before closing their connection. A
+      // hidden/paused provider stream can otherwise retain the close drain.
+      ref.invalidate(tasksStreamProvider);
+      ref.invalidate(habitsStreamProvider);
+      ref.invalidate(financeStreamProvider);
+      ref.invalidate(goalsStreamProvider);
+      ref.invalidate(studyStreamProvider);
+      ref.invalidate(subjectsStreamProvider);
+      ref.invalidate(flashcardStreamProvider);
+      ref.invalidate(healthStreamProvider);
+      ref.invalidate(medicationsStreamProvider);
+      ref.invalidate(checkInStreamProvider);
+      ref.invalidate(localNotificationInboxProvider);
+      ref.invalidate(focusProvider);
+      await _databases.detach(expectedUid: previous.uid);
+    }
+    _activeLocalSessionUid = null;
+  }
+
+  Future<bool> _prepareLocalTasksSession(User user) => _serializeLocalSession(() async {
+    final runtime = ref.read(emulatorAccountRuntimeProvider)!;
+    runtime.requireClients(ref.read(firebaseAuthProvider), ref.read(firestoreProvider));
+    final generation = _sessionGeneration;
+    final identity = await TrustedAccountAccess.admittedIdentity(
+        runtime.auth, runtime.store, user.uid);
+    if (_disposed || generation != _sessionGeneration || runtime.auth.currentUser?.uid != user.uid) return false;
+    final db = await _databases.prepare(user.uid, accountIdentity: identity);
+    if (_disposed || generation != _sessionGeneration || runtime.auth.currentUser?.uid != user.uid) {
+      await _databases.detach(expectedUid: user.uid);
+      return false;
+    }
+    if (db.identity != identity) throw const SessionDatabaseUnavailable();
+    ref.read(localAccountSessionProvider.notifier).bind(identity);
+    _activeLocalSessionUid = user.uid;
+    return true;
+  });
+
+  Future<void> _publishLocalTasksUser(UserEntity user, int operation) async {
+    final firebaseUser = ref.read(firebaseAuthProvider).currentUser;
+    if (_disposed || operation != _localAuthOperation || firebaseUser?.uid != user.uid) return;
+    if (!await _prepareLocalTasksSession(firebaseUser!)) return;
+    if (_disposed || operation != _localAuthOperation) return;
+    // Resolve only the explicitly enabled resource dependencies outside build.
+    // Their streams are disposed when hidden and cannot retain A's values for B.
+    final modules=ref.read(emulatorAccountRuntimeProvider)!.enabledModules;
+    if(modules.contains('tasks'))ref.read(tasksRepositoryProvider);
+    if(modules.contains('habits'))ref.read(habitsRepositoryProvider);
+    if(modules.contains('finance'))ref.read(financeRepositoryProvider);
+    if(modules.contains('goals'))ref.read(goalRepositoryProvider);
+    if(modules.contains('study'))ref.read(studyRepositoryProvider);
+    if(modules.contains('health'))ref.read(healthRepositoryProvider);
+    if(modules.contains('checkin'))ref.read(checkInRepositoryProvider);
+    if(modules.contains('notifications'))ref.read(notificationsRepositoryProvider);
+    state = AuthState.authenticated(user);
+    // No Premium, reminder, notification-engine or other module initialization.
+    // Queue failure does not block the separately protected Tasks pull.
+    unawaited(_hydrateLocalTasks());
+  }
+
+  Future<void> _hydrateLocalTasks() async {
+    final lease = ref.read(localAccountSessionProvider.notifier).capture();
+    try {
+      await ref.read(syncManagerProvider).processPendingItems();
+      lease.requireCurrent();
+      await ref.read(tasksRepositoryProvider).syncTasksFromFirebaseToLocal();
+    } catch (_) {
+      // Existing admitted Drift data stays available; no fabricated ACK.
+    }
+  }
+
+  Future<void> _restoreLocalTasksSession(int operation) async {
+    try {
+      if (ref.read(firebaseAuthProvider).currentUser == null) {
+        await _detachLocalTasksSession();
+        if (!_disposed && operation == _localAuthOperation) state = AuthState.unauthenticated();
+        return;
+      }
+      if (!_disposed) state = AuthState.loading();
+      final result = await _repository.getCurrentUser();
+      await result.when((user) => _publishLocalTasksUser(user, operation), (failure) async {
+        if (!_disposed && operation == _localAuthOperation) state = AuthState.error(failure.message, code: failure.code);
+      });
+    } catch (_) {
+      if (!_disposed && operation == _localAuthOperation) state = AuthState.error('Não foi possível confirmar a sessão.');
+    }
+  }
+
+  Future<void> _authenticateLocalTasks(String email, String password, {String? name}) async {
+    if (_localAuthBusy) return;
+    final operation = ++_localAuthOperation;
+    _localAuthBusy = true;
+    state = AuthState.loading();
+    try {
+      await _detachLocalTasksSession();
+      final result = name == null
+          ? await _repository.signInWithEmailAndPassword(email, password)
+          : await _repository.signUpWithEmailAndPassword(email, password, name);
+      await result.when((user) => _publishLocalTasksUser(user, operation), (failure) async {
+        if (!_disposed && operation == _localAuthOperation) state = _entryFailureState(failure.message);
+      });
+    } catch (_) {
+      if (!_disposed && operation == _localAuthOperation) state = AuthState.error('Não foi possível preparar a sessão.');
+    } finally {
+      _localAuthBusy = false;
+    }
+  }
+
+  Future<void> _logoutLocalTasks() async {
+    if (_localAuthBusy) return;
+    _localAuthBusy = true;
+    ++_localAuthOperation;
+    state = AuthState.loading();
+    try {
+      final uid = ref.read(firebaseAuthProvider).currentUser?.uid;
+      if (uid != null && _databases.attachedDatabase != null) {
+        // Stop retries/in-flight work without requiring an upload or deleting.
+        if (!await ref.read(syncManagerProvider).prepareForSessionDetach(uid)) {
+          throw const SessionDatabaseUnavailable();
+        }
+      }
+      await _detachLocalTasksSession();
+      final result = await _repository.signOut();
+      result.when((_) {}, (_) => throw StateError('SIGN_OUT_UNCONFIRMED'));
+      if (ref.read(firebaseAuthProvider).currentUser != null) throw StateError('SIGN_OUT_UNCONFIRMED');
+      if (!_disposed) state = AuthState.unauthenticated();
+    } catch (_) {
+      if (!_disposed) state = AuthState.error('Não foi possível encerrar a sessão com segurança.');
+    } finally {
+      _localAuthBusy = false;
+    }
+  }
+
   bool _disposed = false;
   bool _accountDeletionInProgress = false;
   bool _explicitSignOutInProgress = false;
@@ -136,6 +310,22 @@ class AuthNotifier extends Notifier<AuthState> {
   @override
   AuthState build() {
     _disposed = false;
+    if (ref.watch(emulatorAccountRuntimeProvider) != null) {
+      _initializeLocalTasksAuth();
+      return ref.read(firebaseAuthProvider).currentUser == null
+          ? AuthState.unauthenticated() : AuthState.initial();
+    }
+    if (TrustedAccountAccess.localSessionClosed) {
+      // No identity exists to protect: show onboarding/public entry normally.
+      // This does not admit a private session or start any remote hydration.
+      if (ref.read(firebaseAuthProvider).currentUser == null) {
+        return AuthState.unauthenticated();
+      }
+      return AuthState.error(
+        'Esta coorte aguarda a habilitação segura dos dados locais.',
+        code: 'TRUSTED_LOCAL_SESSION_CLOSED',
+      );
+    }
     _initializeAuthListener();
     return AuthState.initial();
   }
@@ -145,6 +335,9 @@ class AuthNotifier extends Notifier<AuthState> {
     unawaited(checkCurrentUser());
 
     final subscription = auth.authStateChanges().listen((firebaseUser) async {
+      _sessionGeneration++;
+      ref.read(localAccountSessionProvider.notifier).clear();
+      _databases.observeSession(null);
       _databases.observeSession(firebaseUser?.uid);
       if (firebaseUser == null) {
         if (_accountDeletionInProgress || _explicitSignOutInProgress) return;
@@ -331,7 +524,30 @@ class AuthNotifier extends Notifier<AuthState> {
       return false;
     }
 
-    if (_activeLocalSessionUid == uid && !_localCleanupRequired) {
+    if (TrustedAccountAccess.localSessionClosed) {
+      state = AuthState.error(
+        'O acesso desta coorte aguarda a separação segura dos dados locais.',
+        code: 'TRUSTED_LOCAL_SESSION_CLOSED',
+      );
+      return false;
+    }
+    LocalDatabaseIdentity accountIdentity;
+    try {
+      accountIdentity = await TrustedAccountAccess.admittedIdentity(
+        ref.read(firebaseAuthProvider),
+        FirebaseFirestore.instance,
+        uid,
+      );
+    } catch (_) {
+      if (!_disposed)
+        state = AuthState.error(
+          'A conta precisa de preparo ou revisão de origem.',
+        );
+      return false;
+    }
+    if (_activeLocalSessionUid == uid &&
+        !_localCleanupRequired &&
+        _databases.snapshot.identity == accountIdentity) {
       try {
         _databases.requirePrepared();
         return true;
@@ -343,6 +559,7 @@ class AuthNotifier extends Notifier<AuthState> {
     try {
       await _databases.prepare(
         uid,
+        accountIdentity: accountIdentity,
         beforePublish: () async {
           String? token;
           try {
@@ -354,7 +571,11 @@ class AuthNotifier extends Notifier<AuthState> {
               ref.read(firebaseAuthProvider).currentUser?.uid != uid) {
             throw const SessionDatabaseUnavailable();
           }
-          if (token != null) await _secureStorage.saveToken(token);
+          if (token != null)
+            await SecureStorageService.scoped(
+              ref.read(secureStorageProvider),
+              accountIdentity,
+            ).saveToken(token);
         },
       );
     } catch (_) {
@@ -376,6 +597,7 @@ class AuthNotifier extends Notifier<AuthState> {
         return false;
       }
       _databases.requirePrepared();
+      ref.read(localAccountSessionProvider.notifier).bind(accountIdentity);
       _activeLocalSessionUid = uid;
       _unconfirmedAccountDeletionUid = null;
       _firestoreLocalStateCleared = false;
@@ -436,6 +658,10 @@ class AuthNotifier extends Notifier<AuthState> {
 
   // --- Métodos de Autenticação e Perfil ---
   Future<void> checkCurrentUser() async {
+    if (_localTasksSession) {
+      if (_localAuthBusy) return;
+      return _restoreLocalTasksSession(++_localAuthOperation);
+    }
     if (_disposed || _accountDeletionInProgress) return;
     try {
       await _serializeLocalSession(() async {
@@ -572,7 +798,7 @@ class AuthNotifier extends Notifier<AuthState> {
           if (!_disposed && !_accountDeletionInProgress) {
             state = AuthState.error(
               failure.message,
-              code: failure.code == 'WATER_PROVISIONING_PENDING'
+              code: failure.code == 'TRUSTED_ACCOUNT_PROVISIONING_PENDING'
                   ? failure.code
                   : null,
             );
@@ -596,7 +822,7 @@ class AuthNotifier extends Notifier<AuthState> {
     bool finishLocalSignOutWhenNoUser = false,
   }) async {
     if (_disposed || _accountDeletionInProgress) return;
-    if (failure.code == 'WATER_PROVISIONING_PENDING' &&
+    if (failure.code == 'TRUSTED_ACCOUNT_PROVISIONING_PENDING' &&
         ref.read(firebaseAuthProvider).currentUser != null) {
       // Auth succeeded. Keep the session pending until an explicit resume or
       // the existing Auth event asks for the server profile again.
@@ -635,6 +861,7 @@ class AuthNotifier extends Notifier<AuthState> {
   }
 
   Future<void> login(String email, String password) async {
+    if (_localTasksSession) return _authenticateLocalTasks(email, password);
     if (_accountDeletionInProgress) return;
     final analytics = ref.read(analyticsServiceProvider);
     state = AuthState.loading();
@@ -655,6 +882,7 @@ class AuthNotifier extends Notifier<AuthState> {
   }
 
   Future<void> register(String email, String password, String name) async {
+    if (_localTasksSession) return _authenticateLocalTasks(email, password, name: name);
     if (_accountDeletionInProgress) return;
     final analytics = ref.read(analyticsServiceProvider);
     state = AuthState.loading();
@@ -676,6 +904,7 @@ class AuthNotifier extends Notifier<AuthState> {
   }
 
   Future<void> signInWithGoogle() async {
+    if (_localTasksSession) { state = _entryFailureState('Google aguarda homologação.'); return; }
     if (_accountDeletionInProgress) return;
     final analytics = ref.read(analyticsServiceProvider);
     state = AuthState.loading();
@@ -723,6 +952,7 @@ class AuthNotifier extends Notifier<AuthState> {
   }
 
   Future<void> logout() async {
+    if (_localTasksSession) return _logoutLocalTasks();
     if (_explicitSignOutInProgress || _accountDeletionInProgress) return;
     state = AuthState.loading();
     final firebaseAuth = ref.read(firebaseAuthProvider);
@@ -772,8 +1002,14 @@ class AuthNotifier extends Notifier<AuthState> {
             firebaseAuth.currentUser?.uid == logoutUserId &&
             logoutUserId != null) {
           final restoredUser = firebaseAuth.currentUser!;
+          final restoredIdentity = await TrustedAccountAccess.admittedIdentity(
+            firebaseAuth,
+            FirebaseFirestore.instance,
+            logoutUserId,
+          );
           await _databases.prepare(
             logoutUserId,
+            accountIdentity: restoredIdentity,
             beforePublish: () async {
               String? token;
               try {
@@ -784,7 +1020,11 @@ class AuthNotifier extends Notifier<AuthState> {
               if (_disposed || firebaseAuth.currentUser?.uid != logoutUserId) {
                 throw const SessionDatabaseUnavailable();
               }
-              if (token != null) await _secureStorage.saveToken(token);
+              if (token != null)
+                await SecureStorageService.scoped(
+                  ref.read(secureStorageProvider),
+                  restoredIdentity,
+                ).saveToken(token);
             },
           );
           _activeLocalSessionUid = logoutUserId;
@@ -1006,6 +1246,15 @@ class AuthNotifier extends Notifier<AuthState> {
 
   Future<void> deleteAccount({String? password}) async {
     if (_accountDeletionInProgress) return;
+    // UID-scoped local deletion receipts/preferences cannot attest the new
+    // generation. Keep this integration closed before any remote effect.
+    if (_databases.attachedDatabase?.identity?.generation != null) {
+      state = AuthState.error(
+        'A exclusão desta conta aguarda a habilitação segura da limpeza local.',
+        code: 'TRUSTED_LOCAL_DELETION_CLOSED',
+      );
+      return;
+    }
     final expectedUid = _activeLocalSessionUid?.trim();
     final user = ref.read(firebaseAuthProvider).currentUser;
     if (expectedUid == null ||
@@ -1227,6 +1476,10 @@ class AuthNotifier extends Notifier<AuthState> {
   }
 
   Future<void> _recoverAccountDeletionCleanup() async {
+    // UID-only markers cannot authorize generation-specific local destruction.
+    if (TrustedAccountAccess.localSessionClosed) {
+      throw StateError('TRUSTED_LOCAL_SESSION_CLOSED');
+    }
     final barrier = ref.read(accountDeletionCleanupBarrierProvider);
     final markers = await barrier.readAll();
     // Stop on the first failure; never clear another identity as compensation.
@@ -1313,6 +1566,10 @@ class AuthNotifier extends Notifier<AuthState> {
     final previousDeletion = _accountDeletionInProgress;
     _accountDeletionInProgress = true;
     _localCleanupRequired = true;
+    // A bound marker must use the scoped journal/ports, never this legacy
+    // UID-only cancellation/sign-out sequence. Preserve it while CLOSED.
+    if (marker.identity != null)
+      throw StateError('GENERATIONAL_CLEANUP_PIPELINE_CLOSED');
     final identity = LocalDatabaseIdentity(marker.userId);
     try {
       final attached = _databases.attachedDatabase;
@@ -1531,13 +1788,40 @@ class AuthNotifier extends Notifier<AuthState> {
     String? cleanupUserId, {
     bool destroyRows = false,
   }) async {
+    // Capture before any drain. UID-only legacy recovery cannot select a
+    // bound database or replace it with whichever session appears later.
+    final capturedLocal = ref.read(localAccountSessionProvider);
+    final capturedDatabase = _databases.attachedDatabase;
+    void validateCaptured() {
+      final attached = _databases.attachedDatabase;
+      final uid = ref.read(firebaseAuthProvider).currentUser?.uid;
+      if (ref.read(localAccountSessionProvider).revision !=
+              capturedLocal.revision ||
+          attached != null && !identical(attached, capturedDatabase) ||
+          uid != null && uid != cleanupUserId)
+        throw StateError('LOCAL_CLEANUP_SESSION_CHANGED');
+    }
+
+    validateCaptured();
+    final capturedIdentity = capturedDatabase?.identity;
+    if (capturedIdentity?.generation != null) {
+      throw StateError('GENERATIONAL_CLEANUP_PIPELINE_CLOSED');
+    }
+    if (capturedIdentity != null &&
+        cleanupUserId != null &&
+        capturedIdentity.uid != cleanupUserId) {
+      throw StateError('LOCAL_CLEANUP_USER_CONFLICT');
+    }
+
     await ref
         .read(notificationRemoteEffectsBarrierProvider)
         .sealAndDrain()
         .timeout(const Duration(seconds: 20));
+    validateCaptured();
     _clearCycleReminderActionSession();
     _sessionGeneration += 1;
     await _medicationReconciler?.drain().timeout(const Duration(seconds: 20));
+    validateCaptured();
     final hydration = _hydrationInFlight;
 
     if (hydration != null) {
@@ -1549,8 +1833,9 @@ class AuthNotifier extends Notifier<AuthState> {
         .resetAndDrain()
         .timeout(const Duration(seconds: 20));
 
+    validateCaptured();
     final secureStorage = _secureStorage;
-    final db = _databases.attachedDatabase;
+    final db = capturedDatabase;
     var cleanupFailed = false;
 
     try {
@@ -1578,11 +1863,23 @@ class AuthNotifier extends Notifier<AuthState> {
     }
 
     try {
-      await secureStorage.deleteToken();
+      validateCaptured();
+      final capturedIdentity = db?.identity;
+      if (capturedIdentity?.generation != null) {
+        if (capturedIdentity?.isBound != true)
+          throw StateError('LOCAL_GENERATION_BINDING_REQUIRED');
+        await SecureStorageService.scoped(
+          ref.read(secureStorageProvider),
+          capturedIdentity!,
+        ).deleteToken();
+      } else {
+        await secureStorage.deleteToken();
+      }
     } on Object {
       cleanupFailed = true;
     }
 
+    validateCaptured();
     if (destroyRows) {
       try {
         if (db == null || db.identity?.uid != cleanupUserId) {
@@ -1595,7 +1892,9 @@ class AuthNotifier extends Notifier<AuthState> {
     }
 
     try {
+      validateCaptured();
       await ref.read(authNotificationCleanupProvider)();
+      validateCaptured();
     } on Object {
       cleanupFailed = true;
     }
@@ -1611,6 +1910,8 @@ class AuthNotifier extends Notifier<AuthState> {
   }
 
   Future<void> _clearFirestoreLocalState() async {
+    if (ref.read(localAccountSessionProvider).identity != null)
+      throw StateError('GLOBAL_FIRESTORE_CACHE_CLEANUP_CLOSED');
     if (_firestoreLocalStateCleared) return;
 
     final firestore = ref.read(firestoreProvider);

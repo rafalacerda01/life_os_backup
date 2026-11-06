@@ -1,4 +1,6 @@
 import 'dart:async';
+import 'package:life_os/core/network/generational_http_store.dart';
+import 'package:life_os/core/network/generational_http_transport.dart';
 import 'dart:convert';
 
 import 'package:firebase_auth/firebase_auth.dart';
@@ -119,6 +121,23 @@ class _FakeStudyRepository implements StudyRepository {
 }
 
 class _FakeFocusRemoteDataSource implements FocusRemoteDataSource {
+  // This historical suite exercises the legacy provider contract explicitly.
+  // Trusted transport is verified separately with real durable handles.
+  @override
+  GenerationalHttpTransport? get trustedTransport => null;
+  @override
+  Future<GenerationalHttpIntent> prepareTrusted({
+    required String stableKey,
+    required String operation,
+    required Map<String, dynamic> payload,
+  }) => throw StateError('LEGACY_FIXTURE_HAS_NO_TRUSTED_TRANSPORT');
+  @override
+  Future<int?> reconcileRunning({
+    required String sessionId,
+    required String targetId,
+    required FocusRemoteTargetType targetType,
+    required int plannedDurationSeconds,
+  }) => throw StateError('LEGACY_FIXTURE_MUST_NOT_RECONCILE_TRUSTED_STATE');
   int startCalls = 0;
   int finishCalls = 0;
   int cancelCalls = 0;
@@ -140,6 +159,7 @@ class _FakeFocusRemoteDataSource implements FocusRemoteDataSource {
     required FocusRemoteTargetType targetType,
     required int plannedDurationSeconds,
     RemoteSendPermit? admission,
+    GenerationalHttpIntent? intent,
   }) async {
     startCalls++;
     lastTargetId = targetId;
@@ -170,6 +190,7 @@ class _FakeFocusRemoteDataSource implements FocusRemoteDataSource {
   Future<FocusFinishResponse> finishFocus({
     required String sessionId,
     RemoteSendPermit? admission,
+    GenerationalHttpIntent? intent,
   }) async {
     finishCalls++;
     finishedSessionIds.add(sessionId);
@@ -191,6 +212,7 @@ class _FakeFocusRemoteDataSource implements FocusRemoteDataSource {
   Future<FocusCancelResponse> cancelFocus({
     required String sessionId,
     RemoteSendPermit? admission,
+    GenerationalHttpIntent? intent,
   }) async {
     cancelCalls++;
     cancelledSessionIds.add(sessionId);

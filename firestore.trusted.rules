@@ -1,0 +1,1191 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Prototype trusted cohort: every client access requires the server origin.
+    function isSignedIn() {
+      return request.auth != null && trustedGeneration();
+    }
+
+    function defaultTenant() {
+      return request.auth != null
+        && 'firebase' in request.auth.token
+        && !('tenant' in request.auth.token.firebase);
+    }
+
+    function trustedGeneration() {
+      let path = /databases/$(database)/documents/trusted_account_origins/$(request.auth.uid);
+      return defaultTenant() && database == '(default)'
+        && 'lifeos_generation' in request.auth.token
+        && request.auth.token.aud == 'demo-life-os'
+        && exists(path)
+        && get(path).data.version == 1
+        && get(path).data.projectId == 'demo-life-os'
+        && get(path).data.databaseId == database
+        && get(path).data.uid == request.auth.uid
+        && get(path).data.policy == 'AUTH_BLOCKING_GENESIS_V1'
+        && get(path).data.state == 'ACTIVE'
+        && get(path).data.generation == request.auth.token.lifeos_generation;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn()
+        && request.auth.uid == userId;
+    }
+
+    function validCircleDocumentId(id) {
+      // Match JavaScript trim(), including Unicode whitespace at either edge.
+      let whitespace = '[\\s\\x{00a0}\\x{1680}\\x{2000}-\\x{200a}\\x{2028}\\x{2029}\\x{202f}\\x{205f}\\x{3000}\\x{feff}]';
+      return id is string
+        && id.size() > 0
+        && id.size() <= 128
+        && id.trim() == id
+        && id.replace('^' + whitespace + '+|' + whitespace + '+$', '') == id
+        && id.matches('[^/]+');
+    }
+
+    function circlePath(circleId) {
+      return /databases/$(database)/documents/circles/$(circleId);
+    }
+
+    function challengePath(circleId, challengeId) {
+      return /databases/$(database)/documents/circles/$(circleId)/challenges/$(challengeId);
+    }
+
+    function maxCircleChallenges() {
+      return 240;
+    }
+
+    function accountDeletionBlocked(userId) {
+      // R5: any control is permanent deny-only, including malformed records.
+      return exists(/databases/$(database)/documents/retired_auth_identities/$(userId))
+        || exists(/databases/$(database)/documents/account_deletion_guards/$(userId))
+        || exists(/databases/$(database)/documents/account_deletion_guards/$(userId)/control/operation);
+    }
+
+    function canWriteUserData(userId) {
+      return isOwner(userId)
+        && !accountDeletionBlocked(userId);
+    }
+
+    // Any authoritative marker closes client water writes, even if malformed.
+    function hasWaterProtocolBarrier(userId) {
+      return exists(/databases/$(database)/documents/users/$(userId)/water_protocol/eligibility)
+        || exists(/databases/$(database)/documents/users/$(userId)/water_protocol/activation)
+        || exists(/databases/$(database)/documents/account_birth_decisions/$(userId))
+        || exists(/databases/$(database)/documents/retired_auth_identities/$(userId));
+    }
+
+    function circleDeletionPath(circleId) {
+      return /databases/$(database)/documents/circle_deletions/$(circleId);
+    }
+
+    function circleMutationAllowed(circleId, data) {
+      // Mutation-only helper: read predicates and their permissions stay intact.
+      return isSignedIn()
+        && validCircleDocumentId(circleId)
+        && validCircleDocumentId(data.adminId)
+        && !accountDeletionBlocked(request.auth.uid)
+        && (data.adminId == request.auth.uid || !accountDeletionBlocked(data.adminId))
+        && data.schemaVersion == 2
+        && !data.keys().hasAny(['deletionState'])
+        && !exists(circleDeletionPath(circleId))
+        && !exists(/databases/$(database)/documents/circle_cleanup_guards/$(circleId));
+    }
+
+    function membershipMutationAllowed(circleId) {
+      // Existing Circle ownership is read before the write; a new Circle uses
+      // its post-state, still subject to the original root/member/user rules.
+      let data = exists(circlePath(circleId))
+        ? get(circlePath(circleId)).data
+        : getAfter(circlePath(circleId)).data;
+      return circleMutationAllowed(circleId, data);
+    }
+
+    function userPath(userId) {
+      return /databases/$(database)/documents/users/$(userId);
+    }
+
+    function memberPath(circleId, userId) {
+      return /databases/$(database)/documents/circles/$(circleId)/members/$(userId);
+    }
+
+    function isCircleAdmin(circleId) {
+      return isSignedIn()
+        && exists(circlePath(circleId))
+        && get(circlePath(circleId)).data.adminId == request.auth.uid;
+    }
+
+    function isCircleMember(circleId) {
+      return isSignedIn()
+        && exists(memberPath(circleId, request.auth.uid));
+    }
+
+    function isUpdatingOnly(fields) {
+      return request.resource.data
+        .diff(resource.data)
+        .affectedKeys()
+        .hasOnly(fields);
+    }
+
+    function validNewMemberData(data, expectedRole) {
+      return data.keys().hasOnly([
+          'role',
+          'displayNameSnapshot',
+          'photoUrlSnapshot',
+          'joinedAt'
+        ])
+        && data.keys().hasAll([
+          'role',
+          'displayNameSnapshot',
+          'photoUrlSnapshot',
+          'joinedAt'
+        ])
+        && data.role == expectedRole
+        && data.displayNameSnapshot is string
+        && data.displayNameSnapshot.size() > 0
+        && data.displayNameSnapshot.size() <= 50
+        && (
+          data.photoUrlSnapshot == null
+          || (
+            data.photoUrlSnapshot is string
+            && data.photoUrlSnapshot.size() <= 2048
+          )
+        )
+        && data.joinedAt == request.time;
+    }
+
+    function hasNoActiveCircle(userId) {
+      return exists(userPath(userId))
+        && (
+          !get(userPath(userId)).data.keys().hasAny(['activeCircleId'])
+          || get(userPath(userId)).data.activeCircleId == null
+        );
+    }
+
+    function changesOnlyActiveCircle(userId) {
+      return exists(userPath(userId))
+        && existsAfter(userPath(userId))
+        && getAfter(userPath(userId)).data
+          .diff(get(userPath(userId)).data)
+          .affectedKeys()
+          .hasOnly(['activeCircleId'])
+        && getAfter(userPath(userId)).data
+          .diff(get(userPath(userId)).data)
+          .affectedKeys()
+          .hasAny(['activeCircleId']);
+    }
+
+    function userActivatesCircle(userId, circleId) {
+      return validCircleDocumentId(circleId)
+        && !accountDeletionBlocked(userId)
+        && hasNoActiveCircle(userId)
+        && changesOnlyActiveCircle(userId)
+        && getAfter(userPath(userId)).data.activeCircleId == circleId;
+    }
+
+    function userClearsCircle(userId, circleId) {
+      return exists(userPath(userId))
+        && get(userPath(userId)).data.activeCircleId == circleId
+        && changesOnlyActiveCircle(userId)
+        && getAfter(userPath(userId)).data.activeCircleId == null;
+    }
+
+    function validActiveCircleUpdate(userId) {
+      return changesOnlyActiveCircle(userId)
+        && (
+          (
+            validCircleDocumentId(request.resource.data.activeCircleId)
+            && !accountDeletionBlocked(userId)
+            && (
+              !resource.data.keys().hasAny(['activeCircleId'])
+              || resource.data.activeCircleId == null
+            )
+            && !exists(
+              memberPath(
+                request.resource.data.activeCircleId,
+                userId
+              )
+            )
+            && existsAfter(
+              memberPath(
+                request.resource.data.activeCircleId,
+                userId
+              )
+            )
+          )
+          || (
+            request.resource.data.activeCircleId == null
+            && resource.data.activeCircleId is string
+            && (
+              !existsAfter(
+                memberPath(
+                  resource.data.activeCircleId,
+                  userId
+                )
+              )
+              || !existsAfter(
+                circlePath(resource.data.activeCircleId)
+              )
+            )
+          )
+        );
+    }
+
+    function hasTrustedPremium(data) {
+      return data.get('isPremium', false) == true
+        && data.get('premiumProvider', null) == 'google_play'
+        && data.get('premiumProductId', null) == 'life_os_premium'
+        && data.get('premiumTier', null) in ['monthly', 'annual']
+        && data.get('premiumBasePlanId', null) == data.premiumTier
+        && data.get('premiumSubscriptionState', null) in [
+          'SUBSCRIPTION_STATE_ACTIVE',
+          'SUBSCRIPTION_STATE_IN_GRACE_PERIOD',
+          'SUBSCRIPTION_STATE_CANCELED'
+        ]
+        && data.get('premiumExpiresAt', null) is timestamp
+        && data.premiumExpiresAt > request.time;
+    }
+
+    function hasTrustedAdminPremium(adminId) {
+      return exists(userPath(adminId))
+        && hasTrustedPremium(get(userPath(adminId)).data);
+    }
+
+    function validAdminMemberLimit(adminId, memberLimit) {
+      return exists(userPath(adminId))
+        && memberLimit == (hasTrustedAdminPremium(adminId) ? 30 : 3);
+    }
+
+    function effectiveMemberLimit(data) {
+      return hasTrustedAdminPremium(data.adminId) ? data.memberLimit : 3;
+    }
+
+    function validCircleCreate(circleId) {
+      return validCircleDocumentId(circleId)
+        && !exists(circleDeletionPath(circleId))
+        && !exists(/databases/$(database)/documents/circle_cleanup_guards/$(circleId))
+        && request.resource.data.keys().hasOnly([
+          'name',
+          'description',
+          'adminId',
+          'memberCount',
+          'memberLimit',
+          'challengeCount',
+          'lastChallengeId',
+          'createdAt',
+          'updatedAt',
+          'schemaVersion'
+        ])
+        && request.resource.data.keys().hasAll([
+          'name',
+          'description',
+          'adminId',
+          'memberCount',
+          'memberLimit',
+          'challengeCount',
+          'lastChallengeId',
+          'createdAt',
+          'updatedAt',
+          'schemaVersion'
+        ])
+        && request.resource.data.name is string
+        && request.resource.data.name.size() > 0
+        && request.resource.data.name.size() <= 100
+        && request.resource.data.description is string
+        && request.resource.data.description.size() > 0
+        && request.resource.data.description.size() <= 500
+        && request.resource.data.adminId == request.auth.uid
+        && request.resource.data.memberCount is int
+        && request.resource.data.memberCount == 1
+        && request.resource.data.challengeCount is int
+        && request.resource.data.challengeCount == 0
+        && request.resource.data.lastChallengeId == null
+        && request.resource.data.memberLimit is int
+        && validAdminMemberLimit(
+          request.auth.uid,
+          request.resource.data.memberLimit
+        )
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time
+        && request.resource.data.schemaVersion == 2
+        && userActivatesCircle(request.auth.uid, circleId)
+        && !exists(memberPath(circleId, request.auth.uid))
+        && existsAfter(memberPath(circleId, request.auth.uid))
+        && validNewMemberData(
+          getAfter(memberPath(circleId, request.auth.uid)).data,
+          'admin'
+        );
+    }
+
+    function isAtomicJoin(circleId) {
+      return isSignedIn()
+        && resource.data.schemaVersion == 2
+        && !resource.data.keys().hasAny(['deletionState'])
+        && !isCircleMember(circleId)
+        && resource.data.memberCount is int
+        && resource.data.memberCount >= 1
+        && resource.data.memberLimit is int
+        && (
+          resource.data.memberLimit == 3
+          || resource.data.memberLimit == 10
+          || resource.data.memberLimit == 30
+        )
+        && resource.data.memberCount < effectiveMemberLimit(resource.data)
+        && isUpdatingOnly([
+          'memberCount',
+          'updatedAt'
+        ])
+        && request.resource.data.memberCount ==
+            resource.data.memberCount + 1
+        && request.resource.data.memberCount <=
+            effectiveMemberLimit(resource.data)
+        && request.resource.data.updatedAt == request.time
+        && userActivatesCircle(request.auth.uid, circleId)
+        && !exists(memberPath(circleId, request.auth.uid))
+        && existsAfter(memberPath(circleId, request.auth.uid))
+        && validNewMemberData(
+          getAfter(memberPath(circleId, request.auth.uid)).data,
+          'member'
+        );
+    }
+
+    function isAtomicLeave(circleId) {
+      // Normal leave is server-owned so progress cleanup cannot be bypassed.
+      return false;
+    }
+
+    function isValidMemberCreate(circleId, userId) {
+      return isOwner(userId)
+        && !exists(memberPath(circleId, userId))
+        && userActivatesCircle(userId, circleId)
+        && existsAfter(circlePath(circleId))
+        && (
+          (
+            !exists(circlePath(circleId))
+            && validNewMemberData(request.resource.data, 'admin')
+            && getAfter(circlePath(circleId)).data.schemaVersion == 2
+            && getAfter(circlePath(circleId)).data.adminId == userId
+            && getAfter(circlePath(circleId)).data.memberCount == 1
+          )
+          || (
+            exists(circlePath(circleId))
+            && !get(circlePath(circleId)).data.keys().hasAny([
+              'deletionState'
+            ])
+            && validNewMemberData(request.resource.data, 'member')
+            && get(circlePath(circleId)).data.schemaVersion == 2
+            && getAfter(circlePath(circleId)).data.memberCount ==
+              get(circlePath(circleId)).data.memberCount + 1
+          )
+        );
+    }
+
+    function isAdminTimestampUpdate(circleId) {
+      return isCircleAdmin(circleId)
+        && resource.data.schemaVersion == 2
+        && isUpdatingOnly(['updatedAt'])
+        && request.resource.data
+          .diff(resource.data)
+          .affectedKeys()
+          .hasAny(['updatedAt'])
+        && request.resource.data.updatedAt == request.time;
+    }
+
+    function validCircleDelete(circleId) {
+      return isCircleAdmin(circleId)
+        && resource.data.schemaVersion == 2
+        && resource.data.memberCount is int
+        && resource.data.memberCount == 1
+        && !existsAfter(
+          memberPath(circleId, request.auth.uid)
+        )
+        && userClearsCircle(request.auth.uid, circleId);
+    }
+
+    function validChallengeCounterUpdate(circleId, before, after) {
+      let challengeId = after.get('lastChallengeId', null);
+      return validCircleDocumentId(circleId)
+        && isCircleAdmin(circleId)
+        && isCircleMember(circleId)
+        && before.schemaVersion == 2
+        && !before.keys().hasAny(['deletionState'])
+        && before.keys().hasAll(['challengeCount', 'lastChallengeId'])
+        && before.challengeCount is int
+        && before.challengeCount >= 0
+        && before.challengeCount < maxCircleChallenges()
+        && (before.lastChallengeId == null || validCircleDocumentId(before.lastChallengeId))
+        && after.diff(before).affectedKeys().hasOnly([
+          'challengeCount', 'lastChallengeId', 'updatedAt'
+        ])
+        && after.challengeCount is int
+        && after.challengeCount == before.challengeCount + 1
+        && after.challengeCount <= maxCircleChallenges()
+        && validCircleDocumentId(challengeId)
+        && after.updatedAt == request.time
+        && !exists(challengePath(circleId, challengeId))
+        && existsAfter(challengePath(circleId, challengeId));
+    }
+
+    function isAtomicChallengeCreate(circleId, challengeId) {
+      let before = get(circlePath(circleId)).data;
+      let after = getAfter(circlePath(circleId)).data;
+      return after.lastChallengeId == challengeId
+        && validChallengeCounterUpdate(circleId, before, after);
+    }
+
+    function validMemberDelete(circleId, userId) {
+      return isOwner(userId)
+        && (
+            isCircleAdmin(circleId)
+            && get(circlePath(circleId)).data.adminId == userId
+            && !existsAfter(circlePath(circleId))
+            && userClearsCircle(userId, circleId)
+        );
+    }
+
+    function validChallengeCreate(circleId, challengeId) {
+      return validCircleDocumentId(circleId)
+        && validCircleDocumentId(challengeId)
+        && request.resource.data.keys().hasOnly([
+          'type',
+          'title',
+          'targetValue',
+          'startAt',
+          'endAt',
+          'createdBy',
+          'createdAt',
+          'updatedAt',
+          'schemaVersion'
+        ])
+        && request.resource.data.keys().hasAll([
+          'type',
+          'title',
+          'targetValue',
+          'startAt',
+          'endAt',
+          'createdBy',
+          'createdAt',
+          'updatedAt',
+          'schemaVersion'
+        ])
+        && (
+          request.resource.data.type == 'FOCUS_MINUTES'
+          || request.resource.data.type == 'HABIT_COMPLETIONS'
+          || request.resource.data.type == 'STUDY_MINUTES'
+          || request.resource.data.type == 'TASK_COMPLETIONS'
+        )
+        && request.resource.data.title is string
+        && request.resource.data.title.size() > 0
+        && request.resource.data.title.size() <= 200
+        && request.resource.data.targetValue is int
+        && request.resource.data.targetValue > 0
+        && request.resource.data.targetValue <= 1000000
+        && request.resource.data.startAt == request.time
+        && request.resource.data.endAt is timestamp
+        && request.resource.data.endAt > request.time
+        && request.resource.data.endAt <=
+            request.time + duration.value(366, 'd')
+        && request.resource.data.createdBy == request.auth.uid
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time
+        && request.resource.data.schemaVersion == 2;
+    }
+
+    function validUserCreate() {
+      return request.resource.data.keys().hasOnly([
+          'email',
+          'displayName',
+          'isPremium',
+          'photoUrl',
+          'xp',
+          'level',
+          'streak',
+          'habitsCount',
+          'tasksCount',
+          'goalsCount',
+          'subjectsCount',
+          'medicationsCount',
+          'transactionsCount'
+        ])
+        && request.resource.data.keys().hasAll([
+          'email',
+          'displayName',
+          'isPremium',
+          'photoUrl',
+          'xp',
+          'level',
+          'streak',
+          'habitsCount',
+          'tasksCount',
+          'goalsCount',
+          'subjectsCount',
+          'medicationsCount',
+          'transactionsCount'
+        ])
+        && request.resource.data.email is string
+        && request.resource.data.displayName is string
+        && (
+          request.resource.data.photoUrl == null ||
+          request.resource.data.photoUrl is string
+        )
+        && request.resource.data.isPremium == false
+        && request.resource.data.xp is int
+        && request.resource.data.xp == 0
+        && request.resource.data.level is int
+        && request.resource.data.level == 1
+        && request.resource.data.streak is int
+        && request.resource.data.streak == 0
+        && request.resource.data.habitsCount is int
+        && request.resource.data.habitsCount == 0
+        && request.resource.data.tasksCount is int
+        && request.resource.data.tasksCount == 0
+        && request.resource.data.goalsCount is int
+        && request.resource.data.goalsCount == 0
+        && request.resource.data.subjectsCount is int
+        && request.resource.data.subjectsCount == 0
+        && request.resource.data.medicationsCount is int
+        && request.resource.data.medicationsCount == 0
+        && request.resource.data.transactionsCount is int
+        && request.resource.data.transactionsCount == 0;
+    }
+
+    function validUserUpdate(userId) {
+      return isUpdatingOnly([
+          'displayName',
+          'photoUrl',
+          'selectedFocusAreas',
+          'hasCompletedOnboarding',
+          'activeCircleId'
+        ])
+        && (
+          !request.resource.data
+            .diff(resource.data)
+            .affectedKeys()
+            .hasAny(['displayName']) ||
+          request.resource.data.displayName is string
+        )
+        && (
+          !request.resource.data
+            .diff(resource.data)
+            .affectedKeys()
+            .hasAny(['photoUrl']) ||
+          request.resource.data.photoUrl == null ||
+          request.resource.data.photoUrl is string
+        )
+        && (
+          !request.resource.data
+            .diff(resource.data)
+            .affectedKeys()
+            .hasAny(['selectedFocusAreas']) ||
+          (
+            request.resource.data.selectedFocusAreas is list
+            && request.resource.data.selectedFocusAreas.size() <= 20
+          )
+        )
+        && (
+          !request.resource.data
+            .diff(resource.data)
+            .affectedKeys()
+            .hasAny(['hasCompletedOnboarding']) ||
+          request.resource.data.hasCompletedOnboarding is bool
+        )
+        && (
+          !request.resource.data
+            .diff(resource.data)
+            .affectedKeys()
+            .hasAny(['activeCircleId']) ||
+          (
+            (
+              request.resource.data.activeCircleId == null
+              || request.resource.data.activeCircleId is string
+            )
+            && validActiveCircleUpdate(userId)
+          )
+        );
+    }
+
+    // Local contract: Gregorian day ID (0001..9999), finite metrics 0..10.
+    // Creates and updates validate the complete post-write document.
+    function validCivilDay(id) {
+      let year = int(id[0:4]);
+      let month = int(id[5:7]);
+      let day = int(id[8:10]);
+      let leap = year % 400 == 0 || (year % 4 == 0 && year % 100 != 0);
+      let maxDay = month == 2 ? (leap ? 29 : 28)
+        : (month in [4, 6, 9, 11] ? 30 : 31);
+      return id.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$')
+        && year >= 1 && year <= 9999 && month >= 1 && month <= 12
+        && day >= 1 && day <= maxDay;
+    }
+
+    function validCheckinData(checkinId) {
+      let data = request.resource.data;
+      return validCivilDay(checkinId)
+        && data.keys().hasOnly(['energy', 'focus', 'motivation', 'updatedAt'])
+        && data.keys().hasAll(['energy', 'focus', 'motivation', 'updatedAt'])
+        && data.energy is number && data.energy >= 0 && data.energy <= 10
+        && data.focus is number && data.focus >= 0 && data.focus <= 10
+        && data.motivation is number && data.motivation >= 0 && data.motivation <= 10
+        && data.updatedAt == request.time;
+    }
+
+    function validFocusLogData() {
+      return request.resource.data.keys().hasOnly([
+          'targetId',
+          'targetType',
+          'durationSeconds',
+          'timestamp'
+        ])
+        && request.resource.data.keys().hasAll([
+          'targetId',
+          'targetType',
+          'durationSeconds',
+          'timestamp'
+        ])
+        && request.resource.data.targetId is string
+        && request.resource.data.targetType is string
+        && request.resource.data.durationSeconds is int
+        && request.resource.data.durationSeconds >= 0
+        && request.resource.data.timestamp is timestamp;
+    }
+
+    function validMenstrualCycleData() {
+      return request.resource.data.menstrualCycle is map
+        && request.resource.data.menstrualCycle.keys().hasOnly([
+          'isEnabled',
+          'lastPeriodStart',
+          'cycleLengthDays',
+          'periodLengthDays'
+        ])
+        && request.resource.data.menstrualCycle.keys().hasAll([
+          'isEnabled',
+          'lastPeriodStart',
+          'cycleLengthDays',
+          'periodLengthDays'
+        ])
+        && request.resource.data.menstrualCycle.isEnabled is bool
+        && request.resource.data.menstrualCycle.lastPeriodStart is string
+        && request.resource.data.menstrualCycle.cycleLengthDays is int
+        && request.resource.data.menstrualCycle.cycleLengthDays >= 1
+        && request.resource.data.menstrualCycle.cycleLengthDays <= 120
+        && request.resource.data.menstrualCycle.periodLengthDays is int
+        && request.resource.data.menstrualCycle.periodLengthDays >= 1
+        && request.resource.data.menstrualCycle.periodLengthDays <=
+            request.resource.data.menstrualCycle.cycleLengthDays;
+    }
+
+    function validHealthData() {
+      return request.resource.data.keys().hasOnly([
+          'mood',
+          'waterIntakeMl',
+          'hasTakenPillToday',
+          'menstrualCycle',
+          'date'
+        ])
+        && request.resource.data.keys().hasAny([
+          'mood',
+          'waterIntakeMl',
+          'hasTakenPillToday',
+          'menstrualCycle'
+        ])
+        && request.resource.data.keys().hasAll(['date'])
+        && request.resource.data.date is timestamp
+        && (
+          !request.resource.data.keys().hasAny(['mood']) ||
+          request.resource.data.mood is string
+        )
+        && (
+          !request.resource.data.keys().hasAny(['waterIntakeMl']) ||
+          (
+            request.resource.data.waterIntakeMl is int
+            && request.resource.data.waterIntakeMl >= 0
+            && request.resource.data.waterIntakeMl <= 1000000
+          )
+        )
+        && (
+          !request.resource.data.keys().hasAny(['hasTakenPillToday']) ||
+          request.resource.data.hasTakenPillToday is bool
+        )
+        && (
+          !request.resource.data.keys().hasAny(['menstrualCycle']) ||
+          validMenstrualCycleData()
+        );
+    }
+
+    function validStudyInfoData() {
+      return request.resource.data.keys().hasOnly([
+          'reviewQueue',
+          'progress',
+          'streak',
+          'lastStudyDate',
+          'updatedAt'
+        ])
+        && request.resource.data.keys().hasAny([
+          'reviewQueue',
+          'progress',
+          'streak',
+          'lastStudyDate',
+          'updatedAt'
+        ])
+        && (
+          !request.resource.data.keys().hasAny(['reviewQueue']) ||
+          (
+            request.resource.data.reviewQueue is int
+            && request.resource.data.reviewQueue >= 0
+          )
+        )
+        && (
+          !request.resource.data.keys().hasAny(['progress']) ||
+          (
+            request.resource.data.progress is number
+            && request.resource.data.progress >= 0
+            && request.resource.data.progress <= 1
+          )
+        )
+        && (
+          !request.resource.data.keys().hasAny(['streak']) ||
+          (
+            request.resource.data.streak is int
+            && request.resource.data.streak >= 0
+          )
+        )
+        && (
+          !request.resource.data.keys().hasAny(['lastStudyDate']) ||
+          request.resource.data.lastStudyDate is timestamp
+        )
+        && (
+          !request.resource.data.keys().hasAny(['updatedAt']) ||
+          request.resource.data.updatedAt is timestamp
+        );
+    }
+
+    function validStudyInfoCreate() {
+      return request.resource.data.keys().hasOnly(['reviewQueue'])
+        && request.resource.data.keys().hasAll(['reviewQueue'])
+        && request.resource.data.reviewQueue is int
+        && request.resource.data.reviewQueue >= 0;
+    }
+
+    function validStudyInfoUpdate() {
+      return validStudyInfoData()
+        && request.resource.data
+          .diff(resource.data)
+          .affectedKeys()
+          .hasOnly(['reviewQueue'])
+        && request.resource.data.reviewQueue is int
+        && request.resource.data.reviewQueue >= 0;
+    }
+
+    function validReviewQueueCreate() {
+  return request.resource.data.keys().hasOnly([
+      'subjectId',
+      'question',
+      'answer',
+      'createdAt'
+    ])
+    && request.resource.data.keys().hasAll([
+      'subjectId',
+      'question',
+      'answer',
+      'createdAt'
+    ])
+    && request.resource.data.subjectId is string
+    && request.resource.data.question is string
+    && request.resource.data.answer is string
+    && request.resource.data.createdAt is timestamp;
+}
+
+    // Notification engine: habits/studies/health, canonical occurrence IDs.
+    // Full schema is required on create and update; partial status updates
+    // remain valid when merged into an existing complete document.
+    function validNotificationData(notificationId) {
+      let data = request.resource.data;
+      return data.keys().hasOnly(['title', 'description', 'priority', 'moduleType',
+          'route', 'isRead', 'isCompleted', 'dueDate', 'createdAt', 'updatedAt'])
+        && data.keys().hasAll(['title', 'description', 'priority', 'moduleType',
+          'route', 'isRead', 'isCompleted', 'dueDate', 'createdAt', 'updatedAt'])
+        && notificationId.size() <= 200
+        && data.title is string && data.title.size() > 0 && data.title.size() <= 200
+        && data.description is string && data.description.size() <= 2000
+        && data.priority in ['normal', 'high', 'today', 'upcoming', 'completed']
+        && data.moduleType in ['habits', 'studies', 'health']
+        && data.route is string && data.route.size() <= 512
+        && ((data.moduleType == 'habits' && notificationId.matches('^habit_.+') && data.route == '/habits')
+          || (data.moduleType == 'studies' && notificationId.matches('^exam_.+') && data.route == '/study')
+          || (data.moduleType == 'health' && notificationId.matches('^health_med_.+') && data.route == '/health'))
+        && data.isRead is bool && data.isCompleted is bool
+        && (data.dueDate == null || data.dueDate is timestamp)
+        && data.createdAt is timestamp && data.updatedAt == request.time;
+    }
+
+    function validPrivacySchema(data, userId) {
+      return data.keys().hasOnly([
+          'accepted',
+          'userId',
+          'consentVersion',
+          'acceptedAt',
+          'revokedAt',
+          'updatedAt',
+          'source'
+        ])
+        && data.keys().hasAll([
+          'accepted',
+          'userId',
+          'consentVersion',
+          'acceptedAt',
+          'revokedAt',
+          'updatedAt',
+          'source'
+        ])
+        && data.accepted is bool
+        && data.userId == userId
+        && data.consentVersion in ['1.0', '2.0']
+        && data.acceptedAt is timestamp
+        && (data.revokedAt == null || data.revokedAt is timestamp)
+        && data.updatedAt is timestamp
+        && data.source == 'life_os_app';
+    }
+
+    function validPrivacyCreate(userId) {
+      return validPrivacySchema(request.resource.data, userId)
+        && request.resource.data.accepted == true
+        && request.resource.data.acceptedAt == request.time
+        && request.resource.data.revokedAt == null
+        && request.resource.data.updatedAt == request.time;
+    }
+
+    function validPrivacyUpdate(userId) {
+      return validPrivacySchema(request.resource.data, userId)
+        && request.resource.data.userId == resource.data.userId
+        && request.resource.data.source == resource.data.source
+        && request.resource.data.updatedAt == request.time
+        && (
+          (
+            resource.data.accepted == true
+            && request.resource.data.accepted == false
+            && request.resource.data.consentVersion == resource.data.consentVersion
+            && request.resource.data.acceptedAt == resource.data.acceptedAt
+            && request.resource.data.revokedAt == request.time
+          )
+          ||
+          (
+            resource.data.accepted == false
+            && resource.data.revokedAt is timestamp
+            && request.resource.data.accepted == true
+            && (
+              request.resource.data.consentVersion == resource.data.consentVersion
+              || (
+                resource.data.consentVersion == '1.0'
+                && request.resource.data.consentVersion == '2.0'
+              )
+            )
+            && request.resource.data.acceptedAt == request.time
+            && request.resource.data.revokedAt == null
+          )
+          ||
+          (
+            resource.data.accepted == true
+            && resource.data.consentVersion == '1.0'
+            && request.resource.data.accepted == true
+            && request.resource.data.consentVersion == '2.0'
+            && request.resource.data.acceptedAt == request.time
+            && request.resource.data.revokedAt == null
+          )
+        );
+    }
+
+    // =========================================================================
+    // USUÁRIOS
+    // =========================================================================
+
+    match /users/{userId} {
+
+  allow read: if isOwner(userId);
+
+  allow create: if canWriteUserData(userId)
+    && validUserCreate()
+        && !exists(/databases/$(database)/documents/account_birth_decisions/$(userId));
+
+  allow update: if canWriteUserData(userId)
+    && validUserUpdate(userId)
+    && request.resource.data._lifeosGeneration == resource.data._lifeosGeneration;
+
+  allow delete: if false;
+
+      match /habits/{habitId} {
+        allow read: if isOwner(userId);
+        allow create, delete: if false;
+        allow update: if canWriteUserData(userId)
+          && isUpdatingOnly(['completedDates'])
+          && request.resource.data.completedDates is list
+          && request.resource.data.completedDates.size() <= 5000;
+      }
+
+      match /tasks/{taskId} {
+        allow read: if isOwner(userId);
+        allow create, delete: if false;
+        allow update: if canWriteUserData(userId)
+          && isUpdatingOnly(['isCompleted'])
+          && request.resource.data.isCompleted is bool;
+      }
+
+      match /goals/{goalId} {
+        allow read: if isOwner(userId);
+        allow create, delete: if false;
+        allow update: if canWriteUserData(userId)
+          && isUpdatingOnly([
+            'currentValue',
+            'lastReset'
+          ])
+          && (
+            !request.resource.data
+              .diff(resource.data)
+              .affectedKeys()
+              .hasAny(['currentValue']) ||
+            (
+              request.resource.data.currentValue is int
+              && request.resource.data.currentValue >= 0
+            )
+          )
+          && (
+            !request.resource.data
+              .diff(resource.data)
+              .affectedKeys()
+              .hasAny(['lastReset']) ||
+            request.resource.data.lastReset is timestamp
+          );
+      }
+
+      match /subjects/{subjectId} {
+        allow read: if isOwner(userId);
+        allow create, delete: if false;
+        allow update: if canWriteUserData(userId)
+          // Review-create counters are committed only by the backend Sync.
+          && !request.resource.data.diff(resource.data).affectedKeys()
+            .hasAny(['cardsToReview'])
+          && isUpdatingOnly([
+            'cardsToReview',
+            'progress',
+            'streakDays'
+          ])
+          && (
+            !request.resource.data
+              .diff(resource.data)
+              .affectedKeys()
+              .hasAny(['cardsToReview']) ||
+            (
+              request.resource.data.cardsToReview is int
+              && request.resource.data.cardsToReview >= 0
+            )
+          )
+          && (
+            !request.resource.data
+              .diff(resource.data)
+              .affectedKeys()
+              .hasAny(['progress']) ||
+            (
+              request.resource.data.progress is number
+              && request.resource.data.progress >= 0
+              && request.resource.data.progress <= 1
+            )
+          )
+          && (
+            !request.resource.data
+              .diff(resource.data)
+              .affectedKeys()
+              .hasAny(['streakDays']) ||
+            (
+              request.resource.data.streakDays is int
+              && request.resource.data.streakDays >= 0
+            )
+          );
+      }
+
+      match /medications/{medicationId} {
+        allow read: if isOwner(userId);
+        allow create, update, delete: if false;
+      }
+
+      match /transactions/{transactionId} {
+        allow read: if isOwner(userId);
+        allow create, update, delete: if false;
+      }
+
+      match /checkins/{checkinId} {
+        allow read: if isOwner(userId);
+        allow create, update: if canWriteUserData(userId)
+          && validCheckinData(checkinId);
+        allow delete: if false;
+      }
+
+      match /focus_logs/{focusLogId} {
+        allow read: if isOwner(userId);
+        allow create, update: if canWriteUserData(userId)
+          && validFocusLogData();
+        allow delete: if false;
+      }
+
+      match /health_info/{healthInfoId} {
+        allow read: if isOwner(userId);
+        allow create: if canWriteUserData(userId)
+          && validHealthData()
+          && (
+            !hasWaterProtocolBarrier(userId)
+            || !request.resource.data.keys().hasAny(['waterIntakeMl'])
+          );
+        allow update: if canWriteUserData(userId)
+          && validHealthData()
+          && (
+            !hasWaterProtocolBarrier(userId)
+            || !request.resource.data.diff(resource.data)
+              .affectedKeys().hasAny(['waterIntakeMl'])
+          );
+        allow delete: if false;
+      }
+
+      match /study_info/{studyInfoId} {
+        allow read: if isOwner(userId);
+        // Its only former Client write field was the server-owned counter.
+        allow create: if false;
+        allow update: if false;
+        allow delete: if false;
+      }
+
+      match /study_progress_state/{stateId} {
+        allow read: if isOwner(userId) && stateId == 'main';
+        allow create, update, delete: if false;
+      }
+
+      match /study_progress_events/{eventId} {
+        allow read, create, update, delete: if false;
+      }
+
+      match /study_streak_ranges/{rangeId} {
+        allow read, create, update, delete: if false;
+      }
+
+      match /review_queue/{reviewId} {
+  allow read: if isOwner(userId);
+
+  // Only Sync's four-effect transaction can create a card and its receipt.
+  allow create: if false;
+
+  allow update: if false;
+
+  allow delete: if false;
+}
+
+      match /notifications/{notificationId} {
+        allow read: if isOwner(userId);
+        allow create, update: if canWriteUserData(userId)
+          && validNotificationData(notificationId);
+        allow delete: if canWriteUserData(userId);
+      }
+
+      match /privacy/{privacyId} {
+        allow read: if isOwner(userId);
+        allow create: if canWriteUserData(userId)
+          && privacyId == 'ai_consent'
+          && validPrivacyCreate(userId);
+        allow update: if canWriteUserData(userId)
+          && privacyId == 'ai_consent'
+          && validPrivacyUpdate(userId);
+        allow delete: if false;
+      }
+    }
+
+    // =========================================================================
+    // CÍRCULOS
+    // =========================================================================
+
+    match /circles/{circleId} {
+
+      allow get: if isSignedIn();
+      allow list: if false;
+
+      allow create: if isSignedIn()
+        && validCircleCreate(circleId);
+
+      // The common gate dominates every OR branch; false elsewhere is no veto.
+      allow update: if circleMutationAllowed(circleId, resource.data)
+        && (
+          isAdminTimestampUpdate(circleId)
+          || isAtomicJoin(circleId)
+          || isAtomicLeave(circleId)
+          || validChallengeCounterUpdate(circleId, resource.data, request.resource.data)
+        );
+
+      allow delete: if false;
+
+      match /members/{userId} {
+
+        allow get: if isOwner(userId)
+          || isCircleMember(circleId);
+
+        allow list: if isCircleMember(circleId);
+
+        allow create: if membershipMutationAllowed(circleId)
+          && isValidMemberCreate(circleId, userId);
+
+        allow update: if false;
+
+        allow delete: if validMemberDelete(circleId, userId);
+      }
+
+      match /challenges/{challengeId} {
+
+        allow read: if isCircleMember(circleId);
+
+        allow create: if circleMutationAllowed(circleId, get(circlePath(circleId)).data)
+          && isCircleAdmin(circleId)
+          && isCircleMember(circleId)
+          && !get(circlePath(circleId)).data.keys().hasAny([
+            'deletionState'
+          ])
+          && validChallengeCreate(circleId, challengeId)
+          && isAtomicChallengeCreate(circleId, challengeId);
+
+        allow update: if false;
+
+        allow delete: if false;
+
+        match /progress/{userId} {
+          allow get: if isCircleMember(circleId)
+            && exists(memberPath(circleId, userId));
+          // List requires orphan-free progress from backfill and atomic server leave.
+          // Block rollout until remaining candidates and readable conflicts are resolved.
+          allow list: if isCircleMember(circleId);
+          allow create, update, delete: if false;
+        }
+
+        match /processed_events/{eventKey} {
+          allow read, write: if false;
+        }
+      }
+    }
+
+    match /circle_deletions/{circleId} {
+      allow read, write: if false;
+    }
+
+    // Read-only server receipt; clients cannot create/approve a provenance.
+    match /trusted_account_origins/{uid} {
+      allow get: if defaultTenant() && database == '(default)'
+        && request.auth.uid == uid
+        && request.auth.token.aud == "demo-life-os"
+        && "lifeos_generation" in request.auth.token
+        && resource.data.generation == request.auth.token.lifeos_generation;
+      allow list, write: if false;
+    }
+
+    // =========================================================================
+    // DENY BY DEFAULT
+    // =========================================================================
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

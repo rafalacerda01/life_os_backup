@@ -1,3 +1,5 @@
+import 'package:life_os/core/database/local_account_session.dart';
+import 'package:life_os/core/services/generational_read_policy.dart';
 import 'dart:async';
 import 'dart:convert';
 
@@ -32,6 +34,12 @@ class _RemoteFinanceTransaction {
 }
 
 class FinanceRepository {
+  final LocalAccountLease? sessionLease;
+  Future<void> _verifyRemoteRead(String uid) => GenerationalReadPolicy.verify(
+    identity: _db.identity, lease: sessionLease, auth: _auth, store: _firestore, expectedUid: uid);
+  void _requireReadSession(String uid) => GenerationalReadPolicy.requireCurrent(
+    identity: _db.identity, lease: sessionLease, auth: _auth, expectedUid: uid);
+
   static const double _maximumAmount = 1000000000;
 
   final local_db.AppDatabase _db;
@@ -39,7 +47,7 @@ class FinanceRepository {
   final FirebaseAuth _auth;
   final SyncManager _syncManager;
 
-  FinanceRepository(this._db, this._firestore, this._auth, this._syncManager);
+  FinanceRepository(this._db, this._firestore, this._auth, this._syncManager, {this.sessionLease});
 
   Future<void> addTransaction({
     required String title,
@@ -162,20 +170,23 @@ class FinanceRepository {
 
     try {
       final ticket = _db.localMutations.capture(expectedUid: expectedUid);
+      await _verifyRemoteRead(expectedUid);
       final pullStartedAt = DateTime.now().millisecondsSinceEpoch;
       final queueDrained = await _syncManager.processPendingItems();
-      if (!queueDrained || !_isCurrentUser(expectedUid)) return;
+      if ((!queueDrained && _db.identity?.isBound != true) || !_isCurrentUser(expectedUid)) return;
 
       final snapshot = await _firestore
           .collection('users')
           .doc(expectedUid)
           .collection('transactions')
           .get(const GetOptions(source: Source.server));
+      await _verifyRemoteRead(expectedUid);
+      if (_db.identity?.generation != null && !GenerationalReadPolicy.accepts(_db.identity, fromCache: snapshot.metadata.isFromCache, pendingWrites: snapshot.metadata.hasPendingWrites)) throw StateError('GENERATIONAL_SNAPSHOT_UNCONFIRMED');
       _requireCurrentUser(expectedUid);
 
       final remoteDocIds = snapshot.docs.map((doc) => doc.id).toSet();
 
-      await _db.transaction(admission: ticket, waitForReopen: false, () async {
+      await _db.transactionWithCommitGuard(admission: ticket, waitForReopen: false, validateBeforeCommit: () => _requireReadSession(expectedUid), () async {
         _requireCurrentUser(expectedUid);
 
         final authoritativeItems =

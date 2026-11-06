@@ -31,6 +31,7 @@ const allows = text => [...text.matchAll(/\ballow\s+([^:]+):\s*if\s+([^;]+);/g)]
 const matches = text => text.split(/\r?\n/).filter(l => /^\s*match /.test(l)).map(compact);
 const bodies = functions(rules);
 const preserved = {
+  "validCivilDay": "d95b47e257b7546550d9c37161008f94ad0de088735863d9a51f553f633a5027",
   "isSignedIn": "8ab02b46db8f833c5eefa0d11e8fd5bd518fef3d557e7f7d8c8c11fc9ea07c59",
   "isOwner": "7ea87600fe5eee07818da58b19d780d2eb20834a08c32ae0fde0d031d8e3f4f3",
   "validCircleDocumentId": "d846c3b3cddfeccf08153d0e1286d4e56a2bb8440d01bf682b8a624aab8927f8",
@@ -67,7 +68,7 @@ const preserved = {
   "validChallengeCreate": "c42b0790314c19ca3edc7e340056ee9c4e81691964772f22830f87577e26f2bb",
   "validUserCreate": "dc170c8af2c58256cfa0879052ed07be560a368f19affeacbf1f72f292d0713c",
   "validUserUpdate": "963a0eb02a3b9f8dca6febeaa88f68777a41d635776ab518772471e83c94c4c3",
-  "validCheckinData": "ad12102d7f540bb000b1bac4e14830285d125eaaad563ee360e53c014fc63932",
+  "validCheckinData": "8a1f90ff2b1604a9ec24f1305601cd83b1fed257f1410ab6ac3a77eb779467a8",
   "validFocusLogData": "fa317fb8d3ce2774d711dd344e49db1a0a79937f88378e90c3acdcb82cef152a",
   "validMenstrualCycleData": "0c7e244af7dd1cef6234ac252c6e451a5d4c45d3678d11abbc909e80bfdf6dfd",
   "validHealthData": "b251e258f5a61e93566f5b9a0a4e0125280299e45d43ba79cbb3f5ec275a261d",
@@ -75,7 +76,7 @@ const preserved = {
   "validStudyInfoCreate": "11d570920792982435a7c16490a903203527a63e8538cdc94da9946e63d3a234",
   "validStudyInfoUpdate": "a01b112a599e9985b36a023d0471d8b7d5724e0432d59b2733a34a3f7598c2b7",
   "validReviewQueueCreate": "94f5ce48232980da1afb2d029965c80306780ce2f12fd8571bd3dcb135cfe47c",
-  "validNotificationData": "c7e42ba44cc2d51fa76a6b305a22f45eb1a624d27e115791e0d57d2e5262fcc5",
+  "validNotificationData": "651dac768276644469f86ea0831113f6b47222c605c5e4d4a8800e0e8ca1445f",
   "validPrivacySchema": "320c7970745ec96ddb49cd307e1ef601456d5df4bf6b818b54c36fd15b613cf1",
   "validPrivacyCreate": "a81cdae1337c94c7c28148cd04b7c9432f3e688d3739804b7d47608fcda860fa",
   "validPrivacyUpdate": "7885504ce496a1a83416d76e2201abfa0e33ca607620130e0e8ec3e7535144da"
@@ -102,7 +103,7 @@ const expectedAllows = [
   "allowread:ifisOwner(userId);",
   "allowcreate,update,delete:iffalse;",
   "allowread:ifisOwner(userId);",
-  "allowcreate,update:ifcanWriteUserData(userId)&&validCheckinData();",
+  "allowcreate,update:ifcanWriteUserData(userId)&&validCheckinData(checkinId);",
   "allowdelete:iffalse;",
   "allowread:ifisOwner(userId);",
   "allowcreate,update:ifcanWriteUserData(userId)&&validFocusLogData();",
@@ -124,7 +125,7 @@ const expectedAllows = [
   "allowupdate:iffalse;",
   "allowdelete:iffalse;",
   "allowread:ifisOwner(userId);",
-  "allowcreate,update:ifcanWriteUserData(userId)&&validNotificationData();",
+  "allowcreate,update:ifcanWriteUserData(userId)&&validNotificationData(notificationId);",
   "allowdelete:ifcanWriteUserData(userId);",
   "allowread:ifisOwner(userId);",
   "allowcreate:ifcanWriteUserData(userId)&&privacyId=='ai_consent'&&validPrivacyCreate(userId);",
@@ -180,7 +181,7 @@ const expectedMatches = [
 ];
 
 for (const [name, digest] of Object.entries(preserved)) {
-  test('unchanged original validator body: ' + name, () => {
+  test('reviewed validator body (unaltered except P1 contracts): ' + name, () => {
     assert.equal(crypto.createHash('sha256').update(bodies[name]).digest('hex'), digest);
   });
 }

@@ -34,6 +34,12 @@ class _RecordingNotificationsPlugin extends Fake
   bool throwOnCancel = false;
   bool throwOnPending = false;
   final pending = <PendingNotificationRequest>[];
+  // This in-memory platform starts with no delivered notifications. Tests may
+  // populate this explicit snapshot; unknown API calls are still rejected.
+  final active = <ActiveNotification>[];
+  @override
+  Future<List<ActiveNotification>> getActiveNotifications() async =>
+      List.unmodifiable(active);
   final scheduledDates = <TZDateTime>[];
   Future<bool?> Function(int call)? initializeHandler;
 
@@ -68,6 +74,18 @@ class _RecordingNotificationsPlugin extends Fake
     String? payload,
   }) async {
     showCalls += 1;
+    active.removeWhere(
+      (n) => n.id == id && n.tag == notificationDetails?.android?.tag,
+    );
+    active.add(
+      ActiveNotification(
+        id: id,
+        title: title,
+        body: body,
+        payload: payload,
+        tag: notificationDetails?.android?.tag,
+      ),
+    );
   }
 
   @override
@@ -166,31 +184,44 @@ void main() {
 
   test('cancelamento estrito chama o plugin e conclui', () async {
     final plugin = _RecordingNotificationsPlugin();
+    plugin.pending.add(
+      const PendingNotificationRequest(17, 'legacy', 'body', null),
+    );
     final service = NotificationService(notificationsPlugin: plugin);
-
     await service.cancelAllNotificationsOrThrow();
-
-    expect(plugin.cancelAllCalls, 1);
+    expect(plugin.cancelAllCalls, 0);
+    expect(plugin.cancelledIds, [17]);
+    expect(plugin.pending, isEmpty);
   });
 
   test('cancelamento estrito propaga falha do plugin', () async {
-    final plugin = _RecordingNotificationsPlugin()..throwOnCancelAll = true;
+    final plugin = _RecordingNotificationsPlugin()..throwOnCancel = true;
+    plugin.pending.add(
+      const PendingNotificationRequest(18, 'legacy', 'body', null),
+    );
     final service = NotificationService(notificationsPlugin: plugin);
 
     await expectLater(
       service.cancelAllNotificationsOrThrow(),
       throwsStateError,
     );
-    expect(plugin.cancelAllCalls, 1);
+    expect(plugin.cancelAllCalls, 0);
+    expect(plugin.cancelledIds, [18]);
+    expect(plugin.pending.single.id, 18);
   });
 
   test('cancelamento best-effort preserva falha isolada da UI', () async {
-    final plugin = _RecordingNotificationsPlugin()..throwOnCancelAll = true;
+    final plugin = _RecordingNotificationsPlugin()..throwOnCancel = true;
+    plugin.pending.add(
+      const PendingNotificationRequest(19, 'legacy', 'body', null),
+    );
     final service = NotificationService(notificationsPlugin: plugin);
 
     await service.cancelAllNotifications();
 
-    expect(plugin.cancelAllCalls, 1);
+    expect(plugin.cancelAllCalls, 0);
+    expect(plugin.cancelledIds, [19]);
+    expect(plugin.pending.single.id, 19);
   });
 
   test('all_notifications false bloqueia showNotification', () async {

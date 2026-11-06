@@ -1,3 +1,6 @@
+import 'package:life_os/core/database/local_database_identity.dart';
+import 'package:life_os/core/database/local_account_session.dart';
+import 'package:life_os/core/storage/generational_local_store.dart';
 import 'dart:convert';
 import 'dart:math';
 
@@ -46,11 +49,47 @@ abstract interface class CycleReminderActionTokenManager
 
 typedef CycleReminderSecureRandomBytes = List<int> Function(int length);
 
+class _ScopedCycleTokens implements CycleReminderActionTokenStorage {
+  _ScopedCycleTokens(this.scope);
+  final GenerationalLocalStore scope;
+  @override
+  Future<String?> read(String key) => scope.read(key);
+  @override
+  Future<void> write(String key, String value) => scope.write(key, value);
+  @override
+  Future<void> delete(String key) => scope.delete(key);
+}
+
 class CycleReminderActionTokenStore implements CycleReminderActionTokenManager {
   CycleReminderActionTokenStore(
     this._storage, {
     CycleReminderSecureRandomBytes? randomBytes,
   }) : _randomBytes = randomBytes ?? _createSecureRandomBytes;
+
+  factory CycleReminderActionTokenStore.scoped(
+    CycleReminderActionTokenStorage storage,
+    LocalDatabaseIdentity identity, {
+    Future<Set<String>> Function()? listKeys,
+    CycleReminderSecureRandomBytes? randomBytes,
+  }) => CycleReminderActionTokenStore(
+    _ScopedCycleTokens(
+      GenerationalLocalStore(
+        identity: identity,
+        domain: 'cycle_tokens',
+        read: storage.read,
+        write: storage.write,
+        delete: storage.delete,
+        listKeys: listKeys,
+      ),
+    ),
+    randomBytes: randomBytes,
+  );
+  Future<void> retire() async {
+    final storage = _storage;
+    if (storage is! _ScopedCycleTokens)
+      throw StateError('LOCAL_GENERATION_BINDING_REQUIRED');
+    await storage.scope.retire();
+  }
 
   static const String _keyPrefix = 'life_os_cycle_action_token_v1_';
   static const int _tokenBytes = 32;
@@ -140,7 +179,12 @@ class CycleReminderActionTokenStore implements CycleReminderActionTokenManager {
     return result;
   }
 
-  String _keyFor(String userId) => '$_keyPrefix${_normalizeUserId(userId)}';
+  String _keyFor(String userId) {
+    final uid = _normalizeUserId(userId), storage = _storage;
+    if (storage is _ScopedCycleTokens && storage.scope.identity.uid != uid)
+      throw StateError('LOCAL_OWNER_MISMATCH');
+    return '$_keyPrefix$uid';
+  }
 
   static String _normalizeUserId(String userId) {
     final normalized = userId.trim();
@@ -225,6 +269,13 @@ final cycleReminderActionTokenStoreProvider =
       const storage = FlutterSecureStorage(
         aOptions: AndroidOptions(encryptedSharedPreferences: true),
       );
+      final identity = ref.watch(localAccountSessionProvider).identity;
+      if (identity != null)
+        return CycleReminderActionTokenStore.scoped(
+          const SecureCycleReminderActionTokenStorage(storage),
+          identity,
+          listKeys: () async => (await storage.readAll()).keys.toSet(),
+        );
       return CycleReminderActionTokenStore(
         const SecureCycleReminderActionTokenStorage(storage),
       );

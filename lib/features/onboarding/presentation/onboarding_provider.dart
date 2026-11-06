@@ -1,3 +1,4 @@
+import 'package:life_os/core/services/emulator_account_runtime.dart';
 import 'dart:async';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -76,7 +77,9 @@ class OnboardingNotifier extends Notifier<OnboardingPrefs> {
       state = const OnboardingPrefs(hasCompletedOnboarding: true);
       if (!_completionRecorded) {
         _completionRecorded = true;
-        unawaited(ref.read(analyticsServiceProvider).logOnboardingCompleted());
+        if (ref.read(emulatorAccountRuntimeProvider) == null) {
+          unawaited(ref.read(analyticsServiceProvider).logOnboardingCompleted());
+        }
       }
       return true;
     } finally {

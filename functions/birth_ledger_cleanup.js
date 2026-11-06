@@ -1,8 +1,11 @@
 "use strict";
 const {createHash, randomUUID} = require("node:crypto");
 const {Timestamp} = require("firebase-admin/firestore");
+const cleanupManifest = require("./account_cleanup_manifest");
 const circles = require("./circle_cleanup");
 const control = require("./deletion_control");
+const historicalAdmission = require("./historical_admission");
+const trustedAccount = require("./trusted_account");
 const KEYS = ["version", "uid", "projectId", "tenantId", "authCreatedAt",
   "sourceType", "sourceEventId", "eventAt", "cohort", "decisionId",
   "originalIdentity", "recordedAt", "status"];
@@ -207,11 +210,12 @@ async function assertTerminal(tx, db, accountUid) {
   if (journal.exists) {
     const h = journal.data();
     const original = await tx.get(db.doc("account_deletion_guards/" + accountUid + "/control/operation"));
-    if (h.version !== 2 || h.uid !== accountUid || h.projectId !== db.projectId ||
+    if (![2, 3].includes(h.version) || h.uid !== accountUid || h.projectId !== db.projectId ||
         h.databaseId !== db.databaseId || h.state !== "COMPLETE" ||
         !original.exists || h.deletionId !== original.data().deletionId ||
         ["UNKNOWN", "DISPATCHED"].includes(h.authOutcome) ||
         (original.data().origin === "PRE_AUTH" && h.authOutcome !== "CONFIRMED")) fail();
+    if (h.version === 3) cleanupManifest.validateHeader(h, original.data(), "users/" + accountUid);
   }
 
   const hash = createHash("sha256").update(accountUid, "utf8").digest("hex");
@@ -242,6 +246,12 @@ async function prepare(db, user, context, getUser, syntheticRollout) {
     const bound = Object.freeze({...binding, deletedAt: eventTime(context.timestamp),
       created: metadata(user.metadata?.creationTime)});
     if (bound.created && after(bound.created.at, bound.deletedAt)) fail();
+    // A delayed/duplicate event cannot authorize an unproven generation,
+    // including continuations with a previously sealed UID-only manifest.
+    let trustedProof;
+    try { trustedProof = await trustedAccount.resolveDeletionEvent(db, user, context); }
+    catch (_) { await historicalAdmission.refuseUnprovenAdmission(
+        db, binding, "AUTH_EVENT", context.eventId); }
     const rollout = syntheticRollout === undefined ? CLOSED_ROLLOUT : syntheticRollout;
     if (syntheticRollout !== undefined &&
         (binding.projectId !== "demo-life-os-p1" ||
@@ -298,8 +308,8 @@ async function prepare(db, user, context, getUser, syntheticRollout) {
         return {...context, privateTreeEmpty: true, externalResourcesEmpty: true};
       },
     };
-    controller = control.createController({db, binding,
-      clock: () => Timestamp.now(), uuid: randomUUID, ports});
+    controller = trustedAccount.protectController(db, trustedProof, control.createController({db, binding,
+      clock: () => Timestamp.now(), uuid: randomUUID, ports}));
     admitted = await controller.admitManagedEvent();
     if (!admitted.handle) {
       const error = new Error("Account cleanup requires review.");

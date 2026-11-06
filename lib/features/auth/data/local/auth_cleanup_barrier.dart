@@ -1,3 +1,6 @@
+import 'package:life_os/core/database/local_account_session.dart';
+import 'package:life_os/core/database/local_database_identity.dart';
+import 'package:life_os/core/storage/generational_local_store.dart';
 import 'dart:convert';
 import 'dart:math';
 
@@ -12,8 +15,10 @@ class PendingAuthCleanup {
     required this.userId,
     required this.intent,
     required this.revision,
+    this.identity,
   });
 
+  final LocalDatabaseIdentity? identity;
   final int version;
   final String userId;
   final AuthCleanupIntent intent;
@@ -24,6 +29,7 @@ class PendingAuthCleanup {
   @override
   bool operator ==(Object other) {
     return other is PendingAuthCleanup &&
+        other.identity == identity &&
         other.version == version &&
         other.userId == userId &&
         other.intent == intent &&
@@ -31,7 +37,7 @@ class PendingAuthCleanup {
   }
 
   @override
-  int get hashCode => Object.hash(version, userId, intent, revision);
+  int get hashCode => Object.hash(identity, version, userId, intent, revision);
 }
 
 abstract interface class AuthCleanupBarrierStorage {
@@ -69,9 +75,45 @@ abstract interface class AuthCleanupBarrier {
   Future<bool> clearIfCurrent(PendingAuthCleanup expected);
 }
 
+class IdentityAuthCleanupStorage implements AuthCleanupBarrierStorage {
+  IdentityAuthCleanupStorage(
+    AuthCleanupBarrierStorage raw,
+    LocalDatabaseIdentity identity, {
+    required String domain,
+    Future<Set<String>> Function()? listKeys,
+  }) : scope = GenerationalLocalStore(
+         identity: identity,
+         domain: domain,
+         read: raw.read,
+         write: raw.write,
+         delete: raw.delete,
+         listKeys: listKeys,
+       );
+  final GenerationalLocalStore scope;
+  @override
+  Future<String?> read(String key) => scope.read(key);
+  @override
+  Future<void> write(String key, String value) => scope.write(key, value);
+  @override
+  Future<void> delete(String key) => scope.delete(key);
+}
+
 class AuthCleanupBarrierStore implements AuthCleanupBarrier {
-  AuthCleanupBarrierStore(this._storage, {String Function()? revisionFactory})
-    : _revisionFactory = revisionFactory ?? _createRevision;
+  AuthCleanupBarrierStore(
+    AuthCleanupBarrierStorage storage, {
+    String Function()? revisionFactory,
+    LocalDatabaseIdentity? identity,
+    Future<Set<String>> Function()? listKeys,
+  }) : _identity = identity,
+       _storage = identity == null
+           ? storage
+           : IdentityAuthCleanupStorage(
+               storage,
+               identity,
+               domain: 'auth_cleanup',
+               listKeys: listKeys,
+             ),
+       _revisionFactory = revisionFactory ?? _createRevision;
 
   // Keep the key stable so a pre-v2 marker fails closed instead of vanishing.
   static const String _storageKey = 'life_os_auth_cleanup_pending_v1';
@@ -80,6 +122,7 @@ class AuthCleanupBarrierStore implements AuthCleanupBarrier {
   static final Random _secureRandom = Random.secure();
   static Future<void> _mutationTail = Future<void>.value();
 
+  final LocalDatabaseIdentity? _identity;
   final AuthCleanupBarrierStorage _storage;
   final String Function() _revisionFactory;
 
@@ -92,6 +135,8 @@ class AuthCleanupBarrierStore implements AuthCleanupBarrier {
     AuthCleanupIntent intent,
   ) {
     final normalizedUserId = _normalizeUserId(userId);
+    if (_identity != null && _identity.uid != normalizedUserId)
+      throw StateError("LOCAL_OWNER_MISMATCH");
     return _runSerialized(() async {
       final existing = await _readPending();
       if (existing != null && existing.userId != normalizedUserId) {
@@ -108,6 +153,7 @@ class AuthCleanupBarrierStore implements AuthCleanupBarrier {
       }
 
       final marker = PendingAuthCleanup(
+        identity: _identity,
         version: _storageVersion,
         userId: normalizedUserId,
         intent: effectiveIntent,
@@ -153,8 +199,11 @@ class AuthCleanupBarrierStore implements AuthCleanupBarrier {
     }
 
     final userId = _normalizeUserId(decoded['uid'] as String);
+    if (_identity != null && _identity.uid != userId)
+      throw const FormatException('LOCAL_OWNER_MISMATCH');
     final revision = _normalizeRevision(decoded['revision'] as String);
     return PendingAuthCleanup(
+      identity: _identity,
       version: _storageVersion,
       userId: userId,
       intent: decoded['logout'] as bool
@@ -205,5 +254,7 @@ final authCleanupBarrierProvider = Provider<AuthCleanupBarrier>((ref) {
   );
   return AuthCleanupBarrierStore(
     const SecureAuthCleanupBarrierStorage(storage),
+    identity: ref.watch(localAccountSessionProvider).identity,
+    listKeys: () async => (await storage.readAll()).keys.toSet(),
   );
 });

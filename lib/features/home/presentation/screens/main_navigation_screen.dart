@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:life_os/core/services/emulator_account_runtime.dart';
 import 'package:go_router/go_router.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:life_os/core/theme/app_colors.dart';
@@ -99,6 +100,14 @@ class MainNavigationScreen extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    if (ref.watch(emulatorAccountRuntimeProvider) != null) {
+      return Scaffold(appBar: AppBar(title: const Text('Life OS'), actions: [
+        TextButton(onPressed: () => context.go('/home'), child: const Text('Home')),
+        TextButton(onPressed: () => context.go('/tasks'), child: const Text('Tarefas')),
+        TextButton(onPressed: () { ref.read(syncManagerProvider).processPendingItems(); }, child: const Text('Sincronizar')),
+        TextButton(onPressed: () { ref.read(authNotifierProvider.notifier).logout(); }, child: const Text('Sair')),
+      ]), body: child);
+    }
     ref.listen(syncUiEventsProvider, (_, next) {
       final event = next.asData?.value;
       if (event == null) return;

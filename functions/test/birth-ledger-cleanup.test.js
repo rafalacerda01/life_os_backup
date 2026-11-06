@@ -1,4 +1,5 @@
 "use strict";
+const reachOrFail=require("./helpers/observed-gate.cjs");
 
 const assert = require("node:assert/strict");
 const test = require("node:test");
@@ -400,7 +401,7 @@ test("concurrent cleanup of one identity shares guard and removes ledger once",
     });
 
 test("birth commits before guard: claim retries and includes the real ledger",
-    async () => {
+    async t => {
       const f = fixture(); const hold = pause(); let paused = false;
       f.db.hooks.beforeCommit = async ({pending}) => {
         if (!paused && pending.some((w) => w.ref.path === GUARD)) {
@@ -408,7 +409,8 @@ test("birth commits before guard: claim retries and includes the real ledger",
         }
       };
       const pending = assert.rejects(f.prepare(), {code: "ACCOUNT_STATE_CONFLICT"});
-      await hold.reached;
+      t.after(async()=>{hold.release();await Promise.allSettled([pending]);});
+      await reachOrFail(hold.reached,pending);
       await f.birth.record(); hold.release(); await pending;
       assert.equal(f.db.docs.has(GUARD), false);
       assert.equal(f.db.docs.has(GUARD + "/control/operation"), false);
@@ -421,7 +423,7 @@ test("birth commits before guard: claim retries and includes the real ledger",
     });
 
 test("guard wins pending birth: real core retries and refuses resurrection",
-    async () => {
+    async t => {
       const f = fixture(); const hold = pause(); let paused = false;
       f.db.hooks.beforeCommit = async ({pending}) => {
         if (!paused && pending.some((w) => w.ref.path === PATH)) {
@@ -430,7 +432,8 @@ test("guard wins pending birth: real core retries and refuses resurrection",
       };
       const pending = assert.rejects(f.birth.record(),
           {code: "WATER_ACCOUNT_DELETING"});
-      await hold.reached; await finish(f.db, await f.prepare());
+      t.after(async()=>{hold.release();await Promise.allSettled([pending]);});
+      await reachOrFail(hold.reached,pending); await finish(f.db, await f.prepare());
       hold.release(); await pending;
       assert.equal(f.db.docs.has(PATH), false); assert.ok(f.db.conflicts >= 1);
       assert.equal(f.db.docs.get(GUARD).state, "COMPLETE");

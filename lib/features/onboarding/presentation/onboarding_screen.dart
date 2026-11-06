@@ -1,3 +1,4 @@
+import 'package:life_os/core/services/emulator_account_runtime.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -9,6 +10,7 @@ class OnboardingScreen extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final localTasksOnly = ref.watch(emulatorAccountRuntimeProvider) != null;
     final onboardingState = ref.watch(onboardingProvider);
     final analyticsState = ref.watch(analyticsPreferenceProvider);
     final canContinue =
@@ -100,7 +102,7 @@ class OnboardingScreen extends ConsumerWidget {
                       value: analyticsState.isEnabled,
                       activeColor: const Color(0xFFB026FF),
                       onChanged:
-                          analyticsState.status ==
+                          localTasksOnly || analyticsState.status ==
                                   AnalyticsPreferenceStatus.loading ||
                               analyticsState.operationInProgress
                           ? null

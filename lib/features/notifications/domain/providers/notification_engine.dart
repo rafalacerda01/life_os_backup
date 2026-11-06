@@ -1,3 +1,4 @@
+import 'package:life_os/core/database/local_account_session.dart';
 import 'dart:async';
 import 'dart:convert';
 
@@ -14,6 +15,7 @@ part 'notification_engine.g.dart';
 
 final notificationBootstrapCoordinatorProvider =
     Provider<NotificationBootstrapCoordinator>((ref) {
+      ref.watch(localAccountSessionProvider);
       return NotificationBootstrapCoordinator();
     });
 

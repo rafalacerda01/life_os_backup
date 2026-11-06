@@ -1,3 +1,5 @@
+import 'package:life_os/core/database/local_account_session.dart';
+import 'package:life_os/core/services/generational_read_policy.dart';
 import 'dart:convert';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
@@ -14,12 +16,18 @@ class _GoalSessionChanged implements Exception {
 }
 
 class GoalRepository {
+  final LocalAccountLease? sessionLease;
+  Future<void> _verifyRemoteRead(String uid) => GenerationalReadPolicy.verify(
+    identity: _db.identity, lease: sessionLease, auth: _auth, store: _firestore, expectedUid: uid);
+  void _requireReadSession(String uid) => GenerationalReadPolicy.requireCurrent(
+    identity: _db.identity, lease: sessionLease, auth: _auth, expectedUid: uid);
+
   final AppDatabase _db;
   final FirebaseFirestore _firestore;
   final FirebaseAuth _auth;
   final _uuid = const Uuid();
 
-  GoalRepository(this._db, this._firestore, this._auth);
+  GoalRepository(this._db, this._firestore, this._auth, {this.sessionLease});
 
   // ===========================================================================
   // 1. LEITURA (STREAMS LOCAIS)
@@ -119,9 +127,10 @@ class GoalRepository {
       final currentRow = await (_db.select(
         _db.goals,
       )..where((table) => table.id.equals(id))).getSingleOrNull();
+      if (currentRow==null) return;
+      if (newValue<0 || newValue>9007199254740991) throw ArgumentError('Progresso da meta inválido.');
       final now = DateTime.now();
       final cycleExpired =
-          currentRow != null &&
           _isGoalCycleExpired(
             currentRow.period,
             DateTime.fromMillisecondsSinceEpoch(currentRow.lastReset),
@@ -135,6 +144,7 @@ class GoalRepository {
             )
           : newValue;
 
+      if(effectiveValue<0 || effectiveValue>currentRow.targetValue) throw ArgumentError('Progresso da meta inválido.');
       await _db.transactionWithSync(
         admission: admission,
         ownerUid: user.uid,
@@ -237,6 +247,7 @@ class GoalRepository {
     try {
       AppLogger.i("SYNC Metas: Iniciando...");
       final ticket = _db.localMutations.capture(expectedUid: expectedUid);
+      await _verifyRemoteRead(expectedUid);
       final pullStartedAt = DateTime.now().millisecondsSinceEpoch;
       final pendingAtPullStart =
           await (_db.select(_db.syncQueueTable)..where(
@@ -256,9 +267,11 @@ class GoalRepository {
           .collection('goals')
           .get(const GetOptions(source: Source.server));
       if (_auth.currentUser?.uid != expectedUid) return;
+      await _verifyRemoteRead(expectedUid);
+      if (_db.identity?.generation != null && !GenerationalReadPolicy.accepts(_db.identity, fromCache: snapshot.metadata.isFromCache, pendingWrites: snapshot.metadata.hasPendingWrites)) throw StateError('GENERATIONAL_SNAPSHOT_UNCONFIRMED');
       final remoteDocIds = snapshot.docs.map((doc) => doc.id).toSet();
 
-      await _db.transaction(admission: ticket, waitForReopen: false, () async {
+      await _db.transactionWithCommitGuard(admission: ticket, waitForReopen: false, validateBeforeCommit: () => _requireReadSession(expectedUid), () async {
         void requireCurrentUser() {
           if (_auth.currentUser?.uid != expectedUid) {
             throw const _GoalSessionChanged();

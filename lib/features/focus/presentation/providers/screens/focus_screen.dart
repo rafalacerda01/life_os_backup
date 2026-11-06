@@ -1,4 +1,5 @@
 import 'dart:math' as math;
+import 'package:life_os/core/services/emulator_account_runtime.dart';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -26,7 +27,7 @@ class FocusScreen extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final focusState = ref.watch(focusProvider);
 
-    final activeCircleIdAsync = ref.watch(activeCircleIdForFocusProvider);
+    final activeCircleIdAsync = ref.watch(emulatorAccountRuntimeProvider) != null ? const AsyncData<String?>(null) : ref.watch(activeCircleIdForFocusProvider);
     final activeCircleId = activeCircleIdAsync.asData?.value;
 
     final circleChallengesAsync = activeCircleId == null
@@ -210,7 +211,9 @@ class FocusScreen extends ConsumerWidget {
           ),
           const SizedBox(width: 7),
           Text(
-            isActive ? 'ATIVO' : 'PRONTO',
+            isActive
+                ? (focusState.isVerified ? 'VERIFICADO' : 'LOCAL')
+                : 'PRONTO',
             style: TextStyle(
               color: isActive ? Colors.white : _textSecondary,
               fontSize: 10,

@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+import 'dart:async';
+import 'package:life_os/core/services/emulator_account_runtime.dart';
 import 'package:life_os/core/services/water_v2_provider.dart';
 import 'package:life_os/core/services/water_v2_controller.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -535,6 +537,7 @@ class HealthScreen extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    if (ref.watch(emulatorAccountRuntimeProvider) != null) return const _LocalMedicationScreen();
     final healthAsync = ref.watch(healthStreamProvider);
 
     const moods = [
@@ -2897,4 +2900,40 @@ class _WaterActionsState extends ConsumerState<_WaterActions> {
       ],
     );
   }
+}
+
+// Local essential slice: the real medication repository/queue, no native effects.
+class _LocalMedicationScreen extends ConsumerStatefulWidget {
+  const _LocalMedicationScreen();
+  @override ConsumerState<_LocalMedicationScreen> createState()=>_LocalMedicationScreenState();
+}
+class _LocalMedicationScreenState extends ConsumerState<_LocalMedicationScreen> {
+  @override void initState(){super.initState();WidgetsBinding.instance.addPostFrameCallback((_){if(mounted)unawaited(ref.read(healthRepositoryProvider).syncHealthFromFirebase());});}
+  Future<void> _add()async {await showDialog<void>(context:context,builder:(context)=>const _LocalMedicationDialog());}
+  @override Widget build(BuildContext context){final meds=ref.watch(medicationsStreamProvider);return Scaffold(appBar:AppBar(title:const Text('Saúde')),body:ListView(padding:const EdgeInsets.all(24),children:[
+    const Text('Medicamentos',style:TextStyle(fontSize:24)),
+    const Text('Água, ciclo e lembretes nativos aguardam homologação neste ambiente.'),
+    FilledButton(onPressed:_add,child:const Text('Adicionar medicamento')),
+    TextButton(onPressed:()=>context.go('/checkin'),child:const Text('Abrir Check-in')),
+    meds.when(data:(rows)=>Column(children:rows.map((m)=>ListTile(title:Text(m.name),subtitle:Text(m.durationDays==null?'Sem duração definida':'${m.durationDays} dias'),trailing:IconButton(key:ValueKey('delete-medication-${m.firestoreId}'),tooltip:'Excluir medicamento',icon:const Icon(Icons.delete_outline),onPressed:()async{try{await ref.read(healthRepositoryProvider).deleteMedication(m.firestoreId,m.id);}catch(_){if(context.mounted)ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content:Text('Não foi possível excluir o medicamento.')));}}))).toList()),loading:()=>const CircularProgressIndicator(),error:(e,s)=>const Text('Não foi possível carregar medicamentos.')),
+  ]));}
+}
+
+class _LocalMedicationDialog extends ConsumerStatefulWidget {
+  const _LocalMedicationDialog();
+  @override ConsumerState<_LocalMedicationDialog> createState()=>_LocalMedicationDialogState();
+}
+class _LocalMedicationDialogState extends ConsumerState<_LocalMedicationDialog> {
+  final name=TextEditingController(),duration=TextEditingController();bool saving=false;
+  @override void dispose(){name.dispose();duration.dispose();super.dispose();}
+  @override Widget build(BuildContext context)=>AlertDialog(title:const Text('Adicionar medicamento'),content:SingleChildScrollView(child:Column(mainAxisSize:MainAxisSize.min,children:[
+    TextField(key:const ValueKey('medication-name'),controller:name,decoration:const InputDecoration(labelText:'Nome do medicamento')),
+    TextField(key:const ValueKey('medication-duration'),controller:duration,keyboardType:TextInputType.number,decoration:const InputDecoration(labelText:'Duração em dias (opcional)')),
+  ])),actions:[TextButton(onPressed:saving?null:()=>Navigator.pop(context),child:const Text('Cancelar')),FilledButton(onPressed:saving?null:()async{
+    final repository=ref.read(healthRepositoryProvider);setState(()=>saving=true);
+    try{final days=duration.text.trim().isEmpty?null:int.tryParse(duration.text);if(duration.text.trim().isNotEmpty&&days==null)throw const FormatException();
+      await repository.addMedication(name.text,DateTime.now(),days);if(context.mounted)Navigator.pop(context);
+    }catch(_){if(context.mounted)ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content:Text('Confira o nome e a duração do medicamento.')));}
+    finally{if(mounted)setState(()=>saving=false);}
+  },child:const Text('Salvar medicamento'))]);
 }

@@ -1,3 +1,5 @@
+import '../network/generational_http_provider.dart';
+import 'emulator_account_runtime.dart';
 import 'package:life_os/features/notifications/data/repositories/notification_remote_effects_barrier.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:firebase_auth/firebase_auth.dart';
@@ -16,12 +18,15 @@ final syncManagerProvider = Provider<SyncManager>((ref) {
 
   final auth = ref.watch(firebaseAuthProvider);
 
+  final localTasksOnly = ref.watch(emulatorAccountRuntimeProvider) != null;
   final manager = SyncManager(
-    waterV2Processor: ref.watch(waterV2ProcessorProvider),
+    waterV2Processor: localTasksOnly ? null : ref.watch(waterV2ProcessorProvider),
     queueStore: AppDatabaseSyncQueueStore(database),
     remoteDataSource: FirestoreSyncRemoteDataSource(
       firestore,
       auth,
+      trustedTransport: ref.watch(generationalHttpTransportProvider),
+      allowedCollections: ref.watch(emulatorAccountRuntimeProvider)?.allowedCollections,
       captureRemoteSend: (uid) =>
           database.localMutations.captureRemoteSend(expectedUid: uid),
       beforeNotificationDelete: () =>

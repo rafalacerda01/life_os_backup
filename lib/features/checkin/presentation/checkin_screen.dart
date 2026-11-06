@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:life_os/core/services/emulator_account_runtime.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'providers/checkin_controller.dart';
 
@@ -32,6 +33,8 @@ class CheckInScreen extends ConsumerWidget {
               "Como está seu alinhamento hoje?",
               style: TextStyle(color: Colors.white70, fontSize: 14),
             ),
+            if (ref.watch(emulatorAccountRuntimeProvider) != null)
+              ref.watch(checkInHistoryProvider).when(data:(entries)=>Text(entries.isEmpty?'Sem registros anteriores.':'Último registro: ${entries.first.energy} / ${entries.first.focus} / ${entries.first.motivation}',key:const ValueKey('checkin-history')),loading:()=>const Text('Carregando registros…'),error:(e,s)=>const Text('Histórico indisponível.')),
             const SizedBox(height: 30),
 
             // Reagindo e enviando ações para o Controller
@@ -72,12 +75,12 @@ class CheckInScreen extends ConsumerWidget {
                           ScaffoldMessenger.of(context).showSnackBar(
                             const SnackBar(
                               content: Text(
-                                "Estado sincronizado no ecossistema.",
+                                "Check-in salvo.",
                               ),
                               backgroundColor: Colors.green,
                             ),
                           );
-                          Navigator.pop(context);
+                          if (ref.read(emulatorAccountRuntimeProvider) == null) Navigator.pop(context);
                         },
                         onError: () {
                           ScaffoldMessenger.of(context).showSnackBar(

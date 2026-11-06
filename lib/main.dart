@@ -1,6 +1,6 @@
 import 'dart:async';
+import 'package:life_os/core/services/emulator_account_runtime.dart';
 import 'dart:ui';
-import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_app_check/firebase_app_check.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_crashlytics/firebase_crashlytics.dart';
@@ -12,6 +12,7 @@ import 'package:intl/date_symbol_data_local.dart';
 import 'package:life_os/core/router/router.dart';
 import 'package:life_os/core/security/biometric_app_gate.dart';
 import 'package:life_os/core/services/analytics_service.dart';
+import 'package:life_os/core/services/firebase_sdk_bootstrap.dart';
 import 'package:life_os/core/utils/app_logger.dart';
 import 'package:life_os/features/health/services/cycle_reminder_action_bootstrap.dart';
 import 'package:life_os/firebase_options.dart';
@@ -24,15 +25,14 @@ void main() {
       await Firebase.initializeApp(
         options: DefaultFirebaseOptions.currentPlatform,
       );
-      await initializeAnalyticsCollection();
 
       if (!kIsWeb &&
           (defaultTargetPlatform == TargetPlatform.android ||
               defaultTargetPlatform == TargetPlatform.iOS)) {
-        FirebaseFirestore.instance.settings = const Settings(
-          persistenceEnabled: false,
-        );
+        configureFirestoreMemoryCache(Firebase.app());
       }
+
+      await initializeAnalyticsCollection();
 
       // 🚀 CÓDIGO ALTERADO: App Check agora é aguardado ANTES de construir a UI.
       // Isso garante que nenhuma requisição do Riverpod bata no Firebase sem o token de segurança.
@@ -106,7 +106,8 @@ class LifeOSApp extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    ref.watch(cycleReminderActionBootstrapProvider);
+    final localTasksOnly = ref.watch(emulatorAccountRuntimeProvider) != null;
+    if (!localTasksOnly) ref.watch(cycleReminderActionBootstrapProvider);
     final router = ref.watch(routerProvider);
 
     return MaterialApp.router(
@@ -125,7 +126,8 @@ class LifeOSApp extends ConsumerWidget {
         useMaterial3: true,
       ),
       builder: (context, child) =>
-          BiometricAppGate(child: child ?? const SizedBox.shrink()),
+          localTasksOnly ? (child ?? const SizedBox.shrink())
+              : BiometricAppGate(child: child ?? const SizedBox.shrink()),
       routerConfig: router,
     );
   }

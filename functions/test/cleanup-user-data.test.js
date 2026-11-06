@@ -1,6 +1,8 @@
 
 const cleanupManifest = require("../account_cleanup_manifest");
 const realRemoveTree = cleanupManifest.removeTree;
+// Preserve the genuine executor for the native arrangement of the two REDs.
+Object.defineProperty(cleanupManifest,'__nativeRemoveTree',{value:realRemoveTree});
 // Trace and pause the real versioned executor, not a fictitious SDK RPC.
 cleanupManifest.removeTree = async options => {
   options.db.fixtureTreeOptions = options;
@@ -30,7 +32,9 @@ const {createHash} = require("node:crypto");
 const test = require("node:test");
 const {Timestamp} = require("firebase-admin/firestore");
 
-process.env.GCLOUD_PROJECT = "demo-life-os-p1";
+// Preserve the isolated runner's explicit project; historical offline fixtures
+// retain their old model binding and do not gain trusted admission.
+process.env.GCLOUD_PROJECT ??= "demo-life-os-p1";
 
 // Load the Functions SDK before replacing only the Admin SDK used by index.js.
 require("firebase-functions/v1");
@@ -43,7 +47,8 @@ let activeDb;
 // callback still invokes prepare at its real boundary; no admission is faked.
 const fixtureBirthCleanup = require("../birth_ledger_cleanup");
 const productionPrepare = fixtureBirthCleanup.prepare;
-fixtureBirthCleanup.prepare = (...args) => productionPrepare(...args,
+fixtureBirthCleanup.prepare = (...args) => args[0]?.nativeAuth ?
+  productionPrepare(...args) : productionPrepare(...args,
     {verified: true, notBefore: Timestamp.fromMillis(1)});
 
 const originalAdmin = require.cache[adminPath].exports;
@@ -54,7 +59,11 @@ require.cache[adminPath].exports = {
   },
   auth() {
     return {getUser: async (owner) => {
-      assert.equal(owner, uid);
+      assert.equal(owner, activeDb.accountUid || uid);
+      if (activeDb.nativeAuth) {
+        if (activeDb.authHook) await activeDb.authHook(owner);
+        return activeDb.nativeAuth.getUser(owner);
+      }
       activeDb.fixtureTrace.push({kind: "auth.lookup", uid: owner, present: !!activeDb.authUser});
       if (activeDb.authHook) await activeDb.authHook(owner);
       if (activeDb.authError) throw activeDb.authError;
@@ -2678,7 +2687,8 @@ async function p1Fixture() {
   return {db, authLookups: () => authLookups};
 }
 
-function p1AssertOtherAndDeny(db, record = p1DenyRecord()) {
+function p1AssertOtherAndDeny(db, record = db.nativeDenyRecord || p1DenyRecord()) {
+  const p1RetiredPath = 'retired_auth_identities/' + (db.accountUid || uid);
   assert.deepEqual(db.data(p1OtherRoot), {syntheticOtherOwner: true});
   assert.deepEqual(db.data(p1OtherChild), {syntheticOtherData: true});
   assert.deepEqual(db.data(p1RetiredPath), record);
@@ -2910,11 +2920,18 @@ test("P1 recovery: late orphan residue prevents COMPLETE until another real clea
   assert.equal(db.data(guardPath).state, "IN_PROGRESS"); p1AssertOtherAndDeny(db);
 });
 
-// Security regressions deliberately remain RED while this cross-service race
-// exists. A green mock suite must not be mistaken for recovery authorization.
+// Original race oracles now use genuine Emulator provenance and native MVCC.
+// Their local PASS does not close P1/K01 or authorize any production rollout.
 for (const boundary of ["after admission", "before recursive delete"]) {
   test(`P1 RED: reused UID ${boundary} must preserve the recreated account`, async (t) => {
-    const {db, authLookups} = await p1Fixture(), hold = p1Gate(); t.after(hold.release);
+    const fixture = await require('./helpers/trusted-original-operation.cjs')({
+      deletionId:p1DeletionId,peerRoot:p1OtherRoot,peerChild:p1OtherChild,t});
+    const {db,authLookups,uid,rootPath,guardPath}=fixture;activeDb=db;
+    const c1Delete=async()=>{try{return await cleanupUserData.run(fixture.user,fixture.context);}finally{await db.refresh();}};
+    const nativeGate=p1Gate();
+    const hold={...nativeGate,release:async()=>{try{await db.flush();}finally{nativeGate.release();}}};
+    let execution;
+    fixture.beforeClose=async()=>{try{await hold.release();}finally{if(execution)await execution;}};
     let lookupsAtPause = null;
     if (boundary === "after admission") {
       const birth = require("../birth_ledger_cleanup"), originalPrepare = birth.prepare;
@@ -2940,7 +2957,7 @@ for (const boundary of ["after admission", "before recursive delete"]) {
         return callback(tx);
       }));
     }
-    const execution = c1Delete().then(() => ({ok: true}), (error) => ({error}));
+    execution = c1Delete().then(() => ({ok: true}), (error) => ({error}));
     await Promise.race([hold.reached, execution.then(() => assert.fail("callback did not reach controlled pause"))]);
     const {UserRecord} = require("firebase-admin/auth");
     db.authUser = new UserRecord({localId: uid, createdAt: String(c1Clock.toMillis())});
@@ -2950,7 +2967,7 @@ for (const boundary of ["after admission", "before recursive delete"]) {
     db.createTimes.set(rootPath, c1Clock);
     const recreatedChild = `${rootPath}/notes/recreated-private`;
     db.seed(recreatedChild, {syntheticRecreatedData: true});
-    hold.release(); const outcome = await execution;
+    await hold.release(); const outcome = await execution;
     p1AssertOtherAndDeny(db);
     t.diagnostic(JSON.stringify({boundary, authLookups: authLookups(), authPresent: !!db.authUser,
       recreatedRootPreserved: !!db.data(rootPath), recreatedChildPreserved: !!db.data(recreatedChild),
@@ -3153,13 +3170,14 @@ test("P1 absence recheck: not-found from recursive deletion is not Auth absence 
   reportHistoricalAuth(db, boundary, {injected, storageNotFoundPropagated: true});
 });
 
-// The original P1 RED "before recursive delete" test remains unchanged above.
-// Its pause is inside versionedDelete, after this new query has completed:
-// it records the remaining race without asserting an atomic Auth/data fence.
+// Original P1 RED safety assertions remain unchanged above. Its native
+// page-read pause follows the final Auth query; version checks protect the
+// recreated namespace without asserting atomicity across Auth and Firestore.
 
 // Read-only evidence of reached stages. Never modifies results or test oracles.
 test.afterEach(t => {
   if (!activeDb?.fixtureTrace) return;
+  const guardPath = 'account_deletion_guards/' + (activeDb.accountUid || uid);
   t.diagnostic(JSON.stringify({fixtureEvidence: true, name: t.name,
     trace: activeDb.fixtureTrace.slice(-16),
     preparationLog: activeDb.fixturePreparationLog,

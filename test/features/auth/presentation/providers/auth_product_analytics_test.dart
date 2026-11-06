@@ -1,3 +1,4 @@
+import 'package:life_os/core/services/trusted_account_access.dart';
 import 'dart:async';
 
 import 'package:firebase_auth/firebase_auth.dart';
@@ -272,6 +273,9 @@ class _Harness {
 
   Future<AuthNotifier> startNotifier() async {
     final current = notifier;
+    if (TrustedAccountAccess.localSessionClosed) {
+      throw StateError('HISTORICAL_FIXTURE_NOT_ADMITTED: TRUSTED_LOCAL_SESSION_CLOSED');
+    }
     // Let the new durable-barrier read finish before configuring later results.
     await repository.firstCurrentUserRead.future;
     return current;

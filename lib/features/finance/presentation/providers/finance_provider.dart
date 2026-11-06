@@ -1,4 +1,5 @@
-import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:life_os/core/services/firebase_auth_provider.dart';
+import 'package:life_os/core/database/local_account_session.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:riverpod_annotation/riverpod_annotation.dart';
@@ -212,8 +213,9 @@ final financeVisibleTransactionsProvider = Provider.autoDispose
 final financeRepositoryProvider = Provider.autoDispose((ref) {
   return FinanceRepository(
     ref.watch(databaseProvider),
-    FirebaseFirestore.instance,
-    FirebaseAuth.instance,
+    ref.watch(firebaseFirestoreProvider),
+    ref.watch(firebaseAuthProvider),
     ref.watch(syncManagerProvider),
+    sessionLease: ref.watch(localAccountSessionProvider).identity == null ? null : ref.read(localAccountSessionProvider.notifier).capture(),
   );
 });

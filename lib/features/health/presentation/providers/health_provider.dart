@@ -1,7 +1,8 @@
 import 'dart:async';
 
-import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:firebase_auth/firebase_auth.dart';
+import 'package:life_os/core/services/firebase_auth_provider.dart';
+import 'package:life_os/core/database/local_account_session.dart';
+import 'package:life_os/core/services/emulator_account_runtime.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:drift/drift.dart' as drift hide Column;
 import 'package:life_os/core/database/app_database.dart';
@@ -32,15 +33,18 @@ DateTime nextHealthDayBoundary(DateTime now) {
 final healthRepositoryProvider = Provider<HealthRepository>((ref) {
   final db = ref.watch(databaseProvider);
 
+  final local = ref.watch(emulatorAccountRuntimeProvider) != null;
   return HealthRepository(
-    NotificationService.instance,
-    FirebaseFirestore.instance,
-    FirebaseAuth.instance,
+    local ? NotificationService.instance : ref.watch(notificationServiceProvider),
+    ref.watch(firebaseFirestoreProvider),
+    ref.watch(firebaseAuthProvider),
     db,
     ref.watch(syncManagerProvider),
     now: ref.watch(healthDayClockProvider),
-    waterController: ref.watch(waterV2ControllerProvider),
-    medicationLifecycle: ref.watch(medicationReminderLifecycleProvider),
+    sessionLease:ref.watch(localAccountSessionProvider).identity==null?null:ref.read(localAccountSessionProvider.notifier).capture(),
+    medicationsOnly:local,nativeRemindersEnabled:!local,
+    waterController: local ? null : ref.watch(waterV2ControllerProvider),
+    medicationLifecycle: local ? null : ref.watch(medicationReminderLifecycleProvider),
   );
 });
 
@@ -68,7 +72,7 @@ final healthStreamProvider = StreamProvider<HealthModel>((ref) {
 // MEDICAMENTOS
 // ===========================================================================
 
-final medicationsStreamProvider = StreamProvider<List<Medication>>((ref) {
+final medicationsStreamProvider = StreamProvider.autoDispose<List<Medication>>((ref) {
   final db = ref.watch(databaseProvider);
 
   return (db.select(db.medications)..orderBy([

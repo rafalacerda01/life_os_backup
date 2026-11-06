@@ -1,4 +1,6 @@
+import 'package:life_os/core/services/generational_read_policy.dart';
 import 'dart:async';
+import 'package:life_os/core/database/local_account_session.dart';
 import 'dart:convert';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
@@ -16,7 +18,8 @@ class FocusRepository {
   final SyncManager _syncManager;
   final _uuid = const Uuid();
 
-  FocusRepository(this._db, this._firestore, this._auth, this._syncManager);
+  final LocalAccountLease? sessionLease;
+  FocusRepository(this._db, this._firestore, this._auth, this._syncManager,{this.sessionLease});
 
   // ===========================================================================
   // 1. ESCRITA (OFFLINE-FIRST)
@@ -80,12 +83,23 @@ class FocusRepository {
 
     try {
       AppLogger.i("SYNC Focus: Iniciando...");
+      await GenerationalReadPolicy.verify(identity:_db.identity,lease:sessionLease,auth:_auth,store:_firestore,expectedUid:user.uid);
       final snapshot = await _firestore
           .collection('users')
           .doc(user.uid)
           .collection('focus_logs')
-          .get();
+          .get(GenerationalReadPolicy.options(_db.identity, _firestore));
+      if (_db.identity?.generation != null &&
+          !GenerationalReadPolicy.accepts(
+            _db.identity,
+            fromCache: snapshot.metadata.isFromCache,
+            pendingWrites: snapshot.metadata.hasPendingWrites,
+          )) {
+        throw StateError('GENERATIONAL_SNAPSHOT_UNCONFIRMED');
+      }
 
+      await GenerationalReadPolicy.verify(identity:_db.identity,lease:sessionLease,auth:_auth,store:_firestore,expectedUid:user.uid);
+      await _db.transactionWithCommitGuard(admission:admission,waitForReopen:false,validateBeforeCommit:()=>GenerationalReadPolicy.requireCurrent(identity:_db.identity,lease:sessionLease,auth:_auth,expectedUid:user.uid),()async{
       for (var doc in snapshot.docs) {
         final data = doc.data();
 
@@ -121,6 +135,7 @@ class FocusRepository {
           );
         }
       }
+      });
       AppLogger.i("SYNC Focus: Concluído com sucesso.");
     } catch (e, stack) {
       AppLogger.e("SYNC Focus: ERRO CRÍTICO", e, stack);

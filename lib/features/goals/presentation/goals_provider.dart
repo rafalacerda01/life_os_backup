@@ -1,4 +1,5 @@
-import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:life_os/core/services/firebase_auth_provider.dart';
+import 'package:life_os/core/database/local_account_session.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:life_os/core/database/database_provider.dart';
@@ -11,8 +12,9 @@ import 'package:life_os/features/goals/data/models/local/repositories/goal_repos
 final goalRepositoryProvider = Provider((ref) {
   return GoalRepository(
     ref.watch(databaseProvider),
-    FirebaseFirestore.instance,
-    FirebaseAuth.instance,
+    ref.watch(firebaseFirestoreProvider),
+    ref.watch(firebaseAuthProvider),
+    sessionLease: ref.watch(localAccountSessionProvider).identity == null ? null : ref.read(localAccountSessionProvider.notifier).capture(),
   );
 });
 

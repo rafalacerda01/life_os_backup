@@ -1,3 +1,6 @@
+import 'package:life_os/core/database/local_account_session.dart';
+import 'dart:convert';
+import 'package:life_os/core/services/generational_read_policy.dart';
 import 'dart:async';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -9,6 +12,12 @@ import 'package:life_os/core/database/local_mutation_gate.dart';
 import 'package:life_os/core/utils/app_logger.dart';
 
 class CheckInRepository {
+  final LocalAccountLease? sessionLease;
+  Future<void> _verifyRemoteRead(String uid) => GenerationalReadPolicy.verify(
+    identity: _db.identity, lease: sessionLease, auth: _auth, store: _firestore, expectedUid: uid);
+  void _requireReadSession(String uid) => GenerationalReadPolicy.requireCurrent(
+    identity: _db.identity, lease: sessionLease, auth: _auth, expectedUid: uid);
+
   static const _defaultRemoteWriteTimeout = Duration(seconds: 10);
   static final _dailyIdPattern = RegExp(r'^[0-9]{4}-[0-9]{2}-[0-9]{2}$');
 
@@ -31,6 +40,7 @@ class CheckInRepository {
   final FirebaseFirestore _firestore;
   final FirebaseAuth _auth;
   final Duration _remoteWriteTimeout;
+  final Future<bool> Function()? replaySyncQueue;
   Future<void> _uploadTail = Future<void>.value();
 
   bool _isCurrentUser(String uid) =>
@@ -45,6 +55,8 @@ class CheckInRepository {
     this._firestore,
     this._auth, {
     Duration? remoteWriteTimeout,
+    this.replaySyncQueue,
+    this.sessionLease,
   }) : _remoteWriteTimeout = remoteWriteTimeout ?? _defaultRemoteWriteTimeout;
 
   // ===========================================================================
@@ -74,6 +86,7 @@ class CheckInRepository {
       return;
     }
 
+    if (![energy,focus,motivation].every((v)=>v.isFinite && v>=0 && v<=10)) throw ArgumentError('Métricas devem estar entre zero e dez.');
     final admission = _db.localMutations.capture(expectedUid: user.uid);
     await _db.localMutations.run(
       () => _saveDailyMetrics(
@@ -103,7 +116,7 @@ class CheckInRepository {
       // Salva imediatamente no Drift.
       // -----------------------------------------------------------------------
 
-      await _db.insertCheckIn(
+      Future<int> insertLocal() => _db.insertCheckIn(
         CheckInTableCompanion(
           id: Value(todayId),
           energy: Value(energy),
@@ -113,6 +126,25 @@ class CheckInRepository {
           isSynced: const Value(false),
         ),
       );
+      if (_db.identity?.generation != null) {
+        await _db.transaction(() async {
+          final revision = await insertLocal();
+          await _db.insertSyncItem(
+            ownerUid: userId,
+            collection: 'checkins',
+            docId: todayId,
+            operationType: 'update',
+            payloadJson: jsonEncode({
+              'energy': energy,
+              'focus': focus,
+              'motivation': motivation,
+              'localRowId': revision,
+            }),
+          );
+        });
+      } else {
+        await insertLocal();
+      }
 
       AppLogger.i('Check-in salvo localmente: $todayId');
 
@@ -159,6 +191,7 @@ class CheckInRepository {
     }
     final expectedUid = user.uid;
     final ticket = _db.localMutations.capture(expectedUid: expectedUid);
+      await _verifyRemoteRead(expectedUid);
 
     try {
       AppLogger.i('SYNC Check-ins: iniciando download do Firebase...');
@@ -176,10 +209,20 @@ class CheckInRepository {
           .collection('users')
           .doc(expectedUid)
           .collection('checkins')
-          .get();
+          .get(GenerationalReadPolicy.options(_db.identity, _firestore));
+      if (_db.identity?.generation != null &&
+          !GenerationalReadPolicy.accepts(
+            _db.identity,
+            fromCache: snapshot.metadata.isFromCache,
+            pendingWrites: snapshot.metadata.hasPendingWrites,
+          )) {
+        throw StateError('GENERATIONAL_SNAPSHOT_UNCONFIRMED');
+      }
 
+      await _verifyRemoteRead(expectedUid);
+      if (_db.identity?.generation != null && !GenerationalReadPolicy.accepts(_db.identity, fromCache: snapshot.metadata.isFromCache, pendingWrites: snapshot.metadata.hasPendingWrites)) throw StateError('GENERATIONAL_SNAPSHOT_UNCONFIRMED');
       if (!_isCurrentUser(expectedUid)) return;
-      await _db.transaction(admission: ticket, waitForReopen: false, () async {
+      await _db.transactionWithCommitGuard(admission: ticket, waitForReopen: false, validateBeforeCommit: () => _requireReadSession(expectedUid), () async {
         final current = await _readLocalCheckInRevisions();
         for (final doc in snapshot.docs) {
           if (!_isCurrentUser(expectedUid)) {
@@ -270,6 +313,27 @@ class CheckInRepository {
       )..where((table) => table.id.equals(checkInId))).getSingleOrNull();
       if (!_isCurrentUser(userId) || checkIn == null) return false;
       if (checkIn.isSynced) return true;
+      if (_db.identity?.generation != null) {
+        await _db.localMutations.run(
+          () async {},
+          ticket: admission,
+          waitForReopen: false,
+        );
+        final replay = replaySyncQueue;
+        if (replay == null) return false;
+        await replay();
+        return _db.transaction(
+          () async {
+            if (!_isCurrentUser(userId)) return false;
+            final current = await (_db.select(
+              _db.checkInTable,
+            )..where((t) => t.id.equals(checkInId))).getSingleOrNull();
+            return current?.isSynced == true;
+          },
+          admission: admission,
+          waitForReopen: false,
+        );
+      }
 
       await _firestore
           .collection('users')

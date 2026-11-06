@@ -1,3 +1,4 @@
+const reachOrFail=require("./helpers/observed-gate.cjs");
 const cleanupManifest = require("../account_cleanup_manifest");
 const realRemoveTree = cleanupManifest.removeTree;
 cleanupManifest.removeTree = options => {
@@ -212,7 +213,7 @@ function integral(f) {
 }
 for (const root of [true, false]) for (const birth of [true, false]) {
   test('R2 real onDelete fences delayed Billing (root=' + root + ',ledger=' + birth + ')',
-    {timeout: 10000}, async () => {
+    {timeout: 10000}, async t => {
       const f = fixture({root, birth}), firstGate = gate(), staleGate = gate();
       let firstHeld = false, secondHeld = false, lateWrites = 0;
       f.db.hooks.beforeCommit = async a => {
@@ -229,10 +230,12 @@ for (const root of [true, false]) for (const birth of [true, false]) {
           lateWrites++; throw new Error('COMMITTED_REPLY_LOST');
         }
       };
-      const first = call(f, 'first');
-      await firstGate.reached;
-      const second = call(f, 'second');
-      await staleGate.reached; firstGate.release(); await first;
+      let first,second;
+      t.after(async()=>{firstGate.release();staleGate.release();await Promise.allSettled([first,second].filter(Boolean));});
+      first = call(f, 'first');
+      await reachOrFail(firstGate.reached,first);
+      second = call(f, 'second');
+      await reachOrFail(staleGate.reached,second); firstGate.release(); await first;
       const g = f.db.docs.get(G); staleGate.release(); await second;
       assert.equal(lateWrites, 0); assert.ok(f.db.conflicts.some(c => c.label === 'second'));
       assert.deepEqual(f.db.docs.get(G), g); integral(f);
@@ -299,7 +302,7 @@ for (const operation of ['owned marker', 'closure reservation', 'member link', '
       }
     };
     const stale = context.run('stale', cleanup).then(() => null, e => e);
-    await ready.reached;
+    await reachOrFail(ready.reached,stale);
     const receipt = f.db.docs.get(G + '/control/operation');
     const retired = f.db.docs.get('retired_auth_identities/' + UID);
     assert.equal(receipt.state, 'IN_PROGRESS');

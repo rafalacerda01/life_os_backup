@@ -1,3 +1,4 @@
+import '../../helpers/observed_gate.dart';
 // ignore_for_file: subtype_of_sealed_class
 import 'dart:async';
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -108,7 +109,7 @@ void main() {
         );
         addTearDown(trackedManager.dispose);
         final processing = trackedManager.processPendingItems();
-        await started.future;
+        await observedGate(started.future, processing);
         if (stop == 'dispose') {
           trackedManager.dispose();
         } else if (stop == 'quiesce') {
@@ -158,7 +159,7 @@ void main() {
       );
       addTearDown(manager.dispose);
       final processing = manager.processPendingItems();
-      await started.future;
+      await observedGate(started.future, processing);
       expect(await manager.prepareForSessionDetach('a'), true);
       expect(response.isCompleted, false);
       expect(await processing, false);
@@ -194,7 +195,7 @@ void main() {
         );
         final result = source.process('a', item);
         if (refreshPending) {
-          await entered.future;
+          await observedGate(entered.future, result);
           session.reloginA();
           refresh.complete('private-fresh-token');
         }
@@ -235,7 +236,7 @@ void main() {
         );
         addTearDown(manager.dispose);
         final old = manager.processPendingItems();
-        await entered.future;
+        await observedGate(entered.future, old);
         final q = session.gate.beginQuiesce('a');
         await manager.prepareForSessionDetach('a');
         q.finish(signOutConfirmed: false);

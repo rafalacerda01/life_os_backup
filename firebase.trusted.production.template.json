@@ -1,0 +1,13 @@
+{
+  "state": "CLOSED",
+  "projectId": null,
+  "databaseId": "(default)",
+  "rules": "firestore.trusted.rules",
+  "requiredBeforeConfiguration": [
+    "Identity Platform blocking hook",
+    "approved isolated project",
+    "R8 and old-executor containment",
+    "complete writer/resource generation coverage",
+    "Cloud homologation"
+  ]
+}

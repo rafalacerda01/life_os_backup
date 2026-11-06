@@ -1,4 +1,7 @@
 import 'package:flutter/material.dart';
+import 'dart:async';
+import 'package:life_os/core/services/emulator_account_runtime.dart';
+import 'package:life_os/features/notifications/data/repositories/notifications_repository.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:life_os/features/notifications/domain/providers/notification_engine.dart';
 import 'package:life_os/features/notifications/presentation/widgets/notification_tile.dart';
@@ -8,6 +11,7 @@ class NotificationScreen extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    if (ref.watch(emulatorAccountRuntimeProvider) != null) return const _LocalNotificationInbox();
     final notificationsAsync = ref.watch(notificationEngineProvider);
 
     return Scaffold(
@@ -115,4 +119,18 @@ class NotificationScreen extends ConsumerWidget {
       ),
     );
   }
+}
+
+class _LocalNotificationInbox extends ConsumerStatefulWidget {
+  const _LocalNotificationInbox();
+  @override ConsumerState<_LocalNotificationInbox> createState()=>_LocalNotificationInboxState();
+}
+class _LocalNotificationInboxState extends ConsumerState<_LocalNotificationInbox> {
+  @override void initState(){super.initState();WidgetsBinding.instance.addPostFrameCallback((_){if(mounted)unawaited(ref.read(notificationsRepositoryProvider).syncNotificationsFromFirebaseToLocal());});}
+  @override Widget build(BuildContext context){final entries=ref.watch(localNotificationInboxProvider);return Scaffold(appBar:AppBar(title:const Text('Central de Notificações')),body:Column(children:[
+    const Padding(padding:EdgeInsets.all(16),child:Text('Leitura e dispensa disponíveis. Geração automática, edição e notificações nativas aguardam homologação.')),
+    Expanded(child:entries.when(data:(rows)=>rows.isEmpty?const Center(child:Text('Nenhuma notificação no momento.')):ListView(children:rows.map((n)=>ListTile(title:Text(n.title),subtitle:Text(n.description),trailing:TextButton(onPressed:()async{
+      try{await ref.read(notificationsRepositoryProvider).deleteNotification(n.id);}catch(_){if(context.mounted)ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content:Text('Não foi possível dispensar a notificação.')));}
+    },child:const Text('Dispensar')))).toList()),loading:()=>const Center(child:CircularProgressIndicator()),error:(e,s)=>const Center(child:Text('Notificações indisponíveis.')))),
+  ]));}
 }

@@ -9,20 +9,42 @@ enum SyncOperationStatus {
 
 class SyncOperationResult {
   final SyncOperationStatus status;
+  final bool acknowledgedByTransport;
+  final bool preserveQueueState;
+  final bool sessionStopped;
   final String? message;
   final String? code;
 
-  const SyncOperationResult._({required this.status, this.message, this.code});
+  const SyncOperationResult._({
+    required this.status,
+    this.message,
+    this.code,
+    this.acknowledgedByTransport = false,
+    this.preserveQueueState = false,
+    this.sessionStopped = false,
+  });
 
-  const SyncOperationResult.success()
-    : this._(status: SyncOperationStatus.success);
+  const SyncOperationResult.success({
+    bool acknowledgedByTransport = false,
+    bool sessionStopped = false,
+  }) : this._(
+         status: SyncOperationStatus.success,
+         acknowledgedByTransport: acknowledgedByTransport,
+         sessionStopped: sessionStopped,
+       );
 
-  const SyncOperationResult.retryable({String? message, String? code})
-    : this._(
-        status: SyncOperationStatus.retryableError,
-        message: message,
-        code: code,
-      );
+  const SyncOperationResult.retryable({
+    String? message,
+    String? code,
+    bool preserveQueueState = false,
+    bool sessionStopped = false,
+  }) : this._(
+         status: SyncOperationStatus.retryableError,
+         preserveQueueState: preserveQueueState,
+         sessionStopped: sessionStopped,
+         message: message,
+         code: code,
+       );
 
   const SyncOperationResult.quotaExceeded()
     : this._(status: SyncOperationStatus.quotaExceeded, code: 'QUOTA_EXCEEDED');

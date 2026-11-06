@@ -26,6 +26,10 @@ class AuthLogoutService {
   }) : firebaseAuth = firebaseAuth ?? FirebaseAuth.instance;
 
   Future<void> executeLogout() async {
+    // The legacy helper has no captured generation or durable cleanup receipt.
+    if (database.identity?.generation != null) {
+      throw StateError('GENERATIONAL_LOGOUT_PIPELINE_CLOSED');
+    }
     try {
       // 1. Limpa fisicamente todas as tabelas do Drift SQLite
       await database.clearAllData();

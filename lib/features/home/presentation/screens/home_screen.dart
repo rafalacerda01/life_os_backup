@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:life_os/core/services/emulator_account_runtime.dart';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -119,6 +120,22 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
 
   @override
   Widget build(BuildContext context) {
+    if (ref.watch(emulatorAccountRuntimeProvider) != null) {
+      final tasks = ref.watch(tasksStreamProvider);
+      return Scaffold(body: SafeArea(child: Padding(padding: const EdgeInsets.all(24),
+        child: ListView(children: [
+          const Text('Home', style: TextStyle(fontSize: 28)),
+          const SizedBox(height: 16),
+          const Text('Módulos disponíveis nesta sessão local:'),
+          const SizedBox(height: 16),
+          Text(tasks.when(data: (items) => '${items.length} tarefas', loading: () => 'Carregando tarefas…', error: (error, stack) => 'Tarefas indisponíveis.')),
+          for (final entry in const {'tasks':'tarefas','habits':'hábitos','finance':'finanças','goals':'metas','study':'estudos','health':'saúde','focus':'Focus','checkin':'Check-in','notifications':'notificações'}.entries)
+            if (ref.watch(emulatorAccountRuntimeProvider)!.enabledModules.contains(entry.key))
+              ElevatedButton(key: ValueKey('open-${entry.key}'), onPressed: () => context.go('/${entry.key}'), child: Text('Abrir ${entry.value}')),
+          TextButton(onPressed: () => context.go('/circles'), child: const Text('Círculos: aguardando homologação')),
+          const Text('Premium e compras aguardam homologação. AI Companion indisponível.'),
+        ]))));
+    }
     final homeState = ref.watch(homeStateProvider);
     final authState = ref.watch(authNotifierProvider);
 

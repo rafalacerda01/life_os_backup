@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:life_os/core/services/emulator_account_runtime.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
 import 'providers/study_provider.dart';
@@ -275,6 +276,9 @@ class _StudyScreenState extends ConsumerState<StudyScreen> {
     String subjectId,
     String subjectTitle,
   ) {
+    if (ref.read(emulatorAccountRuntimeProvider) != null) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content:Text('A exclusão de disciplinas aguarda homologação.')));return;
+    }
     showDialog(
       context: context,
       builder: (context) {

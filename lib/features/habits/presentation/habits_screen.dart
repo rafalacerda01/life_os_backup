@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:life_os/core/services/emulator_account_runtime.dart';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -39,7 +40,7 @@ class _HabitsScreenState extends ConsumerState<HabitsScreen> {
       final queueDrained = await ref
           .read(syncManagerProvider)
           .processPendingItems();
-      if (!mounted || !queueDrained) return;
+      if (!mounted || (!queueDrained && ref.read(emulatorAccountRuntimeProvider) == null)) return;
       await ref.read(habitsRepositoryProvider).syncHabitsFromFirebaseToLocal();
     } catch (_) {
       AppLogger.w('Não foi possível sincronizar hábitos neste momento.');

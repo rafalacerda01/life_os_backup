@@ -1,3 +1,4 @@
+import '../../../../helpers/observed_gate.dart';
 // ignore_for_file: subtype_of_sealed_class
 import 'dart:async';
 import 'dart:convert';
@@ -316,7 +317,7 @@ void main() {
         producerResult: result,
       );
       final processing = sync.processPendingItems();
-      await entered.future;
+      await observedGate(entered.future, processing);
       LocalMutationQuiescence? quiescence;
       if (stop == 'manager') {
         expect(await sync.prepareForSessionDetach('user-a'), true);
@@ -412,7 +413,7 @@ void main() {
         final result = Completer<SyncOperationResult>();
         final sync = manager(producerResult: result);
         final processing = sync.processPendingItems();
-        await started.future;
+        await observedGate(started.future, processing);
         LocalMutationQuiescence? quiescence;
         if (stop == 'manager') {
           expect(await sync.prepareForSessionDetach('user-a'), true);
@@ -450,7 +451,7 @@ void main() {
       final result = Completer<SyncOperationResult>();
       final sync = manager(producerResult: result);
       final processing = sync.processPendingItems();
-      await started.future;
+      await observedGate(started.future, processing);
       expect(remote.deletes, [path(model.id)]);
       expect(await sync.prepareForSessionDetach('user-a'), true);
       expect(release.isCompleted, false);
@@ -524,7 +525,7 @@ void main() {
         producerResult: result,
       );
       final processing = sync.processPendingItems();
-      await entered.future;
+      await observedGate(entered.future, processing);
       final quiescence = db.localMutations.beginQuiesce('user-a');
       expect(await sync.prepareForSessionDetach('user-a'), true);
       quiescence.finish(signOutConfirmed: false);

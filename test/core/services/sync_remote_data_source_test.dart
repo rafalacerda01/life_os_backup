@@ -1,3 +1,4 @@
+import '../../helpers/genuine_goal_scenario.dart';
 import 'package:life_os/core/services/sync_operation_result.dart';
 // ignore_for_file: subtype_of_sealed_class, must_be_immutable
 
@@ -835,6 +836,9 @@ void main() {
     _FakeFirebaseAuth(),
   );
 
+  // These five fixtures have no R1 admission/trusted transport. The global
+  // cohort refusal precedes legacy F01 classification. Keep all retry/no-write,
+  // no-counter/no-ACK oracles; this does not certify an admitted F01 scenario.
   test(
     'legacy review_queue create remains pending without card/counter writes',
     () async {
@@ -845,7 +849,7 @@ void main() {
       ).process('user-123', reviewCreateItem('card-1'));
       expect(result.isSuccess, isFalse);
       expect(result.shouldRetry, isTrue);
-      expect(result.code, 'REVIEW_CREATE_LEGACY_UNVERIFIED');
+      expect(result.code, 'TRUSTED_LOCAL_SESSION_CLOSED');
       expect(firestore.read('users/user-123/review_queue/card-1'), isNull);
       expect(firestore.read('users/user-123/study_info/main'), isNull);
       expect(
@@ -865,7 +869,7 @@ void main() {
       final result = await source.process('user-123', item);
       expect(result.isSuccess, isFalse);
       expect(result.shouldRetry, isTrue);
-      expect(result.code, 'REVIEW_CREATE_LEGACY_UNVERIFIED');
+      expect(result.code, 'TRUSTED_LOCAL_SESSION_CLOSED');
     }
     expect(firestore.read('users/user-123/study_info/main'), isNull);
     expect(
@@ -884,7 +888,7 @@ void main() {
       for (final id in ['card-1', 'card-2'])
         expect(
           (await source.process('user-123', reviewCreateItem(id))).code,
-          'REVIEW_CREATE_LEGACY_UNVERIFIED',
+          'TRUSTED_LOCAL_SESSION_CLOSED',
         );
       expect(firestore.read('users/user-123/study_info/main'), isNull);
       expect(
@@ -904,7 +908,7 @@ void main() {
       ).process('user-123', reviewCreateItem('card-1'));
       expect(result.isPermanentFailure, isFalse);
       expect(result.shouldRetry, isTrue);
-      expect(result.code, 'REVIEW_CREATE_LEGACY_UNVERIFIED');
+      expect(result.code, 'TRUSTED_LOCAL_SESSION_CLOSED');
       expect(firestore.data, isEmpty);
       expect(firestore.transactionCommits, 0);
     },
@@ -928,63 +932,46 @@ void main() {
       );
       expect(result.isPermanentFailure, isFalse);
       expect(result.shouldRetry, isTrue);
-      expect(result.code, 'REVIEW_CREATE_LEGACY_UNVERIFIED');
+      expect(result.code, 'TRUSTED_LOCAL_SESSION_CLOSED');
       expect(healthDoc.lastData, isNull);
       expect(healthDoc.updateCalls, 0);
     },
   );
 
+  // These four contracts now use actual blocking genesis, bootstrap and the
+  // reviewed HTTP goal route. No synthetic success/claims/receipts or SDK fallback.
   test('goals update preserva currentValue inteiro', () async {
-    final result = await remote.process(
-      'user-123',
-      createGoalUpdateItem({'currentValue': 3}),
-    );
-
-    expect(result.isSuccess, isTrue);
-    expect(healthDoc.lastUpdateData, {'currentValue': 3});
-    expect(healthDoc.lastUpdateData!['currentValue'], isA<int>());
-  });
+    final scenario=await GenuineGoalScenario.create();addTearDown(scenario.close);
+    final result=await scenario.update({'currentValue':3});
+    expect(result.isSuccess,isTrue);final data=await scenario.readGoal();
+    expect(data['currentValue'],3);expect(data['currentValue'],isA<int>());
+    await scenario.requireOriginalAck();expect(await scenario.confirmedLocalIntentCount(),2);expect(scenario.sdkWrites,0);scenario.requireServerReceipts(2);
+  },timeout:const Timeout(Duration(seconds:30)));
 
   test('goals update converte lastReset ISO para Timestamp', () async {
-    final result = await remote.process(
-      'user-123',
-      createGoalUpdateItem({
-        'currentValue': 0,
-        'lastReset': '2026-09-06T10:00:00.000Z',
-      }),
-    );
-
-    expect(result.isSuccess, isTrue);
-    expect(healthDoc.lastUpdateData!['currentValue'], 0);
-    expect(healthDoc.lastUpdateData!['lastReset'], isA<Timestamp>());
-    expect(
-      (healthDoc.lastUpdateData!['lastReset']! as Timestamp)
-          .millisecondsSinceEpoch,
-      DateTime.parse('2026-09-06T10:00:00.000Z').millisecondsSinceEpoch,
-    );
-  });
+    final scenario=await GenuineGoalScenario.create();addTearDown(scenario.close);
+    final result=await scenario.update({'currentValue':0,'lastReset':'2026-09-06T10:00:00.000Z'});
+    expect(result.isSuccess,isTrue);final data=await scenario.readGoal();
+    expect(data['currentValue'],0);expect(data['lastReset'],isA<Timestamp>());
+    expect((data['lastReset'] as Timestamp).millisecondsSinceEpoch,DateTime.parse('2026-09-06T10:00:00.000Z').millisecondsSinceEpoch);
+    await scenario.requireOriginalAck();expect(await scenario.confirmedLocalIntentCount(),2);expect(scenario.sdkWrites,0);scenario.requireServerReceipts(2);
+  },timeout:const Timeout(Duration(seconds:30)));
 
   test('goals update rejeita lastReset inválido sem escrever', () async {
-    final result = await remote.process(
-      'user-123',
-      createGoalUpdateItem({'currentValue': 0, 'lastReset': 'inválido'}),
-    );
-
-    expect(result.isPermanentFailure, isTrue);
-    expect(result.code, 'INVALID_PAYLOAD');
-    expect(healthDoc.updateCalls, 0);
-  });
+    final scenario=await GenuineGoalScenario.create();addTearDown(scenario.close);
+    final before=await scenario.readGoal(),requests=scenario.syncRequests;
+    final result=await scenario.update({'currentValue':0,'lastReset':'inválido'});
+    expect(result.isPermanentFailure,isTrue);expect(result.code,'INVALID_PAYLOAD');expect(scenario.sdkWrites,0);expect(scenario.syncRequests,requests);
+    expect(await scenario.readGoal(),before);expect(await scenario.confirmedLocalIntentCount(),1);scenario.requireServerReceipts(1);
+  },timeout:const Timeout(Duration(seconds:30)));
 
   test('goals update rejeita campo extra sem escrever', () async {
-    final result = await remote.process(
-      'user-123',
-      createGoalUpdateItem({'currentValue': 3, 'unexpectedField': true}),
-    );
-
-    expect(result.isPermanentFailure, isTrue);
-    expect(result.code, 'INVALID_PAYLOAD');
-    expect(healthDoc.updateCalls, 0);
-  });
+    final scenario=await GenuineGoalScenario.create();addTearDown(scenario.close);
+    final before=await scenario.readGoal(),requests=scenario.syncRequests;
+    final result=await scenario.update({'currentValue':3,'unexpectedField':true});
+    expect(result.isPermanentFailure,isTrue);expect(result.code,'INVALID_PAYLOAD');expect(scenario.sdkWrites,0);expect(scenario.syncRequests,requests);
+    expect(await scenario.readGoal(),before);expect(await scenario.confirmedLocalIntentCount(),1);scenario.requireServerReceipts(1);
+  },timeout:const Timeout(Duration(seconds:30)));
 
   test('health_info create com água legada não escreve nem confirma', () async {
     final item = createHealthItem(

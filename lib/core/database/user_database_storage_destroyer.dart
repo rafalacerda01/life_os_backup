@@ -33,6 +33,8 @@ class UserDatabaseStorageDestroyer {
   }
 
   Future<void> destroy(LocalDatabaseIdentity identity) async {
+    if (identity.generation != null && !identity.isBound)
+      throw StateError('LOCAL_GENERATION_BINDING_REQUIRED');
     final files = artifacts(identity, await _directoryProvider());
     for (final file in files) {
       await _deleteFile(file);

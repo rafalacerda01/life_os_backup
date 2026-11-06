@@ -1,3 +1,6 @@
+import 'generational_http_provider.dart';
+import 'package:life_os/core/network/generational_http_transport.dart';
+import 'package:life_os/core/network/generational_http_store.dart';
 import 'dart:async';
 import 'dart:convert';
 
@@ -93,7 +96,9 @@ class ActivityRemoteException implements Exception {
 final activityRemoteDataSourceProvider = Provider<ActivityRemoteDataSource>((
   ref,
 ) {
-  final dataSource = ActivityRemoteDataSource();
+  final dataSource = ActivityRemoteDataSource(
+    trustedTransport: ref.watch(generationalHttpTransportProvider),
+  );
   ref.onDispose(dataSource.close);
   return dataSource;
 });
@@ -105,6 +110,7 @@ class ActivityRemoteDataSource {
   );
   static const Duration defaultTimeout = Duration(seconds: 7);
 
+  final GenerationalHttpTransport? trustedTransport;
   final http.Client _client;
   final ActivityIdTokenProvider _idTokenProvider;
   final ActivityAppCheckTokenProvider _appCheckTokenProvider;
@@ -113,6 +119,7 @@ class ActivityRemoteDataSource {
   final bool _ownsClient;
 
   ActivityRemoteDataSource({
+    this.trustedTransport,
     http.Client? client,
     ActivityIdTokenProvider? idTokenProvider,
     ActivityAppCheckTokenProvider? appCheckTokenProvider,
@@ -132,9 +139,11 @@ class ActivityRemoteDataSource {
 
   Future<ActivityTaskCompletionResponse> completeTask({
     required String taskId,
+    GenerationalHttpIntent? intent,
   }) async {
     final normalizedTaskId = _validateIdentifier(taskId, 'taskId');
     final response = await _post(
+      intent: intent,
       operation: 'task-complete',
       fallbackCode: 'ACTIVITY_TASK_COMPLETION_FAILED',
       payload: {'taskId': normalizedTaskId},
@@ -155,9 +164,11 @@ class ActivityRemoteDataSource {
 
   Future<ActivityHabitCompletionResponse> completeHabit({
     required String habitId,
+    GenerationalHttpIntent? intent,
   }) async {
     final normalizedHabitId = _validateIdentifier(habitId, 'habitId');
     final response = await _post(
+      intent: intent,
       operation: 'habit-complete',
       fallbackCode: 'ACTIVITY_HABIT_COMPLETION_FAILED',
       payload: {'habitId': normalizedHabitId},
@@ -176,6 +187,21 @@ class ActivityRemoteDataSource {
     return parsed;
   }
 
+  Future<GenerationalHttpIntent> prepareTrusted({
+    required String stableKey,
+    required String operation,
+    required Map<String, dynamic> payload,
+  }) {
+    final transport = trustedTransport;
+    if (transport == null)
+      throw const HttpCustodyException('HTTP_TRANSPORT_REQUIRED');
+    return transport.store.prepare(
+      stableKey: stableKey,
+      route: 'activity/$operation',
+      body: payload,
+    );
+  }
+
   void close() {
     if (_ownsClient) _client.close();
   }
@@ -184,7 +210,21 @@ class ActivityRemoteDataSource {
     required String operation,
     required String fallbackCode,
     required Map<String, dynamic> payload,
+    GenerationalHttpIntent? intent,
   }) async {
+    final transport = trustedTransport;
+    if (transport != null) {
+      if (intent == null ||
+          intent.route != 'activity/$operation' ||
+          httpCanonical(intent.body) != httpCanonical(payload)) {
+        throw const HttpCustodyException('HTTP_PREPARED_INTENT_REQUIRED');
+      }
+      final body = await transport.send(intent);
+      return _ActivityHttpResponse(statusCode: 200, json: body);
+    }
+    if (intent != null)
+      throw const HttpCustodyException('HTTP_TRANSPORT_REQUIRED');
+
     final token = await _loadToken(fallbackCode);
     final appCheckToken = await _loadAppCheckToken();
     http.Response response;

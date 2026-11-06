@@ -10,9 +10,10 @@ class TasksNotifier extends Notifier<List<TaskEntity>> {
   }
 
   void _watchLocalTasks() {
-    final repository = ref.read(tasksRepositoryProvider);
+    final repository = ref.watch(tasksRepositoryProvider);
 
-    repository.getTasksStream().listen((taskModels) {
+    final subscription = repository.getTasksStream().listen((taskModels) {
+      if (!ref.mounted) return;
       state = taskModels
           .map(
             (model) => TaskEntity(
@@ -26,6 +27,7 @@ class TasksNotifier extends Notifier<List<TaskEntity>> {
           )
           .toList();
     });
+    ref.onDispose(subscription.cancel);
   }
 
   Future<void> toggleTaskCompletion(String taskId, bool currentStatus) async {

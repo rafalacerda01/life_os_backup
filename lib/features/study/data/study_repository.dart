@@ -1,3 +1,5 @@
+import 'package:life_os/core/database/local_account_session.dart';
+import 'package:life_os/core/services/generational_read_policy.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -162,6 +164,12 @@ class ReviewCreationSyncState {
 }
 
 class StudyRepository {
+  final LocalAccountLease? sessionLease;
+  Future<void> _verifyRemoteRead(String uid) => GenerationalReadPolicy.verify(
+    identity: _db.identity, lease: sessionLease, auth: _auth, store: _firestore, expectedUid: uid);
+  void _requireReadSession(String uid) => GenerationalReadPolicy.requireCurrent(
+    identity: _db.identity, lease: sessionLease, auth: _auth, expectedUid: uid);
+
   static const _dueCardsPredicate =
       '(cards.last_reviewed IS NULL OR cards.last_reviewed < ?)';
 
@@ -177,6 +185,7 @@ class StudyRepository {
     this._firestore,
     this._auth,
     this._syncManager, {
+    this.sessionLease,
     DateTime Function()? reviewNow,
   }) : _reviewNow = reviewNow ?? DateTime.now;
 
@@ -1052,9 +1061,10 @@ class StudyRepository {
 
     try {
       final admission = _db.localMutations.capture(expectedUid: expectedUid);
+      await _verifyRemoteRead(expectedUid);
       final pullStartedAt = DateTime.now().millisecondsSinceEpoch;
       final queueDrained = await _syncManager.processPendingItems();
-      if (!queueDrained || !_isCurrentUser(expectedUid)) return;
+      if ((!queueDrained && _db.identity?.isBound != true) || !_isCurrentUser(expectedUid)) return;
 
       final userRef = _firestore.collection('users').doc(expectedUid);
       final mainDoc = await _getStudyDocument(
@@ -1069,6 +1079,10 @@ class StudyRepository {
         userRef.collection('review_queue'),
       );
       if (flashcardsSnapshot == null) return;
+      await _verifyRemoteRead(expectedUid);
+      if (_db.identity?.generation != null) for (final metadata in [mainDoc.metadata, subjectsSnapshot.metadata, flashcardsSnapshot.metadata]) {
+        if (_db.identity?.generation != null && !GenerationalReadPolicy.accepts(_db.identity, fromCache: metadata.isFromCache, pendingWrites: metadata.hasPendingWrites)) throw StateError('GENERATIONAL_SNAPSHOT_UNCONFIRMED');
+      }
       _requireCurrentUser(expectedUid);
 
       final remoteSubjectDocIds = subjectsSnapshot.docs
@@ -1242,7 +1256,7 @@ class StudyRepository {
     required Set<String> remoteSubjectDocIds,
     required Set<String> remoteFlashcardDocIds,
   }) async {
-    await _db.transaction(admission: admission, waitForReopen: false, () async {
+    await _db.transactionWithCommitGuard(admission: admission, waitForReopen: false, validateBeforeCommit: () => _requireReadSession(expectedUid), () async {
       _requireCurrentUser(expectedUid);
       final authoritativeItems =
           await (_db.select(_db.syncQueueTable)..where(

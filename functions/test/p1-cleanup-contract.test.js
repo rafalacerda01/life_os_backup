@@ -13,6 +13,7 @@ cleanupManifest.removeTree = async options => {
   return options.db.recursiveDelete(options.ref);
 };
 "use strict";
+const reachOrFail=require("./helpers/observed-gate.cjs");
 /* eslint-disable require-jsdoc -- Synthetic MVCC fixture and contract cases. */
 // Offline only: fail on any network or ADC attempt.
 const network = {attempts: 0};
@@ -481,7 +482,7 @@ test("R6B2 peer completes while callback is paused: no new effects after termina
       paused = true; await hold.hold();
     }
   };
-  const first = f.run(); await hold.reached;
+  const first = f.run(); await reachOrFail(hold.reached,first);
   await f.run(); const count = f.effects.length; hold.release(); await first;
   terminal(f, original); assert.equal(f.effects.length, count); assert.ok(f.db.conflicts >= 1);
 });
@@ -1009,7 +1010,7 @@ test("R6C4-D actual normal writer held before commit loses to real R5 retirement
     }
   };
   const writer = assert.rejects(reviewCreate(f, "racing-card"), {code: "ACCOUNT_DELETION_BLOCKED"});
-  await hold.reached; await f.preAuth(); const original = copy(f.db.docs.get(OP));
+  await reachOrFail(hold.reached,writer); await f.preAuth(); const original = copy(f.db.docs.get(OP));
   await f.run(); hold.release(); await writer;
   terminal(f, original); reviewOriginal(f, original); reviewPeerPreserved(f);
   assert.ok(f.db.conflicts >= 1); assert.equal(f.db.docs.has(reviewReceiptPath(UID, "racing-card")), false);
@@ -1026,7 +1027,7 @@ test("R6C4-D actual normal writer commits before held admission; original cleanu
       paused = true; await hold.hold();
     }
   };
-  const retirement = f.preAuth(); await hold.reached;
+  const retirement = f.preAuth(); await reachOrFail(hold.reached,retirement);
   assert.equal((await reviewCreate(f, "racing-card")).outcome, "APPLIED");
   assert.equal(f.db.docs.has(reviewReceiptPath(UID, "racing-card")), true);
   hold.release(); await retirement; const original = copy(f.db.docs.get(OP));

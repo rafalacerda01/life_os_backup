@@ -1,3 +1,5 @@
+import 'package:life_os/core/database/local_account_session.dart';
+import 'package:life_os/core/services/generational_read_policy.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -13,12 +15,18 @@ class _HabitSessionChanged implements Exception {
 }
 
 class HabitsRepository {
+  final LocalAccountLease? sessionLease;
+  Future<void> _verifyRemoteRead(String uid) => GenerationalReadPolicy.verify(
+    identity: _db.identity, lease: sessionLease, auth: _auth, store: _firestore, expectedUid: uid);
+  void _requireReadSession(String uid) => GenerationalReadPolicy.requireCurrent(
+    identity: _db.identity, lease: sessionLease, auth: _auth, expectedUid: uid);
+
   final AppDatabase _db;
   final FirebaseFirestore _firestore;
   final FirebaseAuth _auth;
   final _uuid = const Uuid();
 
-  HabitsRepository(this._db, this._firestore, this._auth);
+  HabitsRepository(this._db, this._firestore, this._auth, {this.sessionLease});
 
   // ===========================================================================
   // 1. LEITURA (STREAMS LOCAIS)
@@ -197,6 +205,7 @@ class HabitsRepository {
     final expectedUid = _auth.currentUser?.uid.trim();
     if (expectedUid == null || expectedUid.isEmpty) return;
     final ticket = _db.localMutations.capture(expectedUid: expectedUid);
+      await _verifyRemoteRead(expectedUid);
 
     try {
       AppLogger.i('SYNC Hábitos: Iniciando...');
@@ -221,9 +230,11 @@ class HabitsRepository {
           .collection('habits')
           .get(const GetOptions(source: Source.server));
       if (_auth.currentUser?.uid != expectedUid) return;
+      await _verifyRemoteRead(expectedUid);
+      if (_db.identity?.generation != null && !GenerationalReadPolicy.accepts(_db.identity, fromCache: snapshot.metadata.isFromCache, pendingWrites: snapshot.metadata.hasPendingWrites)) throw StateError('GENERATIONAL_SNAPSHOT_UNCONFIRMED');
       final remoteDocIds = snapshot.docs.map((doc) => doc.id).toSet();
 
-      await _db.transaction(admission: ticket, waitForReopen: false, () async {
+      await _db.transactionWithCommitGuard(admission: ticket, waitForReopen: false, validateBeforeCommit: () => _requireReadSession(expectedUid), () async {
         void requireCurrentUser() {
           if (_auth.currentUser?.uid != expectedUid) {
             throw const _HabitSessionChanged();

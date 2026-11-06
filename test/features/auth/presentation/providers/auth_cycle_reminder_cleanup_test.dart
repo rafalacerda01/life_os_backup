@@ -1,3 +1,4 @@
+import 'package:life_os/core/services/trusted_account_access.dart';
 import 'package:flutter_riverpod/misc.dart' show ProviderException;
 import 'package:life_os/core/database/remote_send_permit.dart';
 import 'package:life_os/features/health/presentation/providers/health_provider.dart';
@@ -782,6 +783,9 @@ class _Harness {
   Future<T> waitForState<T extends AuthState>() async {
     final current = state;
     if (current is T) return current;
+    if (TrustedAccountAccess.localSessionClosed) {
+      throw StateError('HISTORICAL_FIXTURE_NOT_ADMITTED: TRUSTED_LOCAL_SESSION_CLOSED');
+    }
 
     final completer = Completer<T>();
     late final ProviderSubscription<AuthState> subscription;
@@ -1045,20 +1049,7 @@ class _Harness {
       ],
     );
 
-    beforeAuth?.call(container);
-    if (waitForAuthentication) {
-      final authenticated = Completer<void>();
-      container.listen<AuthState>(authNotifierProvider, (_, next) {
-        if (next is AuthAuthenticated && !authenticated.isCompleted) {
-          authenticated.complete();
-        }
-      }, fireImmediately: true);
-      await authenticated.future;
-    } else {
-      container.read(authNotifierProvider);
-    }
-
-    return _Harness._(
+    final harness = _Harness._(
       auth: auth,
       repository: repository,
       firestore: localFirestore,
@@ -1080,6 +1071,29 @@ class _Harness {
       syncManager: syncManager,
       container: container,
     );
+    try {
+      if (waitForAuthentication && TrustedAccountAccess.localSessionClosed) {
+        throw StateError('HISTORICAL_FIXTURE_NOT_ADMITTED: TRUSTED_LOCAL_SESSION_CLOSED');
+      }
+      beforeAuth?.call(container);
+      if (waitForAuthentication) {
+        final authenticated = Completer<void>();
+        final subscription = container.listen<AuthState>(authNotifierProvider, (_, next) {
+          if (next is AuthAuthenticated && !authenticated.isCompleted) {
+            authenticated.complete();
+          } else if (next is AuthError && next.code == 'TRUSTED_LOCAL_SESSION_CLOSED' && !authenticated.isCompleted) {
+            authenticated.completeError(StateError('HISTORICAL_FIXTURE_NOT_ADMITTED: TRUSTED_LOCAL_SESSION_CLOSED'));
+          }
+        }, fireImmediately: true);
+        try { await authenticated.future; } finally { subscription.close(); }
+      } else {
+        container.read(authNotifierProvider);
+      }
+      return harness;
+    } catch (_) {
+      await harness.dispose();
+      rethrow;
+    }
   }
 
   Future<void> dispose() async {

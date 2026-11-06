@@ -40,7 +40,7 @@ class SessionDatabaseCoordinator {
   SessionDatabasePhase _phase = SessionDatabasePhase.detached;
   int _generation = 0;
   bool _disposed = false;
-  final Set<String> _destroyingUserIds = {};
+  final Set<LocalDatabaseIdentity> _destroyingIdentities = {};
 
   SessionDatabaseSnapshot get snapshot => SessionDatabaseSnapshot(
     _phase,
@@ -76,10 +76,16 @@ class SessionDatabaseCoordinator {
   Future<AppDatabase> prepare(
     String expectedUid, {
     Future<void> Function()? beforePublish,
+    String? identityGeneration,
+    LocalDatabaseIdentity? accountIdentity,
   }) {
-    final identity = LocalDatabaseIdentity(expectedUid);
+    final identity =
+        accountIdentity ??
+        LocalDatabaseIdentity(expectedUid, generation: identityGeneration);
+    if (identity.uid != expectedUid.trim())
+      return Future.error(const SessionDatabaseUnavailable());
     if (_disposed ||
-        _destroyingUserIds.contains(identity.uid) ||
+        _destroyingIdentities.contains(identity) ||
         currentUserId() != identity.uid) {
       return Future.error(const SessionDatabaseUnavailable());
     }
@@ -132,7 +138,12 @@ class SessionDatabaseCoordinator {
   }
 
   Future<void> detach({required String expectedUid}) {
-    final identity = LocalDatabaseIdentity(expectedUid);
+    // Capture the exact attached/requested generation before asynchronous close.
+    final identity = _database?.identity?.uid == expectedUid
+        ? _database!.identity!
+        : _requestedIdentity?.uid == expectedUid
+        ? _requestedIdentity!
+        : LocalDatabaseIdentity(expectedUid);
     if (_database?.identity != identity && _requestedIdentity != identity) {
       return Future<void>.value();
     }
@@ -165,7 +176,7 @@ class SessionDatabaseCoordinator {
     LocalDatabaseIdentity identity,
     Future<void> Function() destroyStorage,
   ) {
-    _destroyingUserIds.add(identity.uid);
+    _destroyingIdentities.add(identity);
     if (_requestedIdentity == identity) {
       _requestedIdentity = null;
       _generation++;
@@ -182,7 +193,7 @@ class SessionDatabaseCoordinator {
 
   void _requireRequest(LocalDatabaseIdentity identity, int generation) {
     if (_disposed ||
-        _destroyingUserIds.contains(identity.uid) ||
+        _destroyingIdentities.contains(identity) ||
         _generation != generation ||
         _requestedIdentity != identity ||
         currentUserId() != identity.uid) {

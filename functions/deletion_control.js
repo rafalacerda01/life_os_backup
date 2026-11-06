@@ -3,6 +3,7 @@
 
 const {createHash} = require("node:crypto");
 const {Timestamp} = require("firebase-admin/firestore");
+const trustedAccount = require("./trusted_account");
 
 const UUID = new RegExp("^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-" +
     "[89ab][0-9a-f]{3}-[0-9a-f]{12}$");
@@ -730,5 +731,41 @@ function createController(options) {
 }
 
 module.exports = {DeletionControlError, references, validateBinding,
+  assertNormalWriterTransaction, withNormalWriterTransactions,
   validateReservation, validateGuard, validateBirth, validateControl,
   classify, createController};
+
+// Normal writers get no cleanup handle, authority or state transition. Presence
+// of ANY control is deny-only, including legacy/malformed/expired documents.
+// Missing snapshots are read in the mutation transaction on every SDK retry.
+async function assertNormalWriterTransaction(transaction, db, accountUid) {
+  try {
+    if (!uid(accountUid) || !db || typeof db.collection !== "function" ||
+        !transaction || typeof transaction.get !== "function") {
+      fail("ACCOUNT_DELETION_BLOCKED");
+    }
+    const guard = db.collection("account_deletion_guards").doc(accountUid);
+    const retired = db.collection("retired_auth_identities").doc(accountUid);
+    const operation = guard.collection("control").doc("operation");
+    for (const ref of [guard, retired, operation]) {
+      const snapshot = await transaction.get(ref);
+      if (!snapshot || snapshot.exists !== false ||
+          typeof snapshot.data !== "function" || snapshot.data() !== undefined) {
+        fail("ACCOUNT_DELETION_BLOCKED");
+      }
+    }
+    await trustedAccount.assertWriterTransaction(transaction, db, accountUid);
+  } catch (_) {
+    // Neither a read error nor an unknown snapshot is evidence of absence.
+    fail("ACCOUNT_DELETION_BLOCKED");
+  }
+}
+function withNormalWriterTransactions(db, accountUid) {
+  if (!uid(accountUid) || !db || typeof db.collection !== "function" ||
+      typeof db.runTransaction !== "function") fail("ACCOUNT_DELETION_BLOCKED");
+  return Object.freeze({collection: db.collection.bind(db),
+    runTransaction: (callback, ...options) => db.runTransaction(async transaction => {
+      await assertNormalWriterTransaction(transaction, db, accountUid);
+      return callback(transaction);
+    }, ...options)});
+}

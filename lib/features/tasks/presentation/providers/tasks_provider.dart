@@ -1,4 +1,9 @@
+import 'package:life_os/core/database/local_account_session.dart';
+import 'package:life_os/core/services/trusted_account_access.dart';
+import 'package:uuid/uuid.dart';
 import 'dart:async';
+import 'package:life_os/core/services/firebase_auth_provider.dart';
+import 'package:life_os/core/services/emulator_account_runtime.dart';
 import 'dart:convert';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -18,7 +23,10 @@ import 'package:life_os/features/tasks/data/models/task_model.dart';
 final tasksRepositoryProvider = Provider((ref) {
   final db = ref.watch(databaseProvider);
 
-  return TasksRepository(db, FirebaseFirestore.instance, FirebaseAuth.instance);
+  final session = ref.watch(localAccountSessionProvider);
+  return TasksRepository(db, ref.watch(firebaseFirestoreProvider), ref.watch(firebaseAuthProvider),
+      sessionLease: db.identity?.isBound == true && session.identity == db.identity
+          ? ref.read(localAccountSessionProvider.notifier).capture() : null);
 });
 
 typedef ManualTaskStatusToggle =
@@ -26,6 +34,9 @@ typedef ManualTaskStatusToggle =
 
 final manualTaskStatusToggleProvider = Provider<ManualTaskStatusToggle>((ref) {
   final repository = ref.watch(tasksRepositoryProvider);
+  if (ref.watch(emulatorAccountRuntimeProvider) != null) {
+    return (taskId, currentStatus) => repository.toggleTaskStatus(taskId, currentStatus);
+  }
   final analytics = ref.watch(analyticsServiceProvider);
   final isSessionActive = ref.watch(analyticsSessionActiveProvider);
   return (taskId, currentStatus) async {
@@ -41,7 +52,7 @@ final manualTaskStatusToggleProvider = Provider<ManualTaskStatusToggle>((ref) {
 // STREAM PROVIDER
 // ============================================================================
 
-final tasksStreamProvider = StreamProvider<List<TaskModel>>((ref) {
+final tasksStreamProvider = StreamProvider.autoDispose<List<TaskModel>>((ref) {
   final repository = ref.watch(tasksRepositoryProvider);
 
   return repository.getTasksStream();
@@ -60,7 +71,8 @@ class TasksRepository {
   final FirebaseFirestore _firestore;
   final FirebaseAuth _auth;
 
-  TasksRepository(this._db, this._firestore, this._auth);
+  final LocalAccountLease? sessionLease;
+  TasksRepository(this._db, this._firestore, this._auth, {this.sessionLease});
 
   // ==========================================================================
   // LEITURA LOCAL
@@ -92,6 +104,18 @@ class TasksRepository {
     final ticket = _db.localMutations.capture(expectedUid: expectedUid);
 
     try {
+      Future<void> verifyGeneration() async {
+        if (_db.identity?.isBound != true) return;
+        final lease = sessionLease;
+        if (lease == null || lease.identity != _db.identity) {
+          throw StateError('TASKS_READ_CUSTODY_REQUIRED');
+        }
+        lease.requireCurrent();
+        final admitted = await TrustedAccountAccess.admittedIdentity(_auth, _firestore, expectedUid);
+        lease.requireCurrent();
+        if (admitted != _db.identity) throw const _TaskSessionChanged();
+      }
+      await verifyGeneration();
       final pullStartedAt = DateTime.now().millisecondsSinceEpoch;
       final pendingAtPullStart =
           await (_db.select(_db.syncQueueTable)..where(
@@ -111,9 +135,15 @@ class TasksRepository {
           .collection('tasks')
           .get(const GetOptions(source: Source.server));
       if (_auth.currentUser?.uid != expectedUid) return;
+      if (_db.identity?.isBound == true &&
+          (snapshot.metadata.isFromCache || snapshot.metadata.hasPendingWrites)) return;
+      await verifyGeneration();
       final remoteDocIds = snapshot.docs.map((doc) => doc.id).toSet();
 
-      await _db.transaction(admission: ticket, waitForReopen: false, () async {
+      await _db.transactionWithCommitGuard(admission: ticket, waitForReopen: false, validateBeforeCommit: () {
+        sessionLease?.requireCurrent();
+        if (_auth.currentUser?.uid != expectedUid) throw const _TaskSessionChanged();
+      }, () async {
         void requireCurrentUser() {
           if (_auth.currentUser?.uid != expectedUid) {
             throw const _TaskSessionChanged();
@@ -197,7 +227,7 @@ class TasksRepository {
       throw Exception('Usuário não autenticado');
     }
 
-    final id = DateTime.now().millisecondsSinceEpoch.toString();
+    final id = const Uuid().v4();
 
     final createdAt = DateTime.now();
 

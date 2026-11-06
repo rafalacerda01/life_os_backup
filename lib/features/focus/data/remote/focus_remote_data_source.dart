@@ -1,3 +1,5 @@
+import 'package:life_os/core/network/generational_http_transport.dart';
+import 'package:life_os/core/network/generational_http_store.dart';
 import 'dart:async';
 import 'dart:convert';
 
@@ -141,6 +143,7 @@ class FocusRemoteDataSource {
 
   static const Set<int> _allowedDurations = {60, 180, 600, 1500, 2700};
 
+  final GenerationalHttpTransport? trustedTransport;
   final http.Client _client;
   final FocusIdTokenProvider _idTokenProvider;
   final FocusAppCheckTokenProvider _appCheckTokenProvider;
@@ -150,6 +153,7 @@ class FocusRemoteDataSource {
   final RemoteSendPermit Function() _captureRemoteSend;
 
   FocusRemoteDataSource({
+    this.trustedTransport,
     http.Client? client,
     FocusIdTokenProvider? idTokenProvider,
     FocusAppCheckTokenProvider? appCheckTokenProvider,
@@ -175,6 +179,7 @@ class FocusRemoteDataSource {
     required FocusRemoteTargetType targetType,
     required int plannedDurationSeconds,
     RemoteSendPermit? admission,
+    GenerationalHttpIntent? intent,
   }) async {
     final normalizedTargetId = _validateRequestIdentifier(targetId, 'targetId');
     if (!_allowedDurations.contains(plannedDurationSeconds)) {
@@ -182,6 +187,7 @@ class FocusRemoteDataSource {
     }
 
     final response = await _post(
+      intent: intent,
       operation: 'start',
       admission: admission,
       fallbackCode: 'FOCUS_START_FAILED',
@@ -206,8 +212,10 @@ class FocusRemoteDataSource {
   Future<FocusFinishResponse> finishFocus({
     required String sessionId,
     RemoteSendPermit? admission,
+    GenerationalHttpIntent? intent,
   }) async {
     final response = await _post(
+      intent: intent,
       operation: 'finish',
       admission: admission,
       fallbackCode: 'FOCUS_FINISH_FAILED',
@@ -226,8 +234,10 @@ class FocusRemoteDataSource {
   Future<FocusCancelResponse> cancelFocus({
     required String sessionId,
     RemoteSendPermit? admission,
+    GenerationalHttpIntent? intent,
   }) async {
     final response = await _post(
+      intent: intent,
       operation: 'cancel',
       admission: admission,
       fallbackCode: 'FOCUS_CANCEL_FAILED',
@@ -243,6 +253,73 @@ class FocusRemoteDataSource {
     );
   }
 
+  Future<GenerationalHttpIntent> prepareTrusted({
+    required String stableKey,
+    required String operation,
+    required Map<String, dynamic> payload,
+  }) async {
+    final transport = trustedTransport;
+    if (transport == null)
+      throw const HttpCustodyException('HTTP_TRANSPORT_REQUIRED');
+    transport.lease.requireCurrent();
+    if (operation == 'start') {
+      final pending = (await transport.store.pending())
+          .where(
+            (i) => i.route.startsWith('focus/') && i.route != 'focus/status',
+          )
+          .toList();
+      transport.lease.requireCurrent();
+      if (pending.isNotEmpty) {
+        if (pending.length == 1 &&
+            pending.single.route == 'focus/start' &&
+            httpCanonical(pending.single.body) == httpCanonical(payload))
+          return pending.single;
+        throw const HttpCustodyException('FOCUS_PENDING_REVIEW_REQUIRED');
+      }
+    }
+    return transport.store.prepare(
+      stableKey: stableKey,
+      route: 'focus/$operation',
+      body: payload,
+    );
+  }
+
+  Future<int?> reconcileRunning({
+    required String sessionId,
+    required String targetId,
+    required FocusRemoteTargetType targetType,
+    required int plannedDurationSeconds,
+  }) async {
+    final intent = await prepareTrusted(
+      stableKey: 'focus/status/$sessionId',
+      operation: 'status',
+      payload: {'sessionId': sessionId},
+    );
+    final response = await _post(
+      operation: 'status',
+      fallbackCode: 'FOCUS_STATUS_FAILED',
+      payload: {'sessionId': sessionId},
+      intent: intent,
+    );
+    final d = response.json;
+    if (d['sessionId'] != sessionId ||
+        d['targetId'] != targetId ||
+        d['targetType'] != targetType.backendValue ||
+        d['plannedDurationSeconds'] != plannedDurationSeconds ||
+        ![
+          'RUNNING',
+          'COMPLETED',
+          'CANCELLED',
+          'EXPIRED',
+        ].contains(d['status']) ||
+        d['remainingSeconds'] is! int ||
+        d['remainingSeconds'] < 0 ||
+        d['remainingSeconds'] > plannedDurationSeconds) {
+      throw const HttpCustodyException('FOCUS_STATUS_INVALID');
+    }
+    return d['status'] == 'RUNNING' ? d['remainingSeconds'] as int : null;
+  }
+
   void close() {
     if (_ownsClient) _client.close();
   }
@@ -252,7 +329,21 @@ class FocusRemoteDataSource {
     required String fallbackCode,
     required Map<String, dynamic> payload,
     RemoteSendPermit? admission,
+    GenerationalHttpIntent? intent,
   }) async {
+    final transport = trustedTransport;
+    if (transport != null) {
+      if (intent == null ||
+          intent.route != 'focus/$operation' ||
+          httpCanonical(intent.body) != httpCanonical(payload)) {
+        throw const HttpCustodyException('HTTP_PREPARED_INTENT_REQUIRED');
+      }
+      final body = await transport.send(intent);
+      return _FocusHttpResponse(statusCode: 200, json: body);
+    }
+    if (intent != null)
+      throw const HttpCustodyException('HTTP_TRANSPORT_REQUIRED');
+
     final RemoteSendPermit permit;
     try {
       permit = admission ?? _captureRemoteSend();

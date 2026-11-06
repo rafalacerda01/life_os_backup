@@ -1,3 +1,4 @@
+import 'package:life_os/core/database/local_database_identity.dart';
 import 'dart:convert';
 import 'dart:math';
 
@@ -11,8 +12,10 @@ class PendingAccountDeletion {
     required this.phase,
     required this.revision,
     this.hasAuthoritativeConfirmation = false,
+    this.identity,
   });
 
+  final LocalDatabaseIdentity? identity;
   final String userId;
   final AccountDeletionPhase phase;
   final String revision;
@@ -21,27 +24,48 @@ class PendingAccountDeletion {
   @override
   bool operator ==(Object other) =>
       other is PendingAccountDeletion &&
+      other.identity == identity &&
       other.userId == userId &&
       other.phase == phase &&
       other.revision == revision &&
       other.hasAuthoritativeConfirmation == hasAuthoritativeConfirmation;
   @override
-  int get hashCode =>
-      Object.hash(userId, phase, revision, hasAuthoritativeConfirmation);
+  int get hashCode => Object.hash(
+    identity,
+    userId,
+    phase,
+    revision,
+    hasAuthoritativeConfirmation,
+  );
 }
 
 /// Independent from the non-destructive logout/isolation marker.
 class AccountDeletionCleanupBarrier {
-  AccountDeletionCleanupBarrier(this._storage);
+  AccountDeletionCleanupBarrier(
+    AuthCleanupBarrierStorage storage, {
+    LocalDatabaseIdentity? identity,
+    Future<Set<String>> Function()? listKeys,
+  }) : _identity = identity,
+       _storage = identity == null
+           ? storage
+           : IdentityAuthCleanupStorage(
+               storage,
+               identity,
+               domain: 'account_cleanup',
+               listKeys: listKeys,
+             );
 
   static const storageKey = 'life_os_account_deletion_cleanup_v1';
   static const storageVersion = 3;
   static Future<void> _tail = Future<void>.value();
+  final LocalDatabaseIdentity? _identity;
   final AuthCleanupBarrierStorage _storage;
 
   Future<PendingAccountDeletion?> readForUser(String uid) =>
       _serialize(() async {
         final normalized = _normalizeUid(uid);
+        if (_identity != null && _identity.uid != normalized)
+          throw StateError("LOCAL_OWNER_MISMATCH");
         return _forUser(await _read(), normalized);
       });
 
@@ -101,6 +125,7 @@ class AccountDeletionCleanupBarrier {
       List<int>.generate(16, (_) => random.nextInt(256)),
     ).replaceAll('=', '');
     return PendingAccountDeletion(
+      identity: _identity,
       userId: uid,
       phase: phase,
       revision: revision,
@@ -199,7 +224,10 @@ class AccountDeletionCleanupBarrier {
         )) {
       throw const FormatException('ACCOUNT_DELETION_MARKER_INVALID');
     }
+    if (_identity != null && value['uid'] != _identity.uid)
+      throw const FormatException('LOCAL_OWNER_MISMATCH');
     return PendingAccountDeletion(
+      identity: _identity,
       userId: value['uid'] as String,
       phase: AccountDeletionPhase.values.firstWhere(
         (phase) => phase.name == value['phase'],

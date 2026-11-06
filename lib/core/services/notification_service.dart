@@ -1,3 +1,4 @@
+import 'native_notification_registry.dart';
 import 'dart:async';
 import 'dart:io';
 import 'dart:math';
@@ -170,9 +171,17 @@ class NotificationService {
   // PERMISSÕES
   // ---------------------------------------------------------------------------
 
-  Future<bool> requestPermissions({String? preferenceKey}) async {
+  Future<bool> requestPermissions({String? preferenceKey}) =>
+      _requestPermissions(preferenceKey: preferenceKey);
+  Future<bool> requestOwnedPermissions() =>
+      _requestPermissions(skipLegacyPreference: true);
+  Future<bool> _requestPermissions({
+    String? preferenceKey,
+    bool skipLegacyPreference = false,
+  }) async {
     try {
-      if (!await _isEnabled(preferenceKey)) return false;
+      if (!skipLegacyPreference && !await _isEnabled(preferenceKey))
+        return false;
 
       await init();
 
@@ -267,11 +276,15 @@ class NotificationService {
         iOS: DarwinNotificationDetails(),
       );
 
-      await _notificationsPlugin.show(
-        id: id ?? Random().nextInt(100000),
-        title: title,
-        body: body,
-        notificationDetails: notificationDetails,
+      final actualId = id ?? Random().nextInt(100000);
+      await _legacyEffect(
+        actualId,
+        () => _notificationsPlugin.show(
+          id: actualId,
+          title: title,
+          body: body,
+          notificationDetails: notificationDetails,
+        ),
       );
     } catch (_) {
       // Notificações nunca devem quebrar o fluxo principal do aplicativo.
@@ -338,17 +351,20 @@ class NotificationService {
         iOS: DarwinNotificationDetails(),
       );
 
-      await _notificationsPlugin.zonedSchedule(
-        id: id,
-        title: title,
-        body: body,
-        scheduledDate: nativeDate,
-        notificationDetails: notificationDetails,
+      await _legacyEffect(
+        id,
+        () => _notificationsPlugin.zonedSchedule(
+          id: id,
+          title: title,
+          body: body,
+          scheduledDate: nativeDate,
+          notificationDetails: notificationDetails,
 
-        androidScheduleMode: scheduleMode,
+          androidScheduleMode: scheduleMode,
 
-        matchDateTimeComponents: repeatDaily ? DateTimeComponents.time : null,
-        payload: payload,
+          matchDateTimeComponents: repeatDaily ? DateTimeComponents.time : null,
+          payload: payload,
+        ),
       );
 
       return true;
@@ -464,15 +480,18 @@ class NotificationService {
         ),
       );
 
-      await _notificationsPlugin.zonedSchedule(
-        id: id,
-        title: title,
-        body: body,
-        scheduledDate: _wallClockInLocation(scheduledDate, location),
-        notificationDetails: notificationDetails,
-        androidScheduleMode: scheduleMode,
-        matchDateTimeComponents: matchDateTimeComponents,
-        payload: payload,
+      await _legacyEffect(
+        id,
+        () => _notificationsPlugin.zonedSchedule(
+          id: id,
+          title: title,
+          body: body,
+          scheduledDate: _wallClockInLocation(scheduledDate, location),
+          notificationDetails: notificationDetails,
+          androidScheduleMode: scheduleMode,
+          matchDateTimeComponents: matchDateTimeComponents,
+          payload: payload,
+        ),
       );
 
       return true;
@@ -487,7 +506,7 @@ class NotificationService {
   Future<bool> cancelCycleReminderNotification(int id) async {
     try {
       await init();
-      await _notificationsPlugin.cancel(id: id);
+      await _legacyEffect(id, () => _notificationsPlugin.cancel(id: id));
       return true;
     } catch (_) {
       return false;
@@ -508,7 +527,7 @@ class NotificationService {
 
   Future<void> cancelNotificationOrThrow(int id) async {
     await init();
-    await _notificationsPlugin.cancel(id: id);
+    await _legacyEffect(id, () => _notificationsPlugin.cancel(id: id));
   }
 
   Future<List<PendingNotificationRequest>> pendingNotificationRequests() async {
@@ -530,7 +549,140 @@ class NotificationService {
 
   Future<void> cancelAllNotificationsOrThrow() async {
     await init();
-    await _notificationsPlugin.cancelAll();
+    // Broad cancelAll can erase a later generation. Enumerate legacy entries;
+    // bound owners use tags and their own durable registry/facade.
+    final pending = await _notificationsPlugin.pendingNotificationRequests();
+    final active = await _notificationsPlugin.getActiveNotifications();
+    final protectedIds = {
+      ...pending
+          .where((p) => p.payload?.startsWith('life_os_owned_v2:') == true)
+          .map((p) => p.id),
+      ...active
+          .where((p) => p.tag?.startsWith('lifeos:') == true)
+          .map((p) => p.id)
+          .whereType<int>(),
+    };
+    for (final id in {
+      ...pending.map((p) => p.id),
+      ...active.map((p) => p.id).whereType<int>(),
+    }) {
+      if (!protectedIds.contains(id))
+        await _legacyEffect(id, () => _notificationsPlugin.cancel(id: id));
+    }
+  }
+
+  Future<T> _legacyEffect<T>(
+    int id,
+    Future<T> Function() effect,
+  ) => NativeNotificationEffectGate.run(() async {
+    final pending = await _notificationsPlugin.pendingNotificationRequests();
+    final active = await _notificationsPlugin.getActiveNotifications();
+    if (pending.any(
+          (p) =>
+              p.id == id &&
+              p.payload?.startsWith(ownedNotificationPrefix) == true,
+        ) ||
+        active.any((p) => p.id == id && p.tag?.startsWith('lifeos:') == true)) {
+      throw StateError('NATIVE_GENERATIONAL_OWNER_PROTECTED');
+    }
+    return effect();
+  });
+
+  Future<List<ActiveNotification>> activeNotificationRequests() async {
+    await init();
+    return _notificationsPlugin.getActiveNotifications();
+  }
+
+  Future<void> cancelOwnedNotification(int id, String tag) async {
+    await init();
+    await _notificationsPlugin.cancel(id: id, tag: tag);
+  }
+
+  Future<bool> scheduleOwnedNotification({
+    required int id,
+    required String tag,
+    required String payload,
+    required String kind,
+    required String title,
+    required String body,
+    required DateTime scheduledDate,
+    bool repeatDaily = false,
+    int? weekday,
+    bool includeDoneAction = false,
+    bool snooze = false,
+    bool immediate = false,
+    bool Function()? canSend,
+  }) async {
+    void permit() {
+      if (canSend?.call() != true) throw StateError('NATIVE_SCOPE_CLOSED');
+    }
+
+    permit();
+    await init();
+    permit();
+    if (!_isAndroid) throw StateError('OWNED_NATIVE_PLATFORM_CLOSED');
+    final mode = await _canScheduleExactNotifications()
+        ? AndroidScheduleMode.exactAllowWhileIdle
+        : AndroidScheduleMode.inexactAllowWhileIdle;
+    permit();
+    final location = await _resolveTimeZoneLocation();
+    permit();
+    final details = NotificationDetails(
+      android: AndroidNotificationDetails(
+        'life_os_owned_notifications',
+        'Lembretes Life OS',
+        tag: tag,
+        importance: Importance.max,
+        priority: Priority.high,
+        actions: kind == 'cycle'
+            ? [
+                const AndroidNotificationAction(
+                  cycleReminderSnoozeActionId,
+                  'Adiar',
+                  showsUserInterface: true,
+                  cancelNotification: true,
+                ),
+                if (includeDoneAction)
+                  const AndroidNotificationAction(
+                    cycleReminderDoneActionId,
+                    'Concluído',
+                    showsUserInterface: true,
+                    cancelNotification: true,
+                  ),
+              ]
+            : null,
+      ),
+    );
+    permit();
+    if (immediate) {
+      await _notificationsPlugin.show(
+        id: id,
+        title: title,
+        body: body,
+        notificationDetails: details,
+        payload: payload,
+      );
+      return true;
+    }
+    final date = repeatDaily
+        ? nextDailyMedicationOccurrence(scheduledDate, _now())
+        : scheduledDate;
+    permit();
+    await _notificationsPlugin.zonedSchedule(
+      id: id,
+      title: title,
+      body: body,
+      scheduledDate: _wallClockInLocation(date, location),
+      notificationDetails: details,
+      payload: payload,
+      androidScheduleMode: mode,
+      matchDateTimeComponents: weekday != null
+          ? DateTimeComponents.dayOfWeekAndTime
+          : repeatDaily
+          ? DateTimeComponents.time
+          : null,
+    );
+    return true;
   }
 
   Future<bool> _isEnabled(String? preferenceKey) async {

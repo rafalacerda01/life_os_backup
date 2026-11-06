@@ -1,11 +1,11 @@
+import 'package:life_os/core/services/emulator_account_runtime.dart';
 import 'dart:async';
+import 'package:life_os/core/services/trusted_account_access.dart';
 
 import 'package:firebase_auth/firebase_auth.dart' as fb;
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/foundation.dart';
 import 'package:life_os/core/services/water_v2_configuration.dart';
-import 'package:life_os/core/services/water_v2_remote_data_source.dart';
-import 'package:life_os/core/database/remote_send_permit.dart';
 import 'package:multiple_result/multiple_result.dart';
 import '../../../../core/errors/failure.dart';
 import '../../domain/entities/user_entity.dart';
@@ -45,6 +45,7 @@ class AuthRepositoryImpl implements AuthRepository {
     'avatar_neural',
   };
 
+  final EmulatorAccountRuntime? emulatorRuntime;
   final fb.FirebaseAuth _firebaseAuth;
   final FirebaseFirestore _firestore;
   final AccountRemoteDataSource _accountRemoteDataSource;
@@ -57,6 +58,7 @@ class AuthRepositoryImpl implements AuthRepository {
     // Public test seam keeps the production flag immutable.
     // ignore: prefer_initializing_formals
     Future<void> Function(fb.User)? waterProfileProvisioner,
+    this.emulatorRuntime,
     // ignore: prefer_initializing_formals
   }) : _waterProfileProvisioner = waterProfileProvisioner;
 
@@ -74,6 +76,13 @@ class AuthRepositoryImpl implements AuthRepository {
   Future<Result<void, Failure>> deleteAccount({
     required String expectedUid,
   }) async {
+    if (TrustedAccountAccess.localSessionClosed) {
+      return const Error(AuthFailure(
+        'Esta coorte aguarda a habilitação segura dos dados locais.',
+        code: 'TRUSTED_LOCAL_SESSION_CLOSED',
+      ));
+    }
+
     final normalizedExpectedUid = expectedUid.trim();
     final user = _firebaseAuth.currentUser;
     if (normalizedExpectedUid.isEmpty ||
@@ -151,6 +160,15 @@ class AuthRepositoryImpl implements AuthRepository {
     String email,
     String password,
   ) async {
+    if (TrustedAccountAccess.localSessionClosed && emulatorRuntime == null) {
+      return const Error(AuthFailure(
+        'Esta coorte aguarda a habilitação segura dos dados locais.',
+        code: 'TRUSTED_LOCAL_SESSION_CLOSED',
+      ));
+    }
+
+    emulatorRuntime?.requireClients(_firebaseAuth, _firestore);
+
     try {
       final credential = await _firebaseAuth.signInWithEmailAndPassword(
         email: InputSanitizer.sanitize(email),
@@ -175,6 +193,15 @@ class AuthRepositoryImpl implements AuthRepository {
     String password,
     String name,
   ) async {
+    if (TrustedAccountAccess.localSessionClosed && emulatorRuntime == null) {
+      return const Error(AuthFailure(
+        'Esta coorte aguarda a habilitação segura dos dados locais.',
+        code: 'TRUSTED_LOCAL_SESSION_CLOSED',
+      ));
+    }
+
+    emulatorRuntime?.requireClients(_firebaseAuth, _firestore);
+
     try {
       final credential = await _firebaseAuth.createUserWithEmailAndPassword(
         email: InputSanitizer.sanitize(email),
@@ -190,8 +217,7 @@ class AuthRepositoryImpl implements AuthRepository {
         fallbackEmail: InputSanitizer.sanitize(email),
         fallbackDisplayName: InputSanitizer.sanitize(name),
       );
-      if ((WaterV2Configuration.enabled || _waterProfileProvisioner != null) &&
-          provisioned.isSuccess()) {
+      if (provisioned.isSuccess()) {
         // The server creates the profile/admission. A normal profile update
         // preserves the entered name without changing the immutable birth proof.
         return updateProfile(
@@ -209,6 +235,13 @@ class AuthRepositoryImpl implements AuthRepository {
 
   @override
   Future<Result<UserEntity, Failure>> signInWithGoogle() async {
+    if (TrustedAccountAccess.localSessionClosed) {
+      return const Error(AuthFailure(
+        'Esta coorte aguarda a habilitação segura dos dados locais.',
+        code: 'TRUSTED_LOCAL_SESSION_CLOSED',
+      ));
+    }
+
     try {
       final googleSignIn = GoogleSignIn.instance;
 
@@ -297,6 +330,15 @@ class AuthRepositoryImpl implements AuthRepository {
 
   @override
   Future<Result<UserEntity, Failure>> getCurrentUser() async {
+    if (TrustedAccountAccess.localSessionClosed && emulatorRuntime == null) {
+      return const Error(AuthFailure(
+        'Esta coorte aguarda a habilitação segura dos dados locais.',
+        code: 'TRUSTED_LOCAL_SESSION_CLOSED',
+      ));
+    }
+
+    emulatorRuntime?.requireClients(_firebaseAuth, _firestore);
+
     try {
       final currentUser = _firebaseAuth.currentUser;
 
@@ -311,7 +353,7 @@ class AuthRepositoryImpl implements AuthRepository {
   }
 
   Future<Result<UserEntity, Failure>> _getUserFromFirestore(String uid) async {
-    final doc = await _firestore.collection('users').doc(uid).get();
+    final doc = await _firestore.collection('users').doc(uid).get(const GetOptions(source: Source.server));
 
     if (!doc.exists) {
       return const Error(
@@ -343,6 +385,12 @@ class AuthRepositoryImpl implements AuthRepository {
 
     try {
       final userRef = _firestore.collection('users').doc(uid);
+      final runtime = emulatorRuntime;
+      runtime?.requireClients(_firebaseAuth, _firestore);
+      final generation = runtime == null
+          ? await TrustedAccountAccess.ensureReady(_firebaseAuth, _firestore, uid)
+          : (await runtime.admit(uid)).generation!;
+      checkSession();
       if (serverProfile) {
         checkSession();
         authSubscription = _firebaseAuth.authStateChanges().listen((current) {
@@ -352,98 +400,34 @@ class AuthRepositoryImpl implements AuthRepository {
           initialAuthEvent = false;
         }, onError: (Object _) => sessionCurrent = false);
         // An existing cached profile restores Auth offline; it grants no Water admission.
-        final existing = await userRef.get().timeout(
+        final existing = await userRef.get(const GetOptions(source: Source.server)).timeout(
           const Duration(seconds: 5),
         );
         checkSession();
-        if (existing.exists)
+        if (existing.exists && !existing.metadata.isFromCache && !existing.metadata.hasPendingWrites &&
+            existing.data()?['_lifeosGeneration'] == generation)
           return Success(
             UserModel.fromFirestore(existing.data()!, existing.id),
           );
-        if (_waterProfileProvisioner != null) {
-          await _waterProfileProvisioner(firebaseUser);
-        } else {
-          final remote = WaterV2RemoteDataSource(
-            _firebaseAuth,
-            captureRemoteSend: (targetUid) =>
-                RemoteSendPermit(() => targetUid == uid && sameSession()),
-          );
-          final result = await remote.bootstrap(
-            firebaseUser.uid,
-            DateTime.now().timeZoneOffset.inMinutes,
-            RemoteSendPermit(sameSession),
-          );
-          checkSession();
-          if (result.error?.code == 'ACCOUNT_DELETION_BLOCKED')
-            return const Error(
-              AuthFailure(
-                'A conta está em exclusão.',
-                code: 'ACCOUNT_DELETION_BLOCKED',
-              ),
-            );
-          if (result.value?.state == 'NOT_ELIGIBLE')
-            return const Error(
-              AuthFailure(
-                'A conta precisa de revisão antes de ser preparada.',
-                code: 'WATER_NOT_ELIGIBLE',
-              ),
-            );
-          if (result.value == null ||
-              !{'READY', 'LEGACY'}.contains(result.value!.state)) {
-            return _profileProvisionPending();
-          }
-        }
-        checkSession();
-        // READY does not make a separate Firestore read atomic with bootstrap.
-        return await _readProvisionedProfile(userRef, checkSession);
+        // No alternate domain can authorize or restore a missing profile.
+        return _profileProvisionPending();
       }
-      final doc = await userRef.get();
+      final doc = await userRef.get(const GetOptions(source: Source.server));
 
-      if (doc.exists) {
+      if (doc.exists && !doc.metadata.isFromCache && !doc.metadata.hasPendingWrites && doc.data()?['_lifeosGeneration'] == generation) {
         return Success(UserModel.fromFirestore(doc.data()!, doc.id));
       }
 
-      final newUser = UserModel(
-        uid: firebaseUser.uid,
-        email: InputSanitizer.sanitize(
-          fallbackEmail ?? firebaseUser.email ?? '',
-        ),
-        displayName: InputSanitizer.sanitize(
-          fallbackDisplayName ?? firebaseUser.displayName ?? 'Novo Usuário',
-        ),
-        photoUrl: firebaseUser.photoURL,
-        isPremium: false,
-        xp: 0,
-        level: 1,
-        streak: 0,
-      );
-
-      try {
-        await userRef.set({
-          ...newUser.toFirestore(),
-          'habitsCount': 0,
-          'tasksCount': 0,
-          'goalsCount': 0,
-          'subjectsCount': 0,
-          'medicationsCount': 0,
-          'transactionsCount': 0,
-        });
-      } catch (_) {
-        try {
-          final reconciledDoc = await userRef.get();
-          if (reconciledDoc.exists) {
-            return Success(
-              UserModel.fromFirestore(reconciledDoc.data()!, reconciledDoc.id),
-            );
-          }
-        } catch (_) {
-          return _profileProvisionFailure();
-        }
-        return _profileProvisionFailure();
-      }
-
-      return Success(newUser);
+      return _profileProvisionPending();
     } catch (error) {
+      if (error is TrustedAccountPending) {
+        return Error(
+          AuthFailure(
+            'A conta precisa de preparo ou revisão de origem.',
+            code: error.code,
+          ),
+        );
+      }
       if (serverProfile && !sameSession()) {
         return const Error(
           AuthFailure(
@@ -468,44 +452,11 @@ class AuthRepositoryImpl implements AuthRepository {
     }
   }
 
-  Future<Result<UserEntity, Failure>> _readProvisionedProfile(
-    DocumentReference<Map<String, dynamic>> userRef,
-    void Function() checkSession,
-  ) async {
-    const delays = [
-      Duration.zero,
-      Duration(milliseconds: 250),
-      Duration(milliseconds: 750),
-    ];
-    for (final delay in delays) {
-      checkSession();
-      if (delay != Duration.zero) await Future<void>.delayed(delay);
-      checkSession();
-      try {
-        final doc = await userRef
-            .get(const GetOptions(source: Source.server))
-            .timeout(const Duration(seconds: 5));
-        checkSession();
-        if (doc.id != userRef.id) throw StateError('Profile identity mismatch');
-        if (doc.exists)
-          return Success(UserModel.fromFirestore(doc.data()!, doc.id));
-      } on TimeoutException {
-        checkSession();
-      } on FirebaseException catch (error) {
-        checkSession();
-        if (error.plugin != 'cloud_firestore' ||
-            !{'unavailable', 'deadline-exceeded'}.contains(error.code))
-          rethrow;
-      }
-    }
-    return _profileProvisionPending();
-  }
-
   Result<UserEntity, Failure> _profileProvisionPending() => const Error(
     AuthFailure(
       'A conta foi autenticada. Seu perfil ainda está sendo preparado. '
       'Tente entrar novamente em instantes.',
-      code: 'WATER_PROVISIONING_PENDING',
+      code: 'TRUSTED_ACCOUNT_PROVISIONING_PENDING',
     ),
   );
 

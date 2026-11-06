@@ -1,3 +1,5 @@
+import 'package:life_os/core/database/local_account_session.dart';
+import 'package:life_os/core/services/generational_read_policy.dart';
 import 'dart:async';
 import 'dart:convert';
 
@@ -37,6 +39,11 @@ class HealthRepository {
   final FirebaseFirestore _firestore;
   final FirebaseAuth _auth;
   final AppDatabase _db;
+  final LocalAccountLease? sessionLease;
+  final bool medicationsOnly;
+  final bool nativeRemindersEnabled;
+  Future<void> _verifyRemoteRead(String uid) => GenerationalReadPolicy.verify(identity:_db.identity,lease:sessionLease,auth:_auth,store:_firestore,expectedUid:uid);
+  void _requireReadSession(String uid) => GenerationalReadPolicy.requireCurrent(identity:_db.identity,lease:sessionLease,auth:_auth,expectedUid:uid);
   final SyncManager _syncManager;
   final DateTime Function() _now;
   final Future<void> Function()? _beforeCycleSyncEnqueue;
@@ -51,6 +58,9 @@ class HealthRepository {
     FirebaseAuth auth,
     AppDatabase db,
     SyncManager syncManager, {
+    LocalAccountLease? sessionLease,
+    bool medicationsOnly = false,
+    bool nativeRemindersEnabled = true,
     DateTime Function()? now,
     Future<void> Function()? beforeCycleSyncEnqueue,
     MedicationReminderLifecycle? medicationLifecycle,
@@ -66,6 +76,9 @@ class HealthRepository {
          medicationLifecycle ??
              MedicationReminderLifecycleService(db, notifService, now: now),
          waterController,
+         sessionLease,
+         medicationsOnly,
+         nativeRemindersEnabled,
        );
 
   HealthRepository._(
@@ -78,9 +91,13 @@ class HealthRepository {
     this._beforeCycleSyncEnqueue,
     this._medicationLifecycle,
     this._water,
+    this.sessionLease,
+    this.medicationsOnly,
+    this.nativeRemindersEnabled,
   );
 
   Future<void> _rebuildMedicationReminders(String userId) async {
+    if (!nativeRemindersEnabled) return;
     if (!_isCurrentUser(userId)) return;
     try {
       await _medicationLifecycle.rebuildMedicationReminders(
@@ -528,6 +545,7 @@ class HealthRepository {
       _schedulePendingHealthSync();
 
       AppLogger.i('Medicamento salvo localmente com sucesso.');
+      if (!nativeRemindersEnabled) return;
 
       // =====================================================================
       // 2. NOTIFICAÇÃO LOCAL
@@ -913,6 +931,7 @@ class HealthRepository {
     try {
       AppLogger.i('SYNC Saúde: Iniciando...');
       final ticket = _db.localMutations.capture(expectedUid: userId);
+      await _verifyRemoteRead(userId);
       final pullStartedAt = DateTime.now().millisecondsSinceEpoch;
       final pendingAtPullStart =
           await (_db.select(_db.syncQueueTable)..where(
@@ -932,10 +951,12 @@ class HealthRepository {
           .collection('medications')
           .get(const GetOptions(source: Source.server));
       _requireCurrentUser(userId);
+      await _verifyRemoteRead(userId);
+      if (_db.identity?.generation != null && !GenerationalReadPolicy.accepts(_db.identity, fromCache:medsSnapshot.metadata.isFromCache,pendingWrites:medsSnapshot.metadata.hasPendingWrites)) throw StateError('GENERATIONAL_SNAPSHOT_UNCONFIRMED');
       final remoteMedicationIds = medsSnapshot.docs
           .map((doc) => doc.id)
           .toSet();
-      await _db.transaction(admission: ticket, waitForReopen: false, () async {
+      await _db.transactionWithCommitGuard(admission: ticket, waitForReopen: false, validateBeforeCommit:()=>_requireReadSession(userId), () async {
         _requireCurrentUser(userId);
         final authoritativeItems =
             await (_db.select(_db.syncQueueTable)..where(
@@ -983,6 +1004,7 @@ class HealthRepository {
       });
 
       await _rebuildMedicationReminders(userId);
+      if (medicationsOnly) return;
 
       _requireCurrentUser(userId);
       final healthPullStartedAt = DateTime.now().millisecondsSinceEpoch;

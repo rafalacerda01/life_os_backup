@@ -270,7 +270,7 @@ class SyncManager {
             );
           }
 
-          if (!_canProcess(ownerUid, generation)) {
+          if (result.sessionStopped || !_canProcess(ownerUid, generation)) {
             _resetRetry();
             return false;
           }
@@ -283,7 +283,7 @@ class SyncManager {
               }
               // Water success means its entire Drift ACK has committed.
               // Never acknowledge it a second time through the generic store.
-              if (!isWater)
+              if (!isWater && !result.acknowledgedByTransport)
                 await _queueStore.markSyncItemAsSucceeded(item.id, ownerUid);
               break;
 
@@ -291,11 +291,12 @@ class SyncManager {
               _beginRecovery(ownerUid);
               final code = result.code ?? 'RETRYABLE_ERROR';
               AppLogger.w('Operação de sync mantida pendente: $code');
-              await _queueStore.markSyncItemRetryableFailure(
-                item.id,
-                ownerUid,
-                code,
-              );
+              if (!result.preserveQueueState)
+                await _queueStore.markSyncItemRetryableFailure(
+                  item.id,
+                  ownerUid,
+                  code,
+                );
               if (StudyStateHoldOperation.matches(item, code)) {
                 // This was a real HTTP attempt. Its persisted code now holds
                 // the FIFO across restarts without timers or fake attempts.

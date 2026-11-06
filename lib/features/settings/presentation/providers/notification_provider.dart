@@ -1,3 +1,4 @@
+import 'package:life_os/core/database/local_account_session.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:life_os/core/services/notification_preferences.dart';
 import 'package:life_os/core/utils/app_logger.dart';
@@ -33,9 +34,11 @@ class NotificationsNotifier extends AsyncNotifier<NotificationPreferences> {
   Future<void> _allNotificationsPersistenceTail = Future<void>.value();
 
   @override
-  Future<NotificationPreferences> build() => _store.load();
+  Future<NotificationPreferences> build() =>
+      ref.watch(notificationPreferencesStoreProvider).load();
 
   Future<void> toggleAll(bool value) async {
+    final captured = ref.read(localAccountSessionProvider);
     state.requireValue;
     final store = _store;
     final notificationService = ref.read(notificationServiceProvider);
@@ -61,7 +64,9 @@ class NotificationsNotifier extends AsyncNotifier<NotificationPreferences> {
 
     Future<void> mutate() async {
       final updated = await persistence;
-      if (!ref.mounted) return;
+      if (!ref.mounted ||
+          ref.read(localAccountSessionProvider).revision != captured.revision)
+        return;
       if (!_isCurrentCycleMutation(cycleOwnerUid, generation, operationEpoch)) {
         return;
       }
@@ -142,7 +147,9 @@ class NotificationsNotifier extends AsyncNotifier<NotificationPreferences> {
         }
       } else {
         await medicationReconciler.reconcileForSession(medicationSession);
-        if (!ref.mounted) return;
+        if (!ref.mounted ||
+            ref.read(localAccountSessionProvider).revision != captured.revision)
+          return;
         if (!_isCurrentCycleMutation(
               cycleOwnerUid,
               generation,
@@ -155,7 +162,9 @@ class NotificationsNotifier extends AsyncNotifier<NotificationPreferences> {
         await notificationService.cancelAllNotifications();
       }
 
-      if (!ref.mounted) return;
+      if (!ref.mounted ||
+          ref.read(localAccountSessionProvider).revision != captured.revision)
+        return;
       refresh();
     }
 
@@ -207,6 +216,7 @@ class NotificationsNotifier extends AsyncNotifier<NotificationPreferences> {
   }
 
   Future<void> toggleMedication(bool value) async {
+    final captured = ref.read(localAccountSessionProvider);
     state.requireValue;
     final store = _store;
     final notificationService = ref.read(notificationServiceProvider);
@@ -218,7 +228,9 @@ class NotificationsNotifier extends AsyncNotifier<NotificationPreferences> {
 
     await store.save(NotificationPreferenceKeys.medicationReminders, value);
     final updated = await store.load();
-    if (!ref.mounted) return;
+    if (!ref.mounted ||
+        ref.read(localAccountSessionProvider).revision != captured.revision)
+      return;
 
     state = AsyncData(updated);
 
@@ -236,7 +248,9 @@ class NotificationsNotifier extends AsyncNotifier<NotificationPreferences> {
       }
     }
 
-    if (!ref.mounted) return;
+    if (!ref.mounted ||
+        ref.read(localAccountSessionProvider).revision != captured.revision)
+      return;
     refresh();
   }
 
@@ -244,13 +258,16 @@ class NotificationsNotifier extends AsyncNotifier<NotificationPreferences> {
     required String key,
     required bool value,
   }) async {
+    final captured = ref.read(localAccountSessionProvider);
     state.requireValue;
     final store = _store;
     final refresh = ref.read(notificationPreferencesChangedProvider);
 
     await store.save(key, value);
     final updated = await store.load();
-    if (!ref.mounted) return;
+    if (!ref.mounted ||
+        ref.read(localAccountSessionProvider).revision != captured.revision)
+      return;
 
     state = AsyncData(updated);
     refresh();
