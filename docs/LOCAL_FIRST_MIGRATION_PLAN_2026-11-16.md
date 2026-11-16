@@ -73,3 +73,28 @@ Gate: testes negativos e positivos, revogação, troca de aparelho, modo avião,
 - Publicação: CLOSED
 
 Este plano não é evidência de implementação.
+
+## Progresso da implementação isolada — 16/11/2026
+- Branch original preservada; nenhuma alteração na main, no Firebase, em IAM ou deploys.
+- `lib/core/database/local_installation_identity_service.dart`: bootstrap para novo ID por instalação, com marcador persistido e bloqueio de artefatos SQLite antigos/desconhecidos antes de provisionar perfil.
+- `lib/core/database/local_installation_identity_provider.dart`: adapter FlutterSecureStorage/UUID (AINDA NÃO CONECTADO AO STARTUP).
+- `lib/core/database/local_device_session.dart`: prepara o banco por identidade local usando o coordenador e a fábrica criptografada existentes, sem depender de Firebase Auth (AINDA NÃO CONECTADO AO STARTUP).
+- `test/core/database/local_installation_identity_service_test.dart`: 9 cenários definidos, NOT_RUN.
+- `test/core/database/local_device_session_test.dart`: 4 cenários definidos, NOT_RUN.
+- Backend: branch isolada `refactor/premium-without-firebase-20261116` com proposta de desenho de Billing, sem alterações nos endpoints de produção.
+- Vercel: projeto `life-os-backend` consultado somente em leitura; NENHUM deploy executado.
+
+### Riscos ainda não resolvidos
+- A inicialização principal, o roteador, a hidratação/sincronização e vários módulos continuam ligados à autenticação Firebase.
+- Antes de substituir os providers atuais, mapear armazenamento adicional fora do banco (Hive, SharedPreferences, SecureStorage), aliases legados e eventuais configurações locais.
+- Não há migração automática de UID para local: o bootstrap recusa instalações com arquivos SQLite legados. Migrador criptografado e reversível é requisito antes do corte.
+- O novo serviço de identidade precisa de `dart format`, `flutter analyze`, testes unitários e testes de dispositivo; ainda não está homologado.
+- A especificação do Billing não autoriza consumo de APIs faturáveis nem elimina o requisito potencial de projeto Google Cloud mínimo.
+
+### Gate imediatamente seguinte
+1. Executar formatação e testes focais dos dois novos componentes.
+2. Inventariar todos os dados locais fora do Drift e implementar fluxo explícito de migração segura.
+3. Desacoplar router/splash e repositórios de Firebase com testes; somente depois ativar o novo caminho no app.
+4. Verificar em Android físico/emulador cold boot, modo avião e ausência de chamadas remotas.
+
+**Status: LOCAL_PROFILE_SCAFFOLD_CREATED · TESTS_NOT_RUN · NO_RUNTIME_CUTOVER · NO_DEPLOY.**
