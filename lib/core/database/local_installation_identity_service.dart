@@ -16,6 +16,7 @@ class LocalInstallationIdentityService {
     required this.writeSavedId,
     required this.documentsDirectory,
     required this.newId,
+    required this.assertFreshInstall,
   });
 
   static const storageKey = 'life_os_local_installation_id_v1';
@@ -41,6 +42,9 @@ class LocalInstallationIdentityService {
   final Future<void> Function(String id) writeSavedId;
   final Future<Directory> Function() documentsDirectory;
   final String Function() newId;
+  /// Checks other persisted stores (preferences, secure storage, etc.) without
+  /// mutating them. A failure must stop first-time local provisioning.
+  final Future<void> Function() assertFreshInstall;
 
   Future<LocalDatabaseIdentity>? _resolved;
 
@@ -80,6 +84,10 @@ class LocalInstallationIdentityService {
     }
 
     if (identity != null) return identity;
+
+    // Legacy user data can survive without the expected SQLite files.
+    // Never provision a new identity before auditing non-DB persistence.
+    await assertFreshInstall();
 
     final generated = newId();
     if (!_validId.hasMatch(generated)) {
