@@ -27,6 +27,7 @@ void main() {
         writeSavedId: (value) async => savedId = value,
         documentsDirectory: () async => directory,
         newId: () => id,
+        assertFreshInstall: () async {},
       ),
       openDatabase: (identity) async {
         openCount++;
