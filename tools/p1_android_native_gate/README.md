@@ -69,3 +69,36 @@ A emissão oficial usa exchangeDebugToken HTTPS e exige cadastro autorizado do
 debug secret no projeto/app gerenciado correspondente. Isso não foi executado.
 Nenhum token foi emitido ou verificado, e o gate funcional permanece BLOCKED.
 Não alterar os guards para produzir token fictício ou admitir dados.
+
+## R2 — fronteira nominal preparada e fechada
+
+O runtime Dart e o servidor local em backend/tools/p1_native_local estão
+conectados a perfis explícitos. O perfil p1-life-os-27b92-android-local permanece
+CLOSED_PENDING_EXTERNAL_AUTHORIZATION: App ID diagnóstico não cadastrado,
+debug secret não registrado e egress não autorizado. Selecioná-lo não inicia
+SDKs, listener nem geração de segredo. Não usar o App ID oficial como substituto.
+
+Gradle aceita a seleção nominal p1NativeEnvironment somente para recusá-la antes
+do build enquanto faltam esses pré-requisitos. O alvo demo original é preservado;
+ele não emite token gerenciado nem homologa a sessão. Nenhuma fase App Check deve
+ser executada nesta missão para gerar um segredo novo.
+
+O servidor local exige Admin verifyToken e identidade App Check exata, além de
+R1/Auth/R5. A configuração confiável está em backend/config/p1_native_environment.json;
+headers, body e flags do cliente não alteram allowlist. Não há importação desse
+servidor por rotas Vercel nem fallback para endpoints distribuídos.
+
+O caminho nominal ainda NÃO está homologado. Após autorização externa serão
+necessários App ID e configuração pública do app diagnóstico, revisão dos pins
+Android/Dart/config, R1 Emulator e emissão/JWKS oficiais. O guard de rede atual
+não foi relaxado. Login produtivo e exclusão continuam CLOSED.
+
+O build nominal preparado aceita p1NativeClientOptions apontando para o arquivo
+público de configuração do app diagnóstico, fora do repositório. Só o lê após
+validar a autorização fixada na política local; não aceita o App ID distribuído.
+O pin Dart também exige revisão explícita de código após autorização, sem flags
+de admissão. A fase application monta a UI real com SDKs nativos e Tasks após
+esses gates; a presença de token abre somente a entrada pública. A Home continua
+dependendo de Admin/App ID, R1 ACTIVE, perfil e banco. Esse percurso foi apenas
+preparado/compilado, ainda não executado com token oficial. Finance e demais
+rotas não são habilitados automaticamente por esse alvo.

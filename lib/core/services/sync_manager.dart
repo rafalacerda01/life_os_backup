@@ -49,6 +49,11 @@ class SyncManager {
     this.waterV2Processor,
   });
 
+  bool isForDatabase(AppDatabase database) {
+    final store = _queueStore;
+    return store is AppDatabaseSyncQueueStore && store.isForDatabase(database);
+  }
+
   /// Stop session work without uploading or discarding the preserved queue.
   /// An already sent request may finish remotely; its unconfirmed local item
   /// remains pending for the same owner's idempotent replay after relogin.

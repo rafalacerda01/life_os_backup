@@ -26,6 +26,8 @@ class AppDatabaseSyncQueueStore
 
   const AppDatabaseSyncQueueStore(this._db);
 
+  bool isForDatabase(AppDatabase database) => identical(_db, database);
+
   @override
   Future<bool> hasRejectedSyncItems(String ownerUid) {
     return _db.hasRejectedSyncItems(ownerUid);

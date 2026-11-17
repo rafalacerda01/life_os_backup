@@ -4,9 +4,89 @@ import 'dart:convert';
 import 'package:firebase_app_check/firebase_app_check.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:http/http.dart' as http;
+import '../../../../core/database/local_database_identity.dart';
 
 typedef AccountIdTokenProvider = Future<String?> Function(String expectedUid);
 typedef AccountAppCheckTokenProvider = Future<String?> Function();
+
+/// Acknowledges submission only. The original receipt is required for cleanup.
+final class GenerationalAccountRemoteDataSource {
+  GenerationalAccountRemoteDataSource({
+    required Uri baseUri,
+    required this._client,
+    required this._appCheckToken,
+  }) : _url = baseUri.resolve('/api/account/delete') {
+    if (baseUri.scheme != 'http' ||
+        baseUri.host != '127.0.0.1' ||
+        !baseUri.hasPort ||
+        baseUri.userInfo.isNotEmpty ||
+        baseUri.hasQuery ||
+        baseUri.hasFragment) {
+      throw ArgumentError('LOCAL_DELETION_ENDPOINT_REQUIRED');
+    }
+  }
+
+  final Uri _url;
+  final http.Client _client;
+  final AccountAppCheckTokenProvider _appCheckToken;
+
+  Future<void> submit({
+    required LocalDatabaseIdentity identity,
+    required Future<Map<String, String>> Function() fenceDispatch,
+    required User user,
+    required void Function() requireCurrent,
+    required Future<void> Function() beforeSend,
+  }) async {
+    const timeout = AccountRemoteDataSource.defaultTimeout;
+    if (!identity.isBound ||
+        identity.tenantId != null ||
+        user.uid != identity.uid) {
+      throw StateError('LOCAL_DELETION_BINDING_INVALID');
+    }
+    requireCurrent();
+    final result = await user.getIdTokenResult(true).timeout(timeout);
+    final claims = result.claims;
+    final token = result.token;
+    if (token == null ||
+        token.isEmpty ||
+        claims?['sub'] != identity.uid ||
+        claims?['aud'] != identity.projectId ||
+        claims?['iss'] !=
+            'https://securetoken.google.com/${identity.projectId}' ||
+        claims?['lifeos_generation'] != identity.generation) {
+      throw StateError('LOCAL_DELETION_BINDING_INVALID');
+    }
+    final appCheck = await _appCheckToken().timeout(timeout);
+    if (appCheck == null || appCheck.trim().isEmpty)
+      throw StateError('APP_CHECK_REQUIRED');
+    requireCurrent();
+    await beforeSend().timeout(timeout);
+    requireCurrent();
+    final payload = await fenceDispatch();
+    requireCurrent();
+    final receiptKey = payload['receiptKey'];
+    if (payload.length != 1 ||
+        !RegExp(r'^[A-Za-z0-9_-]{43}$').hasMatch(receiptKey ?? '')) {
+      throw StateError('LOCAL_DELETION_BINDING_INVALID');
+    }
+    final request = http.Request('POST', _url)
+      ..followRedirects = false
+      ..headers.addAll({
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer $token',
+        'X-Firebase-AppCheck': appCheck,
+      })
+      ..body = jsonEncode({'receiptKey': receiptKey});
+    try {
+      final response = await _client.send(request).timeout(timeout);
+      await response.stream.drain<void>().timeout(timeout);
+      if (response.statusCode >= 200 && response.statusCode < 300) return;
+    } catch (_) {
+      throw StateError('ACCOUNT_DELETE_UNCONFIRMED');
+    }
+    throw StateError('ACCOUNT_DELETE_UNCONFIRMED');
+  }
+}
 
 class AccountDeletionResponse {
   final bool circleDeleted;

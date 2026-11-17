@@ -6,9 +6,43 @@ if (gradle.startParameter.taskNames.any { !it.endsWith('P1NativeGateDebug') }) t
 if (gradle.startParameter.projectProperties['target'] != 'tools/p1_android_native_gate/main.dart') throw new GradleException('NATIVE_GATE_TARGET_ONLY')
     p.plugins.withId('com.android.application') {
         def source = new File(p.rootProject.projectDir, '../tools/p1_android_native_gate').canonicalFile
+        def selected = gradle.startParameter.projectProperties['p1NativeEnvironment'] ?: 'demo-loopback'
+        if (!(selected in ['demo-loopback', 'p1-life-os-27b92-android-local'])) throw new GradleException('LOCAL_ENVIRONMENT_MISMATCH')
+        // Enrollment and egress have not been authorized. Refuse BEFORE build,
+        // installation, Firebase initialization or debug-secret generation.
+        def nativeOptions = [project:'demo-life-os', appId:'1:123456789012:android:00000000000000000000000000000000', number:'123456789012', apiKey:('AIza' + ('0' * 35))]
+        if (selected != 'demo-loopback') {
+            def policy = new groovy.json.JsonSlurper().parse(new File(p.rootProject.projectDir, '../backend/config/p1_native_environment.json'))
+            if (policy.state != 'LOCAL_HOMOLOGATION_AUTHORIZED' || policy.egressAuthorized != true || policy.debugRegistrationApproved != true ||
+                policy.profileId != selected || policy.projectId != 'life-os-27b92' || policy.projectNumber != '278760083864' ||
+                policy.packageName != 'com.rafalacerda.lifeos.p1nativegate' || !(policy.appId ==~ /1:278760083864:android:[a-f0-9]{16,40}/) ||
+                policy.appId == '1:278760083864:android:3e698113400113022d1bed' || policy.databaseId != '(default)' || policy.tenantId != null ||
+                policy.authEmulator != '127.0.0.1:45099' || policy.firestoreEmulator != '127.0.0.1:45089' || policy.backendBaseUrl != 'http://127.0.0.1:45789') {
+                throw new GradleException('LOCAL_ENVIRONMENT_PENDING_AUTHORIZATION')
+            }
+            // Public Firebase client options supplied privately after enrollment.
+            // They contain no debug secret and are never printed or copied to source.
+            def optionsPath = gradle.startParameter.projectProperties['p1NativeClientOptions']
+            if (!optionsPath) throw new GradleException('LOCAL_NATIVE_CLIENT_OPTIONS_REQUIRED')
+            if (!new File(optionsPath).isAbsolute()) throw new GradleException('LOCAL_NATIVE_CLIENT_OPTIONS_OUTSIDE_REPOSITORY_REQUIRED')
+            def optionsFile = new File(optionsPath).canonicalFile
+            if (optionsFile.toPath().startsWith(p.rootProject.projectDir.parentFile.canonicalFile.toPath())) throw new GradleException('LOCAL_NATIVE_CLIENT_OPTIONS_OUTSIDE_REPOSITORY_REQUIRED')
+            def options = new groovy.json.JsonSlurper().parse(optionsFile)
+            def client = options.client?.find { it.client_info?.android_client_info?.package_name == policy.packageName }
+            def publicKey = client?.api_key?.getAt(0)?.current_key
+            if (options.project_info?.project_id != policy.projectId || options.project_info?.project_number?.toString() != policy.projectNumber ||
+                client?.client_info?.mobilesdk_app_id != policy.appId || !(publicKey ==~ /AIza[A-Za-z0-9_-]{35}/)) throw new GradleException('LOCAL_NATIVE_CLIENT_OPTIONS_MISMATCH')
+            nativeOptions = [project:policy.projectId, appId:policy.appId, number:policy.projectNumber, apiKey:publicKey]
+        }
+        p.android.buildFeatures.resValues = true
         p.android.flavorDimensions += 'isolatedTest'
         p.android.productFlavors.create('p1NativeGate') {
             dimension = 'isolatedTest'
+            resValue 'string', 'p1_native_environment', selected
+            resValue 'string', 'p1_native_project', nativeOptions.project
+            resValue 'string', 'p1_native_app_id', nativeOptions.appId
+            resValue 'string', 'p1_native_project_number', nativeOptions.number
+            resValue 'string', 'p1_native_api_key', nativeOptions.apiKey
             applicationIdSuffix = '.p1nativegate'
             versionNameSuffix = '-native-gate-NOT-DISTRIBUTABLE'
         }

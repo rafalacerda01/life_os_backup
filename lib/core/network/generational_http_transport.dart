@@ -4,6 +4,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:http/http.dart' as http;
 import '../database/local_account_session.dart';
 import 'generational_http_store.dart';
+import '../services/emulator_account_runtime.dart';
 
 class HttpCustodyException implements Exception {
   const HttpCustodyException(this.code, {this.acknowledged = false});
@@ -23,6 +24,7 @@ class GenerationalHttpTransport {
     required this.client,
     required this.appCheckToken,
     required this.baseUri,
+    this.localRuntime,
     this.timeout = const Duration(seconds: 15),
     Future<String?> Function(User, bool)? idToken,
   }) : _idToken = idToken ?? ((user, refresh) => user.getIdToken(refresh)) {
@@ -56,6 +58,7 @@ class GenerationalHttpTransport {
     await _sessionEvents.cancel();
   }
 
+  final EmulatorAccountRuntime? localRuntime;
   final Uri baseUri;
   final Duration timeout;
   void _current(User original, int revision) {
@@ -113,7 +116,10 @@ class GenerationalHttpTransport {
     Future<void> Function()? acknowledgeDomain,
   }) async {
     // R1 production policy remains CLOSED. No arbitrary credential destination.
-    if (store.identity.projectId != 'demo-life-os' ||
+    final runtime = localRuntime;
+    if (runtime != null) runtime.requireClients(auth, runtime.store);
+    if ((store.identity.projectId != 'demo-life-os' &&
+          (runtime == null || runtime.environment.projectId != store.identity.projectId || runtime.baseUri != baseUri)) ||
         store.identity.databaseId != '(default)' ||
         store.identity.tenantId != null ||
         baseUri.scheme != 'http' ||

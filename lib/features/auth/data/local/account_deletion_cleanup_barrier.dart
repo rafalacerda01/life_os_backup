@@ -1,4 +1,5 @@
 import 'package:life_os/core/database/local_database_identity.dart';
+import 'package:life_os/core/errors/failure.dart';
 import 'dart:convert';
 import 'dart:math';
 
@@ -71,15 +72,33 @@ class AccountDeletionCleanupBarrier {
 
   Future<List<PendingAccountDeletion>> readAll() => _serialize(_read);
 
-  Future<PendingAccountDeletion> request(String uid) => _serialize(() async {
+  Future<PendingAccountDeletion> request(
+    String uid, {
+    bool reusePending = true,
+    String? reservedRevision,
+  }) => _serialize(() async {
     final normalized = _normalizeUid(uid);
+    if (reservedRevision != null &&
+        (_identity?.isBound != true ||
+            _identity?.uid != normalized ||
+            reusePending ||
+            !RegExp(r'^[A-Za-z0-9_-]{22}$').hasMatch(reservedRevision))) {
+      throw ArgumentError('ACCOUNT_DELETION_RESERVATION_INVALID');
+    }
     final markers = await _read();
     final current = _forUser(markers, normalized);
     if (current != null) {
-      if (current.phase == AccountDeletionPhase.requested) return current;
+      if (current.phase == AccountDeletionPhase.requested) {
+        if (reusePending) return current;
+        throw const AccountDeletionUnconfirmedFailure();
+      }
       throw StateError('ACCOUNT_DELETION_ALREADY_PENDING');
     }
-    final marker = _newMarker(normalized, AccountDeletionPhase.requested);
+    final marker = _newMarker(
+      normalized,
+      AccountDeletionPhase.requested,
+      revision: reservedRevision,
+    );
     await _write([...markers, marker]);
     return marker;
   });
@@ -119,16 +138,22 @@ class AccountDeletionCleanupBarrier {
     },
   );
 
-  PendingAccountDeletion _newMarker(String uid, AccountDeletionPhase phase) {
+  PendingAccountDeletion _newMarker(
+    String uid,
+    AccountDeletionPhase phase, {
+    String? revision,
+  }) {
     final random = Random.secure();
-    final revision = base64UrlEncode(
-      List<int>.generate(16, (_) => random.nextInt(256)),
-    ).replaceAll('=', '');
+    final markerRevision =
+        revision ??
+        base64UrlEncode(
+          List<int>.generate(16, (_) => random.nextInt(256)),
+        ).replaceAll('=', '');
     return PendingAccountDeletion(
       identity: _identity,
       userId: uid,
       phase: phase,
-      revision: revision,
+      revision: markerRevision,
       hasAuthoritativeConfirmation:
           phase == AccountDeletionPhase.remoteConfirmed,
     );

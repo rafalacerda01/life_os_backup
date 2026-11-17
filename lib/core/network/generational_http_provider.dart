@@ -26,6 +26,7 @@ final generationalHttpTransportProvider = Provider<GenerationalHttpTransport?>((
     store: GenerationalHttpStore(database),
     lease: lease,
     auth: auth,
+    localRuntime: localRuntime,
     client: localRuntime?.client ?? client,
     appCheckToken: localRuntime?.appCheckToken ?? () => FirebaseAppCheck.instanceFor(app: auth.app).getToken(),
     baseUri: localRuntime?.baseUri ?? Uri.parse(

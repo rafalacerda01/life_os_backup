@@ -350,4 +350,21 @@ void main() {
       expect(notifier.checkCurrentUserCalls, 0);
     },
   );
+
+  testWidgets('exclusão pendente não oferece retry da sessão', (tester) async {
+    const failure = AccountDeletionUnconfirmedFailure();
+    await pumpSplash(
+      tester,
+      authState: AuthState.error(
+        failure.message,
+        code: failure.code,
+        scope: AuthErrorScope.publicEntry,
+      ),
+      store: _TestOnboardingStore(),
+    );
+
+    await tester.pumpAndSettle();
+    expect(find.text('Tentar novamente'), findsNothing);
+    expect(find.text('Ir para o acesso'), findsOneWidget);
+  });
 }

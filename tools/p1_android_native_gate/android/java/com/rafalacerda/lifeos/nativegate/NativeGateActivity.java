@@ -31,7 +31,7 @@ public final class NativeGateActivity extends FlutterFragmentActivity {
           if ("sanitizeDiagnostic".equals(call.method)) { result.success(AppCheckDiagnostic.redact(call.argument("text"))); return; }
           if (!"configuration".equals(call.method)) { result.notImplemented(); return; }
           result.success(Map.of("ready", NativeGateApplication.ready,
-              "project", NativeGateApplication.PROJECT, "authPort", 45099,
+              "project", NativeGateApplication.PROJECT, "environment", NativeGateApplication.PROFILE, "appId", NativeGateApplication.APP_ID, "authPort", 45099,
               "firestorePort", 45089, "host", NativeGateApplication.HOST,
               "package", getPackageName(), "phase", getIntent().getStringExtra("phase") == null ? "initial" : getIntent().getStringExtra("phase")));
         });

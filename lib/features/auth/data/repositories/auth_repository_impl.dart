@@ -1,5 +1,7 @@
 import 'package:life_os/core/services/emulator_account_runtime.dart';
+import 'package:life_os/core/database/local_database_identity.dart';
 import 'dart:async';
+import 'auth_entry_failure.dart';
 import 'package:life_os/core/services/trusted_account_access.dart';
 
 import 'package:firebase_auth/firebase_auth.dart' as fb;
@@ -50,6 +52,7 @@ class AuthRepositoryImpl implements AuthRepository {
   final FirebaseFirestore _firestore;
   final AccountRemoteDataSource _accountRemoteDataSource;
   final Future<void> Function(fb.User)? _waterProfileProvisioner;
+  final Future<void> Function(LocalDatabaseIdentity)? _checkPendingDeletion;
 
   AuthRepositoryImpl(
     this._firebaseAuth,
@@ -59,6 +62,7 @@ class AuthRepositoryImpl implements AuthRepository {
     // ignore: prefer_initializing_formals
     Future<void> Function(fb.User)? waterProfileProvisioner,
     this.emulatorRuntime,
+    this._checkPendingDeletion,
     // ignore: prefer_initializing_formals
   }) : _waterProfileProvisioner = waterProfileProvisioner;
 
@@ -167,13 +171,12 @@ class AuthRepositoryImpl implements AuthRepository {
       ));
     }
 
-    emulatorRuntime?.requireClients(_firebaseAuth, _firestore);
-
     try {
+      emulatorRuntime?.requireClients(_firebaseAuth, _firestore);
       final credential = await _firebaseAuth.signInWithEmailAndPassword(
         email: InputSanitizer.sanitize(email),
         password: password,
-      );
+      ).timeout(const Duration(seconds:20));
 
       if (credential.user == null) {
         return Error(_emailSignInFailure('unknown'));
@@ -182,8 +185,8 @@ class AuthRepositoryImpl implements AuthRepository {
       return _getOrProvisionUser(credential.user!);
     } on fb.FirebaseAuthException catch (e) {
       return Error(_emailSignInFailure(e.code));
-    } catch (_) {
-      return Error(ServerFailure.unexpected());
+    } catch (error) {
+      return Error(authEntryFailure(error));
     }
   }
 
@@ -200,13 +203,12 @@ class AuthRepositoryImpl implements AuthRepository {
       ));
     }
 
-    emulatorRuntime?.requireClients(_firebaseAuth, _firestore);
-
     try {
+      emulatorRuntime?.requireClients(_firebaseAuth, _firestore);
       final credential = await _firebaseAuth.createUserWithEmailAndPassword(
         email: InputSanitizer.sanitize(email),
         password: password,
-      );
+      ).timeout(const Duration(seconds:20));
 
       if (credential.user == null) {
         return Error(_emailSignUpFailure('unknown'));
@@ -228,8 +230,8 @@ class AuthRepositoryImpl implements AuthRepository {
       return provisioned;
     } on fb.FirebaseAuthException catch (e) {
       return Error(_emailSignUpFailure(e.code));
-    } catch (_) {
-      return Error(ServerFailure.unexpected());
+    } catch (error) {
+      return Error(authEntryFailure(error));
     }
   }
 
@@ -337,9 +339,8 @@ class AuthRepositoryImpl implements AuthRepository {
       ));
     }
 
-    emulatorRuntime?.requireClients(_firebaseAuth, _firestore);
-
     try {
+      emulatorRuntime?.requireClients(_firebaseAuth, _firestore);
       final currentUser = _firebaseAuth.currentUser;
 
       if (currentUser == null) {
@@ -347,8 +348,8 @@ class AuthRepositoryImpl implements AuthRepository {
       }
 
       return _getOrProvisionUser(currentUser);
-    } catch (_) {
-      return Error(ServerFailure.unexpected());
+    } catch (error) {
+      return Error(authEntryFailure(error));
     }
   }
 
@@ -380,25 +381,28 @@ class AuthRepositoryImpl implements AuthRepository {
     bool sameSession() =>
         sessionCurrent && _firebaseAuth.currentUser?.uid == uid;
     void checkSession() {
-      if (!sameSession()) throw StateError('Profile session changed');
+      if (!sameSession()) throw StateError('AUTH_SESSION_UNCONFIRMED');
     }
 
     try {
-      final userRef = _firestore.collection('users').doc(uid);
-      final runtime = emulatorRuntime;
-      runtime?.requireClients(_firebaseAuth, _firestore);
-      final generation = runtime == null
-          ? await TrustedAccountAccess.ensureReady(_firebaseAuth, _firestore, uid)
-          : (await runtime.admit(uid)).generation!;
-      checkSession();
-      if (serverProfile) {
-        checkSession();
-        authSubscription = _firebaseAuth.authStateChanges().listen((current) {
+authSubscription = _firebaseAuth.authStateChanges().listen((current) {
           // The first event reports the current session. Any later sign-in
           // or sign-out invalidates this work, including reuse of the UID.
           if (!initialAuthEvent || current?.uid != uid) sessionCurrent = false;
           initialAuthEvent = false;
         }, onError: (Object _) => sessionCurrent = false);
+      checkSession();
+      final userRef = _firestore.collection('users').doc(uid);
+      final runtime = emulatorRuntime;
+      runtime?.requireClients(_firebaseAuth, _firestore);
+      final generation = runtime == null
+          ? await TrustedAccountAccess.ensureReady(_firebaseAuth, _firestore, uid)
+          : (await runtime.admit(uid, beforeBootstrap: _checkPendingDeletion))
+                .generation!;
+      checkSession();
+      if (serverProfile) {
+        checkSession();
+
         // An existing cached profile restores Auth offline; it grants no Water admission.
         final existing = await userRef.get(const GetOptions(source: Source.server)).timeout(
           const Duration(seconds: 5),
@@ -412,7 +416,8 @@ class AuthRepositoryImpl implements AuthRepository {
         // No alternate domain can authorize or restore a missing profile.
         return _profileProvisionPending();
       }
-      final doc = await userRef.get(const GetOptions(source: Source.server));
+      final doc = await userRef.get(const GetOptions(source: Source.server)).timeout(const Duration(seconds:15));
+      checkSession();
 
       if (doc.exists && !doc.metadata.isFromCache && !doc.metadata.hasPendingWrites && doc.data()?['_lifeosGeneration'] == generation) {
         return Success(UserModel.fromFirestore(doc.data()!, doc.id));
@@ -420,13 +425,11 @@ class AuthRepositoryImpl implements AuthRepository {
 
       return _profileProvisionPending();
     } catch (error) {
-      if (error is TrustedAccountPending) {
-        return Error(
-          AuthFailure(
-            'A conta precisa de preparo ou revisão de origem.',
-            code: error.code,
-          ),
-        );
+      if (error is AccountDeletionUnconfirmedFailure ||
+          error is TrustedAccountPending ||
+          error is StateError ||
+          error is TimeoutException && !serverProfile) {
+        return Error(authEntryFailure(error));
       }
       if (serverProfile && !sameSession()) {
         return const Error(

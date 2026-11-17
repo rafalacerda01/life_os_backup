@@ -92,6 +92,9 @@ class _SplashScreenState extends ConsumerState<SplashScreen>
   Widget build(BuildContext context) {
     final authState = ref.watch(authNotifierProvider);
     final onboardingState = ref.watch(onboardingCompletionStatusProvider);
+    final deletionPending =
+        authState is AuthError &&
+        authState.code == AccountDeletionUnconfirmedFailure.failureCode;
     _scheduleNavigation(authState, onboardingState);
 
     return Scaffold(
@@ -169,8 +172,7 @@ class _SplashScreenState extends ConsumerState<SplashScreen>
                       if (authState is AuthError) ...[
                         const SizedBox(height: 28),
                         Text(
-                          authState.code ==
-                                  AccountDeletionUnconfirmedFailure.failureCode
+                          deletionPending
                               ? const AccountDeletionUnconfirmedFailure()
                                     .message
                               : "Não foi possível iniciar sua sessão.",
@@ -178,25 +180,23 @@ class _SplashScreenState extends ConsumerState<SplashScreen>
                           style: TextStyle(color: Colors.white70, fontSize: 14),
                         ),
                         const SizedBox(height: 12),
-                        FilledButton(
-                          onPressed: _retrying ? null : _retryAuth,
-                          child: _retrying
-                              ? const SizedBox.square(
-                                  dimension: 18,
-                                  child: CircularProgressIndicator(
-                                    strokeWidth: 2,
-                                  ),
-                                )
-                              : const Text("Tentar novamente"),
-                        ),
-                        if (authState.code ==
-                            AccountDeletionUnconfirmedFailure.failureCode) ...[
-                          const SizedBox(height: 12),
+                        if (deletionPending)
                           TextButton(
                             onPressed: () => context.go('/login'),
                             child: const Text('Ir para o acesso'),
+                          )
+                        else
+                          FilledButton(
+                            onPressed: _retrying ? null : _retryAuth,
+                            child: _retrying
+                                ? const SizedBox.square(
+                                    dimension: 18,
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2,
+                                    ),
+                                  )
+                                : const Text("Tentar novamente"),
                           ),
-                        ],
                       ],
                     ],
                   ),

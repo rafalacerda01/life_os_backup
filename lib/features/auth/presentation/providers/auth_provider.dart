@@ -1,5 +1,6 @@
 import 'package:life_os/core/database/local_account_session.dart';
 import 'dart:async';
+import '../../data/repositories/auth_entry_failure.dart';
 import 'package:life_os/core/services/emulator_account_runtime.dart';
 import 'package:life_os/core/services/trusted_account_access.dart';
 
@@ -115,8 +116,26 @@ final authRepositoryProvider = Provider<AuthRepository>((ref) {
     ref.watch(firestoreProvider),
     ref.watch(accountRemoteDataSourceProvider),
     emulatorRuntime: ref.watch(emulatorAccountRuntimeProvider),
+    checkPendingDeletion: (identity) =>
+        _requireNoPendingDeletion(ref.read(secureStorageProvider), identity),
   );
 });
+
+Future<void> _requireNoPendingDeletion(
+  FlutterSecureStorage secureStorage,
+  LocalDatabaseIdentity identity,
+) async {
+  final storage = SecureAuthCleanupBarrierStorage(secureStorage);
+  final scopedBarrier = AccountDeletionCleanupBarrier(
+    storage,
+    identity: identity,
+  );
+  final legacyBarrier = AccountDeletionCleanupBarrier(storage);
+  if (await scopedBarrier.readForUser(identity.uid) != null ||
+      await legacyBarrier.readForUser(identity.uid) != null) {
+    throw const AccountDeletionUnconfirmedFailure();
+  }
+}
 
 // Refatorado para Notifier
 class AuthNotifier extends Notifier<AuthState> {
@@ -179,9 +198,18 @@ class AuthNotifier extends Notifier<AuthState> {
     runtime.requireClients(ref.read(firebaseAuthProvider), ref.read(firestoreProvider));
     final generation = _sessionGeneration;
     final identity = await TrustedAccountAccess.admittedIdentity(
-        runtime.auth, runtime.store, user.uid);
+        runtime.auth, runtime.store, user.uid, allowBootstrap:false);
     if (_disposed || generation != _sessionGeneration || runtime.auth.currentUser?.uid != user.uid) return false;
-    final db = await _databases.prepare(user.uid, accountIdentity: identity);
+    await _requireNoPendingDeletion(ref.read(secureStorageProvider), identity);
+    if (_disposed || generation != _sessionGeneration || runtime.auth.currentUser?.uid != user.uid) return false;
+    final db = await _databases.prepare(user.uid, accountIdentity: identity).timeout(
+      const Duration(seconds:15), onTimeout: () {
+        // Invalidate late opening work before exposing a recoverable error.
+        // The coordinator retains responsibility for draining/closing its DB.
+        ++_sessionGeneration;
+        _databases.observeSession(null);
+        throw const SessionDatabaseUnavailable();
+      });
     if (_disposed || generation != _sessionGeneration || runtime.auth.currentUser?.uid != user.uid) {
       await _databases.detach(expectedUid: user.uid);
       return false;
@@ -194,8 +222,12 @@ class AuthNotifier extends Notifier<AuthState> {
 
   Future<void> _publishLocalTasksUser(UserEntity user, int operation) async {
     final firebaseUser = ref.read(firebaseAuthProvider).currentUser;
-    if (_disposed || operation != _localAuthOperation || firebaseUser?.uid != user.uid) return;
-    if (!await _prepareLocalTasksSession(firebaseUser!)) return;
+    if (_disposed || operation != _localAuthOperation) return;
+    if (firebaseUser?.uid != user.uid) throw StateError('AUTH_SESSION_UNCONFIRMED');
+    if (!await _prepareLocalTasksSession(firebaseUser!)) {
+      if (!_disposed && operation == _localAuthOperation) throw StateError('AUTH_SESSION_UNCONFIRMED');
+      return;
+    }
     if (_disposed || operation != _localAuthOperation) return;
     // Resolve only the explicitly enabled resource dependencies outside build.
     // Their streams are disposed when hidden and cannot retain A's values for B.
@@ -237,8 +269,9 @@ class AuthNotifier extends Notifier<AuthState> {
       await result.when((user) => _publishLocalTasksUser(user, operation), (failure) async {
         if (!_disposed && operation == _localAuthOperation) state = AuthState.error(failure.message, code: failure.code);
       });
-    } catch (_) {
-      if (!_disposed && operation == _localAuthOperation) state = AuthState.error('Não foi possível confirmar a sessão.');
+    } catch (error) {
+      final failure = authEntryFailure(error is SessionDatabaseUnavailable ? StateError('LOCAL_DATABASE_UNAVAILABLE') : error);
+      if (!_disposed && operation == _localAuthOperation) state = _entryFailureState(failure.message, code:failure.code);
     }
   }
 
@@ -253,10 +286,11 @@ class AuthNotifier extends Notifier<AuthState> {
           ? await _repository.signInWithEmailAndPassword(email, password)
           : await _repository.signUpWithEmailAndPassword(email, password, name);
       await result.when((user) => _publishLocalTasksUser(user, operation), (failure) async {
-        if (!_disposed && operation == _localAuthOperation) state = _entryFailureState(failure.message);
+        if (!_disposed && operation == _localAuthOperation) state = _entryFailureState(failure.message, code: failure.code);
       });
-    } catch (_) {
-      if (!_disposed && operation == _localAuthOperation) state = AuthState.error('Não foi possível preparar a sessão.');
+    } catch (error) {
+      final failure = authEntryFailure(error is SessionDatabaseUnavailable ? StateError('LOCAL_DATABASE_UNAVAILABLE') : error);
+      if (!_disposed && operation == _localAuthOperation) state = _entryFailureState(failure.message, code:failure.code);
     } finally {
       _localAuthBusy = false;
     }
@@ -839,10 +873,10 @@ class AuthNotifier extends Notifier<AuthState> {
       return;
     }
 
-    state = _entryFailureState(failure.message);
+    state = _entryFailureState(failure.message, code: failure.code);
   }
 
-  AuthState _entryFailureState(String message) {
+  AuthState _entryFailureState(String message, {String? code}) {
     final isPublicEntry =
         ref.read(firebaseAuthProvider).currentUser == null &&
         _activeLocalSessionUid == null &&
@@ -854,6 +888,7 @@ class AuthNotifier extends Notifier<AuthState> {
         _durableCleanupRecoveryInFlight == null;
     return AuthState.error(
       message,
+      code: code,
       scope: isPublicEntry
           ? AuthErrorScope.publicEntry
           : AuthErrorScope.protectedSession,
@@ -1238,7 +1273,7 @@ class AuthNotifier extends Notifier<AuthState> {
         return true;
       },
       (failure) {
-        state = _entryFailureState(failure.message);
+        state = _entryFailureState(failure.message, code: failure.code);
         return false;
       },
     );
@@ -1321,9 +1356,23 @@ class AuthNotifier extends Notifier<AuthState> {
         return;
       }
 
-      deletionMarker = await ref
-          .read(accountDeletionCleanupBarrierProvider)
-          .request(expectedUid);
+      try {
+        deletionMarker = await ref
+            .read(accountDeletionCleanupBarrierProvider)
+            .request(expectedUid, reusePending: false);
+      } on AccountDeletionUnconfirmedFailure {
+        await _serializeLocalSession(
+          () => _preserveUnconfirmedAccountDeletion(expectedUid),
+        );
+        _accountDeletionInProgress = false;
+        if (_disposed) return;
+        if (_isExpectedFirebaseSession(expectedUid)) {
+          state = _unconfirmedDeletionState();
+        } else {
+          await _handleChangedAccountDeletionSession(expectedUid);
+        }
+        return;
+      }
       if (!_isExpectedFirebaseSession(expectedUid)) {
         await ref
             .read(accountDeletionCleanupBarrierProvider)
@@ -1493,40 +1542,10 @@ class AuthNotifier extends Notifier<AuthState> {
     if (user == null) return;
     final marker = await barrier.readForUser(user.uid);
     if (marker == null) return;
-    if (marker.phase == AccountDeletionPhase.remoteConfirmed &&
-        !marker.hasAuthoritativeConfirmation) {
+    if (!marker.hasAuthoritativeConfirmation) {
+      // Auth existence cannot settle a previously dispatched deletion.
       await _preserveUnconfirmedAccountDeletion(marker.userId);
       throw const AccountDeletionUnconfirmedFailure();
-    }
-    if (marker.phase == AccountDeletionPhase.requested) {
-      if (ref.read(firebaseAuthProvider).currentUser?.uid != marker.userId) {
-        // Only the target session can resolve an unconfirmed deletion.
-        return;
-      }
-      try {
-        await user.reload().timeout(const Duration(seconds: 20));
-        if (ref.read(firebaseAuthProvider).currentUser?.uid != marker.userId) {
-          return;
-        }
-        if (!await barrier.clearIfCurrent(marker))
-          throw StateError('ACCOUNT_DELETION_MARKER_CHANGED');
-        return;
-      } on FirebaseAuthException catch (error) {
-        if (error.code != 'user-not-found') rethrow;
-        final auth = ref.read(firebaseAuthProvider);
-        final currentUid = auth.currentUser?.uid;
-        if (currentUid != null && currentUid != marker.userId) return;
-        // No authoritative response survived: keep requested, never confirm.
-        await _preserveUnconfirmedAccountDeletion(marker.userId);
-        if (auth.currentUser?.uid == marker.userId) {
-          try {
-            await auth.signOut().timeout(const Duration(seconds: 20));
-          } catch (_) {
-            // The detached database and durable marker still deny admission.
-          }
-        }
-        throw const AccountDeletionUnconfirmedFailure();
-      }
     }
     await _completeConfirmedAccountDeletion(marker);
   }

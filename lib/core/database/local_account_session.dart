@@ -31,6 +31,14 @@ class LocalAccountSession extends Notifier<LocalAccountSessionSnapshot> {
   }
 
   void clear() => state = LocalAccountSessionSnapshot(null, state.revision + 1);
+
+  void clearIfCurrent(LocalDatabaseIdentity identity) {
+    if (state.identity == identity) clear();
+  }
+
+  bool isClearedAfter(LocalAccountLease lease) =>
+      state.identity == null && state.revision == lease.revision + 1;
+
   LocalAccountLease capture() {
     final snapshot = state, identity = snapshot.identity;
     if (identity == null) throw StateError('LOCAL_ACCOUNT_SESSION_REQUIRED');

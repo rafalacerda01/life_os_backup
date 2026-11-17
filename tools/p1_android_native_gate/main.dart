@@ -16,6 +16,11 @@ import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 import 'package:life_os/core/services/emulator_account_runtime.dart';
 import 'package:life_os/core/services/trusted_account_access.dart';
+import 'package:life_os/core/services/local_homologation_environment.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:life_os/main.dart' show LifeOSApp;
+import 'package:life_os/core/services/firebase_auth_provider.dart';
+import 'package:intl/date_symbol_data_local.dart';
 
 const channel=MethodChannel('life_os/native_gate');
 const password='Native-emulator-only-19!';
@@ -28,12 +33,17 @@ Future<void> main()async{
   String phase='unknown';
   try{
     final config=await channel.invokeMapMethod<String,dynamic>('configuration');
-    if(config?['ready']!=true||config?['project']!='demo-life-os'||config?['package']!='com.rafalacerda.lifeos.p1nativegate'||config?['host']!='127.0.0.1'||config?['authPort']!=45099||config?['firestorePort']!=45089)throw StateError('NATIVE_CONFIG_REFUSED');
-    phase=config!['phase'] as String;
-    if(!{'initial','restart','offline','second','appcheck'}.contains(phase))throw StateError('PHASE_REFUSED');
+    if(config?['ready']!=true||config?['package']!='com.rafalacerda.lifeos.p1nativegate'||config?['host']!='127.0.0.1'||config?['authPort']!=45099||config?['firestorePort']!=45089)throw StateError('NATIVE_CONFIG_REFUSED');
+    final environment=LocalHomologationEnvironment.select(config!['environment'] as String);
+    environment.requireReady();
+    if(config['project']!=environment.projectId)throw StateError('NATIVE_CONFIG_REFUSED');
+    phase=config['phase'] as String;
+    if(!{'initial','restart','offline','second','appcheck','application'}.contains(phase))throw StateError('PHASE_REFUSED');
+    if((phase=='application')!=identical(environment,LocalHomologationEnvironment.nominal))throw StateError('PHASE_REFUSED');
     log['phase']=phase;log['nativeConfiguration']=config;
     final app=await Firebase.initializeApp();
-    if(app.name!='[DEFAULT]'||app.options.projectId!='demo-life-os'||app.options.appId!='1:123456789012:android:00000000000000000000000000000000')throw StateError('FIREBASE_APP_REFUSED');
+    environment.requireApp(app);
+    if(app.name!='[DEFAULT]'||app.options.appId!=config['appId'])throw StateError('FIREBASE_APP_REFUSED');
     final auth=FirebaseAuth.instanceFor(app:app),store=FirebaseFirestore.instanceFor(app:app);
     store.settings=const Settings(persistenceEnabled:false);
     final check=FirebaseAppCheck.instanceFor(app:app);
@@ -58,11 +68,29 @@ Future<void> main()async{
       return;
     }
     final client=http.Client();
-    final runtime=await EmulatorAccountRuntime.configure(auth:auth,store:store,authPort:45099,firestorePort:45089,baseUri:Uri.parse('http://127.0.0.1:45789'),client:client,appCheckToken:()async{
+    final runtime=await EmulatorAccountRuntime.configure(environment:environment,auth:auth,store:store,authPort:45099,firestorePort:45089,baseUri:Uri.parse('http://127.0.0.1:45789'),client:client,appCheckToken:()async{
       final token=await check.getToken(true).timeout(const Duration(seconds:8));
       if(token==null||token.isEmpty)throw StateError('APP_CHECK_TOKEN_UNAVAILABLE');return token;
     });
     final subscription=auth.authStateChanges().listen((user)=>events.add(user?.uid));
+    if(phase=='application') {
+      // Prepared native UI path. Profile enrollment/egress gates above are
+      // currently CLOSED. No demo port or synthetic token enters this branch.
+      await subscription.cancel();
+      await check.activate(androidProvider:AndroidProvider.debug);
+      await check.setTokenAutoRefreshEnabled(false);
+      final token=await check.getToken(true).timeout(const Duration(seconds:15));
+      if(token==null||token.isEmpty)throw StateError('APP_CHECK_TOKEN_UNAVAILABLE');
+      // Token presence only permits PUBLIC entry. AuthAuthenticated/Home still
+      // require local Admin verification, R1 ACTIVE and protected DB preparation.
+      await initializeDateFormatting('pt_BR');
+      runApp(ProviderScope(overrides:[
+        emulatorAccountRuntimeProvider.overrideWithValue(runtime),
+        firebaseAuthProvider.overrideWithValue(auth),
+        firebaseFirestoreProvider.overrideWithValue(store),
+      ],child:const LifeOSApp()));
+      return;
+    }
     await auth.authStateChanges().first.timeout(const Duration(seconds:5));
     log['restoredUid']=auth.currentUser?.uid;
     const secure=FlutterSecureStorage(aOptions:AndroidOptions(encryptedSharedPreferences:true));

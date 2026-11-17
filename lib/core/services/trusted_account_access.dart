@@ -1,5 +1,7 @@
 import 'package:life_os/core/database/local_database_identity.dart';
 import 'dart:convert';
+import 'dart:async';
+import 'emulator_account_runtime.dart';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_app_check/firebase_app_check.dart';
@@ -66,13 +68,15 @@ abstract final class TrustedAccountAccess {
       throw const TrustedAccountPending('UNAUTHENTICATED');
     }
     final project = auth.app.options.projectId;
-    if (project != 'demo-life-os' ||
+    if ((project != 'demo-life-os' &&
+            EmulatorAccountRuntime.configuredProject(auth, store) != project) ||
+        auth.tenantId != null ||
         store.app.options.projectId != project ||
         store.app.name != auth.app.name ||
         store.databaseId != '(default)') {
       throw const TrustedAccountPending('TRUSTED_ACCOUNT_CLOSED');
     }
-    final token = await user.getIdTokenResult();
+    final token = await user.getIdTokenResult().timeout(const Duration(seconds:15));
     final firebaseClaims = token.claims?['firebase'];
     if (token.claims?['aud'] != project ||
         token.claims?['iss'] != 'https://securetoken.google.com/$project' ||
@@ -143,7 +147,7 @@ abstract final class TrustedAccountAccess {
   ) async {
     // An SDK cache entry is never a positive remote-admission proof. Offline
     // Drift work remains in its original generation; failure grants no ACK.
-    final receipt = await origin.get(const GetOptions(source: Source.server));
+    final receipt = await origin.get(const GetOptions(source: Source.server)).timeout(const Duration(seconds:15));
     if (receipt.metadata.isFromCache || receipt.metadata.hasPendingWrites) {
       throw const TrustedAccountPending(
         'TRUSTED_ACCOUNT_SERVER_PROOF_REQUIRED',

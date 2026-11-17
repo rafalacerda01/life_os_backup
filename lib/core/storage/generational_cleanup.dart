@@ -1,6 +1,7 @@
 // ignore_for_file: prefer_initializing_formals
 import 'dart:convert';
 import 'dart:math';
+import '../../features/auth/data/remote/account_deletion_recovery.dart';
 import '../database/local_database_identity.dart';
 import 'generational_local_store.dart';
 
@@ -10,11 +11,14 @@ class GenerationalCleanupReceipt {
     this.revision,
     this.phase,
     this.completedSteps,
-    this.plan,
-  );
+    this.plan, {
+    this.operationId,
+    this.markerRevision,
+  });
   final LocalDatabaseIdentity identity;
   final String revision, phase;
   final List<String> completedSteps, plan;
+  final String? operationId, markerRevision;
   bool get isComplete => phase == 'COMPLETE';
 }
 
@@ -56,9 +60,9 @@ class GenerationalCleanupJournal {
     if (raw == null) return null;
     final d = jsonDecode(raw);
     if (d is! Map ||
-        d.length != 6 ||
         d['v'] is! int ||
-        d['v'] != 1 ||
+        ![1, 2].contains(d['v']) ||
+        d.length != (d['v'] == 2 ? 8 : 6) ||
         LocalDatabaseIdentity.fromBinding(d['binding']) != identity ||
         d['revision'] is! String ||
         !RegExp(r'^[A-Za-z0-9_-]{22}$').hasMatch(d['revision'] as String) ||
@@ -79,7 +83,17 @@ class GenerationalCleanupJournal {
         (d['steps'] as List).any((s) => !(d['plan'] as List).contains(s)) ||
         (d['phase'] == 'COMPLETE' &&
             (d['plan'] as List).length != (d['steps'] as List).length) ||
-        (d['phase'] == 'REQUESTED' && (d['steps'] as List).isNotEmpty)) {
+        (d['phase'] == 'REQUESTED' && (d['steps'] as List).isNotEmpty) ||
+        (d['v'] == 2 &&
+            (d['phase'] == 'REQUESTED' ||
+                d['operationId'] is! String ||
+                !RegExp(
+                  r'^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$',
+                ).hasMatch(d['operationId'] as String) ||
+                d['markerRevision'] is! String ||
+                !RegExp(
+                  r'^[A-Za-z0-9_-]{22}$',
+                ).hasMatch(d['markerRevision'] as String)))) {
       throw const FormatException('LOCAL_CLEANUP_RECEIPT_INVALID');
     }
     return GenerationalCleanupReceipt._(
@@ -88,6 +102,8 @@ class GenerationalCleanupJournal {
       d['phase'] as String,
       List<String>.unmodifiable(d['steps'] as List),
       List<String>.unmodifiable(d['plan'] as List),
+      operationId: d['v'] == 2 ? d['operationId'] as String : null,
+      markerRevision: d['v'] == 2 ? d['markerRevision'] as String : null,
     );
   }
 
@@ -95,12 +111,14 @@ class GenerationalCleanupJournal {
     GenerationalCleanupReceipt receipt,
   ) async {
     final value = jsonEncode({
-      'v': 1,
+      'v': receipt.operationId == null ? 1 : 2,
       'binding': receipt.identity.toBinding(),
       'revision': receipt.revision,
       'phase': receipt.phase,
       'steps': receipt.completedSteps,
       'plan': receipt.plan,
+      if (receipt.operationId != null) 'operationId': receipt.operationId,
+      if (receipt.operationId != null) 'markerRevision': receipt.markerRevision,
     });
     await _write(keyFor(receipt.identity), value);
     if (await _read(keyFor(receipt.identity)) != value)
@@ -141,16 +159,24 @@ class GenerationalCleanupJournal {
       a.identity == b.identity &&
       a.revision == b.revision &&
       a.phase == b.phase &&
+      a.operationId == b.operationId &&
+      a.markerRevision == b.markerRevision &&
       jsonEncode(a.completedSteps) == jsonEncode(b.completedSteps) &&
       jsonEncode(a.plan) == jsonEncode(b.plan);
   Future<GenerationalCleanupReceipt> confirmOriginalResponse(
-    GenerationalCleanupReceipt expected,
-  ) => _serial(expected.identity, () async {
+    GenerationalCleanupReceipt expected, {
+    RecoveredDeletionProof? proof,
+  }) => _serial(expected.identity, () async {
+    if (proof != null && proof.identity != expected.identity) {
+      throw StateError('LOCAL_CLEANUP_RECEIPT_CHANGED');
+    }
     final current = await read(expected.identity);
     if (current != null &&
         current.identity == expected.identity &&
         current.revision == expected.revision &&
         jsonEncode(current.plan) == jsonEncode(expected.plan) &&
+        current.operationId == proof?.operationId &&
+        current.markerRevision == proof?.markerRevision &&
         current.phase != 'REQUESTED')
       return current;
     if (!_same(current, expected) || expected.phase != 'REQUESTED')
@@ -162,6 +188,8 @@ class GenerationalCleanupJournal {
         'REMOTE_CONFIRMED',
         const [],
         expected.plan,
+        operationId: proof?.operationId,
+        markerRevision: proof?.markerRevision,
       ),
     );
   });
@@ -199,6 +227,8 @@ class GenerationalCleanupJournal {
           'REMOTE_CONFIRMED',
           List.unmodifiable([...current.completedSteps, entry.key]),
           expected.plan,
+          operationId: current.operationId,
+          markerRevision: current.markerRevision,
         ),
       );
     }
@@ -209,6 +239,8 @@ class GenerationalCleanupJournal {
         'COMPLETE',
         current!.completedSteps,
         expected.plan,
+        operationId: current.operationId,
+        markerRevision: current.markerRevision,
       ),
     );
   });
