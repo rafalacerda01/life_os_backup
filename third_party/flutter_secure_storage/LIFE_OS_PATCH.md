@@ -1,0 +1,11 @@
+# Life OS Android preservation patch
+
+Base: flutter_secure_storage 10.3.1, public package SHA-256 `7686b1d6a29985dcbb808c59518226e603e3bfa7c0ddfd1a0d00e4cda77c868e`. Upstream BSD license and AndroidX/Tink notices are retained. Copied only Dart API, package metadata/license and Android main sources/build configuration; no upstream tests/examples/build outputs.
+
+Changed Android files: FlutterSecureStoragePlugin.java, crypto/EncryptedSharedPreferences.java; added LifeOsPreservingStorage.java. Dart and federated implementations are unchanged. The app pins this source via dependency_overrides; no dependency upgrade is implicit.
+
+The registered plugin dispatches storage calls only through the preservation boundary. It has no first-consumer option cache and no auto-migration/reset path. Each call inspects persisted format, uses existing aliases/wrapped keys/keysets and refuses incomplete, mixed, unknown or biometric formats. ESP opening directly reads existing Tink keysets with the existing AndroidKeyStore master; AndroidKeysetManager creation is not used. RSA OAEP/PKCS1 and AES GCM/CBC parameters match the upstream stored formats. Reads perform no storage writes. Only explicit writes provision modern storage in an empty store; failed provisioning leaves artifacts for explicit recovery rather than replacing a key. Explicit bulk deletion is disabled; per-key deletion remains available to domain cleanup after its own authorization.
+
+Qualification: synthetic native Android 14 API34 x86_64, actual app factories/schema, cold guest reboot/airplane mode, concurrent calls, corruption, missing wrapped/master material, explicit writes/deletes and refusal of biometric downgrade. This is not proof for hardware StrongBox, other API levels, OS multi-process writers, arbitrary third-party storage namespaces, crash recovery at every write stage, real user migration or non-Android platforms. No application startup cutover is authorized by this patch.
+
+The upstream helpers remain for test fixture construction only; do not restore their dispatch into the production plugin. See tools/local_native_storage_recovery for executable regression fixtures and the recovery report for evidence and unresolved gates.

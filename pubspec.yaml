@@ -67,3 +67,8 @@ hooks:
   user_defines:
     sqlite3:
       source: sqlite3mc
+
+# Reviewed Android-only preservation boundary; federated platforms unchanged.
+dependency_overrides:
+  flutter_secure_storage:
+    path: third_party/flutter_secure_storage
