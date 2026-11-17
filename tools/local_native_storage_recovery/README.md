@@ -1,0 +1,43 @@
+# Life OS native storage recovery
+
+Android-only fork of flutter_secure_storage 10.3.1, pinned by the app's dependency override. Existing ESP, RSA-OAEP/AES-GCM and legacy RSA-PKCS1/AES-CBC stores select their persisted format. Per-call ESP/migration/reset preferences cannot change the physical format or reset policy. Reads never provision keys, migrate, reset or return raw ciphertext. An explicit write provisions modern custom storage only when the store is unambiguously empty. Missing/invalid/mixed key material fails closed. Explicit bulk delete is refused; captured logical keys can be deleted individually. Biometric/AES-wrapping requests are refused, not downgraded.
+
+Third-party license and original notices are retained in third_party/flutter_secure_storage. Android native implementation is changed; the Dart API and federated non-Android packages remain unchanged. Upstream migration/reset helpers remain only as code used by synthetic fixture setup; the registered production plugin never dispatches storage calls through them.
+
+The local-only identity/session classes are staged and not imported by main.dart. A secondary-store inspector blocks P1 native notification registries, their sidecars, SDK preferences and unqualified existing persistence. This is a guard, not an import/migration mechanism. No Firebase UID data is adopted.
+
+## Reproduction
+
+Use a new path outside the application checkout and its build directory:
+
+```powershell
+.\tools\local_native_storage_recovery\prepare.ps1 -GateDirectory <new-absolute-lab-path>
+```
+
+This creates a minimal Flutter project with only the actual local database dependency closure, the vendored storage plugin and test instrumentation. It has no Firebase, backend credentials, Billing or remote service. Package is **dev.lifeos.recovery.life_os**. AVD must be a new **LifeOSRecovery17**, serial **emulator-5584**, using the installed Android 34 google_apis x86_64 image and dedicated userdata. The executed mission preserves its creation script outside this checkout. Never target the official package or a personal AVD.
+
+Build AOT profile using the installed Gradle/JBR/Flutter artifacts. The profile is deliberately debuggable for test-only run-as extraction. If public Flutter profile Maven artifacts are absent, use official downloads with validated TLS and a task-local Maven repository; do not modify global trust or disable TLS. The executed mission preserves its exact init script, artifact origin/hashes and build logs.
+
+Install the test APK only on emulator-5584, then:
+
+```powershell
+.\tools\local_native_storage_recovery\run-native.ps1 -GateDirectory <lab-path>
+```
+
+Each case saves a JSON with the requested scenario checked against the response. Launch is bounded and force-stop is performed atomically after disposable package clearing to avoid the observed PackageManager race. All inputs are synthetic. A runner exit code alone is not approval: inspect every assertion and run assert-native.ps1.
+
+For cold boot, save the pre-boot healthy case/boot ID, enable airplane mode on this AVD, sync, execute adb reboot, wait for sys.boot_completed=1, confirm the package exists and airplane_mode_on=1, then run healthy with label cold-after and save the new boot ID. The guest kernel, Android services, application process and KeyStore service must actually restart; do not substitute an engine/provider recreation. The executed mission has distinct IDs and post-boot reads of three encrypted databases.
+
+```powershell
+.\tools\local_native_storage_recovery\assert-native.ps1 -GateDirectory <lab-path>
+```
+
+Decision is FAIL if any assertion fails, BLOCKED if evidence is missing, PASS only when required native cases and boot/airplane evidence are present. The qualification is limited to API34 x86_64 and the current app's non-biometric formats. Physical StrongBox, other Android versions, multiple OS processes and real installation migration are not approved.
+
+Additional staged-core cases: secondary-guard refuses a synthetic P1 ownership WAL without changing it or writing a profile marker; local-profile provisions a permanent UUID and encrypted Drift session, persists a synthetic Tasks row and reopens it. It bypasses no ownership gate and proves no complete module UI, Google Play entitlement, Auth removal or P1 notification migration.
+
+Run secondary-guard on a fresh disposable package, then local-profile with label local-profile-before on a fresh disposable package, local-profile-reopen without clearing, and local-profile-after after another guest reboot without clearing. Save profile-boot-before.txt and profile-boot-after.txt in native-results. The former must match the storage gate's boot-after.txt, where airplane-after.txt records mode 1; save profile-airplane-after.txt with the actual post-reboot setting. assert-local-profile.ps1 validates the four reports, the permanent ID, distinct boot IDs, airplane evidence and cross-boot file/alias snapshots. A fresh matrix run may never overwrite earlier approved evidence; use a new evidence directory.
+
+This core probe writes through a direct Drift DAO. The existing AppDatabase still supports SyncQueue and remote permits, and module repositories still require Auth/Firestore. An empty queue here is evidence only about this probe; a local-only queue/send policy remains pending before module integration.
+
+The fixtures use real native ESP/keysets and legacy cipher setup, actual current app UserDatabaseFactory/schema 11, read-only database integrity/content checks, hashes of stored files and KeyStore alias metadata. Corruption/missing material is injected only in this disposable package. No real key is exported or recovered from a missing KeyStore entry. WAL/SHM/journal/backup sentinels are not falsely presented as valid SQLite migration files.
