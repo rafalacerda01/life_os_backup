@@ -98,3 +98,12 @@ Este plano não é evidência de implementação.
 4. Verificar em Android físico/emulador cold boot, modo avião e ausência de chamadas remotas.
 
 **Status: LOCAL_PROFILE_SCAFFOLD_CREATED · TESTS_NOT_RUN · NO_RUNTIME_CUTOVER · NO_DEPLOY.**
+
+
+### Atualização do gate local — 16/11/2026 (continuação)
+- O bootstrap local agora exige `assertFreshInstall` antes de gerar qualquer novo identificador de instalação; o guard verifica sinais legados fora do SQLite.
+- O adapter de produção ainda não ativado verifica chaves de segurança legadas `auth_access_token`, `db_encryption_key`, `db_encryption_key_v2_*`, `life_os_*` e a preferência `life_os_onboarding_completed_v1`.
+- Testes de legado sem banco e reuso de identidade existente adicionados (total: 15 cenários de testes focais escritos, NÃO EXECUTADOS).
+- Missão focal de execução/revisão do Codex: `docs/CODEX_LOCAL_FIRST_FOCAL_GATE_2026-11-16.md`.
+- Nenhum módulo, router ou boot foi reconfigurado; dependências Firebase e Billing antigos permanecem ativos na versão atual.
+- Continua proibido apagar Firebase/Cloud e realizar deploy enquanto não houver migração de dados e provas funcionais.
