@@ -57,7 +57,7 @@ flutter_secure_storage 10.3.1 upstream pode inicializar/migrar durante read/read
 
 - Formato persistido decide como ler; não há cache de configuração do primeiro consumidor. Um lock serializa engines no mesmo processo.
 - ESP abre somente keysets/master existentes. Custom RSA OAEP/PKCS1 e AES GCM/CBC lê wrapped key/alias/config existentes; CBC histórico sem marcadores tem reconhecimento restrito.
-- Store vazio lido permanece vazio; corrupção/material ausente/mistura/formato desconhecido retorna erro estável, sem fallback para ciphertext, reset ou recriação de chave.
+- Store vazio lido permanece vazio; falha de decifragem/material ausente/mistura/formato desconhecido retorna erro estável, sem fallback para ciphertext, reset ou recriação de chave.
 - Escrita explícita provisiona RSA OAEP/AESGCM somente em store inequivocamente vazio. Falha parcial deixa órfãos bloqueantes para recuperação explícita.
 - deleteAll é recusado; delete por chave preserva o contrato de limpeza capturada. Pedidos biométricos/AES-wrapping são recusados antes de tocar o store.
 
@@ -80,6 +80,8 @@ Fixtures usam MethodChannel real, AndroidKeyStore, ESP/Tink e as factories P1 re
 | Núcleo local: guarda secundária + criação/reabertura/reboot | 4 / 18 | PASS separado |
 
 As 210 assertions da matriz não incluem as 18 do núcleo. O erro de corrupção é esperado e aprovado somente porque preservou todas as entradas/aliases e os bancos voltaram a abrir após restaurar exclusivamente a fixture. Material KeyStore genuinamente perdido não é recuperado magicamente: o comportamento aprovado é recusar sem recriar.
+
+O CBC legado não possui tag de autenticação: nem toda alteração de ciphertext é detectável pelo SecureStorage. A matriz comprova leitura dos valores conhecidos e integridade dos bancos sintéticos; não aprova resistência de CBC contra adulteração ativa. Formato da chave e verificação do banco continuam necessários. Migrar para criptografia autenticada exige um gate próprio, sem reescrever stores antigos durante leitura.
 
 Reboot real `adb reboot`, Android/KeyStore/processo reiniciados, modo avião 1. Boot da matriz: db237d15-a1a4-4723-b25b-580a8013b5e6 → 9735099a-9b5c-44f8-8895-782a9028ee5d. Segundo reboot do perfil: 9735099a-9b5c-44f8-8895-782a9028ee5d → 00160664-55e1-4bca-8f2a-aeb69a5a956d. Não foi apenas recriação de provider/engine. Snapshots de domínio/aliases permaneceram iguais, ignorando apenas artefatos do engine.
 
@@ -104,6 +106,8 @@ Cold boot atual está PASS no laboratório novo; não altera o BLOCKED históric
 Falhas ambientais intermediárias preservadas: wrapper/local.properties não versionados ausentes na cópia; build Android final usou wrapper Gradle 9.1 equivalente da sonda e somente SDK paths locais. flutter pub no app gerou dependências mas retornou 1 por symlinks Windows; build Android e testes --no-pub passaram, sem habilitar Developer Mode. Comandos finais inicialmente presos ao lock/escrita do SDK no sandbox foram encerrados por PID validado e repetidos com acesso aprovado. Formatação direta inicial teve erro de escrita de telemetria após formatar; repetição aprovada terminou zero. Nenhum desses logs intermediários foi usado como PASS.
 
 Builds usaram caches e artefatos públicos Flutter profile da missão anterior, com origem/hashes registrados e TLS validado. Nenhuma mudança global de trust/TLS, instalação de serviço faturável ou conexão de teste com produção. APK completo compilado não foi instalado nem executado. APK profile da sonda é instrumento de laboratório, não distribuição.
+
+O primeiro diretório de sonda preserva também cópias não utilizadas de fontes do app, incluindo configuração cliente Firebase. O target AOT e sua closure não importam esses arquivos, e pubspec não tem SDK Firebase/Billing. O preparador versionado reproduz um projeto mínimo com somente 32 bibliotecas locais. delivery/executed-probe-sources preserva os fontes efetivamente disponíveis no build; seu PROVENANCE.txt distingue cópias não compiladas e ajustes finais sem mudança do comportamento Android.
 
 ## 7. Base Local-First: feito e pendente
 
