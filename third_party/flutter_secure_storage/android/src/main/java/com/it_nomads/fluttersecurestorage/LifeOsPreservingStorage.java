@@ -29,7 +29,7 @@ import javax.crypto.spec.SecretKeySpec;
  * and reset flags. Existing data selects its persisted format. Reads cannot
  * create keys, migrate formats, remove entries, or fall back to ciphertext.
  * All engines in this process share the same admission lock. Cross-process
- * writers and biometric key formats require a separate gate and fail closed.
+ * writers require a separate gate. Biometric formats fail closed.
  */
 final class LifeOsPreservingStorage {
     private static final Object LOCK = new Object();
