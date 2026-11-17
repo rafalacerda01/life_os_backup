@@ -28,6 +28,7 @@ void main() {
     String Function()? generator,
     Future<String?> Function()? reader,
     Future<void> Function(String)? writer,
+    Future<void> Function()? assertFreshInstall,
   }) =>
       LocalInstallationIdentityService(
         readSavedId: reader ?? () async => savedId,
@@ -38,6 +39,7 @@ void main() {
             },
         documentsDirectory: () async => directory,
         newId: generator ?? () => id,
+        assertFreshInstall: assertFreshInstall ?? () async {},
       );
 
   test('fresh install creates a stable installation-scoped identity', () async {
@@ -163,4 +165,43 @@ void main() {
     expect(writeCount, 1);
     expect(savedId, isNull);
   });
+
+  test('non-DB legacy data blocks local identity creation', () async {
+    var checked = 0;
+    final bootstrap = service(
+      assertFreshInstall: () async {
+        checked++;
+        throw StateError('LOCAL_PROFILE_MIGRATION_REQUIRED');
+      },
+    );
+
+    await expectLater(
+      bootstrap.resolve(),
+      throwsA(isA<StateError>().having(
+        (e) => e.message,
+        'message',
+        'LOCAL_PROFILE_MIGRATION_REQUIRED',
+      )),
+    );
+    expect(checked, 1);
+    expect(savedId, isNull);
+    expect(writeCount, 0);
+  });
+
+  test('fresh-install guard is not reapplied to a persisted valid profile',
+      () async {
+    savedId = id;
+    var checked = 0;
+    final resolved = await service(
+      assertFreshInstall: () async {
+        checked++;
+        throw StateError('SHOULD_NOT_RUN_FOR_EXISTING_LOCAL_PROFILE');
+      },
+    ).resolve();
+
+    expect(resolved.uid, id);
+    expect(checked, 0);
+    expect(writeCount, 0);
+  });
+
 }
