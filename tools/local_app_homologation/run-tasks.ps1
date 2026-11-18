@@ -31,7 +31,7 @@ while($watch.Elapsed.TotalSeconds -lt 120){
   if($LASTEXITCODE -eq 0 -and $inputRaw){
     $request=$inputRaw | ConvertFrom-Json
     if($request.sequence -gt $lastInputSequence){
-      if($request.text -cnotmatch '^SYNTHETIC-[A-Z0-9-]{1,80}$'){throw 'Non-synthetic input refused'}
+      if($request.text -cnotmatch '^(?:SYNTHETIC-[A-Z0-9-]{1,80}|[0-9]{1,8}(?:[.,][0-9]{1,2})?)$'){throw 'Non-synthetic input refused'}
       & $adb -s $serial shell input text $request.text
       if($LASTEXITCODE){throw 'Android input failed'}
       $lastInputSequence=$request.sequence

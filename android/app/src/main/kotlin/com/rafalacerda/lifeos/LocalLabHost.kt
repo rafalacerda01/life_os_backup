@@ -55,7 +55,7 @@ object LocalLabHost {
                 "scenario" -> result.success(scenario())
                 "requestSyntheticInput" -> {
                     val text = call.arguments as? String
-                    if (text == null || !text.matches(Regex("SYNTHETIC-[A-Z0-9-]{1,80}"))) {
+                    if (text == null || !text.matches(Regex("(?:SYNTHETIC-[A-Z0-9-]{1,80}|[0-9]{1,8}(?:[.,][0-9]{1,2})?)"))) {
                         result.error("INVALID_SYNTHETIC_INPUT", "Synthetic test text required", null)
                     } else {
                         inputSequence++

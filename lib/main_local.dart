@@ -14,6 +14,7 @@ import 'package:life_os/core/db/user_db_key_manager.dart';
 import 'package:life_os/core/runtime/app_runtime_mode.dart';
 import 'package:life_os/core/utils/app_logger.dart';
 import 'package:life_os/features/tasks/presentation/tasks_screen.dart';
+import 'package:life_os/features/finance/presentation/finance_screen.dart';
 
 const localLabChannel = MethodChannel('lifeos.local_lab');
 
@@ -81,6 +82,7 @@ class LocalFirstDevelopmentApp extends StatefulWidget {
 }
 
 class _LocalFirstDevelopmentAppState extends State<LocalFirstDevelopmentApp> {
+  int _selectedModule = 0;
   @override
   Widget build(BuildContext context) => ProviderScope(
     overrides: [
@@ -98,8 +100,26 @@ class _LocalFirstDevelopmentAppState extends State<LocalFirstDevelopmentApp> {
         GlobalWidgetsLocalizations.delegate,
         GlobalCupertinoLocalizations.delegate,
       ],
-      // Other modules are admitted here only after their separate local gate.
-      home: const TasksScreen(),
+      home: Scaffold(
+        body: _selectedModule == 0
+            ? const TasksScreen(showFocusShortcut: false)
+            : const FinanceScreen(),
+        bottomNavigationBar: NavigationBar(
+          selectedIndex: _selectedModule,
+          onDestinationSelected: (index) =>
+              setState(() => _selectedModule = index),
+          destinations: const [
+            NavigationDestination(
+              icon: Icon(Icons.checklist_rounded),
+              label: 'Tarefas',
+            ),
+            NavigationDestination(
+              icon: Icon(Icons.account_balance_wallet_outlined),
+              label: 'Finanças',
+            ),
+          ],
+        ),
+      ),
     ),
   );
 

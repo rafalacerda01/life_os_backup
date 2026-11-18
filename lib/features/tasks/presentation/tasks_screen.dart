@@ -15,7 +15,8 @@ import 'package:life_os/features/premium/domain/services/quota_service.dart';
 import 'package:life_os/features/premium/presentation/plan_limits_provider.dart';
 
 class TasksScreen extends ConsumerStatefulWidget {
-  const TasksScreen({super.key});
+  const TasksScreen({this.showFocusShortcut = true, super.key});
+  final bool showFocusShortcut;
 
   @override
   ConsumerState<TasksScreen> createState() => _TasksScreenState();
@@ -616,8 +617,10 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
                             completedCount: completedCount,
                             progress: progress,
                           ),
-                          const SizedBox(height: 14),
-                          _FocusCta(onTap: () => context.push('/focus')),
+                          if (widget.showFocusShortcut) ...[
+                            const SizedBox(height: 14),
+                            _FocusCta(onTap: () => context.push('/focus')),
+                          ],
                         ],
                       ),
                     ),
