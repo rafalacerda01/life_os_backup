@@ -1,6 +1,9 @@
 import 'package:life_os/core/database/local_account_session.dart';
 import 'package:life_os/core/services/generational_read_policy.dart';
 import 'dart:convert';
+import 'package:life_os/core/database/database_sync_policy.dart';
+import 'package:life_os/features/premium/domain/services/plan_limits.dart';
+import 'package:life_os/features/premium/domain/services/quota_service.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:drift/drift.dart';
@@ -18,16 +21,131 @@ class _GoalSessionChanged implements Exception {
 class GoalRepository {
   final LocalAccountLease? sessionLease;
   Future<void> _verifyRemoteRead(String uid) => GenerationalReadPolicy.verify(
-    identity: _db.identity, lease: sessionLease, auth: _auth, store: _firestore, expectedUid: uid);
+    identity: _db.identity,
+    lease: sessionLease,
+    auth: _auth,
+    store: _firestore,
+    expectedUid: uid,
+  );
   void _requireReadSession(String uid) => GenerationalReadPolicy.requireCurrent(
-    identity: _db.identity, lease: sessionLease, auth: _auth, expectedUid: uid);
+    identity: _db.identity,
+    lease: sessionLease,
+    auth: _auth,
+    expectedUid: uid,
+  );
 
   final AppDatabase _db;
-  final FirebaseFirestore _firestore;
-  final FirebaseAuth _auth;
+  final FirebaseFirestore? _remoteFirestore;
+  final FirebaseAuth? _remoteAuth;
+  FirebaseFirestore get _firestore =>
+      _remoteFirestore ?? (throw const LocalRemoteSyncDisabled());
+  FirebaseAuth get _auth =>
+      _remoteAuth ?? (throw const LocalRemoteSyncDisabled());
+  String? get _ownerUid =>
+      _db.isLocalOnly ? _db.identity?.uid : _remoteAuth?.currentUser?.uid;
   final _uuid = const Uuid();
 
-  GoalRepository(this._db, this._firestore, this._auth, {this.sessionLease});
+  GoalRepository(
+    this._db,
+    FirebaseFirestore firestore,
+    FirebaseAuth auth, {
+    this.sessionLease,
+  }) : _remoteFirestore = firestore,
+       _remoteAuth = auth;
+
+  GoalRepository.local(this._db)
+    : _remoteFirestore = null,
+      _remoteAuth = null,
+      sessionLease = null {
+    if (!_db.isLocalOnly)
+      throw ArgumentError('LOCAL_PROFILE_SYNC_POLICY_REQUIRED');
+  }
+
+  Future<void> _enforceLocalFreeQuota() async {
+    if (!_db.isLocalOnly) return;
+    final limit = PlanLimits.free.goals;
+    final count = _db.goals.id.count();
+    final current = await (_db.selectOnly(
+      _db.goals,
+    )..addColumns([count])).map((row) => row.read(count) ?? 0).getSingle();
+    if (!const QuotaService().canCreate(limit: limit, currentCount: current)) {
+      throw PlanQuotaExceeded(QuotaResource.goals, limit.maximum);
+    }
+  }
+
+  /// UI increments in local storage are based on the admitted row, not its snapshot.
+  Future<void> changeLocalGoalProgress(String id, int delta) async {
+    if (!_db.isLocalOnly)
+      throw StateError('LOCAL_PROFILE_SYNC_POLICY_REQUIRED');
+    if (delta != -1 && delta != 1) throw ArgumentError('INVALID_GOAL_DELTA');
+    final owner = _ownerUid;
+    if (owner == null) throw StateError('LOCAL_PROFILE_REQUIRED');
+    await _db.transactionWithSync(
+      ownerUid: owner,
+      localOperation: () async {
+        final row = await (_db.select(
+          _db.goals,
+        )..where((t) => t.id.equals(id))).getSingleOrNull();
+        if (row == null) return;
+        if (row.targetValue <= 0) throw StateError('GOAL_TARGET_INVALID');
+        final now = DateTime.now();
+        final expired = _isGoalCycleExpired(
+          row.period,
+          DateTime.fromMillisecondsSinceEpoch(row.lastReset),
+          now,
+        );
+        final next = ((expired ? 0 : row.currentValue) + delta).clamp(
+          0,
+          row.targetValue,
+        );
+        await (_db.update(_db.goals)..where((t) => t.id.equals(id))).write(
+          GoalsCompanion(
+            currentValue: Value(next),
+            lastReset: expired
+                ? Value(now.millisecondsSinceEpoch)
+                : const Value.absent(),
+          ),
+        );
+      },
+      collection: 'goals',
+      docId: id,
+      operationType: 'update',
+      payloadJson: '{}',
+    );
+  }
+
+  /// Re-check expiry in the transaction so delayed UI callbacks cannot reset a new cycle.
+  Future<void> resetExpiredGoalCycle(String id) async {
+    if (!_db.isLocalOnly) return resetGoalCycle(id);
+    final owner = _ownerUid;
+    if (owner == null) throw StateError('LOCAL_PROFILE_REQUIRED');
+    await _db.transactionWithSync(
+      ownerUid: owner,
+      localOperation: () async {
+        final row = await (_db.select(
+          _db.goals,
+        )..where((t) => t.id.equals(id))).getSingleOrNull();
+        if (row == null) return;
+        final now = DateTime.now();
+        if (!_isGoalCycleExpired(
+          row.period,
+          DateTime.fromMillisecondsSinceEpoch(row.lastReset),
+          now,
+        ))
+          return;
+        await (_db.update(_db.goals)..where((t) => t.id.equals(id))).write(
+          GoalsCompanion(
+            currentValue: const Value(0),
+            lastReset: Value(now.millisecondsSinceEpoch),
+          ),
+        );
+      },
+      collection: 'goals',
+      docId: id,
+      operationType: 'update',
+      payloadJson: '{}',
+    );
+  }
 
   // ===========================================================================
   // 1. LEITURA (STREAMS LOCAIS)
@@ -59,9 +177,9 @@ class GoalRepository {
   // ===========================================================================
 
   Future<void> createGoal(String title, String period, int targetValue) async {
-    final user = _auth.currentUser;
+    final ownerUid = _ownerUid;
 
-    if (user == null) {
+    if (ownerUid == null) {
       return;
     }
 
@@ -81,8 +199,9 @@ class GoalRepository {
 
     try {
       await _db.transactionWithSync(
-        ownerUid: user.uid,
+        ownerUid: ownerUid,
         localOperation: () async {
+          await _enforceLocalFreeQuota();
           await _db
               .into(_db.goals)
               .insert(
@@ -116,26 +235,26 @@ class GoalRepository {
   }
 
   Future<void> updateGoalProgress(String id, int newValue) async {
-    final user = _auth.currentUser;
+    final ownerUid = _ownerUid;
 
-    if (user == null) {
+    if (ownerUid == null) {
       return;
     }
 
     try {
-      final admission = _db.localMutations.capture(expectedUid: user.uid);
+      final admission = _db.localMutations.capture(expectedUid: ownerUid);
       final currentRow = await (_db.select(
         _db.goals,
       )..where((table) => table.id.equals(id))).getSingleOrNull();
-      if (currentRow==null) return;
-      if (newValue<0 || newValue>9007199254740991) throw ArgumentError('Progresso da meta inválido.');
+      if (currentRow == null) return;
+      if (newValue < 0 || newValue > 9007199254740991)
+        throw ArgumentError('Progresso da meta inválido.');
       final now = DateTime.now();
-      final cycleExpired =
-          _isGoalCycleExpired(
-            currentRow.period,
-            DateTime.fromMillisecondsSinceEpoch(currentRow.lastReset),
-            now,
-          );
+      final cycleExpired = _isGoalCycleExpired(
+        currentRow.period,
+        DateTime.fromMillisecondsSinceEpoch(currentRow.lastReset),
+        now,
+      );
       final effectiveValue = cycleExpired
           ? _progressForNewCycle(
               requestedValue: newValue,
@@ -144,10 +263,11 @@ class GoalRepository {
             )
           : newValue;
 
-      if(effectiveValue<0 || effectiveValue>currentRow.targetValue) throw ArgumentError('Progresso da meta inválido.');
+      if (effectiveValue < 0 || effectiveValue > currentRow.targetValue)
+        throw ArgumentError('Progresso da meta inválido.');
       await _db.transactionWithSync(
         admission: admission,
-        ownerUid: user.uid,
+        ownerUid: ownerUid,
         localOperation: () async {
           await (_db.update(
             _db.goals,
@@ -175,9 +295,9 @@ class GoalRepository {
   }
 
   Future<void> resetGoalCycle(String id) async {
-    final user = _auth.currentUser;
+    final ownerUid = _ownerUid;
 
-    if (user == null) {
+    if (ownerUid == null) {
       return;
     }
 
@@ -185,7 +305,7 @@ class GoalRepository {
 
     try {
       await _db.transactionWithSync(
-        ownerUid: user.uid,
+        ownerUid: ownerUid,
         localOperation: () async {
           await (_db.update(
             _db.goals,
@@ -211,15 +331,15 @@ class GoalRepository {
   }
 
   Future<void> removeGoal(String id) async {
-    final user = _auth.currentUser;
+    final ownerUid = _ownerUid;
 
-    if (user == null) {
+    if (ownerUid == null) {
       return;
     }
 
     try {
       await _db.transactionWithSync(
-        ownerUid: user.uid,
+        ownerUid: ownerUid,
         localOperation: () async {
           await (_db.delete(
             _db.goals,
@@ -241,6 +361,7 @@ class GoalRepository {
   // ===========================================================================
 
   Future<void> syncGoalsFromFirebaseToLocal() async {
+    if (_db.isLocalOnly) return;
     final expectedUid = _auth.currentUser?.uid.trim();
     if (expectedUid == null || expectedUid.isEmpty) return;
 
@@ -268,81 +389,95 @@ class GoalRepository {
           .get(const GetOptions(source: Source.server));
       if (_auth.currentUser?.uid != expectedUid) return;
       await _verifyRemoteRead(expectedUid);
-      if (_db.identity?.generation != null && !GenerationalReadPolicy.accepts(_db.identity, fromCache: snapshot.metadata.isFromCache, pendingWrites: snapshot.metadata.hasPendingWrites)) throw StateError('GENERATIONAL_SNAPSHOT_UNCONFIRMED');
+      if (_db.identity?.generation != null &&
+          !GenerationalReadPolicy.accepts(
+            _db.identity,
+            fromCache: snapshot.metadata.isFromCache,
+            pendingWrites: snapshot.metadata.hasPendingWrites,
+          ))
+        throw StateError('GENERATIONAL_SNAPSHOT_UNCONFIRMED');
       final remoteDocIds = snapshot.docs.map((doc) => doc.id).toSet();
 
-      await _db.transactionWithCommitGuard(admission: ticket, waitForReopen: false, validateBeforeCommit: () => _requireReadSession(expectedUid), () async {
-        void requireCurrentUser() {
-          if (_auth.currentUser?.uid != expectedUid) {
-            throw const _GoalSessionChanged();
+      await _db.transactionWithCommitGuard(
+        admission: ticket,
+        waitForReopen: false,
+        validateBeforeCommit: () => _requireReadSession(expectedUid),
+        () async {
+          void requireCurrentUser() {
+            if (_auth.currentUser?.uid != expectedUid) {
+              throw const _GoalSessionChanged();
+            }
           }
-        }
 
-        requireCurrentUser();
-        final authoritativeItems =
-            await (_db.select(_db.syncQueueTable)..where(
-                  (item) =>
-                      item.ownerUid.equals(expectedUid) &
-                      item.collection.equals('goals') &
-                      (item.status.equals(SyncQueuePersistenceStatus.pending) |
-                          (item.status.equals(
-                                SyncQueuePersistenceStatus.succeeded,
-                              ) &
-                              (item.createdAt.isBiggerOrEqualValue(
-                                    pullStartedAt,
-                                  ) |
-                                  item.id.isIn(pendingOperationIds)))),
-                ))
-                .get();
-        final protectedDocIds = authoritativeItems
-            .map((item) => item.docId)
-            .toSet();
-        requireCurrentUser();
-
-        for (final doc in snapshot.docs) {
           requireCurrentUser();
-          if (protectedDocIds.contains(doc.id)) continue;
-          final data = doc.data();
-          final createdAt = _parseFirestoreDate(data['createdAt']);
-          if (createdAt == null) {
-            AppLogger.w('SYNC Metas: data de criação inválida ignorada.');
-            continue;
+          final authoritativeItems =
+              await (_db.select(_db.syncQueueTable)..where(
+                    (item) =>
+                        item.ownerUid.equals(expectedUid) &
+                        item.collection.equals('goals') &
+                        (item.status.equals(
+                              SyncQueuePersistenceStatus.pending,
+                            ) |
+                            (item.status.equals(
+                                  SyncQueuePersistenceStatus.succeeded,
+                                ) &
+                                (item.createdAt.isBiggerOrEqualValue(
+                                      pullStartedAt,
+                                    ) |
+                                    item.id.isIn(pendingOperationIds)))),
+                  ))
+                  .get();
+          final protectedDocIds = authoritativeItems
+              .map((item) => item.docId)
+              .toSet();
+          requireCurrentUser();
+
+          for (final doc in snapshot.docs) {
+            requireCurrentUser();
+            if (protectedDocIds.contains(doc.id)) continue;
+            final data = doc.data();
+            final createdAt = _parseFirestoreDate(data['createdAt']);
+            if (createdAt == null) {
+              AppLogger.w('SYNC Metas: data de criação inválida ignorada.');
+              continue;
+            }
+            final lastReset =
+                _parseFirestoreDate(data['lastReset']) ?? createdAt;
+            await _db
+                .into(_db.goals)
+                .insertOnConflictUpdate(
+                  GoalsCompanion(
+                    id: Value(doc.id),
+                    title: Value(data['title']),
+                    period: Value(data['period']),
+                    currentValue: Value(data['currentValue']),
+                    targetValue: Value(data['targetValue']),
+                    createdAt: Value(createdAt.millisecondsSinceEpoch),
+                    lastReset: Value(lastReset.millisecondsSinceEpoch),
+                  ),
+                );
+            requireCurrentUser();
           }
-          final lastReset = _parseFirestoreDate(data['lastReset']) ?? createdAt;
-          await _db
-              .into(_db.goals)
-              .insertOnConflictUpdate(
-                GoalsCompanion(
-                  id: Value(doc.id),
-                  title: Value(data['title']),
-                  period: Value(data['period']),
-                  currentValue: Value(data['currentValue']),
-                  targetValue: Value(data['targetValue']),
-                  createdAt: Value(createdAt.millisecondsSinceEpoch),
-                  lastReset: Value(lastReset.millisecondsSinceEpoch),
-                ),
-              );
-          requireCurrentUser();
-        }
 
-        final localGoals = await _db.select(_db.goals).get();
-        requireCurrentUser();
-        for (final goal in localGoals) {
+          final localGoals = await _db.select(_db.goals).get();
           requireCurrentUser();
-          final id = goal.id.trim();
-          if (id.isEmpty ||
-              id == 'pending' ||
-              id == 'synced' ||
-              remoteDocIds.contains(goal.id) ||
-              protectedDocIds.contains(goal.id)) {
-            continue;
+          for (final goal in localGoals) {
+            requireCurrentUser();
+            final id = goal.id.trim();
+            if (id.isEmpty ||
+                id == 'pending' ||
+                id == 'synced' ||
+                remoteDocIds.contains(goal.id) ||
+                protectedDocIds.contains(goal.id)) {
+              continue;
+            }
+            await (_db.delete(
+              _db.goals,
+            )..where((t) => t.id.equals(goal.id))).go();
+            requireCurrentUser();
           }
-          await (_db.delete(
-            _db.goals,
-          )..where((t) => t.id.equals(goal.id))).go();
-          requireCurrentUser();
-        }
-      });
+        },
+      );
       AppLogger.i("SYNC Metas: Concluído.");
     } on _GoalSessionChanged {
       return;

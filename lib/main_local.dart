@@ -16,6 +16,7 @@ import 'package:life_os/core/utils/app_logger.dart';
 import 'package:life_os/features/tasks/presentation/tasks_screen.dart';
 import 'package:life_os/features/finance/presentation/finance_screen.dart';
 import 'package:life_os/features/habits/presentation/habits_screen.dart';
+import 'package:life_os/features/goals/presentation/goals_screen.dart';
 
 const localLabChannel = MethodChannel('lifeos.local_lab');
 
@@ -105,7 +106,8 @@ class _LocalFirstDevelopmentAppState extends State<LocalFirstDevelopmentApp> {
         body: switch (_selectedModule) {
           0 => const TasksScreen(showFocusShortcut: false),
           1 => const FinanceScreen(),
-          _ => const HabitsScreen(),
+          2 => const HabitsScreen(),
+          _ => const GoalsScreen(),
         },
         bottomNavigationBar: NavigationBar(
           selectedIndex: _selectedModule,
@@ -123,6 +125,10 @@ class _LocalFirstDevelopmentAppState extends State<LocalFirstDevelopmentApp> {
             NavigationDestination(
               icon: Icon(Icons.repeat_rounded),
               label: 'Hábitos',
+            ),
+            NavigationDestination(
+              icon: Icon(Icons.flag_outlined),
+              label: 'Metas',
             ),
           ],
         ),

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:life_os/core/database/database_provider.dart';
 import 'package:life_os/core/services/emulator_account_runtime.dart';
 
 import 'package:flutter/material.dart';
@@ -41,10 +42,13 @@ class _GoalsScreenState extends ConsumerState<GoalsScreen> {
 
   Future<void> _syncPendingThenHydrateGoals() async {
     try {
+      if (ref.read(databaseProvider).isLocalOnly) return;
       final queueDrained = await ref
           .read(syncManagerProvider)
           .processPendingItems();
-      if (!mounted || (!queueDrained && ref.read(emulatorAccountRuntimeProvider) == null)) return;
+      if (!mounted ||
+          (!queueDrained && ref.read(emulatorAccountRuntimeProvider) == null))
+        return;
       await ref.read(goalRepositoryProvider).syncGoalsFromFirebaseToLocal();
     } catch (_) {
       AppLogger.w('Não foi possível sincronizar metas neste momento.');
@@ -52,7 +56,7 @@ class _GoalsScreenState extends ConsumerState<GoalsScreen> {
   }
 
   void _schedulePendingGoalSync() {
-    if (!mounted) return;
+    if (!mounted || ref.read(databaseProvider).isLocalOnly) return;
     unawaited(
       ref.read(syncManagerProvider).processPendingItems().catchError((
         Object _,
@@ -63,13 +67,19 @@ class _GoalsScreenState extends ConsumerState<GoalsScreen> {
     );
   }
 
-  Future<void> _updateGoalProgress(String goalId, int value) async {
-    await ref.read(goalRepositoryProvider).updateGoalProgress(goalId, value);
+  Future<void> _updateGoalProgress(String goalId, int value, int delta) async {
+    final repository = ref.read(goalRepositoryProvider);
+    if (ref.read(databaseProvider).isLocalOnly) {
+      await repository.changeLocalGoalProgress(goalId, delta);
+    } else {
+      await repository.updateGoalProgress(goalId, value);
+    }
     _schedulePendingGoalSync();
   }
 
   Future<void> _resetGoalCycle(String goalId) async {
-    await ref.read(goalRepositoryProvider).resetGoalCycle(goalId);
+    if (!mounted) return;
+    await ref.read(goalRepositoryProvider).resetExpiredGoalCycle(goalId);
     _schedulePendingGoalSync();
   }
 
@@ -427,9 +437,22 @@ class _GoalsScreenState extends ConsumerState<GoalsScreen> {
                                 return;
                               }
 
-                              await ref
-                                  .read(goalRepositoryProvider)
-                                  .createGoal(title, selectedTimeframe, target);
+                              try {
+                                await ref
+                                    .read(goalRepositoryProvider)
+                                    .createGoal(
+                                      title,
+                                      selectedTimeframe,
+                                      target,
+                                    );
+                              } on PlanQuotaExceeded catch (error) {
+                                if (context.mounted) {
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    SnackBar(content: Text(error.toString())),
+                                  );
+                                }
+                                return;
+                              }
 
                               _schedulePendingGoalSync();
 
@@ -637,12 +660,14 @@ class _GoalsScreenState extends ConsumerState<GoalsScreen> {
                           ? () => _updateGoalProgress(
                               goal.id,
                               goal.currentValue - 1,
+                              -1,
                             )
                           : null,
                       onIncrease: goal.currentValue < goal.targetValue
                           ? () => _updateGoalProgress(
                               goal.id,
                               goal.currentValue + 1,
+                              1,
                             )
                           : null,
                       onDelete: () => _showDeleteConfirmationDialog(
@@ -854,6 +879,7 @@ class _GoalCard extends StatelessWidget {
             Row(
               children: [
                 _ProgressButton(
+                  key: ValueKey('goal-minus-${goal.id}'),
                   icon: Icons.remove_rounded,
                   onPressed: onDecrease,
                   enabled: onDecrease != null,
@@ -872,6 +898,7 @@ class _GoalCard extends StatelessWidget {
                 ),
                 const SizedBox(width: 8),
                 _ProgressButton(
+                  key: ValueKey('goal-plus-${goal.id}'),
                   icon: Icons.add_rounded,
                   primary: true,
                   onPressed: onIncrease,
@@ -879,6 +906,7 @@ class _GoalCard extends StatelessWidget {
                 ),
                 const SizedBox(width: 4),
                 IconButton(
+                  key: ValueKey('goal-delete-${goal.id}'),
                   tooltip: 'Excluir meta',
                   visualDensity: VisualDensity.compact,
                   onPressed: onDelete,
@@ -990,6 +1018,7 @@ class _ProgressButton extends StatelessWidget {
   final bool primary;
 
   const _ProgressButton({
+    super.key,
     required this.icon,
     required this.onPressed,
     required this.enabled,

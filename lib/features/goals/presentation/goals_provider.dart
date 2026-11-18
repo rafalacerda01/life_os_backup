@@ -10,11 +10,15 @@ import 'package:life_os/features/goals/data/models/local/repositories/goal_repos
 
 // --- INJEÇÃO DO REPOSITÓRIO ---
 final goalRepositoryProvider = Provider((ref) {
+  final database = ref.watch(databaseProvider);
+  if (database.isLocalOnly) return GoalRepository.local(database);
   return GoalRepository(
-    ref.watch(databaseProvider),
+    database,
     ref.watch(firebaseFirestoreProvider),
     ref.watch(firebaseAuthProvider),
-    sessionLease: ref.watch(localAccountSessionProvider).identity == null ? null : ref.read(localAccountSessionProvider.notifier).capture(),
+    sessionLease: ref.watch(localAccountSessionProvider).identity == null
+        ? null
+        : ref.read(localAccountSessionProvider.notifier).capture(),
   );
 });
 
