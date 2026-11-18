@@ -140,8 +140,8 @@ void main() {
         );
         check(tester.takeException() == null, 'no-startup-ui-error');
         check(
-          find.text('Estudar agora').evaluate().isEmpty,
-          'no-unqualified-focus-entrypoint',
+          find.text('Estudar agora').evaluate().length == 1,
+          'focus-shortcut-available',
         );
         final container = ProviderScope.containerOf(
           tester.element(find.byType(StudyScreen)),

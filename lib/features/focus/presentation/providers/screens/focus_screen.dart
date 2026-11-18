@@ -1,4 +1,5 @@
 import 'dart:math' as math;
+import 'package:life_os/core/runtime/app_runtime_mode.dart';
 import 'package:life_os/core/services/emulator_account_runtime.dart';
 
 import 'package:flutter/material.dart';
@@ -27,7 +28,12 @@ class FocusScreen extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final focusState = ref.watch(focusProvider);
 
-    final activeCircleIdAsync = ref.watch(emulatorAccountRuntimeProvider) != null ? const AsyncData<String?>(null) : ref.watch(activeCircleIdForFocusProvider);
+    final offline =
+        ref.watch(appRuntimeModeProvider) == AppRuntimeMode.localFirst;
+    final activeCircleIdAsync =
+        offline || ref.watch(emulatorAccountRuntimeProvider) != null
+        ? const AsyncData<String?>(null)
+        : ref.watch(activeCircleIdForFocusProvider);
     final activeCircleId = activeCircleIdAsync.asData?.value;
 
     final circleChallengesAsync = activeCircleId == null
@@ -858,7 +864,7 @@ class FocusScreen extends ConsumerWidget {
     FocusState focusState, {
     required bool hasTarget,
   }) {
-    final canPlay = hasTarget;
+    final canPlay = hasTarget || focusState.isBreak;
 
     return Column(
       children: [
@@ -930,7 +936,9 @@ class FocusScreen extends ConsumerWidget {
         const SizedBox(height: 13),
 
         Text(
-          !hasTarget
+          focusState.saveFailed
+              ? 'TENTAR SALVAR NOVAMENTE'
+              : !canPlay
               ? 'SELECIONE UM ALVO PARA COMEÇAR'
               : focusState.isRunning
               ? 'PAUSAR SESSÃO'
@@ -943,6 +951,15 @@ class FocusScreen extends ConsumerWidget {
           ),
         ),
 
+        if (focusState.saveFailed)
+          const Padding(
+            padding: EdgeInsets.only(top: 8),
+            child: Text(
+              'Não foi possível salvar a sessão. Tente novamente ou redefina.',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: Colors.white70),
+            ),
+          ),
         const SizedBox(height: 12),
 
         TextButton.icon(

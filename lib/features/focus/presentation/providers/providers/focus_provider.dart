@@ -1,4 +1,5 @@
 import 'package:life_os/core/network/generational_http_provider.dart';
+import 'package:life_os/core/runtime/app_runtime_mode.dart';
 import 'dart:async';
 import 'package:uuid/uuid.dart';
 import 'package:life_os/core/database/local_account_session.dart';
@@ -28,12 +29,16 @@ enum FocusTargetType {
 
 // --- INJEÇÃO DO REPOSITÓRIO ---
 final focusRepositoryProvider = Provider((ref) {
+  final database = ref.watch(databaseProvider);
+  if (database.isLocalOnly) return FocusRepository.local(database);
   return FocusRepository(
-    ref.watch(databaseProvider),
+    database,
     ref.watch(firebaseFirestoreProvider),
     ref.watch(firebaseAuthProvider),
     ref.watch(syncManagerProvider),
-    sessionLease:ref.watch(localAccountSessionProvider).identity==null?null:ref.read(localAccountSessionProvider.notifier).capture(),
+    sessionLease: ref.watch(localAccountSessionProvider).identity == null
+        ? null
+        : ref.read(localAccountSessionProvider.notifier).capture(),
   );
 });
 
@@ -88,7 +93,9 @@ class _FocusCycleContext {
   final int plannedDurationSeconds;
   final LocalMutationTicket admission;
   final RemoteSendPermit? remoteAdmission;
-  final FocusRemoteDataSource remote;
+  final FocusRemoteDataSource? remoteDataSource;
+  FocusRemoteDataSource get remote =>
+      remoteDataSource ?? (throw const RemoteSessionStopped());
   final String intentKey;
 
   const _FocusCycleContext({
@@ -97,7 +104,7 @@ class _FocusCycleContext {
     required this.plannedDurationSeconds,
     required this.admission,
     required this.remoteAdmission,
-    required this.remote,
+    required this.remoteDataSource,
     required this.intentKey,
   });
 }
@@ -117,6 +124,7 @@ class FocusState {
   final bool isBreak;
   final bool isVerified;
   final bool targetLocked;
+  final bool saveFailed;
   final String? activeTargetId;
   final String? activeTargetTitle;
   final FocusTargetType? activeTargetType;
@@ -127,6 +135,7 @@ class FocusState {
     required this.isBreak,
     this.isVerified = false,
     this.targetLocked = false,
+    this.saveFailed = false,
     this.activeTargetId,
     this.activeTargetTitle,
     this.activeTargetType,
@@ -138,6 +147,7 @@ class FocusState {
     bool? isBreak,
     bool? isVerified,
     bool? targetLocked,
+    bool? saveFailed,
     Object? activeTargetId = _keepCurrentTargetValue,
     Object? activeTargetTitle = _keepCurrentTargetValue,
     Object? activeTargetType = _keepCurrentTargetValue,
@@ -148,6 +158,7 @@ class FocusState {
       isBreak: isBreak ?? this.isBreak,
       isVerified: isVerified ?? this.isVerified,
       targetLocked: targetLocked ?? this.targetLocked,
+      saveFailed: saveFailed ?? this.saveFailed,
       activeTargetId: identical(activeTargetId, _keepCurrentTargetValue)
           ? this.activeTargetId
           : activeTargetId as String?,
@@ -163,6 +174,8 @@ class FocusState {
 
 class FocusNotifier extends Notifier<FocusState> {
   Timer? _timer;
+  bool get _offline =>
+      ref.read(appRuntimeModeProvider) == AppRuntimeMode.localFirst;
   bool _isCompletingSession = false;
   bool _isStartingVerifiedSession = false;
   bool _cycleCanBeVerified = true;
@@ -175,7 +188,13 @@ class FocusNotifier extends Notifier<FocusState> {
 
   @override
   FocusState build() {
-    ref.watch(localAccountSessionProvider);
+    if (ref.watch(appRuntimeModeProvider) == AppRuntimeMode.localFirst) {
+      if (!ref.watch(databaseProvider).isLocalOnly) {
+        throw StateError('LOCAL_PROFILE_SYNC_POLICY_REQUIRED');
+      }
+    } else {
+      ref.watch(localAccountSessionProvider);
+    }
     // Riverpod may rebuild this notifier after invalidation. Its fresh state
     // must not retain an old cycle or an in-flight remote operation.
     _isStartingVerifiedSession = false;
@@ -222,7 +241,10 @@ class FocusNotifier extends Notifier<FocusState> {
   }
 
   void setCustomDuration(int minutes) {
-    if (state.isRunning || _isStartingVerifiedSession) return;
+    if (state.isRunning ||
+        _isStartingVerifiedSession ||
+        (_offline && (state.targetLocked || _isCompletingSession)))
+      return;
 
     final safeMinutes = minutes < 1 ? 1 : minutes;
     _timerDurationInSeconds = safeMinutes * 60;
@@ -235,7 +257,19 @@ class FocusNotifier extends Notifier<FocusState> {
       return;
     }
 
-    final cycle = _cycleForCurrentState();
+    if (_offline && state.saveFailed && _activeCycle != null) {
+      unawaited(_finishOfflineCycle(_activeCycle!));
+      return;
+    }
+    final _FocusCycleContext? cycle;
+    try {
+      cycle = _cycleForCurrentState();
+    } on LocalMutationUnavailable {
+      if (!_offline) rethrow;
+      state = state.copyWith(saveFailed: true);
+      return;
+    }
+    if (_offline && !state.isBreak && cycle == null) return;
     if (!_canStartVerifiedSession(cycle)) {
       _startLocalTimer(cycle);
       return;
@@ -265,8 +299,10 @@ class FocusNotifier extends Notifier<FocusState> {
       targetType: targetType,
       plannedDurationSeconds: _timerDurationInSeconds,
       admission: ref.read(databaseProvider).localMutations.capture(),
-      remoteAdmission: _captureCycleRemoteAdmission(),
-      remote: ref.read(focusRemoteDataSourceProvider),
+      remoteAdmission: _offline ? null : _captureCycleRemoteAdmission(),
+      remoteDataSource: _offline
+          ? null
+          : ref.read(focusRemoteDataSourceProvider),
       intentKey: const Uuid().v4(),
     );
   }
@@ -283,7 +319,8 @@ class FocusNotifier extends Notifier<FocusState> {
   }
 
   bool _canStartVerifiedSession(_FocusCycleContext? cycle) {
-    return !state.isBreak &&
+    return !_offline &&
+        !state.isBreak &&
         cycle != null &&
         _cycleCanBeVerified &&
         state.durationRemaining == _timerDurationInSeconds &&
@@ -408,12 +445,14 @@ class FocusNotifier extends Notifier<FocusState> {
       isRunning: true,
       isVerified: _verifiedSessionId != null,
       targetLocked: !state.isBreak && cycle != null,
+      saveFailed: false,
     );
 
     _timer = ref.read(focusPeriodicTimerFactoryProvider)(
       const Duration(seconds: 1),
       (timer) {
-        if (!ref.mounted) return;
+        if (!ref.mounted || !identical(timer, _timer) || !state.isRunning)
+          return;
         final remaining = startingRemaining - timer.tick;
         if (remaining > 0) {
           state = state.copyWith(durationRemaining: remaining);
@@ -429,6 +468,14 @@ class FocusNotifier extends Notifier<FocusState> {
   Future<void> _handleSessionEnd() async {
     if (!ref.mounted) return;
     final cycle = _activeCycle;
+    if (_offline) {
+      if (cycle == null) {
+        toggleSessionType();
+      } else {
+        await _finishOfflineCycle(cycle);
+      }
+      return;
+    }
     try {
       await ref
           .read(databaseProvider)
@@ -439,12 +486,44 @@ class FocusNotifier extends Notifier<FocusState> {
     }
   }
 
+  Future<void> _finishOfflineCycle(_FocusCycleContext cycle) async {
+    if (_isCompletingSession) return;
+    _isCompletingSession = true;
+    final generation = _lifecycleGeneration;
+    bool isCurrent() => ref.mounted && generation == _lifecycleGeneration;
+    var saved = false;
+    try {
+      await ref
+          .read(focusRepositoryProvider)
+          .completeLocalFocusSession(
+            targetId: cycle.targetId,
+            targetType: cycle.targetType.value,
+            durationSeconds: cycle.plannedDurationSeconds,
+            admission: cycle.admission,
+          );
+      saved = true;
+    } catch (error, stack) {
+      AppLogger.e('Erro ao salvar sessão de foco local', error, stack);
+    } finally {
+      if (isCurrent()) {
+        _isCompletingSession = false;
+        if (saved) {
+          toggleSessionType();
+        } else {
+          state = state.copyWith(saveFailed: true);
+        }
+      }
+    }
+  }
+
   Future<void> _completeLocalSession() async {
     if (!ref.mounted) return;
     if (_isCompletingSession) return;
 
     _isCompletingSession = true;
-    final analytics = ref.read(emulatorAccountRuntimeProvider) == null ? ref.read(analyticsServiceProvider) : null;
+    final analytics = ref.read(emulatorAccountRuntimeProvider) == null
+        ? ref.read(analyticsServiceProvider)
+        : null;
 
     final cycle = _activeCycle;
     final verifiedSessionId = _takeVerifiedSession();
@@ -553,6 +632,7 @@ class FocusNotifier extends Notifier<FocusState> {
   }
 
   void resetTimer() {
+    if (_offline && _isCompletingSession) return;
     _timer?.cancel();
     _startGeneration++;
     _isStartingVerifiedSession = false;
@@ -571,10 +651,12 @@ class FocusNotifier extends Notifier<FocusState> {
       isRunning: false,
       isVerified: false,
       targetLocked: false,
+      saveFailed: false,
     );
   }
 
   void toggleSessionType() {
+    if (_offline && _isCompletingSession) return;
     _timer?.cancel();
     _startGeneration++;
     _isStartingVerifiedSession = false;
@@ -595,6 +677,7 @@ class FocusNotifier extends Notifier<FocusState> {
       isBreak: nextIsBreak,
       isVerified: false,
       targetLocked: false,
+      saveFailed: false,
     );
   }
 

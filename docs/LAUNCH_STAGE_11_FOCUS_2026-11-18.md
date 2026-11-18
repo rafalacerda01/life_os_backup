@@ -1,0 +1,17 @@
+# Lançamento Local-First — etapa 11 · Foco
+
+Integração no aplicativo oficial em `C:/life_os`, branch `refactor/launch-local-first-20261117`, a partir de `e33dc6c7baa4605b6770b065ec00eac9d6886d39`. Os originais e seus SHA-256 estão no checkpoint `stage11-before`. As seis configurações protegidas mantiveram os hashes anteriores. O backend independente foi conferido no commit `b316df4302e8ae88e5d17af01780d831c0896ab9`.
+
+O timer pessoal abre pelos atalhos existentes de Tarefas e Estudos no host Android isolado. O repositório local exige a conexão `localOnly`. O timer captura a admissão no início e valida novamente no commit. A gravação do log e a conclusão da tarefa ou a atualização da matéria pertencem à mesma transação. Alvo excluído ou sessão revogada impedem a conclusão. A tela mantém uma tentativa de conclusão pendente quando a gravação falha. Callbacks de timers cancelados não alteram o ciclo atual. O caminho local dispensa Auth, Firestore, Círculos, analytics e processamento de fila. O timer pessoal continua com `isVerified=false`.
+
+Foram alterados os arquivos de repositório, provider e tela de Foco, o atalho de Tarefas, a navegação de `main_local.dart`, a lista de alvos do Gradle e a expectativa do harness de Estudos para o atalho agora disponível. Foram acrescentados o teste local com SQLite, o teste Android e os scripts `run-focus.ps1` e `assert-focus.ps1`. O schema permanece em 11.
+
+- A suíte de Foco passou em 145 testes. Os cinco testes novos cobrem pausa e retomada concorrentes com callbacks antigos, conclusão da tarefa, atualização da matéria, rollback de alvo excluído, recusa de ticket revogado e intervalo sem gravação.
+- As regressões selecionadas dos módulos integrados passaram em 405 testes. A análise geral retornou zero issues na configuração vigente. As falhas remotas de baseline documentadas nas etapas anteriores estão fora dessa seleção.
+- O build profile isolado passou em 2m49s. O build padrão debug ARMv7, ARM64 e x86_64 passou em 1m40s. A instalação de teste usou somente o APK `.localdev` inspecionado com `aapt2` e sem permissão `INTERNET`.
+
+`stage11-native-focus/focus-decision.json` registra **LOCAL_FOCUS_ANDROID=PASS** com 42 verificações no primeiro processo, 33 na reabertura e 33 após reboot real. O ciclo de um minuto usou o timer real. A prova passou por pausa, retomada, saída da tela e retorno com a contagem em execução, seguida de gravação de uma única conclusão. O alvo foi a tarefa sintética já concluída do gate anterior, para preservar seu conteúdo. A conclusão de tarefa pendente e o efeito em matéria foram verificados nos testes SQLite. O Android também abriu Foco pelo atalho de Estudos.
+
+O APK de testes usou o mesmo AVD e a mesma userdata dos gates anteriores, em modo avião antes e depois do reboot. As três rodadas mantiveram o fingerprint do log e o hash do banco fechado. O verificador comparou perfil, chave, tarefa, despesa, hábito, metas, Check-in e Estudos com o gate anterior. O arquivo permaneceu criptografado, `integrity_check=ok`, journal `READY` e fila remota vazia. Todos os dados usados eram sintéticos.
+
+O timer ativo vive no processo. A persistência validada após reboot é a da sessão concluída. A rodada cobriu a navegação dentro do aplicativo, sem homologar a contagem com o processo suspenso pelo Android. A qualificação é focal no AVD API 34 x86_64 com Skia e SwiftShader. A ativação geral depende dos módulos restantes, lembretes, perfil e segurança, migração UID e Premium híbrido. **Lançamento NO-GO**, `LOCAL_IDENTITY_GATE=BLOCKED` e `ROLLOUT=CLOSED`.
