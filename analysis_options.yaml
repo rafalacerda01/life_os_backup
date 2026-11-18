@@ -4,6 +4,7 @@ analyzer:
   exclude:
     # Archived nested projects can otherwise resolve imports to this package.
     - build/**
+    - android/build/**
     - tools/firestore_rules/node_modules/**
   errors:
     # Ignora avisos de depreciação e lints de estilo que não quebram o código
