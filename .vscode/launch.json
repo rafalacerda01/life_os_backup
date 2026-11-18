@@ -1,0 +1,18 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Life OS Local (pacote isolado)",
+      "request": "launch",
+      "type": "dart",
+      "program": "lib/main_local.dart",
+      "env": { "ORG_GRADLE_PROJECT_lifeOsLocalLab": "true" }
+    },
+    {
+      "name": "Life OS legado (startup atual)",
+      "request": "launch",
+      "type": "dart",
+      "program": "lib/main.dart"
+    }
+  ]
+}

@@ -49,6 +49,10 @@ plugins {
     id("com.google.firebase.crashlytics")
 }
 
+// Explicit, non-publishable Android host for local module qualification.
+// Default builds retain the existing package, manifest and startup.
+val localLab = providers.gradleProperty("lifeOsLocalLab").orNull == "true"
+
 android {
     namespace = "com.rafalacerda.lifeos"
     compileSdk = 36 
@@ -62,6 +66,7 @@ android {
 
     defaultConfig {
         applicationId = "com.rafalacerda.lifeos"
+        if (localLab) applicationIdSuffix = ".localdev"
         minSdk = 24 
         targetSdk = 36 
         multiDexEnabled = true // Corrigido
@@ -81,6 +86,34 @@ android {
     buildTypes {
         release {
             signingConfig = signingConfigs.getByName("release")
+        }
+    }
+    if (localLab) {
+        buildTypes.matching { it.name == "profile" }.configureEach { isDebuggable = true }
+        sourceSets.getByName("debug").manifest.srcFile("src/localLab/AndroidManifest.xml")
+        sourceSets.getByName("profile").manifest.srcFile("src/localLabProfile/AndroidManifest.xml")
+    }
+}
+
+if (localLab) {
+    androidComponents.beforeVariants(androidComponents.selector().withBuildType("release")) {
+        it.enable = false
+    }
+    tasks.matching {
+        it.name.endsWith("GoogleServices") || it.name.startsWith("uploadCrashlytics")
+    }.configureEach { enabled = false }
+}
+
+tasks.matching { it.name.startsWith("compileFlutterBuild") }.configureEach {
+    doFirst {
+        val target = project.findProperty("target")?.toString()?.replace('\\', '/') ?: "lib/main.dart"
+        val allowed = listOf("lib/main_local.dart", "integration_test/local_tasks_native_test.dart")
+        val localTarget = allowed.any { target == it || target.endsWith("/$it") }
+        if (localLab && !localTarget) {
+            throw GradleException("Local lab requires an explicitly qualified local entrypoint.")
+        }
+        if (!localLab && localTarget) {
+            throw GradleException("Local entrypoint requires the isolated lifeOsLocalLab package.")
         }
     }
 }
