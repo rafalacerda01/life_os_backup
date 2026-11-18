@@ -15,6 +15,7 @@ import 'package:life_os/core/runtime/app_runtime_mode.dart';
 import 'package:life_os/core/utils/app_logger.dart';
 import 'package:life_os/features/tasks/presentation/tasks_screen.dart';
 import 'package:life_os/features/finance/presentation/finance_screen.dart';
+import 'package:life_os/features/habits/presentation/habits_screen.dart';
 
 const localLabChannel = MethodChannel('lifeos.local_lab');
 
@@ -101,9 +102,11 @@ class _LocalFirstDevelopmentAppState extends State<LocalFirstDevelopmentApp> {
         GlobalCupertinoLocalizations.delegate,
       ],
       home: Scaffold(
-        body: _selectedModule == 0
-            ? const TasksScreen(showFocusShortcut: false)
-            : const FinanceScreen(),
+        body: switch (_selectedModule) {
+          0 => const TasksScreen(showFocusShortcut: false),
+          1 => const FinanceScreen(),
+          _ => const HabitsScreen(),
+        },
         bottomNavigationBar: NavigationBar(
           selectedIndex: _selectedModule,
           onDestinationSelected: (index) =>
@@ -116,6 +119,10 @@ class _LocalFirstDevelopmentAppState extends State<LocalFirstDevelopmentApp> {
             NavigationDestination(
               icon: Icon(Icons.account_balance_wallet_outlined),
               label: 'Finanças',
+            ),
+            NavigationDestination(
+              icon: Icon(Icons.repeat_rounded),
+              label: 'Hábitos',
             ),
           ],
         ),

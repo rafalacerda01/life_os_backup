@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:life_os/core/database/database_provider.dart';
 import 'package:life_os/core/services/emulator_account_runtime.dart';
 
 import 'package:flutter/material.dart';
@@ -37,10 +38,13 @@ class _HabitsScreenState extends ConsumerState<HabitsScreen> {
 
   Future<void> _syncPendingThenHydrateHabits() async {
     try {
+      if (ref.read(databaseProvider).isLocalOnly) return;
       final queueDrained = await ref
           .read(syncManagerProvider)
           .processPendingItems();
-      if (!mounted || (!queueDrained && ref.read(emulatorAccountRuntimeProvider) == null)) return;
+      if (!mounted ||
+          (!queueDrained && ref.read(emulatorAccountRuntimeProvider) == null))
+        return;
       await ref.read(habitsRepositoryProvider).syncHabitsFromFirebaseToLocal();
     } catch (_) {
       AppLogger.w('Não foi possível sincronizar hábitos neste momento.');
@@ -48,7 +52,7 @@ class _HabitsScreenState extends ConsumerState<HabitsScreen> {
   }
 
   void _schedulePendingHabitSync() {
-    if (!mounted) return;
+    if (!mounted || ref.read(databaseProvider).isLocalOnly) return;
     unawaited(
       ref.read(syncManagerProvider).processPendingItems().catchError((
         Object _,
@@ -109,7 +113,16 @@ class _HabitsScreenState extends ConsumerState<HabitsScreen> {
             return;
           }
 
-          await ref.read(habitsRepositoryProvider).addHabit(title);
+          try {
+            await ref.read(habitsRepositoryProvider).addHabit(title);
+          } on PlanQuotaExceeded catch (error) {
+            if (sheetContext.mounted) {
+              ScaffoldMessenger.of(
+                sheetContext,
+              ).showSnackBar(SnackBar(content: Text(error.toString())));
+            }
+            return;
+          }
           _schedulePendingHabitSync();
 
           if (sheetContext.mounted) {
@@ -529,6 +542,9 @@ class _HabitsScreenState extends ConsumerState<HabitsScreen> {
                                               borderRadius:
                                                   BorderRadius.circular(13),
                                               child: InkWell(
+                                                key: ValueKey(
+                                                  'habit-today-${habit.id}',
+                                                ),
                                                 borderRadius:
                                                     BorderRadius.circular(13),
                                                 onTap: () async {
@@ -555,6 +571,9 @@ class _HabitsScreenState extends ConsumerState<HabitsScreen> {
                                               ),
                                             ),
                                             IconButton(
+                                              key: ValueKey(
+                                                'habit-delete-${habit.id}',
+                                              ),
                                               tooltip: 'Excluir hábito',
                                               icon: const Icon(
                                                 Icons.delete_outline_rounded,
@@ -595,21 +614,16 @@ class _HabitsScreenState extends ConsumerState<HabitsScreen> {
                                                 .toUpperCase();
 
                                         return GestureDetector(
+                                          key: ValueKey(
+                                            'habit-day-${habit.id}-$dayStr',
+                                          ),
                                           onTap: () async {
-                                            final updatedDates =
-                                                List<String>.from(
-                                                  habit.completedDates,
-                                                );
-                                            if (isCompleted) {
-                                              updatedDates.remove(dayStr);
-                                            } else {
-                                              updatedDates.add(dayStr);
-                                            }
                                             await ref
                                                 .read(habitsRepositoryProvider)
-                                                .updateHabitDates(
+                                                .toggleHabitDate(
                                                   habit.id,
-                                                  updatedDates,
+                                                  dayStr,
+                                                  habit.completedDates,
                                                 );
                                             _schedulePendingHabitSync();
                                           },

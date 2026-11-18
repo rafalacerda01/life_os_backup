@@ -12,11 +12,15 @@ import 'package:life_os/features/habits/data/repositories/habits_repository.dart
 
 // 1. PROVIDER DO REPOSITÓRIO
 final habitsRepositoryProvider = Provider((ref) {
+  final database = ref.watch(databaseProvider);
+  if (database.isLocalOnly) return HabitsRepository.local(database);
   return HabitsRepository(
-    ref.watch(databaseProvider),
+    database,
     ref.watch(firebaseFirestoreProvider),
     ref.watch(firebaseAuthProvider),
-    sessionLease: ref.watch(localAccountSessionProvider).identity == null ? null : ref.read(localAccountSessionProvider.notifier).capture(),
+    sessionLease: ref.watch(localAccountSessionProvider).identity == null
+        ? null
+        : ref.read(localAccountSessionProvider.notifier).capture(),
   );
 });
 
@@ -29,7 +33,10 @@ typedef ManualHabitTodayToggle =
 
 final manualHabitTodayToggleProvider = Provider<ManualHabitTodayToggle>((ref) {
   final repository = ref.watch(habitsRepositoryProvider);
-  if (ref.watch(emulatorAccountRuntimeProvider) != null) return (id, dates, wasDone) => repository.toggleHabitToday(id, dates);
+  if (ref.watch(databaseProvider).isLocalOnly)
+    return (id, dates, wasDone) => repository.toggleHabitToday(id, dates);
+  if (ref.watch(emulatorAccountRuntimeProvider) != null)
+    return (id, dates, wasDone) => repository.toggleHabitToday(id, dates);
   final analytics = ref.watch(analyticsServiceProvider);
   final isSessionActive = ref.watch(analyticsSessionActiveProvider);
   return (habitId, currentDates, wasCompletedToday) async {
@@ -42,6 +49,8 @@ final manualHabitTodayToggleProvider = Provider<ManualHabitTodayToggle>((ref) {
 });
 
 // 2. STREAM PROVIDER: Escuta o banco LOCAL (Drift) através do Repositório
-final habitsStreamProvider = StreamProvider.autoDispose<List<HabitModel>>((ref) {
+final habitsStreamProvider = StreamProvider.autoDispose<List<HabitModel>>((
+  ref,
+) {
   return ref.watch(habitsRepositoryProvider).getHabitsStream();
 });
