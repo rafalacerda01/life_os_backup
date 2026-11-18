@@ -1,5 +1,13 @@
 import 'plan_limits.dart';
 
+class PlanQuotaExceeded implements Exception {
+  const PlanQuotaExceeded(this.resource, this.maximum);
+  final QuotaResource resource;
+  final int? maximum;
+  @override
+  String toString() => 'Você atingiu o limite permitido pelo seu plano.';
+}
+
 class QuotaService {
   const QuotaService();
 

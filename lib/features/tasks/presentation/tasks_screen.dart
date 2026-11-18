@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:life_os/core/services/emulator_account_runtime.dart';
+import 'package:life_os/core/runtime/app_runtime_mode.dart';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -32,11 +33,16 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
   }
 
   Future<void> _syncPendingThenHydrateTasks() async {
+    if (!mounted ||
+        ref.read(appRuntimeModeProvider) == AppRuntimeMode.localFirst)
+      return;
     try {
       final queueDrained = await ref
           .read(syncManagerProvider)
           .processPendingItems();
-      if (!mounted || (!queueDrained && ref.read(emulatorAccountRuntimeProvider) == null)) return;
+      if (!mounted ||
+          (!queueDrained && ref.read(emulatorAccountRuntimeProvider) == null))
+        return;
       await ref.read(tasksRepositoryProvider).syncTasksFromFirebaseToLocal();
     } catch (_) {
       AppLogger.w('Não foi possível sincronizar tarefas neste momento.');
@@ -44,7 +50,9 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
   }
 
   void _schedulePendingTaskSync() {
-    if (!mounted) return;
+    if (!mounted ||
+        ref.read(appRuntimeModeProvider) == AppRuntimeMode.localFirst)
+      return;
     unawaited(
       ref.read(syncManagerProvider).processPendingItems().catchError((
         Object _,
@@ -238,9 +246,29 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
                           return;
                         }
 
-                        await ref
-                            .read(tasksRepositoryProvider)
-                            .addTask(title, selectedPriority);
+                        try {
+                          await ref
+                              .read(tasksRepositoryProvider)
+                              .addTask(title, selectedPriority);
+                        } on PlanQuotaExceeded catch (error) {
+                          if (context.mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(content: Text(error.toString())),
+                            );
+                          }
+                          return;
+                        } catch (_) {
+                          if (context.mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(
+                                content: Text(
+                                  'Não foi possível salvar a tarefa. Tente novamente.',
+                                ),
+                              ),
+                            );
+                          }
+                          return;
+                        }
 
                         _schedulePendingTaskSync();
 
