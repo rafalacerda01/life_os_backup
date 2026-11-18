@@ -77,6 +77,17 @@ final class LocalDatabaseIdentity {
   final String uid;
   final String? generation, projectId, databaseId, tenantId;
   final String namespace;
+  static bool isValidLocalInstallationId(String value) => RegExp(
+    r'^local-v1-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$',
+  ).hasMatch(value);
+
+  bool get isLocalInstallation =>
+      generation == null &&
+      projectId == null &&
+      databaseId == null &&
+      tenantId == null &&
+      isValidLocalInstallationId(uid);
+
   bool get isBound =>
       generation != null && projectId != null && databaseId != null;
   bool get isLegacy => generation == null;

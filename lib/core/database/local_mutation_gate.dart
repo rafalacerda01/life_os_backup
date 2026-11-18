@@ -30,9 +30,10 @@ class _Lease {
 
 /// One admission covers the entire logical write, not individual SQL statements.
 class LocalMutationGate {
-  LocalMutationGate({this.ownerUid});
+  LocalMutationGate({this.ownerUid, this.allowRemoteSends = true});
 
   final String? ownerUid;
+  final bool allowRemoteSends;
   static final Object _producerZoneKey = Object();
   final Object _zoneKey = Object();
   String? Function()? _currentUserId;
@@ -60,6 +61,7 @@ class LocalMutationGate {
   /// Independent of local write leases, which may drain during quiescence.
   /// Aborting logout opens new admissions without reviving old remote work.
   RemoteSendPermit captureRemoteSend({required String expectedUid}) {
+    if (!allowRemoteSends) throw const RemoteSessionStopped();
     if (_currentUserId != null) observeSession(_currentUserId!());
     final generation = _generation;
     final remoteGeneration = _remoteSendGeneration;

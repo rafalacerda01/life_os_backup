@@ -69,6 +69,74 @@ class DatabaseEncryptionBootstrap {
     }
   }
 
+  /// Fresh local profile provisioning or a read-only check of an already
+  /// encrypted, current-schema local profile. Never invokes legacy recovery,
+  /// plaintext conversion, WAL checkpointing or artifact cleanup.
+  Future<String> prepareLocalProfile({
+    required File databaseFile,
+    required DatabaseKeyProvider keyProvider,
+    required int expectedSchemaVersion,
+  }) async {
+    for (final suffix in ['.plaintext-backup', '.encryption-candidate']) {
+      for (final sidecar in ['', '-wal', '-shm', '-journal']) {
+        if (await FileSystemEntity.type(
+              '${databaseFile.path}$suffix$sidecar',
+              followLinks: false,
+            ) !=
+            FileSystemEntityType.notFound) {
+          throw StateError('LOCAL_PROFILE_MIGRATION_ARTIFACTS_REQUIRE_REVIEW');
+        }
+      }
+    }
+    final type = await FileSystemEntity.type(
+      databaseFile.path,
+      followLinks: false,
+    );
+    if (type != FileSystemEntityType.file &&
+        type != FileSystemEntityType.notFound) {
+      throw StateError('LOCAL_PROFILE_STORAGE_TYPE_INVALID');
+    }
+    final exists = type == FileSystemEntityType.file;
+    if (!exists) {
+      for (final suffix in ['-wal', '-shm', '-journal']) {
+        if (await FileSystemEntity.type(
+              '${databaseFile.path}$suffix',
+              followLinks: false,
+            ) !=
+            FileSystemEntityType.notFound) {
+          throw StateError('USER_DATABASE_ORPHAN_SIDECAR');
+        }
+      }
+    }
+    if (exists &&
+        (databaseFile.lengthSync() == 0 || hasPlaintextHeader(databaseFile))) {
+      throw StateError('LOCAL_PROFILE_ENCRYPTED_DATABASE_REQUIRED');
+    }
+    final key = await keyProvider(allowCreate: !exists);
+    _validateKey(key);
+    if (!exists) {
+      _createEncryptedDatabase(databaseFile, key);
+      return key;
+    }
+    final database = _sqlite.open(databaseFile.path, mode: OpenMode.readOnly);
+    try {
+      _assertSqlite3MultipleCiphers(database);
+      configureEncryptedConnection(database, key);
+      _assertHealthy(database);
+      final version = database
+          .select('PRAGMA user_version')
+          .single
+          .values
+          .single;
+      if (version != expectedSchemaVersion) {
+        throw StateError('LOCAL_PROFILE_SCHEMA_MIGRATION_REQUIRED');
+      }
+    } finally {
+      database.dispose();
+    }
+    return key;
+  }
+
   static void configureEncryptedConnection(Database database, String key) {
     _validateKey(key);
     final escapedKey = _escapeSqlString(key);

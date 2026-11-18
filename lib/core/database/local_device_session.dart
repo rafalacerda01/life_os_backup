@@ -1,4 +1,5 @@
 import 'app_database.dart';
+import 'database_sync_policy.dart';
 import 'local_database_identity.dart';
 import 'local_installation_identity_service.dart';
 import 'session_database_coordinator.dart';
@@ -8,18 +9,27 @@ import 'user_database_factory.dart';
 ///
 /// Keep separate from the authenticated app providers until migration of
 /// UID-scoped encrypted databases and all module side effects is verified.
-/// This class starts no SyncManager. The shared AppDatabase still supports
-/// enqueueing and remote permits; an explicit local-only policy is required
-/// before connecting the existing module repositories to this session.
+/// Its connection cannot enqueue or mutate historical queue rows, and cannot
+/// grant remote-send permits. Module wiring is a separate qualification stage.
 class LocalDeviceSession {
   LocalDeviceSession({
     required this.identityService,
     Future<AppDatabase> Function(LocalDatabaseIdentity)? openDatabase,
     void Function(LocalDatabaseIdentity)? clearKeyCache,
   }) {
+    final open =
+        openDatabase ??
+        UserDatabaseFactory(syncPolicy: DatabaseSyncPolicy.localOnly).open;
     coordinator = SessionDatabaseCoordinator(
       currentUserId: () => _uid,
-      openDatabase: openDatabase ?? UserDatabaseFactory().open,
+      openDatabase: (identity) async {
+        final database = await open(identity);
+        if (!database.isLocalOnly) {
+          await database.closeDatabase();
+          throw StateError('LOCAL_PROFILE_SYNC_POLICY_REQUIRED');
+        }
+        return database;
+      },
       clearKeyCache: clearKeyCache,
     );
   }

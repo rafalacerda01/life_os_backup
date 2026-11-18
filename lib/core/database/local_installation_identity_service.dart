@@ -20,9 +20,6 @@ class LocalInstallationIdentityService {
   });
 
   static const storageKey = 'life_os_local_installation_id_v1';
-  static final _validId = RegExp(
-    r'^local-v1-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$',
-  );
   static const _databaseSuffixes = {
     '',
     '-wal',
@@ -67,7 +64,8 @@ class LocalInstallationIdentityService {
 
   Future<LocalDatabaseIdentity> _resolve() async {
     final existing = await readSavedId();
-    if (existing != null && !_validId.hasMatch(existing)) {
+    if (existing != null &&
+        !LocalDatabaseIdentity.isValidLocalInstallationId(existing)) {
       throw StateError('LOCAL_PROFILE_ID_INVALID');
     }
 
@@ -104,7 +102,7 @@ class LocalInstallationIdentityService {
     await assertFreshInstall();
 
     final generated = newId();
-    if (!_validId.hasMatch(generated)) {
+    if (!LocalDatabaseIdentity.isValidLocalInstallationId(generated)) {
       throw StateError('LOCAL_PROFILE_GENERATOR_INVALID');
     }
     // The marker is written only after the legacy-data guard. No databases

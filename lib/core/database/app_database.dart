@@ -9,6 +9,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:life_os/core/database/database_encryption.dart';
 import 'package:life_os/core/database/local_mutation_gate.dart';
 import 'package:life_os/core/database/local_database_identity.dart';
+import 'database_sync_policy.dart';
 import 'package:life_os/core/db/db_key_manager.dart';
 import 'package:life_os/features/checkin/data/local/checkin_table.dart';
 import 'package:life_os/features/finance/data/local/transaction_table.dart';
@@ -50,15 +51,44 @@ part 'app_database.g.dart';
 class AppDatabase extends _$AppDatabase {
   /// Permite injetar um executor, principalmente para testes.
   AppDatabase({QueryExecutor? executor})
-    : this._(executor ?? _openConnection(), LocalMutationGate(), null);
+    : this._(
+        executor ?? _openConnection(),
+        LocalMutationGate(),
+        null,
+        DatabaseSyncPolicy.remoteEnabled,
+      );
 
   AppDatabase.forUser({
     required LocalDatabaseIdentity identity,
     required QueryExecutor executor,
-  }) : this._(executor, LocalMutationGate(ownerUid: identity.uid), identity);
+    DatabaseSyncPolicy syncPolicy = DatabaseSyncPolicy.remoteEnabled,
+  }) : this._(
+         executor,
+         _mutationGateFor(identity, syncPolicy),
+         identity,
+         syncPolicy,
+       );
 
-  AppDatabase._(QueryExecutor executor, this.localMutations, this.identity)
-    : super(
+  static LocalMutationGate _mutationGateFor(
+    LocalDatabaseIdentity identity,
+    DatabaseSyncPolicy policy,
+  ) {
+    if (policy == DatabaseSyncPolicy.localOnly &&
+        !identity.isLocalInstallation) {
+      throw ArgumentError('LOCAL_PROFILE_IDENTITY_REQUIRED');
+    }
+    return LocalMutationGate(
+      ownerUid: identity.uid,
+      allowRemoteSends: policy == DatabaseSyncPolicy.remoteEnabled,
+    );
+  }
+
+  AppDatabase._(
+    QueryExecutor executor,
+    this.localMutations,
+    this.identity,
+    this.syncPolicy,
+  ) : super(
         executor
             .interceptWith(LocalMutationInterceptor(localMutations))
             .interceptWith(_TransactionCommitGuardInterceptor()),
@@ -66,6 +96,8 @@ class AppDatabase extends _$AppDatabase {
 
   final LocalMutationGate localMutations;
   final LocalDatabaseIdentity? identity;
+  final DatabaseSyncPolicy syncPolicy;
+  bool get isLocalOnly => syncPolicy == DatabaseSyncPolicy.localOnly;
 
   @override
   Future<T> transaction<T>(
@@ -119,7 +151,9 @@ class AppDatabase extends _$AppDatabase {
   // =========================================================================
 
   @override
-  int get schemaVersion => 11;
+  int get schemaVersion => currentSchemaVersion;
+
+  static const currentSchemaVersion = 11;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -127,6 +161,10 @@ class AppDatabase extends _$AppDatabase {
       await migrator.createAll();
     },
     onUpgrade: (Migrator migrator, int from, int to) async {
+      // A local-only connection never silently upgrades an imported database.
+      // A separately qualified migration must authorize any existing schema.
+      if (isLocalOnly)
+        throw StateError('LOCAL_PROFILE_SCHEMA_MIGRATION_REQUIRED');
       // -----------------------------------------------------------------
       // V1 -> V2
       // -----------------------------------------------------------------
@@ -206,6 +244,19 @@ class AppDatabase extends _$AppDatabase {
       }
       if (from < 11) await migrator.createTable(waterV2Preferences);
     },
+    beforeOpen: (_) async {
+      if (!isLocalOnly) return;
+      // Per-connection SQLite enforcement also covers DAOs, raw SQL and batches.
+      // Historical queue rows remain readable but cannot be changed or removed.
+      // TEMP triggers do not modify the persisted schema or database version.
+      for (final event in ['INSERT', 'UPDATE', 'DELETE']) {
+        await customStatement(
+          'CREATE TEMP TRIGGER IF NOT EXISTS life_os_local_queue_${event.toLowerCase()} '
+          'BEFORE $event ON main.sync_queue_table BEGIN '
+          "SELECT RAISE(ABORT, '${LocalRemoteSyncDisabled.code}'); END",
+        );
+      }
+    },
   );
 
   // =========================================================================
@@ -279,6 +330,7 @@ class AppDatabase extends _$AppDatabase {
     required String payloadJson,
     int? createdAt,
   }) async {
+    if (isLocalOnly) throw const LocalRemoteSyncDisabled();
     final cleanOwnerUid = ownerUid.trim();
     final cleanCollection = collection.trim();
     final cleanDocId = docId.trim();
@@ -576,6 +628,13 @@ class AppDatabase extends _$AppDatabase {
     required String payloadJson,
     LocalMutationTicket? admission,
   }) async {
+    if (isLocalOnly) {
+      if (ownerUid != identity!.uid) throw const LocalMutationUnavailable();
+      return transaction(
+        localOperation,
+        admission: admission ?? localMutations.capture(expectedUid: ownerUid),
+      );
+    }
     final cleanOwnerUid = ownerUid.trim();
     final cleanCollection = collection.trim();
     final cleanDocId = docId.trim();

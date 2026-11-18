@@ -8,6 +8,7 @@ import 'package:life_os/core/db/user_db_key_manager.dart';
 import 'app_database.dart';
 import 'database_encryption.dart';
 import 'local_database_identity.dart';
+import 'database_sync_policy.dart';
 
 /// Creates explicitly scoped databases; does not publish a current database.
 /// Callers must await closeDatabase() before a future session cutover.
@@ -15,14 +16,20 @@ class UserDatabaseFactory {
   UserDatabaseFactory({
     UserDbKeyManager? keyManager,
     Future<Directory> Function()? directoryProvider,
+    this.syncPolicy = DatabaseSyncPolicy.remoteEnabled,
   }) : _keyManager = keyManager ?? UserDbKeyManager.instance,
        _directoryProvider =
            directoryProvider ?? getApplicationDocumentsDirectory;
 
   final UserDbKeyManager _keyManager;
+  final DatabaseSyncPolicy syncPolicy;
   final Future<Directory> Function() _directoryProvider;
 
   Future<AppDatabase> open(LocalDatabaseIdentity identity) async {
+    if (syncPolicy == DatabaseSyncPolicy.localOnly &&
+        !identity.isLocalInstallation) {
+      throw ArgumentError('LOCAL_PROFILE_IDENTITY_REQUIRED');
+    }
     final directory = await _directoryProvider();
     final file = identity.fileIn(directory);
     if (!await file.exists() &&
@@ -48,19 +55,23 @@ class UserDatabaseFactory {
         break;
       }
     }
-    if (alreadyExists) {
+    if (alreadyExists && syncPolicy == DatabaseSyncPolicy.remoteEnabled) {
       await _keyManager.getEncryptionKey(identity, allowCreate: false);
     }
-    final key = await DatabaseEncryptionBootstrap().prepare(
-      databaseFile: file,
-      keyProvider: ({required allowCreate}) => _keyManager.getEncryptionKey(
-        identity,
-        allowCreate: allowCreate && !alreadyExists,
-      ),
-    );
+    final bootstrap = DatabaseEncryptionBootstrap();
+    Future<String> keyProvider({required bool allowCreate}) => _keyManager
+        .getEncryptionKey(identity, allowCreate: allowCreate && !alreadyExists);
+    final key = syncPolicy == DatabaseSyncPolicy.localOnly
+        ? await bootstrap.prepareLocalProfile(
+            databaseFile: file,
+            keyProvider: keyProvider,
+            expectedSchemaVersion: AppDatabase.currentSchemaVersion,
+          )
+        : await bootstrap.prepare(databaseFile: file, keyProvider: keyProvider);
     return AppDatabase.forUser(
       identity: identity,
       executor: _openEncryptedDatabase(file, key),
+      syncPolicy: syncPolicy,
     );
   }
 }

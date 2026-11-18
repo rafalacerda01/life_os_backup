@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:life_os/core/database/app_database.dart';
+import 'package:life_os/core/database/database_sync_policy.dart';
 import 'package:life_os/core/database/local_database_identity.dart';
 import 'package:life_os/core/database/local_device_session.dart';
 import 'package:life_os/core/database/local_installation_identity_service.dart';
@@ -35,6 +36,7 @@ void main() {
         return AppDatabase.forUser(
           identity: identity,
           executor: NativeDatabase.memory(),
+          syncPolicy: DatabaseSyncPolicy.localOnly,
         );
       },
     );
@@ -129,6 +131,24 @@ void main() {
     expect(database.closeCount, 1);
   });
 
+  test('rejects and closes an opener that grants remote access', () async {
+    await session.dispose();
+    final database = _RemoteCloseDatabase(LocalDatabaseIdentity(id));
+    session = controlled((_) async => database);
+    await expectLater(
+      session.open(),
+      throwsA(
+        predicate(
+          (Object? error) =>
+              error.toString().contains('LOCAL_PROFILE_SYNC_POLICY_REQUIRED'),
+        ),
+      ),
+    );
+    expect(database.closedBySession, isTrue);
+    expect(session.currentLocalId, isNull);
+    expect(session.requirePrepared, throwsA(isA<SessionDatabaseUnavailable>()));
+  });
+
   test(
     'dispose during identity resolution prevents database opening',
     () async {
@@ -141,6 +161,7 @@ void main() {
           return AppDatabase.forUser(
             identity: identity,
             executor: NativeDatabase.memory(),
+            syncPolicy: DatabaseSyncPolicy.localOnly,
           );
         },
         reader: () {
@@ -196,6 +217,7 @@ void main() {
       return AppDatabase.forUser(
         identity: identity,
         executor: NativeDatabase.memory(),
+        syncPolicy: DatabaseSyncPolicy.localOnly,
       );
     });
     await Future.wait([
@@ -213,7 +235,7 @@ void main() {
   test('wrong identity candidate is closed and rejected', () async {
     await session.dispose();
     final database = _ControlledCloseDatabase(
-      LocalDatabaseIdentity('wrong-identity'),
+      LocalDatabaseIdentity('local-v1-223e4567-e89b-42d3-a456-426614174000'),
       () async {},
     );
     session = controlled((_) async => database);
@@ -271,6 +293,7 @@ void main() {
           (identity) async => AppDatabase.forUser(
             identity: identity,
             executor: NativeDatabase.memory(),
+            syncPolicy: DatabaseSyncPolicy.localOnly,
           ),
         );
       }
@@ -280,13 +303,28 @@ void main() {
 
 class _ControlledCloseDatabase extends AppDatabase {
   _ControlledCloseDatabase(LocalDatabaseIdentity identity, this.onClose)
-    : super.forUser(identity: identity, executor: NativeDatabase.memory());
+    : super.forUser(
+        identity: identity,
+        executor: NativeDatabase.memory(),
+        syncPolicy: DatabaseSyncPolicy.localOnly,
+      );
   final Future<void> Function() onClose;
   int closeCount = 0;
   @override
   Future<void> closeDatabase() async {
     closeCount++;
     await onClose();
+    await super.closeDatabase();
+  }
+}
+
+class _RemoteCloseDatabase extends AppDatabase {
+  _RemoteCloseDatabase(LocalDatabaseIdentity identity)
+    : super.forUser(identity: identity, executor: NativeDatabase.memory());
+  bool closedBySession = false;
+  @override
+  Future<void> closeDatabase() async {
+    closedBySession = true;
     await super.closeDatabase();
   }
 }
