@@ -3,7 +3,8 @@ $ErrorActionPreference='Stop'
 $root=Join-Path $GateDirectory 'native-results'
 $required=@{
  'secondary-guard'='secondary-guard'; 'local-profile-before'='local-profile';
- 'local-profile-reopen'='local-profile'; 'local-profile-after'='local-profile'
+ 'local-profile-reopen'='local-profile'; 'local-profile-after'='local-profile';
+ 'local-policy-historical'='local-policy-historical'
 }
 $missing=@();$failures=@();$checks=0;$reports=@{}
 foreach($label in $required.Keys){

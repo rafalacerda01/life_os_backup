@@ -11,6 +11,8 @@ import 'package:life_os/core/database/database_encryption.dart';
 import 'package:life_os/core/database/local_database_identity.dart';
 import 'package:life_os/core/database/user_database_factory.dart';
 import 'package:life_os/core/database/app_database.dart';
+import 'package:life_os/core/database/database_sync_policy.dart';
+import 'package:life_os/core/database/remote_send_permit.dart';
 import 'package:life_os/core/database/local_device_session.dart';
 import 'package:life_os/core/database/local_installation_identity_provider.dart';
 import 'package:life_os/core/database/local_installation_identity_service.dart';
@@ -102,6 +104,15 @@ Future<bool> refuses(Future<Object?> Function() call) async {
   }
 }
 
+Future<bool> refusesLocalQueue(Future<Object?> Function() call) async {
+  try {
+    await call();
+    return false;
+  } catch (error) {
+    return error.toString().contains(LocalRemoteSyncDisabled.code);
+  }
+}
+
 Future<void> run(String scenario) async {
   final out = fixture.report;
   out['scenario'] = scenario;
@@ -126,18 +137,51 @@ Future<void> run(String scenario) async {
       );
       final before = await db.select(db.taskTable).get();
       if (before.isEmpty) {
-        await db
-            .into(db.taskTable)
-            .insert(
-              TaskTableCompanion.insert(
-                id: 'synthetic-local-task',
-                title: 'SYNTHETIC-LOCAL-PROFILE',
-                priority: 'normal',
-                date: DateTime.utc(2026, 11, 17),
+        await db.transactionWithSync(
+          ownerUid: session.currentLocalId!,
+          collection: 'tasks',
+          docId: 'synthetic-local-task',
+          operationType: 'create',
+          payloadJson: '{"synthetic":true}',
+          localOperation: () => db
+              .into(db.taskTable)
+              .insert(
+                TaskTableCompanion.insert(
+                  id: 'synthetic-local-task',
+                  title: 'SYNTHETIC-LOCAL-PROFILE',
+                  priority: 'normal',
+                  date: DateTime.utc(2026, 11, 17),
+                ),
+                mode: InsertMode.insertOrReplace,
               ),
-              mode: InsertMode.insertOrReplace,
-            );
+        );
       }
+      fixture.check(db.isLocalOnly, 'local-only-connection');
+      fixture.check(
+        await refusesLocalQueue(
+          () => db
+              .into(db.syncQueueTable)
+              .insert(
+                SyncQueueTableCompanion.insert(
+                  collection: 'tasks',
+                  docId: 'forbidden',
+                  operationType: 'create',
+                  payloadJson: '{}',
+                  createdAt: 123,
+                ),
+              ),
+        ),
+        'native-sqlite-blocks-direct-enqueue',
+      );
+      var remoteRefused = false;
+      try {
+        db.localMutations.captureRemoteSend(
+          expectedUid: session.currentLocalId!,
+        );
+      } on RemoteSessionStopped {
+        remoteRefused = true;
+      }
+      fixture.check(remoteRefused, 'native-local-session-has-no-remote-permit');
       final row = await db.select(db.taskTable).getSingle();
       fixture.check(
         row.title == 'SYNTHETIC-LOCAL-PROFILE',
@@ -154,6 +198,66 @@ Future<void> run(String scenario) async {
                 .first ==
             'ok',
         'local-profile-integrity',
+      );
+    } finally {
+      await session.dispose();
+      container.dispose();
+    }
+  } else if (scenario == 'local-policy-historical') {
+    final container = ProviderContainer();
+    final service = container.read(localInstallationIdentityServiceProvider);
+    final identity = await service.resolve();
+    // Only synthetic fixture setup uses the remote-enabled connection to seed
+    // a historical row. The app's LocalDeviceSession cannot grant this mode.
+    final seed = await UserDatabaseFactory().open(identity);
+    await seed
+        .into(seed.taskTable)
+        .insert(
+          TaskTableCompanion.insert(
+            id: 'retained-task',
+            title: 'SYNTHETIC-RETAIN',
+            priority: 'normal',
+            date: DateTime.utc(2026, 11, 17),
+          ),
+        );
+    await seed.insertSyncItem(
+      ownerUid: identity.uid,
+      collection: 'tasks',
+      docId: 'retained-task',
+      operationType: 'create',
+      payloadJson: '{"retained":true}',
+      createdAt: 123,
+    );
+    final original = (await seed.select(seed.syncQueueTable).get()).single;
+    await seed.closeDatabase();
+    final session = LocalDeviceSession(identityService: service);
+    try {
+      final db = await session.open();
+      fixture.check(db.isLocalOnly, 'historical-open-is-local-only');
+      fixture.check(
+        await refusesLocalQueue(
+          () => db.customStatement(
+            "UPDATE sync_queue_table SET payload_json='changed'",
+          ),
+        ),
+        'historical-update-refused',
+      );
+      fixture.check(
+        await refusesLocalQueue(() => db.delete(db.syncQueueTable).go()),
+        'historical-delete-refused',
+      );
+      fixture.check(
+        await refusesLocalQueue(db.clearAllData),
+        'historical-bulk-cleanup-refused',
+      );
+      fixture.check(
+        (await db.select(db.syncQueueTable).get()).single == original,
+        'historical-row-unchanged',
+      );
+      fixture.check(
+        (await db.select(db.taskTable).get()).single.title ==
+            'SYNTHETIC-RETAIN',
+        'historical-failed-cleanup-is-atomic',
       );
     } finally {
       await session.dispose();
