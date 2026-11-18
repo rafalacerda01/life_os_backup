@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:sqlite3/sqlite3.dart';
+import 'local_profile_bootstrap_journal.dart';
 
 typedef DatabaseKeyProvider =
     Future<String> Function({required bool allowCreate});
@@ -76,7 +77,48 @@ class DatabaseEncryptionBootstrap {
     required File databaseFile,
     required DatabaseKeyProvider keyProvider,
     required int expectedSchemaVersion,
+    LocalProfileCreationPermit? creationPermit,
   }) async {
+    final exists = await assertLocalProfileFiles(databaseFile);
+    final key = await keyProvider(allowCreate: !exists);
+    _validateKey(key);
+    if (!exists) {
+      _createEncryptedDatabase(databaseFile, key);
+      return key;
+    }
+    final database = _sqlite.open(databaseFile.path, mode: OpenMode.readOnly);
+    try {
+      _assertSqlite3MultipleCiphers(database);
+      configureEncryptedConnection(database, key);
+      _assertHealthy(database);
+      final version = database
+          .select('PRAGMA user_version')
+          .single
+          .values
+          .single;
+      if (version != expectedSchemaVersion) {
+        // Only resume our own interrupted new-file creation. An old schema,
+        // an arbitrary schema-zero database or any schema objects are refused.
+        if (version != 0 ||
+            creationPermit?.permits(databaseFile, expectedSchemaVersion) !=
+                true ||
+            database.select('SELECT name FROM sqlite_master').isNotEmpty ||
+            database.select('PRAGMA page_count').single.values.single != 1 ||
+            database.select('PRAGMA freelist_count').single.values.single !=
+                0 ||
+            database.select('PRAGMA application_id').single.values.single !=
+                0) {
+          throw StateError('LOCAL_PROFILE_SCHEMA_MIGRATION_REQUIRED');
+        }
+      }
+    } finally {
+      database.dispose();
+    }
+    return key;
+  }
+
+  /// Nonmutating preflight, before reading any secure alias or journal.
+  static Future<bool> assertLocalProfileFiles(File databaseFile) async {
     for (final suffix in ['.plaintext-backup', '.encryption-candidate']) {
       for (final sidecar in ['', '-wal', '-shm', '-journal']) {
         if (await FileSystemEntity.type(
@@ -112,29 +154,7 @@ class DatabaseEncryptionBootstrap {
         (databaseFile.lengthSync() == 0 || hasPlaintextHeader(databaseFile))) {
       throw StateError('LOCAL_PROFILE_ENCRYPTED_DATABASE_REQUIRED');
     }
-    final key = await keyProvider(allowCreate: !exists);
-    _validateKey(key);
-    if (!exists) {
-      _createEncryptedDatabase(databaseFile, key);
-      return key;
-    }
-    final database = _sqlite.open(databaseFile.path, mode: OpenMode.readOnly);
-    try {
-      _assertSqlite3MultipleCiphers(database);
-      configureEncryptedConnection(database, key);
-      _assertHealthy(database);
-      final version = database
-          .select('PRAGMA user_version')
-          .single
-          .values
-          .single;
-      if (version != expectedSchemaVersion) {
-        throw StateError('LOCAL_PROFILE_SCHEMA_MIGRATION_REQUIRED');
-      }
-    } finally {
-      database.dispose();
-    }
-    return key;
+    return exists;
   }
 
   static void configureEncryptedConnection(Database database, String key) {

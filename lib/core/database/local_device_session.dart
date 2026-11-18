@@ -2,6 +2,7 @@ import 'app_database.dart';
 import 'database_sync_policy.dart';
 import 'local_database_identity.dart';
 import 'local_installation_identity_service.dart';
+import 'local_profile_admission.dart';
 import 'session_database_coordinator.dart';
 import 'user_database_factory.dart';
 
@@ -39,10 +40,23 @@ class LocalDeviceSession {
   String? _uid;
   bool _disposed = false;
   Future<void>? _disposal;
+  Future<AppDatabase>? _opening;
 
   String? get currentLocalId => _uid;
 
-  Future<AppDatabase> open() async {
+  Future<AppDatabase> open() {
+    if (_disposed) return Future.error(const SessionDatabaseUnavailable());
+    return _opening ??= _openWithAdmission().whenComplete(
+      () => _opening = null,
+    );
+  }
+
+  Future<AppDatabase> _openWithAdmission() async {
+    final directory = await identityService.documentsDirectory();
+    return LocalProfileAdmission(directory).run(_openAdmitted);
+  }
+
+  Future<AppDatabase> _openAdmitted() async {
     if (_disposed) throw const SessionDatabaseUnavailable();
     final identity = await identityService.resolve();
     if (_disposed) throw const SessionDatabaseUnavailable();

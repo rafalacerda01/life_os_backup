@@ -1,5 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:isolate';
+import 'package:crypto/crypto.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
@@ -16,6 +18,9 @@ import 'package:life_os/core/database/remote_send_permit.dart';
 import 'package:life_os/core/database/local_device_session.dart';
 import 'package:life_os/core/database/local_installation_identity_provider.dart';
 import 'package:life_os/core/database/local_installation_identity_service.dart';
+import 'package:life_os/core/database/local_profile_admission.dart';
+import 'package:life_os/core/database/local_profile_bootstrap_journal.dart';
+import 'package:life_os/core/db/user_db_key_manager.dart';
 import 'fixture_support.dart' as fixture;
 
 final bound = LocalDatabaseIdentity.bound(
@@ -113,13 +118,251 @@ Future<bool> refusesLocalQueue(Future<Object?> Function() call) async {
   }
 }
 
+Future<void> incrementUnderNativeAdmission(String path) async {
+  final directory = Directory(path);
+  for (var index = 0; index < 4; index++) {
+    await LocalProfileAdmission(directory).run(() async {
+      final counter = File('$path/counter.synthetic');
+      final value = int.parse(await counter.readAsString());
+      await Future<void>.delayed(const Duration(milliseconds: 8));
+      await counter.writeAsString('${value + 1}', flush: true);
+    });
+  }
+}
+
+Future<void> runBootstrapScenario(String scenario) async {
+  final out = fixture.report;
+  final documents = await getApplicationDocumentsDirectory();
+  if (scenario == 'admission-concurrent') {
+    final path = documents.path;
+    await File('$path/counter.synthetic').writeAsString('0');
+    await Future.wait(
+      List.generate(
+        4,
+        (_) => Isolate.run(() => incrementUnderNativeAdmission(path)),
+      ),
+    );
+    fixture.check(
+      await File('$path/counter.synthetic').readAsString() == '16',
+      'native-four-isolates-no-lost-update',
+    );
+    fixture.check(
+      await File('$path/${LocalProfileAdmission.fileName}').length() == 0,
+      'native-admission-file-empty',
+    );
+    return;
+  }
+  if (scenario == 'admission-hold' || scenario == 'admission-after-kill') {
+    await LocalProfileAdmission(documents).run(() async {
+      fixture.check(
+        LocalProfileAdmission.isCurrentFile(
+          '${documents.path}/${LocalProfileAdmission.fileName}',
+        ),
+        'native-admission-acquired',
+      );
+      fixture.check(
+        await File(
+              '${documents.path}/${LocalProfileAdmission.fileName}',
+            ).length() ==
+            0,
+        'native-admission-file-empty',
+      );
+      if (scenario == 'admission-hold') {
+        out['after'] = await fixture.snap();
+        await fixture.control.invokeMethod('save', jsonEncode(out));
+        // Runner force-stops this disposable process while its lock is held.
+        await Future<void>.delayed(const Duration(minutes: 2));
+      }
+    });
+    return;
+  }
+  final container = ProviderContainer();
+  try {
+    final service = container.read(localInstallationIdentityServiceProvider);
+    final identity = await service.resolve();
+    out['profileId'] = identity.uid;
+    final file = identity.fileIn(documents);
+    final keys = UserDbKeyManager(storage: fixture.proposed);
+    if (scenario == 'bootstrap-interrupted' ||
+        scenario == 'bootstrap-with-content') {
+      var interrupted = false;
+      try {
+        await LocalProfileAdmission(documents).run(
+          () => LocalProfileBootstrapJournal(fixture.proposed).run<void>(
+            identity: identity,
+            databaseFile: file,
+            schemaVersion: AppDatabase.currentSchemaVersion,
+            open: (permit) async {
+              final key = await DatabaseEncryptionBootstrap()
+                  .prepareLocalProfile(
+                    databaseFile: file,
+                    expectedSchemaVersion: AppDatabase.currentSchemaVersion,
+                    keyProvider: ({required allowCreate}) => keys
+                        .getEncryptionKey(identity, allowCreate: allowCreate),
+                    creationPermit: permit,
+                  );
+              if (scenario == 'bootstrap-with-content') {
+                final raw = sqlite3.open(file.path);
+                try {
+                  DatabaseEncryptionBootstrap.configureEncryptedConnection(
+                    raw,
+                    key,
+                  );
+                  raw.execute('CREATE TABLE sentinel (payload TEXT)');
+                  raw.execute(
+                    "INSERT INTO sentinel VALUES ('SYNTHETIC-PRESERVE')",
+                  );
+                } finally {
+                  raw.dispose();
+                }
+              }
+              throw StateError('SYNTHETIC_BOOTSTRAP_INTERRUPTION');
+            },
+            closeOnFailure: (_) async {},
+          ),
+        );
+      } on StateError catch (error) {
+        interrupted = error.message == 'SYNTHETIC_BOOTSTRAP_INTERRUPTION';
+      }
+      fixture.check(interrupted, 'native-controlled-interruption');
+      final record =
+          jsonDecode(
+                (await fixture.proposed.read(
+                  key: LocalProfileBootstrapJournal.storageKey,
+                ))!,
+              )
+              as Map;
+      fixture.check(record['phase'] == 'CREATING', 'native-journal-creating');
+      final key = await keys.getEncryptionKey(identity, allowCreate: false);
+      out['keyFingerprint'] = sha256.convert(utf8.encode(key)).toString();
+      final raw = sqlite3.open(file.path, mode: OpenMode.readOnly);
+      try {
+        DatabaseEncryptionBootstrap.configureEncryptedConnection(raw, key);
+        fixture.check(
+          raw.select('PRAGMA user_version').single.values.single == 0,
+          'native-schema-zero',
+        );
+        fixture.check(
+          raw.select('PRAGMA integrity_check').single.values.single == 'ok',
+          'native-interrupted-integrity',
+        );
+      } finally {
+        raw.dispose();
+      }
+      fixture.check(
+        !DatabaseEncryptionBootstrap.hasPlaintextHeader(file),
+        'native-interrupted-encrypted',
+      );
+      return;
+    }
+    if (scenario == 'bootstrap-content-refused') {
+      final before = await file.readAsBytes();
+      final journal = await fixture.proposed.read(
+        key: LocalProfileBootstrapJournal.storageKey,
+      );
+      final key = await keys.getEncryptionKey(identity, allowCreate: false);
+      out['keyFingerprint'] = sha256.convert(utf8.encode(key)).toString();
+      var refused = false;
+      try {
+        final db = await UserDatabaseFactory(
+          syncPolicy: DatabaseSyncPolicy.localOnly,
+        ).open(identity);
+        await db.closeDatabase();
+      } on StateError catch (error) {
+        refused = error.message == 'LOCAL_PROFILE_SCHEMA_MIGRATION_REQUIRED';
+      }
+      fixture.check(refused, 'native-content-refused');
+      fixture.check(
+        same(await file.readAsBytes(), before),
+        'native-refusal-preserves-database',
+      );
+      fixture.check(
+        await fixture.proposed.read(
+              key: LocalProfileBootstrapJournal.storageKey,
+            ) ==
+            journal,
+        'native-refusal-preserves-journal',
+      );
+      return;
+    }
+    if (scenario != 'bootstrap-recover')
+      throw StateError('UNKNOWN_BOOTSTRAP_SCENARIO');
+    final key = await keys.getEncryptionKey(identity, allowCreate: false);
+    out['keyFingerprint'] = sha256.convert(utf8.encode(key)).toString();
+    final session = LocalDeviceSession(identityService: service);
+    try {
+      final db = await session.open();
+      final tasks = await db.select(db.taskTable).get();
+      if (tasks.isEmpty) {
+        await db
+            .into(db.taskTable)
+            .insert(
+              TaskTableCompanion.insert(
+                id: 'synthetic-bootstrap-task',
+                title: 'SYNTHETIC-BOOTSTRAP-PRESERVE',
+                priority: 'medium',
+                date: DateTime.utc(2026, 11, 17),
+              ),
+            );
+      }
+      fixture.check(
+        (await db.select(db.taskTable).get()).single.title ==
+            'SYNTHETIC-BOOTSTRAP-PRESERVE',
+        'native-recovered-content',
+      );
+      fixture.check(
+        (await db.customSelect('PRAGMA integrity_check').getSingle())
+                .data
+                .values
+                .single ==
+            'ok',
+        'native-recovered-integrity',
+      );
+      fixture.check(
+        (await db.customSelect('PRAGMA user_version').getSingle())
+                .data
+                .values
+                .single ==
+            AppDatabase.currentSchemaVersion,
+        'native-recovered-schema',
+      );
+      fixture.check(db.isLocalOnly, 'native-recovered-local-only');
+      fixture.check(
+        (await db.select(db.syncQueueTable).get()).isEmpty,
+        'native-recovered-no-sync',
+      );
+      final record =
+          jsonDecode(
+                (await fixture.proposed.read(
+                  key: LocalProfileBootstrapJournal.storageKey,
+                ))!,
+              )
+              as Map;
+      fixture.check(record['phase'] == 'READY', 'native-journal-ready');
+      fixture.check(
+        await keys.getEncryptionKey(identity, allowCreate: false) == key,
+        'native-recovered-original-key',
+      );
+    } finally {
+      await session.dispose();
+    }
+  } finally {
+    container.dispose();
+  }
+}
+
 Future<void> run(String scenario) async {
   final out = fixture.report;
   out['scenario'] = scenario;
   out['checks'] = <String, bool>{};
+  out['processId'] = int.parse(
+    (await File('/proc/self/stat').readAsString()).split(' ').first,
+  );
   fixture.values[bound.keyAlias] = fixture.syntheticKey;
   out['before'] = await fixture.snap();
-  if (scenario == 'local-profile') {
+  if (scenario.startsWith('bootstrap-') || scenario.startsWith('admission-')) {
+    await runBootstrapScenario(scenario);
+  } else if (scenario == 'local-profile') {
     final container = ProviderContainer();
     final session = LocalDeviceSession(
       identityService: container.read(localInstallationIdentityServiceProvider),

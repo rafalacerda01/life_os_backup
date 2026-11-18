@@ -4,6 +4,7 @@ import 'dart:math';
 
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:life_os/core/database/local_database_identity.dart';
+import 'package:life_os/core/database/local_profile_bootstrap_journal.dart';
 
 /// Account-scoped keys. The legacy DbKeyManager remains independent.
 class UserDbKeyManager {
@@ -21,6 +22,8 @@ class UserDbKeyManager {
   static const _keyLength = 32;
 
   final FlutterSecureStorage _storage;
+  LocalProfileBootstrapJournal get localBootstrapJournal =>
+      LocalProfileBootstrapJournal(_storage);
   final _cache = <String, String>{};
   final _cacheRevisions = <String, int>{};
   final _operationTails = <String, Future<void>>{};

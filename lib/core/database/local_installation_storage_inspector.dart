@@ -2,6 +2,7 @@ import 'dart:io';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
+import 'local_profile_admission.dart';
 
 /// Conservative pre-cutover inspection. It never opens, migrates or removes a
 /// secondary store. The P1 notification registry needs an ownership gate of its
@@ -73,6 +74,8 @@ class LocalInstallationStorageInspector {
     final documents = await documentsDirectory();
     if (!await documents.exists()) _blocked();
     await for (final entry in documents.list(followLinks: false)) {
+      // Only the validated, currently held, zero-byte admission file is known.
+      if (LocalProfileAdmission.isCurrentFile(entry.path)) continue;
       final name = p.basename(entry.path);
       final engineAsset = name == 'flutter_assets' && entry is Directory;
       final engineTimestamp =

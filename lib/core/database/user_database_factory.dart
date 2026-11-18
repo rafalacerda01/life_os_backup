@@ -9,6 +9,8 @@ import 'app_database.dart';
 import 'database_encryption.dart';
 import 'local_database_identity.dart';
 import 'database_sync_policy.dart';
+import 'local_profile_admission.dart';
+import 'local_profile_bootstrap_journal.dart';
 
 /// Creates explicitly scoped databases; does not publish a current database.
 /// Callers must await closeDatabase() before a future session cutover.
@@ -31,6 +33,29 @@ class UserDatabaseFactory {
       throw ArgumentError('LOCAL_PROFILE_IDENTITY_REQUIRED');
     }
     final directory = await _directoryProvider();
+    if (syncPolicy == DatabaseSyncPolicy.localOnly) {
+      await DatabaseEncryptionBootstrap.assertLocalProfileFiles(
+        identity.fileIn(directory),
+      );
+      return LocalProfileAdmission(directory).run(
+        () => _keyManager.localBootstrapJournal.run<AppDatabase>(
+          identity: identity,
+          databaseFile: identity.fileIn(directory),
+          schemaVersion: AppDatabase.currentSchemaVersion,
+          open: (permit) =>
+              _openInDirectory(identity, directory, creationPermit: permit),
+          closeOnFailure: (database) => database.closeDatabase(),
+        ),
+      );
+    }
+    return _openInDirectory(identity, directory);
+  }
+
+  Future<AppDatabase> _openInDirectory(
+    LocalDatabaseIdentity identity,
+    Directory directory, {
+    LocalProfileCreationPermit? creationPermit,
+  }) async {
     final file = identity.fileIn(directory);
     if (!await file.exists() &&
         !await File('${file.path}.plaintext-backup').exists() &&
@@ -66,13 +91,25 @@ class UserDatabaseFactory {
             databaseFile: file,
             keyProvider: keyProvider,
             expectedSchemaVersion: AppDatabase.currentSchemaVersion,
+            creationPermit: creationPermit,
           )
         : await bootstrap.prepare(databaseFile: file, keyProvider: keyProvider);
-    return AppDatabase.forUser(
+    final database = AppDatabase.forUser(
       identity: identity,
       executor: _openEncryptedDatabase(file, key),
       syncPolicy: syncPolicy,
     );
+    // Complete schema creation while admission is still held, before another
+    // engine can observe schema zero and before the journal becomes READY.
+    if (syncPolicy == DatabaseSyncPolicy.localOnly) {
+      try {
+        await database.customSelect('SELECT 1').get();
+      } catch (_) {
+        await database.closeDatabase();
+        rethrow;
+      }
+    }
+    return database;
   }
 }
 

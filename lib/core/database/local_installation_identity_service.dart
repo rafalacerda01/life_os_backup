@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:path/path.dart' as p;
 
 import 'local_database_identity.dart';
+import 'local_profile_admission.dart';
 
 /// Pre-migration primitive. It does not start a session or touch Firebase.
 ///
@@ -46,20 +47,13 @@ class LocalInstallationIdentityService {
 
   Future<LocalDatabaseIdentity>? _resolved;
 
-  static Future<void> _resolutionTail = Future<void>.value();
-
-  /// Cache errors per instance, and serialize instances in this isolate so
-  /// separate provider containers cannot publish different installation IDs.
-  /// Cross-isolate/process provisioning requires separate homologation.
+  /// Cache errors per instance. SQLite admission serializes separate instances
+  /// and isolates that use this installation directory.
   Future<LocalDatabaseIdentity> resolve() => _resolved ??= _serializeResolve();
 
-  Future<LocalDatabaseIdentity> _serializeResolve() {
-    final result = _resolutionTail.then((_) => _resolve());
-    _resolutionTail = result.then<void>(
-      (_) {},
-      onError: (Object _, StackTrace _) {},
-    );
-    return result;
+  Future<LocalDatabaseIdentity> _serializeResolve() async {
+    final directory = await documentsDirectory();
+    return LocalProfileAdmission(directory).run(_resolve);
   }
 
   Future<LocalDatabaseIdentity> _resolve() async {
@@ -78,6 +72,7 @@ class LocalInstallationIdentityService {
     // Detect other profiles, old UID-backed files and all known SQLite
     // sidecars before publishing any installation identity.
     await for (final entity in directory.list(followLinks: false)) {
+      if (LocalProfileAdmission.isCurrentFile(entity.path)) continue;
       final filename = p.basename(entity.path);
       final possibleLifeOsDatabase =
           filename.startsWith('life_os.sqlite') ||
