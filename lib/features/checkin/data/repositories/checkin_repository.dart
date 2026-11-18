@@ -1,5 +1,6 @@
 import 'package:life_os/core/database/local_account_session.dart';
 import 'dart:convert';
+import 'package:life_os/core/database/database_sync_policy.dart';
 import 'package:life_os/core/services/generational_read_policy.dart';
 import 'dart:async';
 
@@ -14,9 +15,18 @@ import 'package:life_os/core/utils/app_logger.dart';
 class CheckInRepository {
   final LocalAccountLease? sessionLease;
   Future<void> _verifyRemoteRead(String uid) => GenerationalReadPolicy.verify(
-    identity: _db.identity, lease: sessionLease, auth: _auth, store: _firestore, expectedUid: uid);
+    identity: _db.identity,
+    lease: sessionLease,
+    auth: _auth,
+    store: _firestore,
+    expectedUid: uid,
+  );
   void _requireReadSession(String uid) => GenerationalReadPolicy.requireCurrent(
-    identity: _db.identity, lease: sessionLease, auth: _auth, expectedUid: uid);
+    identity: _db.identity,
+    lease: sessionLease,
+    auth: _auth,
+    expectedUid: uid,
+  );
 
   static const _defaultRemoteWriteTimeout = Duration(seconds: 10);
   static final _dailyIdPattern = RegExp(r'^[0-9]{4}-[0-9]{2}-[0-9]{2}$');
@@ -37,14 +47,22 @@ class CheckInRepository {
   }
 
   final AppDatabase _db;
-  final FirebaseFirestore _firestore;
-  final FirebaseAuth _auth;
+  final FirebaseFirestore? _remoteFirestore;
+  final FirebaseAuth? _remoteAuth;
+  FirebaseFirestore get _firestore =>
+      _remoteFirestore ?? (throw const LocalRemoteSyncDisabled());
+  FirebaseAuth get _auth =>
+      _remoteAuth ?? (throw const LocalRemoteSyncDisabled());
+  String? get _ownerUid =>
+      _db.isLocalOnly ? _db.identity?.uid : _remoteAuth?.currentUser?.uid;
   final Duration _remoteWriteTimeout;
   final Future<bool> Function()? replaySyncQueue;
   Future<void> _uploadTail = Future<void>.value();
 
   bool _isCurrentUser(String uid) =>
-      uid.trim().isNotEmpty && _auth.currentUser?.uid == uid;
+      !_db.isLocalOnly &&
+      uid.trim().isNotEmpty &&
+      _auth.currentUser?.uid == uid;
 
   // ===========================================================================
   // INJEÇÃO DE DEPENDÊNCIA
@@ -52,12 +70,45 @@ class CheckInRepository {
 
   CheckInRepository(
     this._db,
-    this._firestore,
-    this._auth, {
+    FirebaseFirestore firestore,
+    FirebaseAuth auth, {
     Duration? remoteWriteTimeout,
     this.replaySyncQueue,
     this.sessionLease,
-  }) : _remoteWriteTimeout = remoteWriteTimeout ?? _defaultRemoteWriteTimeout;
+  }) : _remoteWriteTimeout = remoteWriteTimeout ?? _defaultRemoteWriteTimeout,
+       _remoteFirestore = firestore,
+       _remoteAuth = auth;
+
+  CheckInRepository.local(this._db)
+    : _remoteFirestore = null,
+      _remoteAuth = null,
+      sessionLease = null,
+      replaySyncQueue = null,
+      _remoteWriteTimeout = _defaultRemoteWriteTimeout {
+    if (!_db.isLocalOnly)
+      throw ArgumentError('LOCAL_PROFILE_SYNC_POLICY_REQUIRED');
+  }
+
+  Future<void> deleteLocalDailyMetrics(String id) async {
+    if (!_db.isLocalOnly)
+      throw StateError('LOCAL_PROFILE_SYNC_POLICY_REQUIRED');
+    if (_checkInDateFromId(id) == null)
+      throw ArgumentError('INVALID_CHECKIN_DAY');
+    final owner = _ownerUid;
+    if (owner == null) throw StateError('LOCAL_PROFILE_REQUIRED');
+    await _db.transactionWithSync(
+      ownerUid: owner,
+      localOperation: () async {
+        await (_db.delete(
+          _db.checkInTable,
+        )..where((t) => t.id.equals(id))).go();
+      },
+      collection: 'checkins',
+      docId: id,
+      operationType: 'delete',
+      payloadJson: '{}',
+    );
+  }
 
   // ===========================================================================
   // 1. LEITURA
@@ -79,18 +130,23 @@ class CheckInRepository {
     required double focus,
     required double motivation,
   }) async {
-    final user = _auth.currentUser;
+    final ownerUid = _ownerUid;
 
-    if (user == null || user.uid.trim().isEmpty) {
-      AppLogger.w('Tentativa de salvar check-in sem usuário autenticado.');
+    if (ownerUid == null || ownerUid.trim().isEmpty) {
+      AppLogger.w('Tentativa de salvar check-in sem sessão disponível.');
       return;
     }
 
-    if (![energy,focus,motivation].every((v)=>v.isFinite && v>=0 && v<=10)) throw ArgumentError('Métricas devem estar entre zero e dez.');
-    final admission = _db.localMutations.capture(expectedUid: user.uid);
+    if (![
+      energy,
+      focus,
+      motivation,
+    ].every((v) => v.isFinite && v >= 0 && v <= 10))
+      throw ArgumentError('Métricas devem estar entre zero e dez.');
+    final admission = _db.localMutations.capture(expectedUid: ownerUid);
     await _db.localMutations.run(
       () => _saveDailyMetrics(
-        user.uid,
+        ownerUid,
         energy: energy,
         focus: focus,
         motivation: motivation,
@@ -126,6 +182,11 @@ class CheckInRepository {
           isSynced: const Value(false),
         ),
       );
+      if (_db.isLocalOnly) {
+        // Keep the existing daily replacement/revision semantics, without upload.
+        await _db.transaction(insertLocal);
+        return;
+      }
       if (_db.identity?.generation != null) {
         await _db.transaction(() async {
           final revision = await insertLocal();
@@ -183,6 +244,7 @@ class CheckInRepository {
   }
 
   Future<void> syncCheckinsFromFirebaseToLocal() async {
+    if (_db.isLocalOnly) return;
     final user = _auth.currentUser;
 
     if (user == null || user.uid.trim().isEmpty) {
@@ -191,7 +253,7 @@ class CheckInRepository {
     }
     final expectedUid = user.uid;
     final ticket = _db.localMutations.capture(expectedUid: expectedUid);
-      await _verifyRemoteRead(expectedUid);
+    await _verifyRemoteRead(expectedUid);
 
     try {
       AppLogger.i('SYNC Check-ins: iniciando download do Firebase...');
@@ -220,52 +282,63 @@ class CheckInRepository {
       }
 
       await _verifyRemoteRead(expectedUid);
-      if (_db.identity?.generation != null && !GenerationalReadPolicy.accepts(_db.identity, fromCache: snapshot.metadata.isFromCache, pendingWrites: snapshot.metadata.hasPendingWrites)) throw StateError('GENERATIONAL_SNAPSHOT_UNCONFIRMED');
+      if (_db.identity?.generation != null &&
+          !GenerationalReadPolicy.accepts(
+            _db.identity,
+            fromCache: snapshot.metadata.isFromCache,
+            pendingWrites: snapshot.metadata.hasPendingWrites,
+          ))
+        throw StateError('GENERATIONAL_SNAPSHOT_UNCONFIRMED');
       if (!_isCurrentUser(expectedUid)) return;
-      await _db.transactionWithCommitGuard(admission: ticket, waitForReopen: false, validateBeforeCommit: () => _requireReadSession(expectedUid), () async {
-        final current = await _readLocalCheckInRevisions();
-        for (final doc in snapshot.docs) {
-          if (!_isCurrentUser(expectedUid)) {
-            throw StateError('CHECKIN_SESSION_CHANGED');
-          }
-          final local = current[doc.id];
-          if (local?.entry.isSynced == false || local != baseline[doc.id]) {
-            continue;
-          }
+      await _db.transactionWithCommitGuard(
+        admission: ticket,
+        waitForReopen: false,
+        validateBeforeCommit: () => _requireReadSession(expectedUid),
+        () async {
+          final current = await _readLocalCheckInRevisions();
+          for (final doc in snapshot.docs) {
+            if (!_isCurrentUser(expectedUid)) {
+              throw StateError('CHECKIN_SESSION_CHANGED');
+            }
+            final local = current[doc.id];
+            if (local?.entry.isSynced == false || local != baseline[doc.id]) {
+              continue;
+            }
 
-          final createdAt = _checkInDateFromId(doc.id);
-          if (createdAt == null) {
-            AppLogger.w(
-              'SYNC Check-ins: documento com ID diário inválido ignorado.',
-            );
-            continue;
-          }
-
-          final data = doc.data();
-
-          final energy = (data['energy'] as num?)?.toDouble() ?? 0.0;
-
-          final focus = (data['focus'] as num?)?.toDouble() ?? 0.0;
-
-          final motivation = (data['motivation'] as num?)?.toDouble() ?? 0.0;
-
-          await _db
-              .into(_db.checkInTable)
-              .insertOnConflictUpdate(
-                CheckInTableCompanion(
-                  id: Value(doc.id),
-                  energy: Value(energy),
-                  focus: Value(focus),
-                  motivation: Value(motivation),
-                  createdAt: Value(createdAt),
-                  isSynced: const Value(true),
-                ),
+            final createdAt = _checkInDateFromId(doc.id);
+            if (createdAt == null) {
+              AppLogger.w(
+                'SYNC Check-ins: documento com ID diário inválido ignorado.',
               );
-          if (!_isCurrentUser(expectedUid)) {
-            throw StateError('CHECKIN_SESSION_CHANGED');
+              continue;
+            }
+
+            final data = doc.data();
+
+            final energy = (data['energy'] as num?)?.toDouble() ?? 0.0;
+
+            final focus = (data['focus'] as num?)?.toDouble() ?? 0.0;
+
+            final motivation = (data['motivation'] as num?)?.toDouble() ?? 0.0;
+
+            await _db
+                .into(_db.checkInTable)
+                .insertOnConflictUpdate(
+                  CheckInTableCompanion(
+                    id: Value(doc.id),
+                    energy: Value(energy),
+                    focus: Value(focus),
+                    motivation: Value(motivation),
+                    createdAt: Value(createdAt),
+                    isSynced: const Value(true),
+                  ),
+                );
+            if (!_isCurrentUser(expectedUid)) {
+              throw StateError('CHECKIN_SESSION_CHANGED');
+            }
           }
-        }
-      });
+        },
+      );
 
       AppLogger.i(
         'SYNC Check-ins: download concluído. '
@@ -388,6 +461,7 @@ class CheckInRepository {
   // ===========================================================================
 
   Future<bool> syncPendingCheckIns() async {
+    if (_db.isLocalOnly) return false;
     final user = _auth.currentUser;
 
     if (user == null || user.uid.trim().isEmpty) {

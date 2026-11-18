@@ -1,4 +1,5 @@
 import 'package:riverpod_annotation/riverpod_annotation.dart';
+import 'package:life_os/core/runtime/app_runtime_mode.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:life_os/core/database/app_database.dart';
 import 'package:life_os/features/checkin/presentation/providers/check_in_provider.dart';
@@ -33,10 +34,12 @@ class CheckInController extends _$CheckInController {
 
   /// Tenta enviar check-ins criados offline para o Firebase
   Future<void> _triggerBackgroundSync() async {
+    if (ref.read(appRuntimeModeProvider) == AppRuntimeMode.localFirst) return;
     try {
       final repository = ref.read(checkInRepositoryProvider);
       await repository.syncPendingCheckIns();
-      if (ref.mounted && ref.read(emulatorAccountRuntimeProvider) != null) await repository.syncCheckinsFromFirebaseToLocal();
+      if (ref.mounted && ref.read(emulatorAccountRuntimeProvider) != null)
+        await repository.syncCheckinsFromFirebaseToLocal();
     } catch (error, stackTrace) {
       // 🚀 Falha silenciosa para o usuário, mas registrada para o desenvolvedor!
       AppLogger.e(

@@ -9,12 +9,16 @@ import 'package:life_os/features/checkin/data/repositories/checkin_repository.da
 
 // 1. PROVIDER DO REPOSITÓRIO (Agora com injeção completa de Firebase e Drift)
 final checkInRepositoryProvider = Provider<CheckInRepository>((ref) {
+  final database = ref.watch(databaseProvider);
+  if (database.isLocalOnly) return CheckInRepository.local(database);
   final manager = ref.watch(syncManagerProvider);
   return CheckInRepository(
-    ref.watch(databaseProvider),
+    database,
     ref.watch(firebaseFirestoreProvider),
     ref.watch(firebaseAuthProvider),
-    sessionLease: ref.watch(localAccountSessionProvider).identity == null ? null : ref.read(localAccountSessionProvider.notifier).capture(),
+    sessionLease: ref.watch(localAccountSessionProvider).identity == null
+        ? null
+        : ref.read(localAccountSessionProvider.notifier).capture(),
     replaySyncQueue: manager.processPendingItems,
   );
 });
