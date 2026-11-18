@@ -2,6 +2,9 @@ import 'package:life_os/core/database/local_account_session.dart';
 import 'package:life_os/core/services/generational_read_policy.dart';
 import 'dart:async';
 import 'dart:convert';
+import 'package:life_os/core/database/database_sync_policy.dart';
+import 'package:life_os/features/premium/domain/services/plan_limits.dart';
+import 'package:life_os/features/premium/domain/services/quota_service.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:drift/drift.dart' hide Query;
 import 'package:firebase_auth/firebase_auth.dart';
@@ -166,28 +169,111 @@ class ReviewCreationSyncState {
 class StudyRepository {
   final LocalAccountLease? sessionLease;
   Future<void> _verifyRemoteRead(String uid) => GenerationalReadPolicy.verify(
-    identity: _db.identity, lease: sessionLease, auth: _auth, store: _firestore, expectedUid: uid);
+    identity: _db.identity,
+    lease: sessionLease,
+    auth: _auth,
+    store: _firestore,
+    expectedUid: uid,
+  );
   void _requireReadSession(String uid) => GenerationalReadPolicy.requireCurrent(
-    identity: _db.identity, lease: sessionLease, auth: _auth, expectedUid: uid);
+    identity: _db.identity,
+    lease: sessionLease,
+    auth: _auth,
+    expectedUid: uid,
+  );
 
   static const _dueCardsPredicate =
       '(cards.last_reviewed IS NULL OR cards.last_reviewed < ?)';
 
   final AppDatabase _db;
-  final FirebaseFirestore _firestore;
-  final FirebaseAuth _auth;
-  final SyncManager _syncManager;
+  final FirebaseFirestore? _remoteFirestore;
+  final FirebaseAuth? _remoteAuth;
+  final SyncManager? _remoteSyncManager;
+  FirebaseFirestore get _firestore =>
+      _remoteFirestore ?? (throw const LocalRemoteSyncDisabled());
+  FirebaseAuth get _auth =>
+      _remoteAuth ?? (throw const LocalRemoteSyncDisabled());
+  SyncManager get _syncManager =>
+      _remoteSyncManager ?? (throw const LocalRemoteSyncDisabled());
   final DateTime Function() _reviewNow;
   final _uuid = const Uuid();
 
   StudyRepository(
     this._db,
-    this._firestore,
-    this._auth,
-    this._syncManager, {
+    FirebaseFirestore firestore,
+    FirebaseAuth auth,
+    SyncManager syncManager, {
     this.sessionLease,
     DateTime Function()? reviewNow,
-  }) : _reviewNow = reviewNow ?? DateTime.now;
+  }) : _reviewNow = reviewNow ?? DateTime.now,
+       _remoteFirestore = firestore,
+       _remoteAuth = auth,
+       _remoteSyncManager = syncManager;
+
+  StudyRepository.local(this._db, {DateTime Function()? reviewNow})
+    : _remoteFirestore = null,
+      _remoteAuth = null,
+      _remoteSyncManager = null,
+      sessionLease = null,
+      _reviewNow = reviewNow ?? DateTime.now {
+    if (!_db.isLocalOnly)
+      throw ArgumentError('LOCAL_PROFILE_SYNC_POLICY_REQUIRED');
+  }
+
+  Future<int> _localDueCount({String? subjectId}) async {
+    final subjectClause = subjectId == null ? '' : ' AND cards.subject_id = ?';
+    final row = await _db
+        .customSelect(
+          'SELECT COUNT(*) AS due_count FROM flashcards AS cards WHERE $_dueCardsPredicate$subjectClause',
+          variables: [
+            Variable.withInt(_startOfReviewDayEpoch()),
+            if (subjectId != null) Variable.withString(subjectId),
+          ],
+          readsFrom: {_db.flashcards},
+        )
+        .getSingle();
+    return row.read<int>('due_count');
+  }
+
+  Future<void> _enforceLocalFreeQuota() async {
+    if (!_db.isLocalOnly) return;
+    final limit = PlanLimits.free.subjects;
+    final count = _db.subjects.id.count();
+    final current = await (_db.selectOnly(
+      _db.subjects,
+    )..addColumns([count])).map((row) => row.read(count) ?? 0).getSingle();
+    if (!const QuotaService().canCreate(limit: limit, currentCount: current)) {
+      throw PlanQuotaExceeded(QuotaResource.subjects, limit.maximum);
+    }
+  }
+
+  Future<void> _logLocalStudySession() async {
+    final owner = _currentUid;
+    if (owner == null) throw StateError('LOCAL_PROFILE_REQUIRED');
+    await _db.transactionWithSync(
+      ownerUid: owner,
+      localOperation: () async {
+        _requireCurrentUser(owner);
+        final current = await _db.select(_db.studyStats).getSingleOrNull();
+        final now = _reviewNow();
+        final last = current?.lastStudyDate;
+        await _upsertStudyStats(
+          current: current,
+          streak: _nextStreak(
+            current?.streak ?? 0,
+            last == null ? null : DateTime.fromMillisecondsSinceEpoch(last),
+            now,
+          ),
+          progress: ((current?.progress ?? 0) + .1).clamp(0.0, 1.0).toDouble(),
+          lastStudyDate: now.millisecondsSinceEpoch,
+        );
+      },
+      collection: 'study_activity',
+      docId: _uuid.v4(),
+      operationType: 'create',
+      payloadJson: '{}',
+    );
+  }
 
   Selectable<QueryRow> _reviewCreationRows(String uid) => _db.customSelect(
     '''SELECT q.*, c.id AS local_card_id, c.subject_id AS local_subject_id,
@@ -386,6 +472,8 @@ class StudyRepository {
   /// Observe only persisted local rows belonging to this prepared session.
   /// No pull, remote receipt read, polling, queue mutation or payload exposure.
   Stream<ReviewCreationSyncState> watchReviewCreationSync() {
+    if (_db.isLocalOnly)
+      return Stream.value(const ReviewCreationSyncState.empty());
     late StreamController<ReviewCreationSyncState> output;
     StreamSubscription<User?>? authSubscription;
     StreamSubscription<List<QueryRow>>? rowsSubscription;
@@ -488,6 +576,7 @@ class StudyRepository {
   /// Explicit user request for the current UID's existing FIFO drain only.
   /// Rejected/legacy operations are never promoted, requeued or repaired here.
   Future<void> retryReviewCreationSync(ReviewCreationSyncState observed) async {
+    if (_db.isLocalOnly) return;
     if (!observed.canRequestRetry) return;
     final uid = _currentUid;
     if (uid == null) return;
@@ -640,12 +729,19 @@ class StudyRepository {
 
     final id = _uuid.v4();
     final cleanTitle = InputSanitizer.sanitize(title);
+    if (_db.isLocalOnly &&
+        (cleanTitle.isEmpty ||
+            cleanTitle.length > 200 ||
+            (hasExam && examDate == null))) {
+      throw ArgumentError('INVALID_STUDY_SUBJECT');
+    }
 
     try {
       await _db.transactionWithSync(
         ownerUid: expectedUid,
         localOperation: () async {
           _requireCurrentUser(expectedUid);
+          await _enforceLocalFreeQuota();
           await _db
               .into(_db.subjects)
               .insert(
@@ -705,9 +801,10 @@ class StudyRepository {
 
         final stats = await _db.select(_db.studyStats).getSingleOrNull();
         _requireCurrentUser(expectedUid);
-        final newQueue = ((stats?.reviewQueue ?? 0) - 1)
-            .clamp(0, 99999)
-            .toInt();
+        final dueCount = _db.isLocalOnly
+            ? await _localDueCount()
+            : (stats?.reviewQueue ?? 0);
+        final newQueue = (dueCount - 1).clamp(0, 99999).toInt();
         final newProgress = ((stats?.progress ?? 0) + 0.05)
             .clamp(0.0, 1.0)
             .toDouble();
@@ -723,9 +820,10 @@ class StudyRepository {
             stats?.lastStudyDate != null && stats!.lastStudyDate! > nowEpoch
             ? stats.lastStudyDate!
             : nowEpoch;
-        final newCardsToReview = (subject.cardsToReview - 1)
-            .clamp(0, 99999)
-            .toInt();
+        final subjectDue = _db.isLocalOnly
+            ? await _localDueCount(subjectId: subject.id)
+            : subject.cardsToReview;
+        final newCardsToReview = (subjectDue - 1).clamp(0, 99999).toInt();
 
         await (_db.update(_db.flashcards)
               ..where((table) => table.id.equals(cardId)))
@@ -781,10 +879,13 @@ class StudyRepository {
               .select(_db.studyStats)
               .getSingleOrNull();
           _requireCurrentUser(expectedUid);
-          final currentQueue = currentStats?.reviewQueue ?? 0;
-          final newQueue = (currentQueue - flashcardsQuery.length)
-              .clamp(0, 99999)
-              .toInt();
+          final currentQueue = _db.isLocalOnly
+              ? await _localDueCount()
+              : (currentStats?.reviewQueue ?? 0);
+          final removedDue = _db.isLocalOnly
+              ? await _localDueCount(subjectId: id)
+              : flashcardsQuery.length;
+          final newQueue = (currentQueue - removedDue).clamp(0, 99999).toInt();
 
           await (_db.delete(
             _db.flashcards,
@@ -830,6 +931,8 @@ class StudyRepository {
     final id = _uuid.v4();
     final cleanQuestion = InputSanitizer.sanitize(question);
     final cleanAnswer = InputSanitizer.sanitize(answer);
+    if (_db.isLocalOnly && (cleanQuestion.isEmpty || cleanAnswer.isEmpty))
+      throw ArgumentError('INVALID_FLASHCARD');
     final createdAt = DateTime.now().toUtc().toIso8601String();
     var didMutate = false;
 
@@ -843,8 +946,16 @@ class StudyRepository {
 
         final stats = await _db.select(_db.studyStats).getSingleOrNull();
         _requireCurrentUser(expectedUid);
-        final newQueue = (stats?.reviewQueue ?? 0) + 1;
-        final newCardsToReview = subject.cardsToReview + 1;
+        final newQueue =
+            (_db.isLocalOnly
+                ? await _localDueCount()
+                : (stats?.reviewQueue ?? 0)) +
+            1;
+        final newCardsToReview =
+            (_db.isLocalOnly
+                ? await _localDueCount(subjectId: subject.id)
+                : subject.cardsToReview) +
+            1;
 
         await _db
             .into(_db.flashcards)
@@ -889,6 +1000,7 @@ class StudyRepository {
   }
 
   Future<void> logStudySession(StudyModel currentStatus) async {
+    if (_db.isLocalOnly) return _logLocalStudySession();
     final expectedUid = _currentUid;
     if (expectedUid == null) return;
 
@@ -944,6 +1056,8 @@ class StudyRepository {
   // ===========================================================================
 
   Future<void> addStudyTime(String subjectId, int elapsedSeconds) async {
+    if (_db.isLocalOnly && elapsedSeconds <= 0)
+      throw ArgumentError('INVALID_STUDY_DURATION');
     final expectedUid = _currentUid;
     if (expectedUid == null) return;
 
@@ -961,6 +1075,8 @@ class StudyRepository {
         )..where((table) => table.id.equals(subjectId))).getSingleOrNull();
         _requireCurrentUser(expectedUid);
 
+        if (_db.isLocalOnly && subject == null)
+          throw ArgumentError('STUDY_SUBJECT_NOT_FOUND');
         final lastStudyDate = stats?.lastStudyDate == null
             ? null
             : DateTime.fromMillisecondsSinceEpoch(stats!.lastStudyDate!);
@@ -1048,6 +1164,7 @@ class StudyRepository {
       return;
     } catch (e, stack) {
       AppLogger.e('Erro ao resetar progresso diário', e, stack);
+      if (_db.isLocalOnly) rethrow;
     }
   }
 
@@ -1056,6 +1173,7 @@ class StudyRepository {
   // ===========================================================================
 
   Future<void> syncStudyFromFirebaseToLocal() async {
+    if (_db.isLocalOnly) return;
     final expectedUid = _currentUid;
     if (expectedUid == null) return;
 
@@ -1064,7 +1182,9 @@ class StudyRepository {
       await _verifyRemoteRead(expectedUid);
       final pullStartedAt = DateTime.now().millisecondsSinceEpoch;
       final queueDrained = await _syncManager.processPendingItems();
-      if ((!queueDrained && _db.identity?.isBound != true) || !_isCurrentUser(expectedUid)) return;
+      if ((!queueDrained && _db.identity?.isBound != true) ||
+          !_isCurrentUser(expectedUid))
+        return;
 
       final userRef = _firestore.collection('users').doc(expectedUid);
       final mainDoc = await _getStudyDocument(
@@ -1080,9 +1200,20 @@ class StudyRepository {
       );
       if (flashcardsSnapshot == null) return;
       await _verifyRemoteRead(expectedUid);
-      if (_db.identity?.generation != null) for (final metadata in [mainDoc.metadata, subjectsSnapshot.metadata, flashcardsSnapshot.metadata]) {
-        if (_db.identity?.generation != null && !GenerationalReadPolicy.accepts(_db.identity, fromCache: metadata.isFromCache, pendingWrites: metadata.hasPendingWrites)) throw StateError('GENERATIONAL_SNAPSHOT_UNCONFIRMED');
-      }
+      if (_db.identity?.generation != null)
+        for (final metadata in [
+          mainDoc.metadata,
+          subjectsSnapshot.metadata,
+          flashcardsSnapshot.metadata,
+        ]) {
+          if (_db.identity?.generation != null &&
+              !GenerationalReadPolicy.accepts(
+                _db.identity,
+                fromCache: metadata.isFromCache,
+                pendingWrites: metadata.hasPendingWrites,
+              ))
+            throw StateError('GENERATIONAL_SNAPSHOT_UNCONFIRMED');
+        }
       _requireCurrentUser(expectedUid);
 
       final remoteSubjectDocIds = subjectsSnapshot.docs
@@ -1137,20 +1268,28 @@ class StudyRepository {
   }
 
   String? get _currentUid {
-    final uid = _auth.currentUser?.uid.trim();
+    final uid =
+        (_db.isLocalOnly ? _db.identity?.uid : _remoteAuth?.currentUser?.uid)
+            ?.trim();
     return uid == null || uid.isEmpty ? null : uid;
   }
 
-  bool _isCurrentUser(String expectedUid) =>
-      _auth.currentUser?.uid == expectedUid;
+  bool _isCurrentUser(String expectedUid) => _db.isLocalOnly
+      ? _db.identity?.uid == expectedUid
+      : _remoteAuth?.currentUser?.uid == expectedUid;
 
   void _requireCurrentUser(String expectedUid) {
+    if (_db.isLocalOnly) {
+      _db.localMutations.capture(expectedUid: expectedUid);
+      return;
+    }
     if (!_isCurrentUser(expectedUid)) {
       throw const _StudySessionChanged();
     }
   }
 
   void _schedulePendingStudySync() {
+    if (_db.isLocalOnly) return;
     unawaited(
       _syncManager.processPendingItems().catchError((Object _, StackTrace _) {
         AppLogger.w('Não foi possível enviar estudos pendentes agora.');
@@ -1166,6 +1305,7 @@ class StudyRepository {
     required String operationType,
     required Map<String, dynamic> payload,
   }) async {
+    if (_db.isLocalOnly) return;
     await _db.insertSyncItem(
       ownerUid: ownerUid,
       collection: collection,
@@ -1256,215 +1396,226 @@ class StudyRepository {
     required Set<String> remoteSubjectDocIds,
     required Set<String> remoteFlashcardDocIds,
   }) async {
-    await _db.transactionWithCommitGuard(admission: admission, waitForReopen: false, validateBeforeCommit: () => _requireReadSession(expectedUid), () async {
-      _requireCurrentUser(expectedUid);
-      final authoritativeItems =
-          await (_db.select(_db.syncQueueTable)..where(
-                (item) =>
-                    item.ownerUid.equals(expectedUid) &
-                    (item.collection.equals('study_info') |
-                        item.collection.equals('subjects') |
-                        item.collection.equals('review_queue') |
-                        item.collection.equals('study_activity') |
-                        item.collection.equals('study_progress_reset')) &
-                    (item.status.equals(SyncQueuePersistenceStatus.pending) |
-                        (item.status.equals(
-                              SyncQueuePersistenceStatus.succeeded,
-                            ) &
-                            item.createdAt.isBiggerOrEqualValue(
-                              pullStartedAt,
-                            ))),
-              ))
-              .get();
+    await _db.transactionWithCommitGuard(
+      admission: admission,
+      waitForReopen: false,
+      validateBeforeCommit: () => _requireReadSession(expectedUid),
+      () async {
+        _requireCurrentUser(expectedUid);
+        final authoritativeItems =
+            await (_db.select(_db.syncQueueTable)..where(
+                  (item) =>
+                      item.ownerUid.equals(expectedUid) &
+                      (item.collection.equals('study_info') |
+                          item.collection.equals('subjects') |
+                          item.collection.equals('review_queue') |
+                          item.collection.equals('study_activity') |
+                          item.collection.equals('study_progress_reset')) &
+                      (item.status.equals(SyncQueuePersistenceStatus.pending) |
+                          (item.status.equals(
+                                SyncQueuePersistenceStatus.succeeded,
+                              ) &
+                              item.createdAt.isBiggerOrEqualValue(
+                                pullStartedAt,
+                              ))),
+                ))
+                .get();
 
-      // A rejected creation remains unresolved while its original local card
-      // exists. Scope by queue owner/family/type/docId, never by e-mail or by
-      // inferred remote effects. Resolved/removed local cards do not pin pulls.
-      final rejectedCreates =
-          await (_db.select(_db.syncQueueTable)..where(
-                (item) =>
-                    item.ownerUid.equals(expectedUid) &
-                    item.collection.equals('review_queue') &
-                    item.operationType.equals('create') &
-                    item.status.equals(SyncQueuePersistenceStatus.rejected),
-              ))
-              .get();
-      final historicalStudy =
-          (await (_db.select(_db.syncQueueTable)..where(
-                    (item) =>
-                        item.ownerUid.equals(expectedUid) &
-                        item.status.equals(SyncQueuePersistenceStatus.rejected),
-                  ))
-                  .get())
-              .where(StudyStateHoldOperation.isHistoricalRejected)
-              .toList();
-      final rejectedReviews = historicalStudy.where(
-        StudyStateHoldOperation.isReview,
-      );
-      final unresolvedSubjectDeletes =
-          [...authoritativeItems, ...historicalStudy]
-              .where(StudyStateHoldOperation.isSubjectDelete)
-              .map((item) => item.docId.trim())
-              .toSet();
-      final unresolvedIds = [
-        ...rejectedCreates,
-        ...rejectedReviews,
-      ].map((item) => item.docId).toSet();
-      final unresolvedCards = (await _db.select(_db.flashcards).get())
-          .where((card) => unresolvedIds.contains(card.id))
-          .toList();
-      _requireCurrentUser(expectedUid);
+        // A rejected creation remains unresolved while its original local card
+        // exists. Scope by queue owner/family/type/docId, never by e-mail or by
+        // inferred remote effects. Resolved/removed local cards do not pin pulls.
+        final rejectedCreates =
+            await (_db.select(_db.syncQueueTable)..where(
+                  (item) =>
+                      item.ownerUid.equals(expectedUid) &
+                      item.collection.equals('review_queue') &
+                      item.operationType.equals('create') &
+                      item.status.equals(SyncQueuePersistenceStatus.rejected),
+                ))
+                .get();
+        final historicalStudy =
+            (await (_db.select(_db.syncQueueTable)..where(
+                      (item) =>
+                          item.ownerUid.equals(expectedUid) &
+                          item.status.equals(
+                            SyncQueuePersistenceStatus.rejected,
+                          ),
+                    ))
+                    .get())
+                .where(StudyStateHoldOperation.isHistoricalRejected)
+                .toList();
+        final rejectedReviews = historicalStudy.where(
+          StudyStateHoldOperation.isReview,
+        );
+        final unresolvedSubjectDeletes =
+            [...authoritativeItems, ...historicalStudy]
+                .where(StudyStateHoldOperation.isSubjectDelete)
+                .map((item) => item.docId.trim())
+                .toSet();
+        final unresolvedIds = [
+          ...rejectedCreates,
+          ...rejectedReviews,
+        ].map((item) => item.docId).toSet();
+        final unresolvedCards = (await _db.select(_db.flashcards).get())
+            .where((card) => unresolvedIds.contains(card.id))
+            .toList();
+        _requireCurrentUser(expectedUid);
 
-      final reviewMutations = [...authoritativeItems, ...rejectedReviews].where(
-        (item) =>
-            StudyStateHoldOperation.isReview(item) ||
-            (item.collection == 'review_queue' &&
-                item.operationType == 'create'),
-      );
-      final studyActivities = authoritativeItems.where(
-        (item) =>
-            item.collection == 'study_activity' &&
-            item.operationType == 'create',
-      );
-      final progressResets = authoritativeItems.where(
-        (item) =>
-            item.collection == 'study_progress_reset' &&
-            item.operationType == 'create',
-      );
-      final protectStats =
-          authoritativeItems.any(
-            (item) => item.collection == 'study_info' && item.docId == 'main',
-          ) ||
-          reviewMutations.isNotEmpty ||
-          unresolvedCards.isNotEmpty ||
-          studyActivities.isNotEmpty ||
-          progressResets.isNotEmpty ||
-          unresolvedSubjectDeletes.isNotEmpty;
-      final protectSubjects = authoritativeItems
-          .where((item) => item.collection == 'subjects')
-          .map((item) => item.docId)
-          .toSet();
-      for (final item in studyActivities) {
-        try {
-          final payload = jsonDecode(item.payloadJson);
-          final subjectId = payload is Map<String, dynamic>
-              ? payload['subjectId']
-              : null;
-          if (subjectId is String && subjectId.trim().isNotEmpty) {
-            protectSubjects.add(subjectId);
+        final reviewMutations = [...authoritativeItems, ...rejectedReviews]
+            .where(
+              (item) =>
+                  StudyStateHoldOperation.isReview(item) ||
+                  (item.collection == 'review_queue' &&
+                      item.operationType == 'create'),
+            );
+        final studyActivities = authoritativeItems.where(
+          (item) =>
+              item.collection == 'study_activity' &&
+              item.operationType == 'create',
+        );
+        final progressResets = authoritativeItems.where(
+          (item) =>
+              item.collection == 'study_progress_reset' &&
+              item.operationType == 'create',
+        );
+        final protectStats =
+            authoritativeItems.any(
+              (item) => item.collection == 'study_info' && item.docId == 'main',
+            ) ||
+            reviewMutations.isNotEmpty ||
+            unresolvedCards.isNotEmpty ||
+            studyActivities.isNotEmpty ||
+            progressResets.isNotEmpty ||
+            unresolvedSubjectDeletes.isNotEmpty;
+        final protectSubjects = authoritativeItems
+            .where((item) => item.collection == 'subjects')
+            .map((item) => item.docId)
+            .toSet();
+        for (final item in studyActivities) {
+          try {
+            final payload = jsonDecode(item.payloadJson);
+            final subjectId = payload is Map<String, dynamic>
+                ? payload['subjectId']
+                : null;
+            if (subjectId is String && subjectId.trim().isNotEmpty) {
+              protectSubjects.add(subjectId);
+            }
+          } on FormatException {
+            // Stats remain protected even when the subject cannot be identified.
           }
-        } on FormatException {
-          // Stats remain protected even when the subject cannot be identified.
         }
-      }
-      protectSubjects.addAll(unresolvedCards.map((card) => card.subjectId));
-      protectSubjects.addAll(unresolvedSubjectDeletes);
-      var protectAllSubjects = false;
-      for (final item in reviewMutations) {
-        try {
-          final payload = jsonDecode(item.payloadJson);
-          final subjectId = payload is Map<String, dynamic>
-              ? payload['subjectId']
-              : null;
-          if (subjectId is String && subjectId.trim().isNotEmpty) {
-            protectSubjects.add(subjectId);
-          } else {
+        protectSubjects.addAll(unresolvedCards.map((card) => card.subjectId));
+        protectSubjects.addAll(unresolvedSubjectDeletes);
+        var protectAllSubjects = false;
+        for (final item in reviewMutations) {
+          try {
+            final payload = jsonDecode(item.payloadJson);
+            final subjectId = payload is Map<String, dynamic>
+                ? payload['subjectId']
+                : null;
+            if (subjectId is String && subjectId.trim().isNotEmpty) {
+              protectSubjects.add(subjectId);
+            } else {
+              protectAllSubjects = true;
+            }
+          } on FormatException {
             protectAllSubjects = true;
           }
-        } on FormatException {
-          protectAllSubjects = true;
         }
-      }
-      final protectCards = authoritativeItems
-          .where((item) => item.collection == 'review_queue')
-          .map((item) => item.docId)
-          .toSet();
-      protectCards.addAll(unresolvedCards.map((card) => card.id));
-      _requireCurrentUser(expectedUid);
+        final protectCards = authoritativeItems
+            .where((item) => item.collection == 'review_queue')
+            .map((item) => item.docId)
+            .toSet();
+        protectCards.addAll(unresolvedCards.map((card) => card.id));
+        _requireCurrentUser(expectedUid);
 
-      if (!protectStats && remoteStats != null) {
-        await _applyRemoteStudyStats(expectedUid, remoteStats);
-      }
-
-      for (final subject in remoteSubjects) {
-        _requireCurrentUser(expectedUid);
-        if (protectAllSubjects || protectSubjects.contains(subject.id))
-          continue;
-        await _db
-            .into(_db.subjects)
-            .insertOnConflictUpdate(
-              SubjectsCompanion.insert(
-                id: subject.id,
-                title: subject.title,
-                cardsToReview: subject.cardsToReview,
-                streakDays: subject.streakDays,
-                progress: subject.progress,
-                hasExam: subject.hasExam,
-                examDate: Value(subject.examDate?.millisecondsSinceEpoch),
-              ),
-            );
-        _requireCurrentUser(expectedUid);
-      }
-
-      for (final card in remoteFlashcards) {
-        _requireCurrentUser(expectedUid);
-        if (protectCards.contains(card.id) ||
-            unresolvedSubjectDeletes.contains(card.subjectId))
-          continue;
-        final subject = await (_db.select(
-          _db.subjects,
-        )..where((table) => table.id.equals(card.subjectId))).getSingleOrNull();
-        _requireCurrentUser(expectedUid);
-        if (subject == null) {
-          AppLogger.w('SYNC Study: flashcard sem matéria válida ignorado.');
-          continue;
+        if (!protectStats && remoteStats != null) {
+          await _applyRemoteStudyStats(expectedUid, remoteStats);
         }
-        await _db
-            .into(_db.flashcards)
-            .insertOnConflictUpdate(
-              FlashcardsCompanion.insert(
-                id: card.id,
-                subjectId: card.subjectId,
-                question: card.question,
-                answer: card.answer,
-                lastReviewed: Value(card.lastReviewed?.millisecondsSinceEpoch),
-              ),
-            );
-        _requireCurrentUser(expectedUid);
-      }
 
-      _requireCurrentUser(expectedUid);
-      final localFlashcards = await _db.select(_db.flashcards).get();
-      _requireCurrentUser(expectedUid);
-      for (final card in localFlashcards) {
-        if (remoteFlashcardDocIds.contains(card.id) ||
-            protectCards.contains(card.id) ||
-            unresolvedSubjectDeletes.contains(card.subjectId)) {
-          protectSubjects.add(card.subjectId);
-          continue;
+        for (final subject in remoteSubjects) {
+          _requireCurrentUser(expectedUid);
+          if (protectAllSubjects || protectSubjects.contains(subject.id))
+            continue;
+          await _db
+              .into(_db.subjects)
+              .insertOnConflictUpdate(
+                SubjectsCompanion.insert(
+                  id: subject.id,
+                  title: subject.title,
+                  cardsToReview: subject.cardsToReview,
+                  streakDays: subject.streakDays,
+                  progress: subject.progress,
+                  hasExam: subject.hasExam,
+                  examDate: Value(subject.examDate?.millisecondsSinceEpoch),
+                ),
+              );
+          _requireCurrentUser(expectedUid);
         }
-        _requireCurrentUser(expectedUid);
-        await (_db.delete(
-          _db.flashcards,
-        )..where((table) => table.id.equals(card.id))).go();
-        _requireCurrentUser(expectedUid);
-      }
 
-      final localSubjects = await _db.select(_db.subjects).get();
-      _requireCurrentUser(expectedUid);
-      for (final subject in localSubjects) {
-        if (remoteSubjectDocIds.contains(subject.id) ||
-            protectAllSubjects ||
-            protectSubjects.contains(subject.id)) {
-          continue;
+        for (final card in remoteFlashcards) {
+          _requireCurrentUser(expectedUid);
+          if (protectCards.contains(card.id) ||
+              unresolvedSubjectDeletes.contains(card.subjectId))
+            continue;
+          final subject =
+              await (_db.select(_db.subjects)
+                    ..where((table) => table.id.equals(card.subjectId)))
+                  .getSingleOrNull();
+          _requireCurrentUser(expectedUid);
+          if (subject == null) {
+            AppLogger.w('SYNC Study: flashcard sem matéria válida ignorado.');
+            continue;
+          }
+          await _db
+              .into(_db.flashcards)
+              .insertOnConflictUpdate(
+                FlashcardsCompanion.insert(
+                  id: card.id,
+                  subjectId: card.subjectId,
+                  question: card.question,
+                  answer: card.answer,
+                  lastReviewed: Value(
+                    card.lastReviewed?.millisecondsSinceEpoch,
+                  ),
+                ),
+              );
+          _requireCurrentUser(expectedUid);
         }
+
         _requireCurrentUser(expectedUid);
-        await (_db.delete(
-          _db.subjects,
-        )..where((table) => table.id.equals(subject.id))).go();
+        final localFlashcards = await _db.select(_db.flashcards).get();
         _requireCurrentUser(expectedUid);
-      }
-    });
+        for (final card in localFlashcards) {
+          if (remoteFlashcardDocIds.contains(card.id) ||
+              protectCards.contains(card.id) ||
+              unresolvedSubjectDeletes.contains(card.subjectId)) {
+            protectSubjects.add(card.subjectId);
+            continue;
+          }
+          _requireCurrentUser(expectedUid);
+          await (_db.delete(
+            _db.flashcards,
+          )..where((table) => table.id.equals(card.id))).go();
+          _requireCurrentUser(expectedUid);
+        }
+
+        final localSubjects = await _db.select(_db.subjects).get();
+        _requireCurrentUser(expectedUid);
+        for (final subject in localSubjects) {
+          if (remoteSubjectDocIds.contains(subject.id) ||
+              protectAllSubjects ||
+              protectSubjects.contains(subject.id)) {
+            continue;
+          }
+          _requireCurrentUser(expectedUid);
+          await (_db.delete(
+            _db.subjects,
+          )..where((table) => table.id.equals(subject.id))).go();
+          _requireCurrentUser(expectedUid);
+        }
+      },
+    );
   }
 
   _RemoteStudyStats? _parseRemoteStudyStats(Map<String, dynamic>? data) {

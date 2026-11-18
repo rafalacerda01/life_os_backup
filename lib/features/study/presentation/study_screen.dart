@@ -254,7 +254,8 @@ class _ReviewCreationNoticeState extends State<_ReviewCreationNotice> {
 }
 
 class StudyScreen extends ConsumerStatefulWidget {
-  const StudyScreen({super.key});
+  const StudyScreen({this.showFocusShortcut = true, super.key});
+  final bool showFocusShortcut;
 
   @override
   ConsumerState<StudyScreen> createState() => _StudyScreenState();
@@ -277,7 +278,12 @@ class _StudyScreenState extends ConsumerState<StudyScreen> {
     String subjectTitle,
   ) {
     if (ref.read(emulatorAccountRuntimeProvider) != null) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content:Text('A exclusão de disciplinas aguarda homologação.')));return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('A exclusão de disciplinas aguarda homologação.'),
+        ),
+      );
+      return;
     }
     showDialog(
       context: context,
@@ -512,13 +518,21 @@ class _StudyScreenState extends ConsumerState<StudyScreen> {
                           return;
                         }
 
-                        await ref
-                            .read(studyRepositoryProvider)
-                            .createSubject(
-                              title,
-                              hasExam: hasExam,
-                              examDate: selectedDate,
+                        try {
+                          await ref
+                              .read(studyRepositoryProvider)
+                              .createSubject(
+                                title,
+                                hasExam: hasExam,
+                                examDate: selectedDate,
+                              );
+                        } on PlanQuotaExceeded catch (error) {
+                          if (context.mounted)
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(content: Text(error.toString())),
                             );
+                          return;
+                        }
 
                         if (context.mounted) {
                           Navigator.pop(context);
@@ -850,35 +864,37 @@ class _StudyScreenState extends ConsumerState<StudyScreen> {
                     subtitle: 'Crie uma pergunta para revisar depois',
                     onTap: () => _showAddFlashcardModal(context, ref),
                   ),
-                  const SizedBox(height: 10),
-                  _SecondaryStudyAction(
-                    icon: Icons.timer_outlined,
-                    title: 'Estudar agora',
-                    subtitle: subjects.isNotEmpty
-                        ? 'Abrir temporizador de foco e estudos'
-                        : 'Adicione uma disciplina para desbloquear',
-                    enabled: subjects.isNotEmpty,
-                    onTap: () {
-                      if (subjects.isEmpty) {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(
-                            content: Text(
-                              'Cadastre pelo menos uma disciplina para estudar!',
+                  if (widget.showFocusShortcut) ...[
+                    const SizedBox(height: 10),
+                    _SecondaryStudyAction(
+                      icon: Icons.timer_outlined,
+                      title: 'Estudar agora',
+                      subtitle: subjects.isNotEmpty
+                          ? 'Abrir temporizador de foco e estudos'
+                          : 'Adicione uma disciplina para desbloquear',
+                      enabled: subjects.isNotEmpty,
+                      onTap: () {
+                        if (subjects.isEmpty) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(
+                              content: Text(
+                                'Cadastre pelo menos uma disciplina para estudar!',
+                              ),
+                              backgroundColor: Colors.orangeAccent,
                             ),
-                            backgroundColor: Colors.orangeAccent,
+                          );
+                          return;
+                        }
+
+                        Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                            builder: (context) => const FocusScreen(),
                           ),
                         );
-                        return;
-                      }
-
-                      Navigator.push(
-                        context,
-                        MaterialPageRoute(
-                          builder: (context) => const FocusScreen(),
-                        ),
-                      );
-                    },
-                  ),
+                      },
+                    ),
+                  ],
                   const SizedBox(height: 28),
                   const _SectionTitle(
                     title: 'Minhas disciplinas',
@@ -1359,6 +1375,7 @@ class _SubjectCard extends StatelessWidget {
                   ),
                 ),
               IconButton(
+                key: ValueKey('subject-delete-${subject.id}'),
                 tooltip: 'Excluir disciplina',
                 onPressed: onDelete,
                 icon: const Icon(

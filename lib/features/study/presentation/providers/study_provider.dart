@@ -13,12 +13,16 @@ import 'package:life_os/features/study/data/study_repository.dart';
 
 // --- INJEÇÃO DO REPOSITÓRIO ---
 final studyRepositoryProvider = Provider((ref) {
+  final database = ref.watch(databaseProvider);
+  if (database.isLocalOnly) return StudyRepository.local(database);
   return StudyRepository(
-    ref.watch(databaseProvider),
+    database,
     ref.watch(firebaseFirestoreProvider),
     ref.watch(firebaseAuthProvider),
     ref.watch(syncManagerProvider),
-    sessionLease: ref.watch(localAccountSessionProvider).identity == null ? null : ref.read(localAccountSessionProvider.notifier).capture(),
+    sessionLease: ref.watch(localAccountSessionProvider).identity == null
+        ? null
+        : ref.read(localAccountSessionProvider.notifier).capture(),
   );
 });
 
@@ -46,7 +50,8 @@ final subjectsStreamProvider =
       return ref.watch(studyRepositoryProvider).getSubjectsStream();
     });
 
-final flashcardStreamProvider = StreamProvider.autoDispose<List<FlashcardModel>>((ref) {
-  ref.watch(_studyDayProvider);
-  return ref.watch(studyRepositoryProvider).getFlashcardsStream();
-});
+final flashcardStreamProvider =
+    StreamProvider.autoDispose<List<FlashcardModel>>((ref) {
+      ref.watch(_studyDayProvider);
+      return ref.watch(studyRepositoryProvider).getFlashcardsStream();
+    });
