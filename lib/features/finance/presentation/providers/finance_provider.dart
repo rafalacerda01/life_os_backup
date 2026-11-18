@@ -211,11 +211,15 @@ final financeVisibleTransactionsProvider = Provider.autoDispose
 // ============================================================================
 
 final financeRepositoryProvider = Provider.autoDispose((ref) {
+  final database = ref.watch(databaseProvider);
+  if (database.isLocalOnly) return FinanceRepository.local(database);
   return FinanceRepository(
-    ref.watch(databaseProvider),
+    database,
     ref.watch(firebaseFirestoreProvider),
     ref.watch(firebaseAuthProvider),
     ref.watch(syncManagerProvider),
-    sessionLease: ref.watch(localAccountSessionProvider).identity == null ? null : ref.read(localAccountSessionProvider.notifier).capture(),
+    sessionLease: ref.watch(localAccountSessionProvider).identity == null
+        ? null
+        : ref.read(localAccountSessionProvider.notifier).capture(),
   );
 });

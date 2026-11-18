@@ -7,6 +7,7 @@ import 'package:life_os/features/finance/presentation/providers/finance_provider
 import 'package:life_os/core/security/input_sanitizer.dart';
 import 'package:life_os/core/database/app_database.dart';
 import 'package:life_os/core/utils/app_logger.dart';
+import 'package:life_os/core/runtime/app_runtime_mode.dart';
 import 'package:life_os/features/premium/domain/services/plan_limits.dart';
 import 'package:life_os/features/premium/domain/services/quota_service.dart';
 import 'package:life_os/features/premium/presentation/plan_limits_provider.dart';
@@ -80,7 +81,9 @@ class _FinanceScreenState extends ConsumerState<FinanceScreen> {
     super.initState();
     _scrollController.addListener(_onScroll);
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted) return;
+      if (!mounted ||
+          ref.read(appRuntimeModeProvider) == AppRuntimeMode.localFirst)
+        return;
       unawaited(
         ref.read(financeRepositoryProvider).syncTransactionsFromFirestore(),
       );
@@ -595,6 +598,14 @@ class _FinanceScreenState extends ConsumerState<FinanceScreen> {
                                             type: selectedType,
                                             category: category,
                                           );
+                                    } on PlanQuotaExceeded catch (error) {
+                                      if (context.mounted) {
+                                        setModalState(
+                                          () => isSubmitting = false,
+                                        );
+                                        _showMessage(context, error.toString());
+                                      }
+                                      return;
                                     } catch (error, stackTrace) {
                                       AppLogger.e(
                                         'Falha ao criar transação.',

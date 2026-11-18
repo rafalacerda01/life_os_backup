@@ -1,4 +1,7 @@
 import 'package:life_os/core/database/local_account_session.dart';
+import 'package:life_os/core/database/database_sync_policy.dart';
+import 'package:life_os/features/premium/domain/services/plan_limits.dart';
+import 'package:life_os/features/premium/domain/services/quota_service.dart';
 import 'package:life_os/core/services/generational_read_policy.dart';
 import 'dart:async';
 import 'dart:convert';
@@ -36,18 +39,68 @@ class _RemoteFinanceTransaction {
 class FinanceRepository {
   final LocalAccountLease? sessionLease;
   Future<void> _verifyRemoteRead(String uid) => GenerationalReadPolicy.verify(
-    identity: _db.identity, lease: sessionLease, auth: _auth, store: _firestore, expectedUid: uid);
+    identity: _db.identity,
+    lease: sessionLease,
+    auth: _auth,
+    store: _firestore,
+    expectedUid: uid,
+  );
   void _requireReadSession(String uid) => GenerationalReadPolicy.requireCurrent(
-    identity: _db.identity, lease: sessionLease, auth: _auth, expectedUid: uid);
+    identity: _db.identity,
+    lease: sessionLease,
+    auth: _auth,
+    expectedUid: uid,
+  );
 
   static const double _maximumAmount = 1000000000;
 
   final local_db.AppDatabase _db;
-  final FirebaseFirestore _firestore;
-  final FirebaseAuth _auth;
-  final SyncManager _syncManager;
+  final FirebaseFirestore? _remoteFirestore;
+  final FirebaseAuth? _remoteAuth;
+  final SyncManager? _remoteSyncManager;
+  FirebaseFirestore get _firestore =>
+      _remoteFirestore ?? (throw const LocalRemoteSyncDisabled());
+  FirebaseAuth get _auth =>
+      _remoteAuth ?? (throw const LocalRemoteSyncDisabled());
+  SyncManager get _syncManager =>
+      _remoteSyncManager ?? (throw const LocalRemoteSyncDisabled());
+  String? get _ownerUid =>
+      _db.isLocalOnly ? _db.identity?.uid : _remoteAuth?.currentUser?.uid;
 
-  FinanceRepository(this._db, this._firestore, this._auth, this._syncManager, {this.sessionLease});
+  FinanceRepository(
+    this._db,
+    FirebaseFirestore firestore,
+    FirebaseAuth auth,
+    SyncManager syncManager, {
+    this.sessionLease,
+  }) : _remoteFirestore = firestore,
+       _remoteAuth = auth,
+       _remoteSyncManager = syncManager;
+
+  FinanceRepository.local(this._db)
+    : _remoteFirestore = null,
+      _remoteAuth = null,
+      _remoteSyncManager = null,
+      sessionLease = null {
+    if (!_db.isLocalOnly)
+      throw ArgumentError('LOCAL_PROFILE_SYNC_POLICY_REQUIRED');
+  }
+
+  Future<void> _enforceLocalFreeQuota() async {
+    if (!_db.isLocalOnly) return;
+    // Local development stays Free until a verified hybrid authority is wired.
+    final limit = PlanLimits.free.transactions;
+    final count = _db.transactions.id.count();
+    final current =
+        await (_db.selectOnly(_db.transactions)
+              ..where(_db.transactions.isDeleted.equals(false))
+              ..addColumns([count]))
+            .map((row) => row.read(count) ?? 0)
+            .getSingle();
+    if (!const QuotaService().canCreate(limit: limit, currentCount: current)) {
+      throw PlanQuotaExceeded(QuotaResource.transactions, limit.maximum);
+    }
+  }
 
   Future<void> addTransaction({
     required String title,
@@ -66,9 +119,9 @@ class FinanceRepository {
       category: cleanCategory,
     );
 
-    final user = _auth.currentUser;
+    final ownerUid = _ownerUid;
 
-    if (user == null) {
+    if (ownerUid == null) {
       return;
     }
 
@@ -80,8 +133,9 @@ class FinanceRepository {
       final createdAt = DateTime.now();
 
       await _db.transactionWithSync(
-        ownerUid: user.uid,
+        ownerUid: ownerUid,
         localOperation: () async {
+          await _enforceLocalFreeQuota();
           await _db
               .into(_db.transactions)
               .insert(
@@ -115,14 +169,14 @@ class FinanceRepository {
   }
 
   Future<void> deleteTransaction(int localId) async {
-    final user = _auth.currentUser;
+    final ownerUid = _ownerUid;
 
-    if (user == null) {
+    if (ownerUid == null) {
       return;
     }
 
     try {
-      final admission = _db.localMutations.capture(expectedUid: user.uid);
+      final admission = _db.localMutations.capture(expectedUid: ownerUid);
       final transaction = await (_db.select(
         _db.transactions,
       )..where((table) => table.id.equals(localId))).getSingleOrNull();
@@ -146,7 +200,7 @@ class FinanceRepository {
 
       await _db.transactionWithSync(
         admission: admission,
-        ownerUid: user.uid,
+        ownerUid: ownerUid,
         localOperation: () async {
           await _deleteLocalTransaction(localId);
         },
@@ -164,6 +218,7 @@ class FinanceRepository {
   }
 
   Future<void> syncTransactionsFromFirestore() async {
+    if (_db.isLocalOnly) return;
     final expectedUid = _auth.currentUser?.uid.trim();
 
     if (expectedUid == null || expectedUid.isEmpty) return;
@@ -173,7 +228,9 @@ class FinanceRepository {
       await _verifyRemoteRead(expectedUid);
       final pullStartedAt = DateTime.now().millisecondsSinceEpoch;
       final queueDrained = await _syncManager.processPendingItems();
-      if ((!queueDrained && _db.identity?.isBound != true) || !_isCurrentUser(expectedUid)) return;
+      if ((!queueDrained && _db.identity?.isBound != true) ||
+          !_isCurrentUser(expectedUid))
+        return;
 
       final snapshot = await _firestore
           .collection('users')
@@ -181,102 +238,113 @@ class FinanceRepository {
           .collection('transactions')
           .get(const GetOptions(source: Source.server));
       await _verifyRemoteRead(expectedUid);
-      if (_db.identity?.generation != null && !GenerationalReadPolicy.accepts(_db.identity, fromCache: snapshot.metadata.isFromCache, pendingWrites: snapshot.metadata.hasPendingWrites)) throw StateError('GENERATIONAL_SNAPSHOT_UNCONFIRMED');
+      if (_db.identity?.generation != null &&
+          !GenerationalReadPolicy.accepts(
+            _db.identity,
+            fromCache: snapshot.metadata.isFromCache,
+            pendingWrites: snapshot.metadata.hasPendingWrites,
+          ))
+        throw StateError('GENERATIONAL_SNAPSHOT_UNCONFIRMED');
       _requireCurrentUser(expectedUid);
 
       final remoteDocIds = snapshot.docs.map((doc) => doc.id).toSet();
 
-      await _db.transactionWithCommitGuard(admission: ticket, waitForReopen: false, validateBeforeCommit: () => _requireReadSession(expectedUid), () async {
-        _requireCurrentUser(expectedUid);
-
-        final authoritativeItems =
-            await (_db.select(_db.syncQueueTable)..where(
-                  (item) =>
-                      item.ownerUid.equals(expectedUid) &
-                      item.collection.equals('transactions') &
-                      (item.status.equals(
-                            local_db.SyncQueuePersistenceStatus.pending,
-                          ) |
-                          (item.status.equals(
-                                local_db.SyncQueuePersistenceStatus.succeeded,
-                              ) &
-                              item.createdAt.isBiggerOrEqualValue(
-                                pullStartedAt,
-                              ))),
-                ))
-                .get();
-        final protectedDocIds = authoritativeItems
-            .map((item) => item.docId)
-            .toSet();
-
-        _requireCurrentUser(expectedUid);
-
-        for (final doc in snapshot.docs) {
+      await _db.transactionWithCommitGuard(
+        admission: ticket,
+        waitForReopen: false,
+        validateBeforeCommit: () => _requireReadSession(expectedUid),
+        () async {
           _requireCurrentUser(expectedUid);
-          if (protectedDocIds.contains(doc.id)) continue;
 
-          final remote = _parseRemoteTransaction(doc.data());
-          if (remote == null) {
-            AppLogger.w('SYNC Finanças: documento remoto inválido ignorado.');
-            continue;
+          final authoritativeItems =
+              await (_db.select(_db.syncQueueTable)..where(
+                    (item) =>
+                        item.ownerUid.equals(expectedUid) &
+                        item.collection.equals('transactions') &
+                        (item.status.equals(
+                              local_db.SyncQueuePersistenceStatus.pending,
+                            ) |
+                            (item.status.equals(
+                                  local_db.SyncQueuePersistenceStatus.succeeded,
+                                ) &
+                                item.createdAt.isBiggerOrEqualValue(
+                                  pullStartedAt,
+                                ))),
+                  ))
+                  .get();
+          final protectedDocIds = authoritativeItems
+              .map((item) => item.docId)
+              .toSet();
+
+          _requireCurrentUser(expectedUid);
+
+          for (final doc in snapshot.docs) {
+            _requireCurrentUser(expectedUid);
+            if (protectedDocIds.contains(doc.id)) continue;
+
+            final remote = _parseRemoteTransaction(doc.data());
+            if (remote == null) {
+              AppLogger.w('SYNC Finanças: documento remoto inválido ignorado.');
+              continue;
+            }
+
+            final existing =
+                await (_db.select(_db.transactions)
+                      ..where((table) => table.firestoreId.equals(doc.id)))
+                    .getSingleOrNull();
+
+            _requireCurrentUser(expectedUid);
+
+            if (existing == null) {
+              await _db
+                  .into(_db.transactions)
+                  .insert(
+                    local_db.TransactionsCompanion.insert(
+                      firestoreId: Value(doc.id),
+                      title: remote.title,
+                      amount: remote.amount,
+                      type: remote.type,
+                      category: remote.category,
+                      date: remote.date,
+                    ),
+                  );
+            } else {
+              await (_db.update(
+                _db.transactions,
+              )..where((table) => table.id.equals(existing.id))).write(
+                local_db.TransactionsCompanion(
+                  firestoreId: Value(doc.id),
+                  title: Value(remote.title),
+                  amount: Value(remote.amount),
+                  type: Value(remote.type),
+                  category: Value(remote.category),
+                  date: Value(remote.date),
+                  isDeleted: const Value(false),
+                ),
+              );
+            }
           }
 
-          final existing =
-              await (_db.select(_db.transactions)
-                    ..where((table) => table.firestoreId.equals(doc.id)))
-                  .getSingleOrNull();
-
           _requireCurrentUser(expectedUid);
+          final localTransactions = await _db.select(_db.transactions).get();
 
-          if (existing == null) {
-            await _db
-                .into(_db.transactions)
-                .insert(
-                  local_db.TransactionsCompanion.insert(
-                    firestoreId: Value(doc.id),
-                    title: remote.title,
-                    amount: remote.amount,
-                    type: remote.type,
-                    category: remote.category,
-                    date: remote.date,
-                  ),
-                );
-          } else {
-            await (_db.update(
+          for (final transaction in localTransactions) {
+            _requireCurrentUser(expectedUid);
+            final firestoreId = transaction.firestoreId;
+            if (!_isRemoteFirestoreId(firestoreId) ||
+                remoteDocIds.contains(firestoreId) ||
+                protectedDocIds.contains(firestoreId)) {
+              continue;
+            }
+
+            await (_db.delete(
               _db.transactions,
-            )..where((table) => table.id.equals(existing.id))).write(
-              local_db.TransactionsCompanion(
-                firestoreId: Value(doc.id),
-                title: Value(remote.title),
-                amount: Value(remote.amount),
-                type: Value(remote.type),
-                category: Value(remote.category),
-                date: Value(remote.date),
-                isDeleted: const Value(false),
-              ),
-            );
+            )..where((table) => table.id.equals(transaction.id))).go();
           }
-        }
 
-        _requireCurrentUser(expectedUid);
-        final localTransactions = await _db.select(_db.transactions).get();
-
-        for (final transaction in localTransactions) {
           _requireCurrentUser(expectedUid);
-          final firestoreId = transaction.firestoreId;
-          if (!_isRemoteFirestoreId(firestoreId) ||
-              remoteDocIds.contains(firestoreId) ||
-              protectedDocIds.contains(firestoreId)) {
-            continue;
-          }
-
-          await (_db.delete(
-            _db.transactions,
-          )..where((table) => table.id.equals(transaction.id))).go();
-        }
-
-        _requireCurrentUser(expectedUid);
-      });
+        },
+      );
     } on _FinanceSessionChanged {
       return;
     } catch (_) {
@@ -384,6 +452,7 @@ class FinanceRepository {
   }
 
   void _schedulePendingFinanceSync() {
+    if (_db.isLocalOnly) return;
     unawaited(
       _syncManager.processPendingItems().catchError((error, stackTrace) {
         AppLogger.e(
