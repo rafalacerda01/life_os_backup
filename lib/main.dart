@@ -26,6 +26,15 @@ void main() {
         options: DefaultFirebaseOptions.currentPlatform,
       );
 
+      AppLogger.configureCrashReporting(
+        (report) => FirebaseCrashlytics.instance.recordError(
+          report.error,
+          report.stackTrace,
+          reason: report.reason,
+          fatal: report.fatal,
+        ),
+      );
+
       if (!kIsWeb &&
           (defaultTargetPlatform == TargetPlatform.android ||
               defaultTargetPlatform == TargetPlatform.iOS)) {
@@ -125,9 +134,9 @@ class LifeOSApp extends ConsumerWidget {
         scaffoldBackgroundColor: const Color(0xFF070B14),
         useMaterial3: true,
       ),
-      builder: (context, child) =>
-          localTasksOnly ? (child ?? const SizedBox.shrink())
-              : BiometricAppGate(child: child ?? const SizedBox.shrink()),
+      builder: (context, child) => localTasksOnly
+          ? (child ?? const SizedBox.shrink())
+          : BiometricAppGate(child: child ?? const SizedBox.shrink()),
       routerConfig: router,
     );
   }

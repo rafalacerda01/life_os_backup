@@ -1,6 +1,6 @@
 import 'package:flutter/foundation.dart';
+import 'dart:async';
 import 'package:logger/logger.dart';
-import 'package:firebase_crashlytics/firebase_crashlytics.dart';
 
 @immutable
 class SanitizedCrashReport {
@@ -28,6 +28,14 @@ class _SanitizedError implements Exception {
 
 class AppLogger {
   AppLogger._(); // Construtor privado para evitar instanciamento
+
+  static FutureOr<void> Function(SanitizedCrashReport)? _crashSink;
+
+  /// No remote reporter is instantiated by local modules. A remote entrypoint
+  /// may explicitly install its already initialized adapter.
+  static void configureCrashReporting(
+    FutureOr<void> Function(SanitizedCrashReport)? sink,
+  ) => _crashSink = sink;
 
   static final Logger _logger = Logger(
     filter:
@@ -58,7 +66,7 @@ class AppLogger {
     _logger.w(message);
   }
 
-  /// Log de Erro: Imprime no console (em debug) e envia para o Crashlytics (em release).
+  /// Registra erro local e usa somente o adapter remoto explicitamente instalado.
   static void e(String message, [dynamic error, StackTrace? stackTrace]) {
     _report(message, error, stackTrace, fatal: false);
   }
@@ -92,7 +100,8 @@ class AppLogger {
     // DevelopmentFilter mantém erro e stack completos apenas no console local.
     _logger.e(reason, error: error, stackTrace: stackTrace);
 
-    if (!kDebugMode) {
+    final sink = _crashSink;
+    if (!kDebugMode && sink != null) {
       final report = sanitizeForCrashlytics(
         reason: reason,
         error: error,
@@ -100,11 +109,9 @@ class AppLogger {
         fatal: fatal,
       );
 
-      FirebaseCrashlytics.instance.recordError(
-        report.error,
-        report.stackTrace,
-        reason: report.reason,
-        fatal: report.fatal,
+      // Logging failures must never replace the original domain failure.
+      unawaited(
+        Future<void>.sync(() => sink(report)).catchError((Object _) {}),
       );
     }
   }

@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:life_os/core/database/app_database.dart';
+import 'package:life_os/core/database/database_sync_policy.dart';
 import 'package:life_os/core/utils/app_logger.dart';
 
 import 'sync_operation_result.dart';
@@ -26,6 +27,7 @@ class SyncManager {
   final SyncQueueStore _queueStore;
   final SyncRemoteDataSource _remoteDataSource;
   final String? Function() _currentUserId;
+  final bool remoteEnabled;
   final _uiEvents = StreamController<SyncUiEvent>.broadcast();
   String? _recoveryUid;
   bool _recoveryResumed = false;
@@ -43,11 +45,26 @@ class SyncManager {
   int _processingGeneration = 0;
 
   SyncManager({
-    required this._queueStore,
+    required SyncQueueStore queueStore,
     required this._remoteDataSource,
     required this._currentUserId,
     this.waterV2Processor,
-  });
+    bool enableRemote = true,
+  }) : _queueStore = queueStore,
+       remoteEnabled =
+           enableRemote &&
+           !(queueStore is AppDatabaseSyncQueueStore && queueStore.isLocalOnly);
+
+  factory SyncManager.local(AppDatabase database) {
+    if (!database.isLocalOnly)
+      throw ArgumentError('LOCAL_PROFILE_SYNC_POLICY_REQUIRED');
+    return SyncManager(
+      queueStore: AppDatabaseSyncQueueStore(database),
+      remoteDataSource: const _DisabledSyncRemoteDataSource(),
+      currentUserId: () => database.identity?.uid,
+      enableRemote: false,
+    );
+  }
 
   bool isForDatabase(AppDatabase database) {
     final store = _queueStore;
@@ -87,12 +104,14 @@ class SyncManager {
   }
 
   bool _canProcess(String uid, int generation) =>
+      remoteEnabled &&
       !_disposed &&
       _pausedUid == null &&
       _processingGeneration == generation &&
       _currentUserId()?.trim() == uid;
 
   Future<bool> prepareForLocalDataDiscard() async {
+    if (!remoteEnabled) return false;
     final initialUid = _currentUserId()?.trim();
     final store = _queueStore;
     if (_disposed ||
@@ -136,6 +155,9 @@ class SyncManager {
   }
 
   Future<bool> processPendingItems() {
+    // No maintenance, queue reads, retry timers or network in local mode.
+    // False means no remote completion was claimed for historical rows.
+    if (!remoteEnabled) return Future.value(false);
     if (_disposed || _pausedUid != null) return Future.value(false);
 
     final currentUid = _currentUserId()?.trim();
@@ -391,6 +413,7 @@ class SyncManager {
   }
 
   void _scheduleRetry(String uid) {
+    if (!remoteEnabled) return;
     if (_disposed || _pausedUid != null || _currentUserId()?.trim() != uid) {
       _resetRetry();
       return;
@@ -428,4 +451,11 @@ class SyncManager {
     _resetRecovery();
     unawaited(_uiEvents.close());
   }
+}
+
+class _DisabledSyncRemoteDataSource implements SyncRemoteDataSource {
+  const _DisabledSyncRemoteDataSource();
+  @override
+  Future<SyncOperationResult> process(String uid, SyncQueueTableData item) =>
+      Future.error(const LocalRemoteSyncDisabled());
 }

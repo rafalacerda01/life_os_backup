@@ -14,19 +14,29 @@ import 'package:life_os/features/auth/presentation/providers/auth_provider.dart'
 final syncManagerProvider = Provider<SyncManager>((ref) {
   final database = ref.watch(databaseProvider);
 
+  if (database.isLocalOnly) {
+    final manager = SyncManager.local(database);
+    ref.onDispose(manager.dispose);
+    return manager;
+  }
+
   final firestore = ref.watch(firestoreProvider);
 
   final auth = ref.watch(firebaseAuthProvider);
 
   final localTasksOnly = ref.watch(emulatorAccountRuntimeProvider) != null;
   final manager = SyncManager(
-    waterV2Processor: localTasksOnly ? null : ref.watch(waterV2ProcessorProvider),
+    waterV2Processor: localTasksOnly
+        ? null
+        : ref.watch(waterV2ProcessorProvider),
     queueStore: AppDatabaseSyncQueueStore(database),
     remoteDataSource: FirestoreSyncRemoteDataSource(
       firestore,
       auth,
       trustedTransport: ref.watch(generationalHttpTransportProvider),
-      allowedCollections: ref.watch(emulatorAccountRuntimeProvider)?.allowedCollections,
+      allowedCollections: ref
+          .watch(emulatorAccountRuntimeProvider)
+          ?.allowedCollections,
       captureRemoteSend: (uid) =>
           database.localMutations.captureRemoteSend(expectedUid: uid),
       beforeNotificationDelete: () =>

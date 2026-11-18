@@ -26,6 +26,8 @@ class AppDatabaseSyncQueueStore
 
   const AppDatabaseSyncQueueStore(this._db);
 
+  bool get isLocalOnly => _db.isLocalOnly;
+
   bool isForDatabase(AppDatabase database) => identical(_db, database);
 
   @override
