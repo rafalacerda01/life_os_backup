@@ -49,11 +49,19 @@ class BiometricService {
 
   Future<bool> authenticate({
     String reason = 'Por favor, autentique-se para continuar',
+  }) => _authenticate(reason, biometricOnly: true);
+
+  Future<bool> authenticateDevice({required String reason}) =>
+      _authenticate(reason, biometricOnly: false);
+
+  Future<bool> _authenticate(
+    String reason, {
+    required bool biometricOnly,
   }) async {
     try {
       return await _platform.authenticate(
         localizedReason: reason,
-        biometricOnly: true,
+        biometricOnly: biometricOnly,
         persistAcrossBackgrounding: true,
       );
     } catch (_) {

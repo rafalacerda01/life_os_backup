@@ -21,6 +21,7 @@ object LocalLabHost {
         engine.plugins.add(com.github.dart_lang.jni.JniPlugin())
         engine.plugins.add(com.github.dart_lang.jni_flutter.JniFlutterPlugin())
         engine.plugins.add(io.flutter.plugins.sharedpreferences.SharedPreferencesPlugin())
+        engine.plugins.add(io.flutter.plugins.localauth.LocalAuthPlugin())
         // Dev dependency may be absent from a non-test bundle. Never needed by production.
         try {
             val type = Class.forName("dev.flutter.plugins.integration_test.IntegrationTestPlugin")

@@ -3,6 +3,7 @@ import 'package:life_os/core/runtime/app_runtime_mode.dart';
 import 'package:life_os/core/services/emulator_account_runtime.dart';
 
 import 'package:flutter/material.dart';
+import 'package:life_os/features/settings/data/local_profile_settings.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
 import 'package:go_router/go_router.dart';
@@ -198,8 +199,11 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
         !homeState.isUnavailable &&
         ref.watch(premiumProvider).isPremium;
 
+    final localName = offline
+        ? ref.watch(localProfileSettingsProvider).asData?.value.displayName
+        : null;
     final userName = offline
-        ? 'Perfil local'
+        ? (localName == null || localName.isEmpty ? 'Perfil local' : localName)
         : ref
               .watch(authNotifierProvider)
               .maybeWhen(
@@ -283,10 +287,21 @@ class _HomeReadyContent extends StatelessWidget {
             _PlanDayButton(onTap: () => _showDayPlanner(context, homeState)),
             if (offline) ...[
               const SizedBox(height: 12),
-              OutlinedButton.icon(
-                onPressed: () => _openHomeRoute(context, '/market'),
-                icon: const Icon(Icons.shopping_cart_outlined),
-                label: const Text('Mercado'),
+              Wrap(
+                spacing: 8,
+                runSpacing: 4,
+                children: [
+                  OutlinedButton.icon(
+                    onPressed: () => _openHomeRoute(context, '/market'),
+                    icon: const Icon(Icons.shopping_cart_outlined),
+                    label: const Text('Mercado'),
+                  ),
+                  OutlinedButton.icon(
+                    onPressed: () => _openHomeRoute(context, '/profile'),
+                    icon: const Icon(Icons.person_outline_rounded),
+                    label: const Text('Perfil e ajustes'),
+                  ),
+                ],
               ),
             ],
             const SizedBox(height: 26),
