@@ -108,6 +108,36 @@ class FinanceRepository {
     required String type,
     required String category,
   }) async {
+    await _addTransaction(
+      title: title,
+      amount: amount,
+      type: type,
+      category: category,
+    );
+  }
+
+  /// Uses the same validation and quota when a local purchase records an expense.
+  Future<int> addLocalExpense({
+    required String title,
+    required double amount,
+    required String category,
+  }) async {
+    if (!_db.isLocalOnly)
+      throw StateError('LOCAL_PROFILE_SYNC_POLICY_REQUIRED');
+    return (await _addTransaction(
+      title: title,
+      amount: amount,
+      type: TransactionType.expense.name,
+      category: category,
+    ))!;
+  }
+
+  Future<int?> _addTransaction({
+    required String title,
+    required double amount,
+    required String type,
+    required String category,
+  }) async {
     final cleanTitle = InputSanitizer.sanitize(title);
     final cleanCategory = InputSanitizer.sanitize(category);
     final cleanType = InputSanitizer.sanitize(type);
@@ -121,9 +151,7 @@ class FinanceRepository {
 
     final ownerUid = _ownerUid;
 
-    if (ownerUid == null) {
-      return;
-    }
+    if (ownerUid == null) return null;
 
     try {
       final transactionType = TransactionType.values.byName(cleanType);
@@ -132,11 +160,11 @@ class FinanceRepository {
 
       final createdAt = DateTime.now();
 
-      await _db.transactionWithSync(
+      final localId = await _db.transactionWithSync(
         ownerUid: ownerUid,
         localOperation: () async {
           await _enforceLocalFreeQuota();
-          await _db
+          return _db
               .into(_db.transactions)
               .insert(
                 local_db.TransactionsCompanion.insert(
@@ -162,6 +190,7 @@ class FinanceRepository {
       );
 
       _schedulePendingFinanceSync();
+      return localId;
     } catch (error, stackTrace) {
       AppLogger.e('Erro ao inserir transação localmente', error, stackTrace);
       rethrow;

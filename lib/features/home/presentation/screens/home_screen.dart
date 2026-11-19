@@ -281,6 +281,14 @@ class _HomeReadyContent extends StatelessWidget {
             _MetricsRow(dashboard: dashboard),
             const SizedBox(height: 18),
             _PlanDayButton(onTap: () => _showDayPlanner(context, homeState)),
+            if (offline) ...[
+              const SizedBox(height: 12),
+              OutlinedButton.icon(
+                onPressed: () => _openHomeRoute(context, '/market'),
+                icon: const Icon(Icons.shopping_cart_outlined),
+                label: const Text('Mercado'),
+              ),
+            ],
             const SizedBox(height: 26),
             const _HomeSectionHeader(
               eyebrow: 'VISÃO DO DIA',

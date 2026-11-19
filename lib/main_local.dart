@@ -14,6 +14,7 @@ import 'package:life_os/core/db/user_db_key_manager.dart';
 import 'package:life_os/core/runtime/app_runtime_mode.dart';
 import 'package:life_os/features/home/presentation/screens/home_screen.dart';
 import 'package:life_os/features/analytics/presentation/analytics_screen.dart';
+import 'package:life_os/features/market/presentation/market_screen.dart';
 import 'package:life_os/features/health/presentation/health_screen.dart';
 import 'package:life_os/features/health/presentation/cycle/cycle_health_screen.dart';
 import 'package:life_os/features/focus/presentation/providers/screens/focus_screen.dart';
@@ -110,6 +111,7 @@ class _LocalFirstDevelopmentAppState extends State<LocalFirstDevelopmentApp> {
         '/study': (context) => const StudyScreen(),
         '/health': (context) => const HealthScreen(),
         '/analytics': (context) => const AnalyticsScreen(),
+        '/market': (context) => const MarketScreen(),
       },
       title: 'Life OS Local',
       debugShowCheckedModeBanner: false,
