@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:life_os/core/runtime/app_runtime_mode.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
 import 'package:life_os/features/health/data/models/health_model.dart';
@@ -78,6 +79,8 @@ class _CycleHealthScreenState extends ConsumerState<CycleHealthScreen>
   @override
   Widget build(BuildContext context) {
     final healthAsync = ref.watch(healthStreamProvider);
+    final offline =
+        ref.watch(appRuntimeModeProvider) == AppRuntimeMode.localFirst;
 
     return Scaffold(
       backgroundColor: _background,
@@ -117,14 +120,14 @@ class _CycleHealthScreenState extends ConsumerState<CycleHealthScreen>
                             health: health,
                             presentation:
                                 CycleHealthDetailsPresentation.dedicated,
-                            showDailyPillControl: false,
+                            showDailyPillControl: offline,
                           ),
                           if (hasUsableEstimate) ...[
                             const SizedBox(height: 16),
                             _CycleMetricsCard(health: health, now: _now),
                           ],
                           const SizedBox(height: 16),
-                          CycleReminderSection(health: health),
+                          if (!offline) CycleReminderSection(health: health),
                           const SizedBox(height: 16),
                           const _CycleDisclaimer(),
                         ],

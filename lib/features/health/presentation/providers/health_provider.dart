@@ -32,19 +32,29 @@ DateTime nextHealthDayBoundary(DateTime now) {
 
 final healthRepositoryProvider = Provider<HealthRepository>((ref) {
   final db = ref.watch(databaseProvider);
+  if (db.isLocalOnly) {
+    return HealthRepository.local(db, now: ref.watch(healthDayClockProvider));
+  }
 
   final local = ref.watch(emulatorAccountRuntimeProvider) != null;
   return HealthRepository(
-    local ? NotificationService.instance : ref.watch(notificationServiceProvider),
+    local
+        ? NotificationService.instance
+        : ref.watch(notificationServiceProvider),
     ref.watch(firebaseFirestoreProvider),
     ref.watch(firebaseAuthProvider),
     db,
     ref.watch(syncManagerProvider),
     now: ref.watch(healthDayClockProvider),
-    sessionLease:ref.watch(localAccountSessionProvider).identity==null?null:ref.read(localAccountSessionProvider.notifier).capture(),
-    medicationsOnly:local,nativeRemindersEnabled:!local,
+    sessionLease: ref.watch(localAccountSessionProvider).identity == null
+        ? null
+        : ref.read(localAccountSessionProvider.notifier).capture(),
+    medicationsOnly: local,
+    nativeRemindersEnabled: !local,
     waterController: local ? null : ref.watch(waterV2ControllerProvider),
-    medicationLifecycle: local ? null : ref.watch(medicationReminderLifecycleProvider),
+    medicationLifecycle: local
+        ? null
+        : ref.watch(medicationReminderLifecycleProvider),
   );
 });
 
@@ -72,7 +82,9 @@ final healthStreamProvider = StreamProvider<HealthModel>((ref) {
 // MEDICAMENTOS
 // ===========================================================================
 
-final medicationsStreamProvider = StreamProvider.autoDispose<List<Medication>>((ref) {
+final medicationsStreamProvider = StreamProvider.autoDispose<List<Medication>>((
+  ref,
+) {
   final db = ref.watch(databaseProvider);
 
   return (db.select(db.medications)..orderBy([

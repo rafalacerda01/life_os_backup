@@ -105,7 +105,7 @@ class CycleDailyPillControl extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final takenToday = health.hasTakenPillToday;
-    final expectedUid = ref.read(cycleReminderUserIdReaderProvider)();
+    final expectedUid = ref.read(cycleHealthOwnerReaderProvider)();
 
     return AnimatedSwitcher(
       duration: const Duration(milliseconds: 300),

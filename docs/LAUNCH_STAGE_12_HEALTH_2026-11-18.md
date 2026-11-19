@@ -1,0 +1,17 @@
+# Lançamento Local-First — etapa 12 · Saúde
+
+Saúde foi integrada no aplicativo oficial em `C:/life_os`, branch `refactor/launch-local-first-20261117`, a partir do commit de Foco `72383e44e8c6b94b27f0f8c986668e5c6e38644d`. O checkpoint `stage12-before` contém as fontes originais e SHA-256. As seis configurações protegidas mantiveram os hashes anteriores. O backend independente permanece no commit `b316df4302e8ae88e5d17af01780d831c0896ab9`.
+
+`HealthRepository.local` usa a identidade local e permite registrar humor, água, medicamentos, configurações de ciclo e marcação diária de pílula na conexão criptografada. O registro de água incrementa 250 ml no dia civil em uma transação. A meta usa a tabela existente de preferências com owner local, revisão zero, sem época ou recibo remoto. Uma preferência com metadados de autoridade incompatíveis é recusada. A quota Free de três medicamentos é aplicada dentro da transação. A exclusão exige o ID local e o UUID correspondentes. O controle de ciclo usa a identidade do armazenamento sem conceder autoridade para alarmes. O modo local não acessa Firebase, sync nem Water V2. O schema permanece em 11.
+
+A UI existente opera no host `.localdev`. Os formulários de registro local dispensam a permissão de alarme. O controle manual de pílula permite desfazer a marcação com confirmação. Lembretes de ciclo e medicamentos seguem fora da qualificação. Continuam ativos os comportamentos legados para os modos que já os usavam.
+
+- A suíte de Saúde passou em **407 testes**, incluindo seis novas regressões locais. As primeiras falhas nos dois fixtures novos foram corrigidas mantendo o listener do stream no teste e usando os campos oficiais da configuração de ciclo.
+- A análise geral e a análise do harness final retornaram zero issues na configuração vigente. O build profile inicial passou em 2m10s, o profile do harness corrigido em 1m45s e o build padrão debug ARMv7, ARM64 e x86_64 em 1m24s.
+- **`LOCAL_HEALTH_ANDROID=PASS`** com 44 verificações no processo de gravação, 38 na reabertura e 38 no cold boot. O AVD API 34 x86_64 usou modo avião, a mesma userdata e somente o APK `.localdev` sem permissão `INTERNET`.
+
+Na primeira prova nativa, a criação de medicamentos, o consumo, a meta, o ciclo e a marcação de pílula passaram. O harness falhou depois, ao exigir o progresso da meta diária do dia anterior. A virada de dia no AVD GMT justificou a mudança dessa meta. A rodada original permanece arquivada. Na nova rodada, o harness verificou o fingerprint das linhas de Saúde da tentativa anterior, repetiu ações pela UI, preservou o medicamento principal e excluiu apenas um segundo registro de teste que criou para esse fim. Os cenários de reabertura e cold boot mantiveram os fingerprints de Saúde e Metas e o hash do banco fechado.
+
+O verificador confirmou que o fingerprint de Metas capturado antes da virada coincide com a evidência de Foco. O registro diário mudou de 1 para 0 com novo timestamp após cruzar o dia civil. ID, título, alvo e data de criação foram preservados. A meta mensal e os registros de Tarefas, Finanças, Hábitos, Check-in, Estudos e Foco permaneceram iguais. O banco passou em `integrity_check`, permaneceu criptografado, abriu com a mesma chave e manteve a fila remota vazia. A evidência final está em `stage12-native-health-final/health-decision.json` no workspace privado.
+
+Qualificação focal de Saúde no laboratório. Devido aos módulos e gates restantes, a ativação geral continua `NO-GO`, `LOCAL_IDENTITY_GATE=BLOCKED` e `ROLLOUT=CLOSED`.

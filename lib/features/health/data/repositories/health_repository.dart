@@ -10,6 +10,9 @@ import 'package:intl/intl.dart';
 import 'package:uuid/uuid.dart';
 import 'package:drift/drift.dart' as drift;
 import 'package:life_os/core/database/app_database.dart';
+import 'package:life_os/core/database/database_sync_policy.dart';
+import 'package:life_os/features/premium/domain/services/plan_limits.dart';
+import 'package:life_os/features/premium/domain/services/quota_service.dart';
 import 'package:life_os/core/security/input_sanitizer.dart';
 import 'package:life_os/core/services/notification_preferences.dart';
 import 'package:life_os/core/services/notification_service.dart';
@@ -35,19 +38,38 @@ class _HealthSessionChanged implements Exception {
 }
 
 class HealthRepository {
-  final NotificationService _notifService;
-  final FirebaseFirestore _firestore;
-  final FirebaseAuth _auth;
+  final NotificationService? _remoteNotificationService;
+  final FirebaseFirestore? _remoteFirestore;
+  final FirebaseAuth? _remoteAuth;
+  NotificationService get _notifService =>
+      _remoteNotificationService ?? (throw const LocalRemoteSyncDisabled());
+  FirebaseFirestore get _firestore =>
+      _remoteFirestore ?? (throw const LocalRemoteSyncDisabled());
+  FirebaseAuth get _auth =>
+      _remoteAuth ?? (throw const LocalRemoteSyncDisabled());
   final AppDatabase _db;
   final LocalAccountLease? sessionLease;
   final bool medicationsOnly;
   final bool nativeRemindersEnabled;
-  Future<void> _verifyRemoteRead(String uid) => GenerationalReadPolicy.verify(identity:_db.identity,lease:sessionLease,auth:_auth,store:_firestore,expectedUid:uid);
-  void _requireReadSession(String uid) => GenerationalReadPolicy.requireCurrent(identity:_db.identity,lease:sessionLease,auth:_auth,expectedUid:uid);
-  final SyncManager _syncManager;
+  Future<void> _verifyRemoteRead(String uid) => GenerationalReadPolicy.verify(
+    identity: _db.identity,
+    lease: sessionLease,
+    auth: _auth,
+    store: _firestore,
+    expectedUid: uid,
+  );
+  void _requireReadSession(String uid) => GenerationalReadPolicy.requireCurrent(
+    identity: _db.identity,
+    lease: sessionLease,
+    auth: _auth,
+    expectedUid: uid,
+  );
+  final SyncManager? _remoteSyncManager;
+  SyncManager get _syncManager =>
+      _remoteSyncManager ?? (throw const LocalRemoteSyncDisabled());
   final DateTime Function() _now;
   final Future<void> Function()? _beforeCycleSyncEnqueue;
-  final MedicationReminderLifecycle _medicationLifecycle;
+  final MedicationReminderLifecycle? _medicationLifecycle;
 
   final WaterV2Controller? _water;
   final Uuid _uuid = const Uuid();
@@ -82,11 +104,11 @@ class HealthRepository {
        );
 
   HealthRepository._(
-    this._notifService,
-    this._firestore,
-    this._auth,
+    this._remoteNotificationService,
+    this._remoteFirestore,
+    this._remoteAuth,
     this._db,
-    this._syncManager,
+    this._remoteSyncManager,
     this._now,
     this._beforeCycleSyncEnqueue,
     this._medicationLifecycle,
@@ -96,11 +118,27 @@ class HealthRepository {
     this.nativeRemindersEnabled,
   );
 
+  HealthRepository.local(this._db, {DateTime Function()? now})
+    : _remoteNotificationService = null,
+      _remoteFirestore = null,
+      _remoteAuth = null,
+      _remoteSyncManager = null,
+      _now = now ?? DateTime.now,
+      _beforeCycleSyncEnqueue = null,
+      _medicationLifecycle = null,
+      _water = null,
+      sessionLease = null,
+      medicationsOnly = false,
+      nativeRemindersEnabled = false {
+    if (!_db.isLocalOnly)
+      throw ArgumentError('LOCAL_PROFILE_SYNC_POLICY_REQUIRED');
+  }
+
   Future<void> _rebuildMedicationReminders(String userId) async {
     if (!nativeRemindersEnabled) return;
     if (!_isCurrentUser(userId)) return;
     try {
-      await _medicationLifecycle.rebuildMedicationReminders(
+      await _medicationLifecycle!.rebuildMedicationReminders(
         shouldContinue: () => _isCurrentUser(userId),
       );
     } catch (_) {
@@ -127,12 +165,16 @@ class HealthRepository {
   }
 
   String? _getUserId() {
-    return _auth.currentUser?.uid;
+    return _db.isLocalOnly ? _db.identity!.uid : _auth.currentUser?.uid;
   }
 
   bool _isCurrentUser(String expectedUid) => _getUserId() == expectedUid;
 
   void _requireCurrentUser(String expectedUid) {
+    if (_db.isLocalOnly) {
+      _db.localMutations.capture(expectedUid: expectedUid);
+      return;
+    }
     if (!_isCurrentUser(expectedUid)) {
       throw const _HealthSessionChanged();
     }
@@ -519,6 +561,20 @@ class HealthRepository {
       await _db.transactionWithSync(
         ownerUid: userId,
         localOperation: () async {
+          if (_db.isLocalOnly) {
+            final count = _db.medications.id.count();
+            final current =
+                await (_db.selectOnly(_db.medications)..addColumns([count]))
+                    .map((row) => row.read(count) ?? 0)
+                    .getSingle();
+            final limit = PlanLimits.free.medications;
+            if (!const QuotaService().canCreate(
+              limit: limit,
+              currentCount: current,
+            )) {
+              throw PlanQuotaExceeded(QuotaResource.medications, limit.maximum);
+            }
+          }
           await _db
               .into(_db.medications)
               .insert(
@@ -612,9 +668,15 @@ class HealthRepository {
     final cleanDocId = docId.trim();
 
     Future<void> deleteLocalMedication() async {
-      await (_db.delete(
-        _db.medications,
-      )..where((table) => table.id.equals(localId))).go();
+      final deleted =
+          await (_db.delete(_db.medications)..where((table) {
+                final id = table.id.equals(localId);
+                return _db.isLocalOnly
+                    ? id & table.firestoreId.equals(cleanDocId)
+                    : id;
+              }))
+              .go();
+      if (_db.isLocalOnly && deleted == 0) return;
 
       await (_db.delete(
         _db.notificationsTable,
@@ -716,6 +778,7 @@ class HealthRepository {
         date: now,
       );
 
+      if (_db.isLocalOnly) return;
       await _beforeCycleSyncEnqueue?.call();
       _requireCurrentUser(expectedUid);
       await _db.insertSyncItem(
@@ -732,6 +795,7 @@ class HealthRepository {
   }
 
   void _schedulePendingHealthSync() {
+    if (_db.isLocalOnly) return;
     unawaited(
       _syncManager.processPendingItems().catchError((error, stackTrace) {
         AppLogger.e(
@@ -807,12 +871,86 @@ class HealthRepository {
     );
   }
 
-  /// No legacy write, local credit or fabricated V2 intent is permitted.
   Future<void> addWater() async {
+    if (_db.isLocalOnly) {
+      final owner = _db.identity!.uid;
+      final now = _now();
+      final day = DateFormat('yyyy-MM-dd').format(now);
+      await _db.transaction(() async {
+        final entry = await (_db.select(
+          _db.healthEntries,
+        )..where((table) => table.docId.equals(day))).getSingleOrNull();
+        final current = entry?.waterIntakeMl ?? 0;
+        const glassMl = 250;
+        if (current < 0 || current > _maxWaterIntakeMl - glassMl) {
+          throw const WaterRegistrationUnavailable();
+        }
+        if (entry == null) {
+          await _db
+              .into(_db.healthEntries)
+              .insert(
+                HealthEntriesCompanion.insert(
+                  docId: day,
+                  date: now,
+                  waterIntakeMl: const Value(glassMl),
+                ),
+              );
+        } else {
+          await (_db.update(
+            _db.healthEntries,
+          )..where((table) => table.docId.equals(day))).write(
+            HealthEntriesCompanion(waterIntakeMl: Value(current + glassMl)),
+          );
+        }
+      }, admission: _db.localMutations.capture(expectedUid: owner));
+      return;
+    }
+    // Remote accounts still require their trusted Water V2 admission.
     final water = _water;
     if (water == null || !water.isEnabled)
       throw const WaterRegistrationUnavailable();
     await water.addWater();
+  }
+
+  SimpleSelectStatement<$WaterV2PreferencesTable, WaterV2Preference>
+  _localWaterPreference() {
+    if (!_db.isLocalOnly)
+      throw StateError('LOCAL_PROFILE_SYNC_POLICY_REQUIRED');
+    final owner = _db.identity!.uid;
+    return _db.select(_db.waterV2Preferences)
+      ..where((table) => table.ownerUid.equals(owner));
+  }
+
+  int _readLocalGoal(WaterV2Preference? preference) {
+    if (preference == null) return 3000;
+    if (preference.epoch != null ||
+        preference.initialHealthDay != null ||
+        preference.revision != 0) {
+      throw StateError('LOCAL_HYDRATION_PREFERENCE_CONFLICT');
+    }
+    return preference.goalMl;
+  }
+
+  Stream<int> watchLocalWaterGoal() =>
+      _localWaterPreference().watchSingleOrNull().map(_readLocalGoal);
+
+  Future<void> setLocalWaterGoal(int goalMl) async {
+    final preference = _localWaterPreference();
+    if (goalMl < 250 || goalMl > 10000 || goalMl % 250 != 0) {
+      throw ArgumentError('INVALID_LOCAL_HYDRATION_GOAL');
+    }
+    final owner = _db.identity!.uid;
+    await _db.transaction(() async {
+      _readLocalGoal(await preference.getSingleOrNull());
+      await _db
+          .into(_db.waterV2Preferences)
+          .insertOnConflictUpdate(
+            WaterV2PreferencesCompanion.insert(
+              ownerUid: owner,
+              goalMl: Value(goalMl),
+            ),
+          );
+    }, admission: _db.localMutations.capture(expectedUid: owner));
   }
 
   Future<bool?> getPillStatusForToday({required String expectedUid}) async {
@@ -865,6 +1003,7 @@ class HealthRepository {
           date: now,
         );
 
+        if (_db.isLocalOnly) return _PillStatusMutation.updated;
         await _beforeCycleSyncEnqueue?.call();
         _requireCurrentUser(ownerUid);
 
@@ -898,6 +1037,18 @@ class HealthRepository {
     final ownerUid = expectedUid.trim();
     if (ownerUid.isEmpty || !_isCurrentUser(ownerUid)) return false;
 
+    if (_db.isLocalOnly) {
+      final admission = _db.localMutations.capture(expectedUid: ownerUid);
+      return _db.transactionWithCommitGuard(
+        () => _toggleCycleForOwner(enable, ownerUid),
+        admission: admission,
+        validateBeforeCommit: () => _requireCurrentUser(ownerUid),
+      );
+    }
+    return _toggleCycleForOwner(enable, ownerUid);
+  }
+
+  Future<bool> _toggleCycleForOwner(bool enable, String ownerUid) async {
     final entries = await _db.select(_db.healthEntries).get();
     if (!_isCurrentUser(ownerUid)) return false;
     final cycleData = enable
@@ -921,6 +1072,7 @@ class HealthRepository {
   // ===========================================================================
 
   Future syncHealthFromFirebase() async {
+    if (_db.isLocalOnly) return;
     final userId = _getUserId();
 
     if (userId == null || userId.trim().isEmpty) {
@@ -952,56 +1104,69 @@ class HealthRepository {
           .get(const GetOptions(source: Source.server));
       _requireCurrentUser(userId);
       await _verifyRemoteRead(userId);
-      if (_db.identity?.generation != null && !GenerationalReadPolicy.accepts(_db.identity, fromCache:medsSnapshot.metadata.isFromCache,pendingWrites:medsSnapshot.metadata.hasPendingWrites)) throw StateError('GENERATIONAL_SNAPSHOT_UNCONFIRMED');
+      if (_db.identity?.generation != null &&
+          !GenerationalReadPolicy.accepts(
+            _db.identity,
+            fromCache: medsSnapshot.metadata.isFromCache,
+            pendingWrites: medsSnapshot.metadata.hasPendingWrites,
+          ))
+        throw StateError('GENERATIONAL_SNAPSHOT_UNCONFIRMED');
       final remoteMedicationIds = medsSnapshot.docs
           .map((doc) => doc.id)
           .toSet();
-      await _db.transactionWithCommitGuard(admission: ticket, waitForReopen: false, validateBeforeCommit:()=>_requireReadSession(userId), () async {
-        _requireCurrentUser(userId);
-        final authoritativeItems =
-            await (_db.select(_db.syncQueueTable)..where(
-                  (item) =>
-                      item.ownerUid.equals(userId) &
-                      item.collection.equals('medications') &
-                      (item.status.equals(SyncQueuePersistenceStatus.pending) |
-                          (item.status.equals(
-                                SyncQueuePersistenceStatus.succeeded,
-                              ) &
-                              (item.createdAt.isBiggerOrEqualValue(
-                                    pullStartedAt,
-                                  ) |
-                                  item.id.isIn(pendingOperationIds)))),
-                ))
-                .get();
-        final protectedMedicationIds = authoritativeItems
-            .map((item) => item.docId)
-            .toSet();
-        _requireCurrentUser(userId);
-
-        for (final doc in medsSnapshot.docs) {
+      await _db.transactionWithCommitGuard(
+        admission: ticket,
+        waitForReopen: false,
+        validateBeforeCommit: () => _requireReadSession(userId),
+        () async {
           _requireCurrentUser(userId);
-          if (protectedMedicationIds.contains(doc.id)) continue;
-          await _syncMedicationDocument(doc: doc, expectedUid: userId);
-        }
-
-        final localMedications = await _db.select(_db.medications).get();
-        _requireCurrentUser(userId);
-        for (final medication in localMedications) {
+          final authoritativeItems =
+              await (_db.select(_db.syncQueueTable)..where(
+                    (item) =>
+                        item.ownerUid.equals(userId) &
+                        item.collection.equals('medications') &
+                        (item.status.equals(
+                              SyncQueuePersistenceStatus.pending,
+                            ) |
+                            (item.status.equals(
+                                  SyncQueuePersistenceStatus.succeeded,
+                                ) &
+                                (item.createdAt.isBiggerOrEqualValue(
+                                      pullStartedAt,
+                                    ) |
+                                    item.id.isIn(pendingOperationIds)))),
+                  ))
+                  .get();
+          final protectedMedicationIds = authoritativeItems
+              .map((item) => item.docId)
+              .toSet();
           _requireCurrentUser(userId);
-          final id = medication.firestoreId.trim();
-          if (id.isEmpty ||
-              id == 'pending' ||
-              id == 'synced' ||
-              remoteMedicationIds.contains(medication.firestoreId) ||
-              protectedMedicationIds.contains(medication.firestoreId)) {
-            continue;
+
+          for (final doc in medsSnapshot.docs) {
+            _requireCurrentUser(userId);
+            if (protectedMedicationIds.contains(doc.id)) continue;
+            await _syncMedicationDocument(doc: doc, expectedUid: userId);
           }
-          await (_db.delete(
-            _db.medications,
-          )..where((table) => table.id.equals(medication.id))).go();
+
+          final localMedications = await _db.select(_db.medications).get();
           _requireCurrentUser(userId);
-        }
-      });
+          for (final medication in localMedications) {
+            _requireCurrentUser(userId);
+            final id = medication.firestoreId.trim();
+            if (id.isEmpty ||
+                id == 'pending' ||
+                id == 'synced' ||
+                remoteMedicationIds.contains(medication.firestoreId) ||
+                protectedMedicationIds.contains(medication.firestoreId)) {
+              continue;
+            }
+            await (_db.delete(
+              _db.medications,
+            )..where((table) => table.id.equals(medication.id))).go();
+            _requireCurrentUser(userId);
+          }
+        },
+      );
 
       await _rebuildMedicationReminders(userId);
       if (medicationsOnly) return;

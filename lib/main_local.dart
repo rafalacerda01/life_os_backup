@@ -12,6 +12,8 @@ import 'package:life_os/core/database/local_device_session.dart';
 import 'package:life_os/core/database/local_installation_identity_provider.dart';
 import 'package:life_os/core/db/user_db_key_manager.dart';
 import 'package:life_os/core/runtime/app_runtime_mode.dart';
+import 'package:life_os/features/health/presentation/health_screen.dart';
+import 'package:life_os/features/health/presentation/cycle/cycle_health_screen.dart';
 import 'package:life_os/features/focus/presentation/providers/screens/focus_screen.dart';
 import 'package:life_os/core/utils/app_logger.dart';
 import 'package:life_os/features/tasks/presentation/tasks_screen.dart';
@@ -95,7 +97,10 @@ class _LocalFirstDevelopmentAppState extends State<LocalFirstDevelopmentApp> {
       appRuntimeModeProvider.overrideWithValue(AppRuntimeMode.localFirst),
     ],
     child: MaterialApp(
-      routes: {'/focus': (context) => const FocusScreen()},
+      routes: {
+        '/focus': (context) => const FocusScreen(),
+        '/health/cycle': (context) => const CycleHealthScreen(),
+      },
       title: 'Life OS Local',
       debugShowCheckedModeBanner: false,
       theme: _theme(),
@@ -117,7 +122,8 @@ class _LocalFirstDevelopmentAppState extends State<LocalFirstDevelopmentApp> {
           2 => const HabitsScreen(),
           3 => const GoalsScreen(),
           4 => const CheckInScreen(),
-          _ => const StudyScreen(),
+          5 => const StudyScreen(),
+          _ => const HealthScreen(),
         },
         bottomNavigationBar: NavigationBar(
           selectedIndex: _selectedModule,
@@ -147,6 +153,10 @@ class _LocalFirstDevelopmentAppState extends State<LocalFirstDevelopmentApp> {
             NavigationDestination(
               icon: Icon(Icons.school_outlined),
               label: 'Estudos',
+            ),
+            NavigationDestination(
+              icon: Icon(Icons.favorite_border),
+              label: 'Saúde',
             ),
           ],
         ),

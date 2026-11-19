@@ -3,6 +3,8 @@ import 'package:life_os/core/database/local_account_session.dart';
 import 'package:life_os/core/storage/generational_local_store.dart';
 import 'dart:async';
 import 'dart:convert';
+import 'package:life_os/core/database/database_provider.dart';
+import 'package:life_os/core/runtime/app_runtime_mode.dart';
 
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -310,6 +312,17 @@ final cycleReminderUserIdReaderProvider = Provider<CycleReminderUserIdReader>((
       ref.read(localAccountSessionProvider).revision == captured.revision
       ? sessionAuthority.admittedUserId(firebaseUserId())
       : null;
+});
+
+/// Identifies the owner of cycle data without granting permission to schedule alarms.
+final cycleHealthOwnerReaderProvider = Provider<CycleReminderUserIdReader>((
+  ref,
+) {
+  if (ref.watch(appRuntimeModeProvider) == AppRuntimeMode.localFirst) {
+    final database = ref.watch(databaseProvider);
+    return () => database.isLocalOnly ? database.identity?.uid : null;
+  }
+  return ref.watch(cycleReminderUserIdReaderProvider);
 });
 
 final cycleReminderPreferencesStoreProvider =

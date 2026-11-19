@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'dart:async';
+import 'package:life_os/core/runtime/app_runtime_mode.dart';
 import 'package:life_os/core/services/emulator_account_runtime.dart';
 import 'package:life_os/core/services/water_v2_provider.dart';
 import 'package:life_os/core/services/water_v2_controller.dart';
@@ -89,6 +90,8 @@ class HealthScreen extends ConsumerWidget {
   }
 
   void _showAddMedicationModal(BuildContext parentContext, WidgetRef ref) {
+    final offline =
+        ref.read(appRuntimeModeProvider) == AppRuntimeMode.localFirst;
     final nameController = TextEditingController();
     final durationController = TextEditingController();
 
@@ -199,81 +202,83 @@ class HealthScreen extends ConsumerWidget {
                         ),
                       ),
                     ),
-                    const SizedBox(height: 18),
-                    const Text(
-                      'Horário do lembrete',
-                      style: TextStyle(color: Colors.white54, fontSize: 12),
-                    ),
-                    const SizedBox(height: 8),
-                    InkWell(
-                      borderRadius: BorderRadius.circular(14),
-                      onTap: () async {
-                        FocusManager.instance.primaryFocus?.unfocus();
+                    if (!offline) ...[
+                      const SizedBox(height: 18),
+                      const Text(
+                        'Horário do lembrete',
+                        style: TextStyle(color: Colors.white54, fontSize: 12),
+                      ),
+                      const SizedBox(height: 8),
+                      InkWell(
+                        borderRadius: BorderRadius.circular(14),
+                        onTap: () async {
+                          FocusManager.instance.primaryFocus?.unfocus();
 
-                        final picker = medicationTimePicker;
-                        final picked = picker == null
-                            ? await showTimePicker(
-                                context: parentContext,
-                                initialTime: reminderTime ?? TimeOfDay.now(),
-                                builder: (pickerContext, child) {
-                                  final mediaQuery = MediaQuery.of(
-                                    pickerContext,
-                                  );
-                                  // The text parser checks MediaQuery, not just locale.
-                                  return MediaQuery(
-                                    data: mediaQuery.copyWith(
-                                      alwaysUse24HourFormat: true,
-                                    ),
-                                    child: child!,
-                                  );
-                                },
-                              )
-                            : await picker(parentContext);
+                          final picker = medicationTimePicker;
+                          final picked = picker == null
+                              ? await showTimePicker(
+                                  context: parentContext,
+                                  initialTime: reminderTime ?? TimeOfDay.now(),
+                                  builder: (pickerContext, child) {
+                                    final mediaQuery = MediaQuery.of(
+                                      pickerContext,
+                                    );
+                                    // The text parser checks MediaQuery, not just locale.
+                                    return MediaQuery(
+                                      data: mediaQuery.copyWith(
+                                        alwaysUse24HourFormat: true,
+                                      ),
+                                      child: child!,
+                                    );
+                                  },
+                                )
+                              : await picker(parentContext);
 
-                        if (picked != null) {
-                          setModalState(() {
-                            reminderTime = picked;
-                          });
-                        }
-                      },
-                      child: Container(
-                        width: double.infinity,
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 16,
-                          vertical: 14,
-                        ),
-                        decoration: BoxDecoration(
-                          color: _background,
-                          borderRadius: BorderRadius.circular(14),
-                          border: Border.all(color: Colors.white10),
-                        ),
-                        child: Row(
-                          children: [
-                            const Icon(
-                              Icons.schedule_rounded,
-                              color: _primary,
-                              size: 18,
-                            ),
-                            const SizedBox(width: 10),
-                            Text(
-                              reminderTime?.format(modalContext) ??
-                                  'Selecionar horário',
-                              style: TextStyle(
-                                color: reminderTime == null
-                                    ? Colors.white54
-                                    : Colors.white,
-                                fontWeight: FontWeight.w600,
+                          if (picked != null) {
+                            setModalState(() {
+                              reminderTime = picked;
+                            });
+                          }
+                        },
+                        child: Container(
+                          width: double.infinity,
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 16,
+                            vertical: 14,
+                          ),
+                          decoration: BoxDecoration(
+                            color: _background,
+                            borderRadius: BorderRadius.circular(14),
+                            border: Border.all(color: Colors.white10),
+                          ),
+                          child: Row(
+                            children: [
+                              const Icon(
+                                Icons.schedule_rounded,
+                                color: _primary,
+                                size: 18,
                               ),
-                            ),
-                            const Spacer(),
-                            const Icon(
-                              Icons.chevron_right_rounded,
-                              color: Colors.white38,
-                            ),
-                          ],
+                              const SizedBox(width: 10),
+                              Text(
+                                reminderTime?.format(modalContext) ??
+                                    'Selecionar horário',
+                                style: TextStyle(
+                                  color: reminderTime == null
+                                      ? Colors.white54
+                                      : Colors.white,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                              const Spacer(),
+                              const Icon(
+                                Icons.chevron_right_rounded,
+                                color: Colors.white38,
+                              ),
+                            ],
+                          ),
                         ),
                       ),
-                    ),
+                    ],
                   ],
                 ),
               ),
@@ -335,7 +340,7 @@ class HealthScreen extends ConsumerWidget {
                     }
 
                     final selectedTime = reminderTime;
-                    if (selectedTime == null) {
+                    if (!offline && selectedTime == null) {
                       _showSnackBar(
                         parentContext,
                         'Selecione o horário do lembrete.',
@@ -344,10 +349,13 @@ class HealthScreen extends ConsumerWidget {
                       return;
                     }
 
-                    final scheduledStart = combineMedicationDateAndTime(
-                      startDate,
-                      selectedTime,
-                    );
+                    final scheduledStart = selectedTime == null
+                        ? DateTime(
+                            startDate.year,
+                            startDate.month,
+                            startDate.day,
+                          )
+                        : combineMedicationDateAndTime(startDate, selectedTime);
 
                     final medicationsAsync = ref.read(
                       medicationsStreamProvider,
@@ -422,7 +430,9 @@ class HealthScreen extends ConsumerWidget {
                       if (parentContext.mounted) {
                         _showSnackBar(
                           parentContext,
-                          'Não foi possível salvar o medicamento.',
+                          e is PlanQuotaExceeded
+                              ? e.toString()
+                              : 'Não foi possível salvar o medicamento.',
                           error: true,
                         );
                       }
@@ -537,7 +547,10 @@ class HealthScreen extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    if (ref.watch(emulatorAccountRuntimeProvider) != null) return const _LocalMedicationScreen();
+    final offline =
+        ref.watch(appRuntimeModeProvider) == AppRuntimeMode.localFirst;
+    if (!offline && ref.watch(emulatorAccountRuntimeProvider) != null)
+      return const _LocalMedicationScreen();
     final healthAsync = ref.watch(healthStreamProvider);
 
     const moods = [
@@ -565,7 +578,7 @@ class HealthScreen extends ConsumerWidget {
           data: (health) {
             final waterProgress =
                 (health.waterIntakeMl /
-                        (ref.watch(waterGoalProvider).value ?? 3000))
+                        (ref.watch(healthWaterGoalProvider).value ?? 3000))
                     .clamp(0.0, 1.0)
                     .toDouble();
 
@@ -604,7 +617,7 @@ class HealthScreen extends ConsumerWidget {
 
                         _buildSectionLabel(
                           'HIDRATAÇÃO',
-                          'Meta diária de ${ref.watch(waterGoalProvider).value ?? 3000} ml',
+                          'Meta diária de ${ref.watch(healthWaterGoalProvider).value ?? 3000} ml',
                         ),
 
                         const SizedBox(height: 12),
@@ -638,7 +651,13 @@ class HealthScreen extends ConsumerWidget {
 
                         CycleHealthSummaryCard(
                           health: health,
-                          onTap: () => context.push('/health/cycle'),
+                          onTap: () {
+                            if (offline) {
+                              Navigator.of(context).pushNamed('/health/cycle');
+                            } else {
+                              context.push('/health/cycle');
+                            }
+                          },
                         ),
                       ]),
                     ),
@@ -896,7 +915,7 @@ class HealthScreen extends ConsumerWidget {
     HealthModel health,
     double progress,
   ) {
-    final goal = ref.watch(waterGoalProvider).value ?? 3000;
+    final goal = ref.watch(healthWaterGoalProvider).value ?? 3000;
     final remaining = (goal - health.waterIntakeMl).clamp(0, goal);
 
     final percentage = (progress * 100).round();
@@ -1190,7 +1209,20 @@ class CycleHealthSummaryCard extends StatelessWidget {
 
 enum CycleHealthDetailsPresentation { embedded, dedicated }
 
+final localWaterGoalProvider = StreamProvider<int>(
+  (ref) => ref.watch(healthRepositoryProvider).watchLocalWaterGoal(),
+);
+
+final healthWaterGoalProvider = Provider<AsyncValue<int>>((ref) {
+  if (ref.watch(appRuntimeModeProvider) == AppRuntimeMode.localFirst) {
+    return ref.watch(localWaterGoalProvider);
+  }
+  return ref.watch(waterGoalProvider);
+});
+
 final cyclePillTrackingVisibleProvider = Provider<bool>((ref) {
+  if (ref.watch(appRuntimeModeProvider) == AppRuntimeMode.localFirst)
+    return true;
   final preferences = ref.watch(cycleReminderPreferencesProvider);
   return preferences.asData?.value?.type == CycleReminderType.pill;
 });
@@ -2099,7 +2131,7 @@ class CycleHealthDetails extends ConsumerWidget {
     final currentDay = (cycleInfo['day'] as num?)?.toInt() ?? 0;
     final totalDays = (cycleInfo['totalDays'] as num?)?.toInt() ?? 0;
     final hasUsableEstimate = currentDay > 0 && totalDays > 0;
-    final expectedUid = ref.read(cycleReminderUserIdReaderProvider)();
+    final expectedUid = ref.read(cycleHealthOwnerReaderProvider)();
     final showPillTracking =
         showDailyPillControl && ref.watch(cyclePillTrackingVisibleProvider);
 
@@ -2785,7 +2817,7 @@ class _WaterActionsState extends ConsumerState<_WaterActions> {
   }
 
   Future<void> chooseGoal() async {
-    var value = ref.read(waterGoalProvider).value ?? 3000;
+    var value = ref.read(healthWaterGoalProvider).value ?? 3000;
     final goal = await showDialog<int>(
       context: context,
       builder: (context) => StatefulBuilder(
@@ -2818,18 +2850,30 @@ class _WaterActionsState extends ConsumerState<_WaterActions> {
         ),
       ),
     );
-    if (goal != null && mounted)
+    if (goal == null || !mounted) return;
+    if (ref.read(appRuntimeModeProvider) == AppRuntimeMode.localFirst) {
+      await perform(
+        () => ref.read(healthRepositoryProvider).setLocalWaterGoal(goal),
+      );
+    } else {
       await perform(() => ref.read(waterV2ControllerProvider).setGoal(goal));
+    }
   }
 
   @override
   Widget build(BuildContext context) {
-    final state =
-        ref.watch(waterAdmissionProvider).value ?? WaterAdmissionState.waiting;
-    final allowed = {
-      WaterAdmissionState.ready,
-      WaterAdmissionState.offline,
-    }.contains(state);
+    final offline =
+        ref.watch(appRuntimeModeProvider) == AppRuntimeMode.localFirst;
+    final state = offline
+        ? null
+        : ref.watch(waterAdmissionProvider).value ??
+              WaterAdmissionState.waiting;
+    final allowed =
+        offline ||
+        {
+          WaterAdmissionState.ready,
+          WaterAdmissionState.offline,
+        }.contains(state);
     final message = switch (state) {
       WaterAdmissionState.disabled => 'Registro temporariamente indisponível',
       WaterAdmissionState.waiting =>
@@ -2842,7 +2886,7 @@ class _WaterActionsState extends ConsumerState<_WaterActions> {
         'Esta conta ainda não pode usar a hidratação V2.',
       WaterAdmissionState.deleting =>
         'Conta em exclusão. Novos registros estão bloqueados.',
-      WaterAdmissionState.ready => '',
+      WaterAdmissionState.ready || null => '',
     };
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -2905,35 +2949,174 @@ class _WaterActionsState extends ConsumerState<_WaterActions> {
 // Local essential slice: the real medication repository/queue, no native effects.
 class _LocalMedicationScreen extends ConsumerStatefulWidget {
   const _LocalMedicationScreen();
-  @override ConsumerState<_LocalMedicationScreen> createState()=>_LocalMedicationScreenState();
+  @override
+  ConsumerState<_LocalMedicationScreen> createState() =>
+      _LocalMedicationScreenState();
 }
-class _LocalMedicationScreenState extends ConsumerState<_LocalMedicationScreen> {
-  @override void initState(){super.initState();WidgetsBinding.instance.addPostFrameCallback((_){if(mounted)unawaited(ref.read(healthRepositoryProvider).syncHealthFromFirebase());});}
-  Future<void> _add()async {await showDialog<void>(context:context,builder:(context)=>const _LocalMedicationDialog());}
-  @override Widget build(BuildContext context){final meds=ref.watch(medicationsStreamProvider);return Scaffold(appBar:AppBar(title:const Text('Saúde')),body:ListView(padding:const EdgeInsets.all(24),children:[
-    const Text('Medicamentos',style:TextStyle(fontSize:24)),
-    const Text('Água, ciclo e lembretes nativos aguardam homologação neste ambiente.'),
-    FilledButton(onPressed:_add,child:const Text('Adicionar medicamento')),
-    TextButton(onPressed:()=>context.go('/checkin'),child:const Text('Abrir Check-in')),
-    meds.when(data:(rows)=>Column(children:rows.map((m)=>ListTile(title:Text(m.name),subtitle:Text(m.durationDays==null?'Sem duração definida':'${m.durationDays} dias'),trailing:IconButton(key:ValueKey('delete-medication-${m.firestoreId}'),tooltip:'Excluir medicamento',icon:const Icon(Icons.delete_outline),onPressed:()async{try{await ref.read(healthRepositoryProvider).deleteMedication(m.firestoreId,m.id);}catch(_){if(context.mounted)ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content:Text('Não foi possível excluir o medicamento.')));}}))).toList()),loading:()=>const CircularProgressIndicator(),error:(e,s)=>const Text('Não foi possível carregar medicamentos.')),
-  ]));}
+
+class _LocalMedicationScreenState
+    extends ConsumerState<_LocalMedicationScreen> {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted)
+        unawaited(ref.read(healthRepositoryProvider).syncHealthFromFirebase());
+    });
+  }
+
+  Future<void> _add() async {
+    await showDialog<void>(
+      context: context,
+      builder: (context) => const _LocalMedicationDialog(),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final meds = ref.watch(medicationsStreamProvider);
+    return Scaffold(
+      appBar: AppBar(title: const Text('Saúde')),
+      body: ListView(
+        padding: const EdgeInsets.all(24),
+        children: [
+          const Text('Medicamentos', style: TextStyle(fontSize: 24)),
+          const Text(
+            'Água, ciclo e lembretes nativos aguardam homologação neste ambiente.',
+          ),
+          FilledButton(
+            onPressed: _add,
+            child: const Text('Adicionar medicamento'),
+          ),
+          TextButton(
+            onPressed: () => context.go('/checkin'),
+            child: const Text('Abrir Check-in'),
+          ),
+          meds.when(
+            data: (rows) => Column(
+              children: rows
+                  .map(
+                    (m) => ListTile(
+                      title: Text(m.name),
+                      subtitle: Text(
+                        m.durationDays == null
+                            ? 'Sem duração definida'
+                            : '${m.durationDays} dias',
+                      ),
+                      trailing: IconButton(
+                        key: ValueKey('delete-medication-${m.firestoreId}'),
+                        tooltip: 'Excluir medicamento',
+                        icon: const Icon(Icons.delete_outline),
+                        onPressed: () async {
+                          try {
+                            await ref
+                                .read(healthRepositoryProvider)
+                                .deleteMedication(m.firestoreId, m.id);
+                          } catch (_) {
+                            if (context.mounted)
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(
+                                  content: Text(
+                                    'Não foi possível excluir o medicamento.',
+                                  ),
+                                ),
+                              );
+                          }
+                        },
+                      ),
+                    ),
+                  )
+                  .toList(),
+            ),
+            loading: () => const CircularProgressIndicator(),
+            error: (e, s) =>
+                const Text('Não foi possível carregar medicamentos.'),
+          ),
+        ],
+      ),
+    );
+  }
 }
 
 class _LocalMedicationDialog extends ConsumerStatefulWidget {
   const _LocalMedicationDialog();
-  @override ConsumerState<_LocalMedicationDialog> createState()=>_LocalMedicationDialogState();
+  @override
+  ConsumerState<_LocalMedicationDialog> createState() =>
+      _LocalMedicationDialogState();
 }
-class _LocalMedicationDialogState extends ConsumerState<_LocalMedicationDialog> {
-  final name=TextEditingController(),duration=TextEditingController();bool saving=false;
-  @override void dispose(){name.dispose();duration.dispose();super.dispose();}
-  @override Widget build(BuildContext context)=>AlertDialog(title:const Text('Adicionar medicamento'),content:SingleChildScrollView(child:Column(mainAxisSize:MainAxisSize.min,children:[
-    TextField(key:const ValueKey('medication-name'),controller:name,decoration:const InputDecoration(labelText:'Nome do medicamento')),
-    TextField(key:const ValueKey('medication-duration'),controller:duration,keyboardType:TextInputType.number,decoration:const InputDecoration(labelText:'Duração em dias (opcional)')),
-  ])),actions:[TextButton(onPressed:saving?null:()=>Navigator.pop(context),child:const Text('Cancelar')),FilledButton(onPressed:saving?null:()async{
-    final repository=ref.read(healthRepositoryProvider);setState(()=>saving=true);
-    try{final days=duration.text.trim().isEmpty?null:int.tryParse(duration.text);if(duration.text.trim().isNotEmpty&&days==null)throw const FormatException();
-      await repository.addMedication(name.text,DateTime.now(),days);if(context.mounted)Navigator.pop(context);
-    }catch(_){if(context.mounted)ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content:Text('Confira o nome e a duração do medicamento.')));}
-    finally{if(mounted)setState(()=>saving=false);}
-  },child:const Text('Salvar medicamento'))]);
+
+class _LocalMedicationDialogState
+    extends ConsumerState<_LocalMedicationDialog> {
+  final name = TextEditingController(), duration = TextEditingController();
+  bool saving = false;
+  @override
+  void dispose() {
+    name.dispose();
+    duration.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+    title: const Text('Adicionar medicamento'),
+    content: SingleChildScrollView(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          TextField(
+            key: const ValueKey('medication-name'),
+            controller: name,
+            decoration: const InputDecoration(labelText: 'Nome do medicamento'),
+          ),
+          TextField(
+            key: const ValueKey('medication-duration'),
+            controller: duration,
+            keyboardType: TextInputType.number,
+            decoration: const InputDecoration(
+              labelText: 'Duração em dias (opcional)',
+            ),
+          ),
+        ],
+      ),
+    ),
+    actions: [
+      TextButton(
+        onPressed: saving ? null : () => Navigator.pop(context),
+        child: const Text('Cancelar'),
+      ),
+      FilledButton(
+        onPressed: saving
+            ? null
+            : () async {
+                final repository = ref.read(healthRepositoryProvider);
+                setState(() => saving = true);
+                try {
+                  final days = duration.text.trim().isEmpty
+                      ? null
+                      : int.tryParse(duration.text);
+                  if (duration.text.trim().isNotEmpty && days == null)
+                    throw const FormatException();
+                  await repository.addMedication(
+                    name.text,
+                    DateTime.now(),
+                    days,
+                  );
+                  if (context.mounted) Navigator.pop(context);
+                } catch (_) {
+                  if (context.mounted)
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text(
+                          'Confira o nome e a duração do medicamento.',
+                        ),
+                      ),
+                    );
+                } finally {
+                  if (mounted) setState(() => saving = false);
+                }
+              },
+        child: const Text('Salvar medicamento'),
+      ),
+    ],
+  );
 }
