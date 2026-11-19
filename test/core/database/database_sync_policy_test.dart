@@ -66,7 +66,7 @@ void main() {
       await save(db);
       expect((await db.select(db.taskTable).get()).single.id, 'local-task');
       expect(await db.select(db.syncQueueTable).get(), isEmpty);
-      expect(db.schemaVersion, 11);
+      expect(db.schemaVersion, AppDatabase.currentLocalSchemaVersion);
     },
   );
   test(
@@ -167,7 +167,7 @@ void main() {
         (await db.customSelect('PRAGMA user_version').getSingle()).read<int>(
           'user_version',
         ),
-        11,
+        AppDatabase.currentLocalSchemaVersion,
       );
     },
   );
@@ -224,17 +224,29 @@ void main() {
       final seed = AppDatabase.forUser(
         identity: identity,
         executor: NativeDatabase(file),
+        syncPolicy: DatabaseSyncPolicy.localOnly,
       );
-      await seed.into(seed.syncQueueTable).insert(queued());
       await seed.into(seed.taskTable).insert(task('preserved-task'));
-      final original = (await seed.select(seed.syncQueueTable).get()).single;
       await seed.close();
+      // Simulate a historical row that predates the per-connection guards.
+      final fixture = sqlite.sqlite3.open(file.path);
+      try {
+        fixture.execute(
+          'INSERT INTO sync_queue_table (owner_uid, collection, doc_id, operation_type, payload_json, created_at) '
+          'VALUES (?, ?, ?, ?, ?, ?)',
+          [uid, 'tasks', 'historical', 'create', '{"synthetic":true}', 123],
+        );
+      } finally {
+        fixture.dispose();
+      }
       final db = AppDatabase.forUser(
         identity: identity,
         executor: NativeDatabase(file),
         syncPolicy: DatabaseSyncPolicy.localOnly,
       );
       try {
+        final original = (await db.select(db.syncQueueTable).get()).single;
+        expect(original.docId, 'historical');
         await expectLater(
           db
               .update(db.syncQueueTable)

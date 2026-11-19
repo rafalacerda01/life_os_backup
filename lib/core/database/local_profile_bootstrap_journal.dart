@@ -9,8 +9,8 @@ import 'local_database_identity.dart';
 import 'database_encryption.dart';
 import 'local_profile_admission.dart';
 
-/// A provenance record for interrupted *new local* database creation. It never
-/// authorizes adopting a UID database, rekeying, deleting data or paid access.
+/// A provenance record for local database creation and eligible schema upgrades.
+/// It never authorizes adopting a UID database, rekeying, deleting data or paid access.
 final class LocalProfileBootstrapJournal {
   LocalProfileBootstrapJournal(this._storage);
   final FlutterSecureStorage _storage;
@@ -20,7 +20,8 @@ final class LocalProfileBootstrapJournal {
     required LocalDatabaseIdentity identity,
     required File databaseFile,
     required int schemaVersion,
-    required Future<T> Function(LocalProfileCreationPermit? permit) open,
+    int? predecessorSchemaVersion,
+    required Future<T> Function(LocalProfileOpenPermit? permit) open,
     required Future<void> Function(T value) closeOnFailure,
   }) async {
     LocalProfileAdmission.requireCurrent(databaseFile.parent);
@@ -43,7 +44,8 @@ final class LocalProfileBootstrapJournal {
             decoded['file'] != identity.fileName ||
             decoded['alias'] != identity.keyAlias ||
             decoded['schema'] is! int ||
-            decoded['schema'] != schemaVersion ||
+            (decoded['schema'] != schemaVersion &&
+                decoded['schema'] != predecessorSchemaVersion) ||
             decoded['nonce'] is! String ||
             !LocalDatabaseIdentity.isValidLocalInstallationId(
               'local-v1-${decoded['nonce']}',
@@ -92,8 +94,16 @@ final class LocalProfileBootstrapJournal {
       await _persist(record);
     }
     final creating = record?['phase'] == 'CREATING';
-    final permit = creating
-        ? LocalProfileCreationPermit._(databaseFile.path, schemaVersion)
+    final recordedSchema = record?['schema'] as int?;
+    final predecessor = recordedSchema == schemaVersion ? null : recordedSchema;
+    final permit = creating || predecessor != null
+        ? LocalProfileOpenPermit._(
+            databaseFile.path,
+            identity,
+            schemaVersion,
+            creating,
+            predecessor,
+          )
         : null;
     late T result;
     var opened = false;
@@ -102,7 +112,7 @@ final class LocalProfileBootstrapJournal {
       opened = true;
       // Current-schema encrypted staged profiles created before this journal
       // can be recorded only AFTER their read-only integrity check succeeds.
-      if (record?['phase'] != 'READY') {
+      if (record?['phase'] != 'READY' || predecessor != null) {
         await _persist(
           _record(
             identity,
@@ -146,18 +156,39 @@ final class LocalProfileBootstrapJournal {
   }
 }
 
-/// Can only be issued by a validated CREATING journal inside active admission.
-final class LocalProfileCreationPermit {
-  LocalProfileCreationPermit._(this._path, this._schema);
+/// Authorization issued only after validating the local bootstrap journal.
+final class LocalProfileOpenPermit {
+  LocalProfileOpenPermit._(
+    this._path,
+    this._identity,
+    this._schema,
+    this._creating,
+    this._predecessor,
+  );
+
   final String _path;
+  final LocalDatabaseIdentity _identity;
   final int _schema;
+  final bool _creating;
+  final int? _predecessor;
   bool _active = true;
 
-  bool permits(File file, int schema) =>
+  bool _isCurrent(int schema) =>
       _active &&
       schema == _schema &&
-      p.normalize(p.absolute(file.path)) == p.normalize(p.absolute(_path)) &&
       LocalProfileAdmission.isCurrentFile(
-        p.join(file.parent.path, LocalProfileAdmission.fileName),
+        p.join(p.dirname(_path), LocalProfileAdmission.fileName),
       );
+
+  bool _matchesFile(File file) =>
+      p.normalize(p.absolute(file.path)) == p.normalize(p.absolute(_path));
+
+  bool permits(File file, int schema) =>
+      _creating && _isCurrent(schema) && _matchesFile(file);
+
+  bool permitsUpgrade(File file, int from, int to) =>
+      _matchesFile(file) && permitsUpgradeFor(_identity, from, to);
+
+  bool permitsUpgradeFor(LocalDatabaseIdentity identity, int from, int to) =>
+      identity == _identity && from == _predecessor && _isCurrent(to);
 }

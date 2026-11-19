@@ -7642,6 +7642,693 @@ class WaterV2PreferencesCompanion extends UpdateCompanion<WaterV2Preference> {
   }
 }
 
+class $MarketPurchasesTable extends MarketPurchases
+    with TableInfo<$MarketPurchasesTable, MarketPurchase> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  $MarketPurchasesTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _idMeta = const VerificationMeta('id');
+  @override
+  late final GeneratedColumn<int> id = GeneratedColumn<int>(
+    'id',
+    aliasedName,
+    false,
+    hasAutoIncrement: true,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    defaultConstraints: GeneratedColumn.constraintIsAlways(
+      'PRIMARY KEY AUTOINCREMENT',
+    ),
+  );
+  static const VerificationMeta _purchasedAtMeta = const VerificationMeta(
+    'purchasedAt',
+  );
+  @override
+  late final GeneratedColumn<DateTime> purchasedAt = GeneratedColumn<DateTime>(
+    'purchased_at',
+    aliasedName,
+    false,
+    type: DriftSqlType.dateTime,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _totalCentsMeta = const VerificationMeta(
+    'totalCents',
+  );
+  @override
+  late final GeneratedColumn<int> totalCents = GeneratedColumn<int>(
+    'total_cents',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _financeTransactionIdMeta =
+      const VerificationMeta('financeTransactionId');
+  @override
+  late final GeneratedColumn<int> financeTransactionId = GeneratedColumn<int>(
+    'finance_transaction_id',
+    aliasedName,
+    true,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    defaultConstraints: GeneratedColumn.constraintIsAlways(
+      'REFERENCES transactions (id) ON DELETE SET NULL',
+    ),
+  );
+  @override
+  List<GeneratedColumn> get $columns => [
+    id,
+    purchasedAt,
+    totalCents,
+    financeTransactionId,
+  ];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'market_purchases';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<MarketPurchase> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('id')) {
+      context.handle(_idMeta, id.isAcceptableOrUnknown(data['id']!, _idMeta));
+    }
+    if (data.containsKey('purchased_at')) {
+      context.handle(
+        _purchasedAtMeta,
+        purchasedAt.isAcceptableOrUnknown(
+          data['purchased_at']!,
+          _purchasedAtMeta,
+        ),
+      );
+    } else if (isInserting) {
+      context.missing(_purchasedAtMeta);
+    }
+    if (data.containsKey('total_cents')) {
+      context.handle(
+        _totalCentsMeta,
+        totalCents.isAcceptableOrUnknown(data['total_cents']!, _totalCentsMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_totalCentsMeta);
+    }
+    if (data.containsKey('finance_transaction_id')) {
+      context.handle(
+        _financeTransactionIdMeta,
+        financeTransactionId.isAcceptableOrUnknown(
+          data['finance_transaction_id']!,
+          _financeTransactionIdMeta,
+        ),
+      );
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {id};
+  @override
+  MarketPurchase map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return MarketPurchase(
+      id: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}id'],
+      )!,
+      purchasedAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.dateTime,
+        data['${effectivePrefix}purchased_at'],
+      )!,
+      totalCents: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}total_cents'],
+      )!,
+      financeTransactionId: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}finance_transaction_id'],
+      ),
+    );
+  }
+
+  @override
+  $MarketPurchasesTable createAlias(String alias) {
+    return $MarketPurchasesTable(attachedDatabase, alias);
+  }
+}
+
+class MarketPurchase extends DataClass implements Insertable<MarketPurchase> {
+  final int id;
+  final DateTime purchasedAt;
+  final int totalCents;
+  final int? financeTransactionId;
+  const MarketPurchase({
+    required this.id,
+    required this.purchasedAt,
+    required this.totalCents,
+    this.financeTransactionId,
+  });
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['id'] = Variable<int>(id);
+    map['purchased_at'] = Variable<DateTime>(purchasedAt);
+    map['total_cents'] = Variable<int>(totalCents);
+    if (!nullToAbsent || financeTransactionId != null) {
+      map['finance_transaction_id'] = Variable<int>(financeTransactionId);
+    }
+    return map;
+  }
+
+  MarketPurchasesCompanion toCompanion(bool nullToAbsent) {
+    return MarketPurchasesCompanion(
+      id: Value(id),
+      purchasedAt: Value(purchasedAt),
+      totalCents: Value(totalCents),
+      financeTransactionId: financeTransactionId == null && nullToAbsent
+          ? const Value.absent()
+          : Value(financeTransactionId),
+    );
+  }
+
+  factory MarketPurchase.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return MarketPurchase(
+      id: serializer.fromJson<int>(json['id']),
+      purchasedAt: serializer.fromJson<DateTime>(json['purchasedAt']),
+      totalCents: serializer.fromJson<int>(json['totalCents']),
+      financeTransactionId: serializer.fromJson<int?>(
+        json['financeTransactionId'],
+      ),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'id': serializer.toJson<int>(id),
+      'purchasedAt': serializer.toJson<DateTime>(purchasedAt),
+      'totalCents': serializer.toJson<int>(totalCents),
+      'financeTransactionId': serializer.toJson<int?>(financeTransactionId),
+    };
+  }
+
+  MarketPurchase copyWith({
+    int? id,
+    DateTime? purchasedAt,
+    int? totalCents,
+    Value<int?> financeTransactionId = const Value.absent(),
+  }) => MarketPurchase(
+    id: id ?? this.id,
+    purchasedAt: purchasedAt ?? this.purchasedAt,
+    totalCents: totalCents ?? this.totalCents,
+    financeTransactionId: financeTransactionId.present
+        ? financeTransactionId.value
+        : this.financeTransactionId,
+  );
+  MarketPurchase copyWithCompanion(MarketPurchasesCompanion data) {
+    return MarketPurchase(
+      id: data.id.present ? data.id.value : this.id,
+      purchasedAt: data.purchasedAt.present
+          ? data.purchasedAt.value
+          : this.purchasedAt,
+      totalCents: data.totalCents.present
+          ? data.totalCents.value
+          : this.totalCents,
+      financeTransactionId: data.financeTransactionId.present
+          ? data.financeTransactionId.value
+          : this.financeTransactionId,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('MarketPurchase(')
+          ..write('id: $id, ')
+          ..write('purchasedAt: $purchasedAt, ')
+          ..write('totalCents: $totalCents, ')
+          ..write('financeTransactionId: $financeTransactionId')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode =>
+      Object.hash(id, purchasedAt, totalCents, financeTransactionId);
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is MarketPurchase &&
+          other.id == this.id &&
+          other.purchasedAt == this.purchasedAt &&
+          other.totalCents == this.totalCents &&
+          other.financeTransactionId == this.financeTransactionId);
+}
+
+class MarketPurchasesCompanion extends UpdateCompanion<MarketPurchase> {
+  final Value<int> id;
+  final Value<DateTime> purchasedAt;
+  final Value<int> totalCents;
+  final Value<int?> financeTransactionId;
+  const MarketPurchasesCompanion({
+    this.id = const Value.absent(),
+    this.purchasedAt = const Value.absent(),
+    this.totalCents = const Value.absent(),
+    this.financeTransactionId = const Value.absent(),
+  });
+  MarketPurchasesCompanion.insert({
+    this.id = const Value.absent(),
+    required DateTime purchasedAt,
+    required int totalCents,
+    this.financeTransactionId = const Value.absent(),
+  }) : purchasedAt = Value(purchasedAt),
+       totalCents = Value(totalCents);
+  static Insertable<MarketPurchase> custom({
+    Expression<int>? id,
+    Expression<DateTime>? purchasedAt,
+    Expression<int>? totalCents,
+    Expression<int>? financeTransactionId,
+  }) {
+    return RawValuesInsertable({
+      if (id != null) 'id': id,
+      if (purchasedAt != null) 'purchased_at': purchasedAt,
+      if (totalCents != null) 'total_cents': totalCents,
+      if (financeTransactionId != null)
+        'finance_transaction_id': financeTransactionId,
+    });
+  }
+
+  MarketPurchasesCompanion copyWith({
+    Value<int>? id,
+    Value<DateTime>? purchasedAt,
+    Value<int>? totalCents,
+    Value<int?>? financeTransactionId,
+  }) {
+    return MarketPurchasesCompanion(
+      id: id ?? this.id,
+      purchasedAt: purchasedAt ?? this.purchasedAt,
+      totalCents: totalCents ?? this.totalCents,
+      financeTransactionId: financeTransactionId ?? this.financeTransactionId,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (id.present) {
+      map['id'] = Variable<int>(id.value);
+    }
+    if (purchasedAt.present) {
+      map['purchased_at'] = Variable<DateTime>(purchasedAt.value);
+    }
+    if (totalCents.present) {
+      map['total_cents'] = Variable<int>(totalCents.value);
+    }
+    if (financeTransactionId.present) {
+      map['finance_transaction_id'] = Variable<int>(financeTransactionId.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('MarketPurchasesCompanion(')
+          ..write('id: $id, ')
+          ..write('purchasedAt: $purchasedAt, ')
+          ..write('totalCents: $totalCents, ')
+          ..write('financeTransactionId: $financeTransactionId')
+          ..write(')'))
+        .toString();
+  }
+}
+
+class $MarketItemsTable extends MarketItems
+    with TableInfo<$MarketItemsTable, MarketItem> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  $MarketItemsTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _idMeta = const VerificationMeta('id');
+  @override
+  late final GeneratedColumn<int> id = GeneratedColumn<int>(
+    'id',
+    aliasedName,
+    false,
+    hasAutoIncrement: true,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    defaultConstraints: GeneratedColumn.constraintIsAlways(
+      'PRIMARY KEY AUTOINCREMENT',
+    ),
+  );
+  static const VerificationMeta _nameMeta = const VerificationMeta('name');
+  @override
+  late final GeneratedColumn<String> name = GeneratedColumn<String>(
+    'name',
+    aliasedName,
+    false,
+    additionalChecks: GeneratedColumn.checkTextLength(
+      minTextLength: 1,
+      maxTextLength: 120,
+    ),
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _quantityMeta = const VerificationMeta(
+    'quantity',
+  );
+  @override
+  late final GeneratedColumn<int> quantity = GeneratedColumn<int>(
+    'quantity',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _checkedMeta = const VerificationMeta(
+    'checked',
+  );
+  @override
+  late final GeneratedColumn<bool> checked = GeneratedColumn<bool>(
+    'checked',
+    aliasedName,
+    false,
+    type: DriftSqlType.bool,
+    requiredDuringInsert: false,
+    defaultConstraints: GeneratedColumn.constraintIsAlways(
+      'CHECK ("checked" IN (0, 1))',
+    ),
+    defaultValue: const Constant(false),
+  );
+  static const VerificationMeta _purchaseIdMeta = const VerificationMeta(
+    'purchaseId',
+  );
+  @override
+  late final GeneratedColumn<int> purchaseId = GeneratedColumn<int>(
+    'purchase_id',
+    aliasedName,
+    true,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    defaultConstraints: GeneratedColumn.constraintIsAlways(
+      'REFERENCES market_purchases (id)',
+    ),
+  );
+  @override
+  List<GeneratedColumn> get $columns => [
+    id,
+    name,
+    quantity,
+    checked,
+    purchaseId,
+  ];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'market_items';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<MarketItem> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('id')) {
+      context.handle(_idMeta, id.isAcceptableOrUnknown(data['id']!, _idMeta));
+    }
+    if (data.containsKey('name')) {
+      context.handle(
+        _nameMeta,
+        name.isAcceptableOrUnknown(data['name']!, _nameMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_nameMeta);
+    }
+    if (data.containsKey('quantity')) {
+      context.handle(
+        _quantityMeta,
+        quantity.isAcceptableOrUnknown(data['quantity']!, _quantityMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_quantityMeta);
+    }
+    if (data.containsKey('checked')) {
+      context.handle(
+        _checkedMeta,
+        checked.isAcceptableOrUnknown(data['checked']!, _checkedMeta),
+      );
+    }
+    if (data.containsKey('purchase_id')) {
+      context.handle(
+        _purchaseIdMeta,
+        purchaseId.isAcceptableOrUnknown(data['purchase_id']!, _purchaseIdMeta),
+      );
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {id};
+  @override
+  MarketItem map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return MarketItem(
+      id: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}id'],
+      )!,
+      name: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}name'],
+      )!,
+      quantity: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}quantity'],
+      )!,
+      checked: attachedDatabase.typeMapping.read(
+        DriftSqlType.bool,
+        data['${effectivePrefix}checked'],
+      )!,
+      purchaseId: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}purchase_id'],
+      ),
+    );
+  }
+
+  @override
+  $MarketItemsTable createAlias(String alias) {
+    return $MarketItemsTable(attachedDatabase, alias);
+  }
+}
+
+class MarketItem extends DataClass implements Insertable<MarketItem> {
+  final int id;
+  final String name;
+  final int quantity;
+  final bool checked;
+  final int? purchaseId;
+  const MarketItem({
+    required this.id,
+    required this.name,
+    required this.quantity,
+    required this.checked,
+    this.purchaseId,
+  });
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['id'] = Variable<int>(id);
+    map['name'] = Variable<String>(name);
+    map['quantity'] = Variable<int>(quantity);
+    map['checked'] = Variable<bool>(checked);
+    if (!nullToAbsent || purchaseId != null) {
+      map['purchase_id'] = Variable<int>(purchaseId);
+    }
+    return map;
+  }
+
+  MarketItemsCompanion toCompanion(bool nullToAbsent) {
+    return MarketItemsCompanion(
+      id: Value(id),
+      name: Value(name),
+      quantity: Value(quantity),
+      checked: Value(checked),
+      purchaseId: purchaseId == null && nullToAbsent
+          ? const Value.absent()
+          : Value(purchaseId),
+    );
+  }
+
+  factory MarketItem.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return MarketItem(
+      id: serializer.fromJson<int>(json['id']),
+      name: serializer.fromJson<String>(json['name']),
+      quantity: serializer.fromJson<int>(json['quantity']),
+      checked: serializer.fromJson<bool>(json['checked']),
+      purchaseId: serializer.fromJson<int?>(json['purchaseId']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'id': serializer.toJson<int>(id),
+      'name': serializer.toJson<String>(name),
+      'quantity': serializer.toJson<int>(quantity),
+      'checked': serializer.toJson<bool>(checked),
+      'purchaseId': serializer.toJson<int?>(purchaseId),
+    };
+  }
+
+  MarketItem copyWith({
+    int? id,
+    String? name,
+    int? quantity,
+    bool? checked,
+    Value<int?> purchaseId = const Value.absent(),
+  }) => MarketItem(
+    id: id ?? this.id,
+    name: name ?? this.name,
+    quantity: quantity ?? this.quantity,
+    checked: checked ?? this.checked,
+    purchaseId: purchaseId.present ? purchaseId.value : this.purchaseId,
+  );
+  MarketItem copyWithCompanion(MarketItemsCompanion data) {
+    return MarketItem(
+      id: data.id.present ? data.id.value : this.id,
+      name: data.name.present ? data.name.value : this.name,
+      quantity: data.quantity.present ? data.quantity.value : this.quantity,
+      checked: data.checked.present ? data.checked.value : this.checked,
+      purchaseId: data.purchaseId.present
+          ? data.purchaseId.value
+          : this.purchaseId,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('MarketItem(')
+          ..write('id: $id, ')
+          ..write('name: $name, ')
+          ..write('quantity: $quantity, ')
+          ..write('checked: $checked, ')
+          ..write('purchaseId: $purchaseId')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hash(id, name, quantity, checked, purchaseId);
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is MarketItem &&
+          other.id == this.id &&
+          other.name == this.name &&
+          other.quantity == this.quantity &&
+          other.checked == this.checked &&
+          other.purchaseId == this.purchaseId);
+}
+
+class MarketItemsCompanion extends UpdateCompanion<MarketItem> {
+  final Value<int> id;
+  final Value<String> name;
+  final Value<int> quantity;
+  final Value<bool> checked;
+  final Value<int?> purchaseId;
+  const MarketItemsCompanion({
+    this.id = const Value.absent(),
+    this.name = const Value.absent(),
+    this.quantity = const Value.absent(),
+    this.checked = const Value.absent(),
+    this.purchaseId = const Value.absent(),
+  });
+  MarketItemsCompanion.insert({
+    this.id = const Value.absent(),
+    required String name,
+    required int quantity,
+    this.checked = const Value.absent(),
+    this.purchaseId = const Value.absent(),
+  }) : name = Value(name),
+       quantity = Value(quantity);
+  static Insertable<MarketItem> custom({
+    Expression<int>? id,
+    Expression<String>? name,
+    Expression<int>? quantity,
+    Expression<bool>? checked,
+    Expression<int>? purchaseId,
+  }) {
+    return RawValuesInsertable({
+      if (id != null) 'id': id,
+      if (name != null) 'name': name,
+      if (quantity != null) 'quantity': quantity,
+      if (checked != null) 'checked': checked,
+      if (purchaseId != null) 'purchase_id': purchaseId,
+    });
+  }
+
+  MarketItemsCompanion copyWith({
+    Value<int>? id,
+    Value<String>? name,
+    Value<int>? quantity,
+    Value<bool>? checked,
+    Value<int?>? purchaseId,
+  }) {
+    return MarketItemsCompanion(
+      id: id ?? this.id,
+      name: name ?? this.name,
+      quantity: quantity ?? this.quantity,
+      checked: checked ?? this.checked,
+      purchaseId: purchaseId ?? this.purchaseId,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (id.present) {
+      map['id'] = Variable<int>(id.value);
+    }
+    if (name.present) {
+      map['name'] = Variable<String>(name.value);
+    }
+    if (quantity.present) {
+      map['quantity'] = Variable<int>(quantity.value);
+    }
+    if (checked.present) {
+      map['checked'] = Variable<bool>(checked.value);
+    }
+    if (purchaseId.present) {
+      map['purchase_id'] = Variable<int>(purchaseId.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('MarketItemsCompanion(')
+          ..write('id: $id, ')
+          ..write('name: $name, ')
+          ..write('quantity: $quantity, ')
+          ..write('checked: $checked, ')
+          ..write('purchaseId: $purchaseId')
+          ..write(')'))
+        .toString();
+  }
+}
+
 abstract class _$AppDatabase extends GeneratedDatabase {
   _$AppDatabase(QueryExecutor e) : super(e);
   $AppDatabaseManager get managers => $AppDatabaseManager(this);
@@ -7666,6 +8353,10 @@ abstract class _$AppDatabase extends GeneratedDatabase {
   late final $WaterV2IntentsTable waterV2Intents = $WaterV2IntentsTable(this);
   late final $WaterV2PreferencesTable waterV2Preferences =
       $WaterV2PreferencesTable(this);
+  late final $MarketPurchasesTable marketPurchases = $MarketPurchasesTable(
+    this,
+  );
+  late final $MarketItemsTable marketItems = $MarketItemsTable(this);
   late final Index idxTransactionsDate = Index(
     'idx_transactions_date',
     'CREATE INDEX idx_transactions_date ON transactions (date)',
@@ -7719,6 +8410,8 @@ abstract class _$AppDatabase extends GeneratedDatabase {
     waterV2DailyStates,
     waterV2Intents,
     waterV2Preferences,
+    marketPurchases,
+    marketItems,
     idxTransactionsDate,
     idxTransactionsCategory,
     idxTransactionsType,
@@ -7735,6 +8428,13 @@ abstract class _$AppDatabase extends GeneratedDatabase {
         limitUpdateKind: UpdateKind.delete,
       ),
       result: [TableUpdate('flashcards', kind: UpdateKind.delete)],
+    ),
+    WritePropagation(
+      on: TableUpdateQuery.onTableName(
+        'transactions',
+        limitUpdateKind: UpdateKind.delete,
+      ),
+      result: [TableUpdate('market_purchases', kind: UpdateKind.update)],
     ),
   ]);
 }
@@ -8204,6 +8904,31 @@ typedef $$TransactionsTableUpdateCompanionBuilder =
       Value<bool> isDeleted,
     });
 
+final class $$TransactionsTableReferences
+    extends BaseReferences<_$AppDatabase, $TransactionsTable, Transaction> {
+  $$TransactionsTableReferences(super.$_db, super.$_table, super.$_typedResult);
+
+  static MultiTypedResultKey<$MarketPurchasesTable, List<MarketPurchase>>
+  _marketPurchasesRefsTable(_$AppDatabase db) => MultiTypedResultKey.fromTable(
+    db.marketPurchases,
+    aliasName: 'transactions__id__market_purchases__finance_transaction_id',
+  );
+
+  $$MarketPurchasesTableProcessedTableManager get marketPurchasesRefs {
+    final manager =
+        $$MarketPurchasesTableTableManager($_db, $_db.marketPurchases).filter(
+          (f) => f.financeTransactionId.id.sqlEquals($_itemColumn<int>('id')!),
+        );
+
+    final cache = $_typedResult.readTableOrNull(
+      _marketPurchasesRefsTable($_db),
+    );
+    return ProcessedTableManager(
+      manager.$state.copyWith(prefetchedData: cache),
+    );
+  }
+}
+
 class $$TransactionsTableFilterComposer
     extends Composer<_$AppDatabase, $TransactionsTable> {
   $$TransactionsTableFilterComposer({
@@ -8252,6 +8977,31 @@ class $$TransactionsTableFilterComposer
     column: $table.isDeleted,
     builder: (column) => ColumnFilters(column),
   );
+
+  Expression<bool> marketPurchasesRefs(
+    Expression<bool> Function($$MarketPurchasesTableFilterComposer f) f,
+  ) {
+    final $$MarketPurchasesTableFilterComposer composer = $composerBuilder(
+      composer: this,
+      getCurrentColumn: (t) => t.id,
+      referencedTable: $db.marketPurchases,
+      getReferencedColumn: (t) => t.financeTransactionId,
+      builder:
+          (
+            joinBuilder, {
+            $addJoinBuilderToRootComposer,
+            $removeJoinBuilderFromRootComposer,
+          }) => $$MarketPurchasesTableFilterComposer(
+            $db: $db,
+            $table: $db.marketPurchases,
+            $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
+            joinBuilder: joinBuilder,
+            $removeJoinBuilderFromRootComposer:
+                $removeJoinBuilderFromRootComposer,
+          ),
+    );
+    return f(composer);
+  }
 }
 
 class $$TransactionsTableOrderingComposer
@@ -8338,6 +9088,31 @@ class $$TransactionsTableAnnotationComposer
 
   GeneratedColumn<bool> get isDeleted =>
       $composableBuilder(column: $table.isDeleted, builder: (column) => column);
+
+  Expression<T> marketPurchasesRefs<T extends Object>(
+    Expression<T> Function($$MarketPurchasesTableAnnotationComposer a) f,
+  ) {
+    final $$MarketPurchasesTableAnnotationComposer composer = $composerBuilder(
+      composer: this,
+      getCurrentColumn: (t) => t.id,
+      referencedTable: $db.marketPurchases,
+      getReferencedColumn: (t) => t.financeTransactionId,
+      builder:
+          (
+            joinBuilder, {
+            $addJoinBuilderToRootComposer,
+            $removeJoinBuilderFromRootComposer,
+          }) => $$MarketPurchasesTableAnnotationComposer(
+            $db: $db,
+            $table: $db.marketPurchases,
+            $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
+            joinBuilder: joinBuilder,
+            $removeJoinBuilderFromRootComposer:
+                $removeJoinBuilderFromRootComposer,
+          ),
+    );
+    return f(composer);
+  }
 }
 
 class $$TransactionsTableTableManager
@@ -8351,12 +9126,9 @@ class $$TransactionsTableTableManager
           $$TransactionsTableAnnotationComposer,
           $$TransactionsTableCreateCompanionBuilder,
           $$TransactionsTableUpdateCompanionBuilder,
-          (
-            Transaction,
-            BaseReferences<_$AppDatabase, $TransactionsTable, Transaction>,
-          ),
+          (Transaction, $$TransactionsTableReferences),
           Transaction,
-          PrefetchHooks Function()
+          PrefetchHooks Function({bool marketPurchasesRefs})
         > {
   $$TransactionsTableTableManager(_$AppDatabase db, $TransactionsTable table)
     : super(
@@ -8410,9 +9182,47 @@ class $$TransactionsTableTableManager
                 isDeleted: isDeleted,
               ),
           withReferenceMapper: (p0) => p0
-              .map((e) => (e.readTable(table), BaseReferences(db, table, e)))
+              .map(
+                (e) => (
+                  e.readTable(table),
+                  $$TransactionsTableReferences(db, table, e),
+                ),
+              )
               .toList(),
-          prefetchHooksCallback: null,
+          prefetchHooksCallback: ({marketPurchasesRefs = false}) {
+            return PrefetchHooks(
+              db: db,
+              explicitlyWatchedTables: [
+                if (marketPurchasesRefs) db.marketPurchases,
+              ],
+              addJoins: null,
+              getPrefetchedDataCallback: (items) async {
+                return [
+                  if (marketPurchasesRefs)
+                    await $_getPrefetchedData<
+                      Transaction,
+                      $TransactionsTable,
+                      MarketPurchase
+                    >(
+                      currentTable: table,
+                      referencedTable: $$TransactionsTableReferences
+                          ._marketPurchasesRefsTable(db),
+                      managerFromTypedResult: (p0) =>
+                          $$TransactionsTableReferences(
+                            db,
+                            table,
+                            p0,
+                          ).marketPurchasesRefs,
+                      referencedItemsForCurrentItem: (item, referencedItems) =>
+                          referencedItems.where(
+                            (e) => e.financeTransactionId == item.id,
+                          ),
+                      typedResults: items,
+                    ),
+                ];
+              },
+            );
+          },
         ),
       );
 }
@@ -8427,12 +9237,9 @@ typedef $$TransactionsTableProcessedTableManager =
       $$TransactionsTableAnnotationComposer,
       $$TransactionsTableCreateCompanionBuilder,
       $$TransactionsTableUpdateCompanionBuilder,
-      (
-        Transaction,
-        BaseReferences<_$AppDatabase, $TransactionsTable, Transaction>,
-      ),
+      (Transaction, $$TransactionsTableReferences),
       Transaction,
-      PrefetchHooks Function()
+      PrefetchHooks Function({bool marketPurchasesRefs})
     >;
 typedef $$TaskTableTableCreateCompanionBuilder =
     TaskTableCompanion Function({
@@ -11912,6 +12719,723 @@ typedef $$WaterV2PreferencesTableProcessedTableManager =
       WaterV2Preference,
       PrefetchHooks Function()
     >;
+typedef $$MarketPurchasesTableCreateCompanionBuilder =
+    MarketPurchasesCompanion Function({
+      Value<int> id,
+      required DateTime purchasedAt,
+      required int totalCents,
+      Value<int?> financeTransactionId,
+    });
+typedef $$MarketPurchasesTableUpdateCompanionBuilder =
+    MarketPurchasesCompanion Function({
+      Value<int> id,
+      Value<DateTime> purchasedAt,
+      Value<int> totalCents,
+      Value<int?> financeTransactionId,
+    });
+
+final class $$MarketPurchasesTableReferences
+    extends
+        BaseReferences<_$AppDatabase, $MarketPurchasesTable, MarketPurchase> {
+  $$MarketPurchasesTableReferences(
+    super.$_db,
+    super.$_table,
+    super.$_typedResult,
+  );
+
+  static $TransactionsTable _financeTransactionIdTable(_$AppDatabase db) =>
+      db.transactions.createAlias(
+        'market_purchases__finance_transaction_id__transactions__id',
+      );
+
+  $$TransactionsTableProcessedTableManager? get financeTransactionId {
+    final $_column = $_itemColumn<int>('finance_transaction_id');
+    if ($_column == null) return null;
+    final manager = $$TransactionsTableTableManager(
+      $_db,
+      $_db.transactions,
+    ).filter((f) => f.id.sqlEquals($_column));
+    final item = $_typedResult.readTableOrNull(
+      _financeTransactionIdTable($_db),
+    );
+    if (item == null) return manager;
+    return ProcessedTableManager(
+      manager.$state.copyWith(prefetchedData: [item]),
+    );
+  }
+
+  static MultiTypedResultKey<$MarketItemsTable, List<MarketItem>>
+  _marketItemsRefsTable(_$AppDatabase db) => MultiTypedResultKey.fromTable(
+    db.marketItems,
+    aliasName: 'market_purchases__id__market_items__purchase_id',
+  );
+
+  $$MarketItemsTableProcessedTableManager get marketItemsRefs {
+    final manager = $$MarketItemsTableTableManager(
+      $_db,
+      $_db.marketItems,
+    ).filter((f) => f.purchaseId.id.sqlEquals($_itemColumn<int>('id')!));
+
+    final cache = $_typedResult.readTableOrNull(_marketItemsRefsTable($_db));
+    return ProcessedTableManager(
+      manager.$state.copyWith(prefetchedData: cache),
+    );
+  }
+}
+
+class $$MarketPurchasesTableFilterComposer
+    extends Composer<_$AppDatabase, $MarketPurchasesTable> {
+  $$MarketPurchasesTableFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<int> get id => $composableBuilder(
+    column: $table.id,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<DateTime> get purchasedAt => $composableBuilder(
+    column: $table.purchasedAt,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get totalCents => $composableBuilder(
+    column: $table.totalCents,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  $$TransactionsTableFilterComposer get financeTransactionId {
+    final $$TransactionsTableFilterComposer composer = $composerBuilder(
+      composer: this,
+      getCurrentColumn: (t) => t.financeTransactionId,
+      referencedTable: $db.transactions,
+      getReferencedColumn: (t) => t.id,
+      builder:
+          (
+            joinBuilder, {
+            $addJoinBuilderToRootComposer,
+            $removeJoinBuilderFromRootComposer,
+          }) => $$TransactionsTableFilterComposer(
+            $db: $db,
+            $table: $db.transactions,
+            $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
+            joinBuilder: joinBuilder,
+            $removeJoinBuilderFromRootComposer:
+                $removeJoinBuilderFromRootComposer,
+          ),
+    );
+    return composer;
+  }
+
+  Expression<bool> marketItemsRefs(
+    Expression<bool> Function($$MarketItemsTableFilterComposer f) f,
+  ) {
+    final $$MarketItemsTableFilterComposer composer = $composerBuilder(
+      composer: this,
+      getCurrentColumn: (t) => t.id,
+      referencedTable: $db.marketItems,
+      getReferencedColumn: (t) => t.purchaseId,
+      builder:
+          (
+            joinBuilder, {
+            $addJoinBuilderToRootComposer,
+            $removeJoinBuilderFromRootComposer,
+          }) => $$MarketItemsTableFilterComposer(
+            $db: $db,
+            $table: $db.marketItems,
+            $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
+            joinBuilder: joinBuilder,
+            $removeJoinBuilderFromRootComposer:
+                $removeJoinBuilderFromRootComposer,
+          ),
+    );
+    return f(composer);
+  }
+}
+
+class $$MarketPurchasesTableOrderingComposer
+    extends Composer<_$AppDatabase, $MarketPurchasesTable> {
+  $$MarketPurchasesTableOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<int> get id => $composableBuilder(
+    column: $table.id,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<DateTime> get purchasedAt => $composableBuilder(
+    column: $table.purchasedAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get totalCents => $composableBuilder(
+    column: $table.totalCents,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  $$TransactionsTableOrderingComposer get financeTransactionId {
+    final $$TransactionsTableOrderingComposer composer = $composerBuilder(
+      composer: this,
+      getCurrentColumn: (t) => t.financeTransactionId,
+      referencedTable: $db.transactions,
+      getReferencedColumn: (t) => t.id,
+      builder:
+          (
+            joinBuilder, {
+            $addJoinBuilderToRootComposer,
+            $removeJoinBuilderFromRootComposer,
+          }) => $$TransactionsTableOrderingComposer(
+            $db: $db,
+            $table: $db.transactions,
+            $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
+            joinBuilder: joinBuilder,
+            $removeJoinBuilderFromRootComposer:
+                $removeJoinBuilderFromRootComposer,
+          ),
+    );
+    return composer;
+  }
+}
+
+class $$MarketPurchasesTableAnnotationComposer
+    extends Composer<_$AppDatabase, $MarketPurchasesTable> {
+  $$MarketPurchasesTableAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<int> get id =>
+      $composableBuilder(column: $table.id, builder: (column) => column);
+
+  GeneratedColumn<DateTime> get purchasedAt => $composableBuilder(
+    column: $table.purchasedAt,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<int> get totalCents => $composableBuilder(
+    column: $table.totalCents,
+    builder: (column) => column,
+  );
+
+  $$TransactionsTableAnnotationComposer get financeTransactionId {
+    final $$TransactionsTableAnnotationComposer composer = $composerBuilder(
+      composer: this,
+      getCurrentColumn: (t) => t.financeTransactionId,
+      referencedTable: $db.transactions,
+      getReferencedColumn: (t) => t.id,
+      builder:
+          (
+            joinBuilder, {
+            $addJoinBuilderToRootComposer,
+            $removeJoinBuilderFromRootComposer,
+          }) => $$TransactionsTableAnnotationComposer(
+            $db: $db,
+            $table: $db.transactions,
+            $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
+            joinBuilder: joinBuilder,
+            $removeJoinBuilderFromRootComposer:
+                $removeJoinBuilderFromRootComposer,
+          ),
+    );
+    return composer;
+  }
+
+  Expression<T> marketItemsRefs<T extends Object>(
+    Expression<T> Function($$MarketItemsTableAnnotationComposer a) f,
+  ) {
+    final $$MarketItemsTableAnnotationComposer composer = $composerBuilder(
+      composer: this,
+      getCurrentColumn: (t) => t.id,
+      referencedTable: $db.marketItems,
+      getReferencedColumn: (t) => t.purchaseId,
+      builder:
+          (
+            joinBuilder, {
+            $addJoinBuilderToRootComposer,
+            $removeJoinBuilderFromRootComposer,
+          }) => $$MarketItemsTableAnnotationComposer(
+            $db: $db,
+            $table: $db.marketItems,
+            $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
+            joinBuilder: joinBuilder,
+            $removeJoinBuilderFromRootComposer:
+                $removeJoinBuilderFromRootComposer,
+          ),
+    );
+    return f(composer);
+  }
+}
+
+class $$MarketPurchasesTableTableManager
+    extends
+        RootTableManager<
+          _$AppDatabase,
+          $MarketPurchasesTable,
+          MarketPurchase,
+          $$MarketPurchasesTableFilterComposer,
+          $$MarketPurchasesTableOrderingComposer,
+          $$MarketPurchasesTableAnnotationComposer,
+          $$MarketPurchasesTableCreateCompanionBuilder,
+          $$MarketPurchasesTableUpdateCompanionBuilder,
+          (MarketPurchase, $$MarketPurchasesTableReferences),
+          MarketPurchase,
+          PrefetchHooks Function({
+            bool financeTransactionId,
+            bool marketItemsRefs,
+          })
+        > {
+  $$MarketPurchasesTableTableManager(
+    _$AppDatabase db,
+    $MarketPurchasesTable table,
+  ) : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $$MarketPurchasesTableFilterComposer($db: db, $table: table),
+          createOrderingComposer: () =>
+              $$MarketPurchasesTableOrderingComposer($db: db, $table: table),
+          createComputedFieldComposer: () =>
+              $$MarketPurchasesTableAnnotationComposer($db: db, $table: table),
+          updateCompanionCallback:
+              ({
+                Value<int> id = const Value.absent(),
+                Value<DateTime> purchasedAt = const Value.absent(),
+                Value<int> totalCents = const Value.absent(),
+                Value<int?> financeTransactionId = const Value.absent(),
+              }) => MarketPurchasesCompanion(
+                id: id,
+                purchasedAt: purchasedAt,
+                totalCents: totalCents,
+                financeTransactionId: financeTransactionId,
+              ),
+          createCompanionCallback:
+              ({
+                Value<int> id = const Value.absent(),
+                required DateTime purchasedAt,
+                required int totalCents,
+                Value<int?> financeTransactionId = const Value.absent(),
+              }) => MarketPurchasesCompanion.insert(
+                id: id,
+                purchasedAt: purchasedAt,
+                totalCents: totalCents,
+                financeTransactionId: financeTransactionId,
+              ),
+          withReferenceMapper: (p0) => p0
+              .map(
+                (e) => (
+                  e.readTable(table),
+                  $$MarketPurchasesTableReferences(db, table, e),
+                ),
+              )
+              .toList(),
+          prefetchHooksCallback:
+              ({financeTransactionId = false, marketItemsRefs = false}) {
+                return PrefetchHooks(
+                  db: db,
+                  explicitlyWatchedTables: [
+                    if (marketItemsRefs) db.marketItems,
+                  ],
+                  addJoins:
+                      <
+                        T extends TableManagerState<
+                          dynamic,
+                          dynamic,
+                          dynamic,
+                          dynamic,
+                          dynamic,
+                          dynamic,
+                          dynamic,
+                          dynamic,
+                          dynamic,
+                          dynamic,
+                          dynamic
+                        >
+                      >(state) {
+                        if (financeTransactionId) {
+                          state =
+                              state.withJoin(
+                                    currentTable: table,
+                                    currentColumn: table.financeTransactionId,
+                                    referencedTable:
+                                        $$MarketPurchasesTableReferences
+                                            ._financeTransactionIdTable(db),
+                                    referencedColumn:
+                                        $$MarketPurchasesTableReferences
+                                            ._financeTransactionIdTable(db)
+                                            .id,
+                                  )
+                                  as T;
+                        }
+
+                        return state;
+                      },
+                  getPrefetchedDataCallback: (items) async {
+                    return [
+                      if (marketItemsRefs)
+                        await $_getPrefetchedData<
+                          MarketPurchase,
+                          $MarketPurchasesTable,
+                          MarketItem
+                        >(
+                          currentTable: table,
+                          referencedTable: $$MarketPurchasesTableReferences
+                              ._marketItemsRefsTable(db),
+                          managerFromTypedResult: (p0) =>
+                              $$MarketPurchasesTableReferences(
+                                db,
+                                table,
+                                p0,
+                              ).marketItemsRefs,
+                          referencedItemsForCurrentItem:
+                              (item, referencedItems) => referencedItems.where(
+                                (e) => e.purchaseId == item.id,
+                              ),
+                          typedResults: items,
+                        ),
+                    ];
+                  },
+                );
+              },
+        ),
+      );
+}
+
+typedef $$MarketPurchasesTableProcessedTableManager =
+    ProcessedTableManager<
+      _$AppDatabase,
+      $MarketPurchasesTable,
+      MarketPurchase,
+      $$MarketPurchasesTableFilterComposer,
+      $$MarketPurchasesTableOrderingComposer,
+      $$MarketPurchasesTableAnnotationComposer,
+      $$MarketPurchasesTableCreateCompanionBuilder,
+      $$MarketPurchasesTableUpdateCompanionBuilder,
+      (MarketPurchase, $$MarketPurchasesTableReferences),
+      MarketPurchase,
+      PrefetchHooks Function({bool financeTransactionId, bool marketItemsRefs})
+    >;
+typedef $$MarketItemsTableCreateCompanionBuilder =
+    MarketItemsCompanion Function({
+      Value<int> id,
+      required String name,
+      required int quantity,
+      Value<bool> checked,
+      Value<int?> purchaseId,
+    });
+typedef $$MarketItemsTableUpdateCompanionBuilder =
+    MarketItemsCompanion Function({
+      Value<int> id,
+      Value<String> name,
+      Value<int> quantity,
+      Value<bool> checked,
+      Value<int?> purchaseId,
+    });
+
+final class $$MarketItemsTableReferences
+    extends BaseReferences<_$AppDatabase, $MarketItemsTable, MarketItem> {
+  $$MarketItemsTableReferences(super.$_db, super.$_table, super.$_typedResult);
+
+  static $MarketPurchasesTable _purchaseIdTable(_$AppDatabase db) => db
+      .marketPurchases
+      .createAlias('market_items__purchase_id__market_purchases__id');
+
+  $$MarketPurchasesTableProcessedTableManager? get purchaseId {
+    final $_column = $_itemColumn<int>('purchase_id');
+    if ($_column == null) return null;
+    final manager = $$MarketPurchasesTableTableManager(
+      $_db,
+      $_db.marketPurchases,
+    ).filter((f) => f.id.sqlEquals($_column));
+    final item = $_typedResult.readTableOrNull(_purchaseIdTable($_db));
+    if (item == null) return manager;
+    return ProcessedTableManager(
+      manager.$state.copyWith(prefetchedData: [item]),
+    );
+  }
+}
+
+class $$MarketItemsTableFilterComposer
+    extends Composer<_$AppDatabase, $MarketItemsTable> {
+  $$MarketItemsTableFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<int> get id => $composableBuilder(
+    column: $table.id,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get name => $composableBuilder(
+    column: $table.name,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get quantity => $composableBuilder(
+    column: $table.quantity,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<bool> get checked => $composableBuilder(
+    column: $table.checked,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  $$MarketPurchasesTableFilterComposer get purchaseId {
+    final $$MarketPurchasesTableFilterComposer composer = $composerBuilder(
+      composer: this,
+      getCurrentColumn: (t) => t.purchaseId,
+      referencedTable: $db.marketPurchases,
+      getReferencedColumn: (t) => t.id,
+      builder:
+          (
+            joinBuilder, {
+            $addJoinBuilderToRootComposer,
+            $removeJoinBuilderFromRootComposer,
+          }) => $$MarketPurchasesTableFilterComposer(
+            $db: $db,
+            $table: $db.marketPurchases,
+            $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
+            joinBuilder: joinBuilder,
+            $removeJoinBuilderFromRootComposer:
+                $removeJoinBuilderFromRootComposer,
+          ),
+    );
+    return composer;
+  }
+}
+
+class $$MarketItemsTableOrderingComposer
+    extends Composer<_$AppDatabase, $MarketItemsTable> {
+  $$MarketItemsTableOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<int> get id => $composableBuilder(
+    column: $table.id,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get name => $composableBuilder(
+    column: $table.name,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get quantity => $composableBuilder(
+    column: $table.quantity,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<bool> get checked => $composableBuilder(
+    column: $table.checked,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  $$MarketPurchasesTableOrderingComposer get purchaseId {
+    final $$MarketPurchasesTableOrderingComposer composer = $composerBuilder(
+      composer: this,
+      getCurrentColumn: (t) => t.purchaseId,
+      referencedTable: $db.marketPurchases,
+      getReferencedColumn: (t) => t.id,
+      builder:
+          (
+            joinBuilder, {
+            $addJoinBuilderToRootComposer,
+            $removeJoinBuilderFromRootComposer,
+          }) => $$MarketPurchasesTableOrderingComposer(
+            $db: $db,
+            $table: $db.marketPurchases,
+            $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
+            joinBuilder: joinBuilder,
+            $removeJoinBuilderFromRootComposer:
+                $removeJoinBuilderFromRootComposer,
+          ),
+    );
+    return composer;
+  }
+}
+
+class $$MarketItemsTableAnnotationComposer
+    extends Composer<_$AppDatabase, $MarketItemsTable> {
+  $$MarketItemsTableAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<int> get id =>
+      $composableBuilder(column: $table.id, builder: (column) => column);
+
+  GeneratedColumn<String> get name =>
+      $composableBuilder(column: $table.name, builder: (column) => column);
+
+  GeneratedColumn<int> get quantity =>
+      $composableBuilder(column: $table.quantity, builder: (column) => column);
+
+  GeneratedColumn<bool> get checked =>
+      $composableBuilder(column: $table.checked, builder: (column) => column);
+
+  $$MarketPurchasesTableAnnotationComposer get purchaseId {
+    final $$MarketPurchasesTableAnnotationComposer composer = $composerBuilder(
+      composer: this,
+      getCurrentColumn: (t) => t.purchaseId,
+      referencedTable: $db.marketPurchases,
+      getReferencedColumn: (t) => t.id,
+      builder:
+          (
+            joinBuilder, {
+            $addJoinBuilderToRootComposer,
+            $removeJoinBuilderFromRootComposer,
+          }) => $$MarketPurchasesTableAnnotationComposer(
+            $db: $db,
+            $table: $db.marketPurchases,
+            $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
+            joinBuilder: joinBuilder,
+            $removeJoinBuilderFromRootComposer:
+                $removeJoinBuilderFromRootComposer,
+          ),
+    );
+    return composer;
+  }
+}
+
+class $$MarketItemsTableTableManager
+    extends
+        RootTableManager<
+          _$AppDatabase,
+          $MarketItemsTable,
+          MarketItem,
+          $$MarketItemsTableFilterComposer,
+          $$MarketItemsTableOrderingComposer,
+          $$MarketItemsTableAnnotationComposer,
+          $$MarketItemsTableCreateCompanionBuilder,
+          $$MarketItemsTableUpdateCompanionBuilder,
+          (MarketItem, $$MarketItemsTableReferences),
+          MarketItem,
+          PrefetchHooks Function({bool purchaseId})
+        > {
+  $$MarketItemsTableTableManager(_$AppDatabase db, $MarketItemsTable table)
+    : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $$MarketItemsTableFilterComposer($db: db, $table: table),
+          createOrderingComposer: () =>
+              $$MarketItemsTableOrderingComposer($db: db, $table: table),
+          createComputedFieldComposer: () =>
+              $$MarketItemsTableAnnotationComposer($db: db, $table: table),
+          updateCompanionCallback:
+              ({
+                Value<int> id = const Value.absent(),
+                Value<String> name = const Value.absent(),
+                Value<int> quantity = const Value.absent(),
+                Value<bool> checked = const Value.absent(),
+                Value<int?> purchaseId = const Value.absent(),
+              }) => MarketItemsCompanion(
+                id: id,
+                name: name,
+                quantity: quantity,
+                checked: checked,
+                purchaseId: purchaseId,
+              ),
+          createCompanionCallback:
+              ({
+                Value<int> id = const Value.absent(),
+                required String name,
+                required int quantity,
+                Value<bool> checked = const Value.absent(),
+                Value<int?> purchaseId = const Value.absent(),
+              }) => MarketItemsCompanion.insert(
+                id: id,
+                name: name,
+                quantity: quantity,
+                checked: checked,
+                purchaseId: purchaseId,
+              ),
+          withReferenceMapper: (p0) => p0
+              .map(
+                (e) => (
+                  e.readTable(table),
+                  $$MarketItemsTableReferences(db, table, e),
+                ),
+              )
+              .toList(),
+          prefetchHooksCallback: ({purchaseId = false}) {
+            return PrefetchHooks(
+              db: db,
+              explicitlyWatchedTables: [],
+              addJoins:
+                  <
+                    T extends TableManagerState<
+                      dynamic,
+                      dynamic,
+                      dynamic,
+                      dynamic,
+                      dynamic,
+                      dynamic,
+                      dynamic,
+                      dynamic,
+                      dynamic,
+                      dynamic,
+                      dynamic
+                    >
+                  >(state) {
+                    if (purchaseId) {
+                      state =
+                          state.withJoin(
+                                currentTable: table,
+                                currentColumn: table.purchaseId,
+                                referencedTable: $$MarketItemsTableReferences
+                                    ._purchaseIdTable(db),
+                                referencedColumn: $$MarketItemsTableReferences
+                                    ._purchaseIdTable(db)
+                                    .id,
+                              )
+                              as T;
+                    }
+
+                    return state;
+                  },
+              getPrefetchedDataCallback: (items) async {
+                return [];
+              },
+            );
+          },
+        ),
+      );
+}
+
+typedef $$MarketItemsTableProcessedTableManager =
+    ProcessedTableManager<
+      _$AppDatabase,
+      $MarketItemsTable,
+      MarketItem,
+      $$MarketItemsTableFilterComposer,
+      $$MarketItemsTableOrderingComposer,
+      $$MarketItemsTableAnnotationComposer,
+      $$MarketItemsTableCreateCompanionBuilder,
+      $$MarketItemsTableUpdateCompanionBuilder,
+      (MarketItem, $$MarketItemsTableReferences),
+      MarketItem,
+      PrefetchHooks Function({bool purchaseId})
+    >;
 
 class $AppDatabaseManager {
   final _$AppDatabase _db;
@@ -11953,4 +13477,8 @@ class $AppDatabaseManager {
       $$WaterV2IntentsTableTableManager(_db, _db.waterV2Intents);
   $$WaterV2PreferencesTableTableManager get waterV2Preferences =>
       $$WaterV2PreferencesTableTableManager(_db, _db.waterV2Preferences);
+  $$MarketPurchasesTableTableManager get marketPurchases =>
+      $$MarketPurchasesTableTableManager(_db, _db.marketPurchases);
+  $$MarketItemsTableTableManager get marketItems =>
+      $$MarketItemsTableTableManager(_db, _db.marketItems);
 }

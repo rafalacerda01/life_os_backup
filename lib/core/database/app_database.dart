@@ -10,6 +10,8 @@ import 'package:life_os/core/database/database_encryption.dart';
 import 'package:life_os/core/database/local_mutation_gate.dart';
 import 'package:life_os/core/database/local_database_identity.dart';
 import 'database_sync_policy.dart';
+import 'local_profile_bootstrap_journal.dart';
+import 'package:life_os/features/market/data/market_tables.dart';
 import 'package:life_os/core/db/db_key_manager.dart';
 import 'package:life_os/features/checkin/data/local/checkin_table.dart';
 import 'package:life_os/features/finance/data/local/transaction_table.dart';
@@ -45,6 +47,8 @@ part 'app_database.g.dart';
     WaterV2DailyStates,
     WaterV2Intents,
     WaterV2Preferences,
+    MarketPurchases,
+    MarketItems,
   ],
   daos: [NotificationDao],
 )
@@ -56,17 +60,20 @@ class AppDatabase extends _$AppDatabase {
         LocalMutationGate(),
         null,
         DatabaseSyncPolicy.remoteEnabled,
+        null,
       );
 
   AppDatabase.forUser({
     required LocalDatabaseIdentity identity,
     required QueryExecutor executor,
     DatabaseSyncPolicy syncPolicy = DatabaseSyncPolicy.remoteEnabled,
+    LocalProfileOpenPermit? localProfileOpenPermit,
   }) : this._(
          executor,
          _mutationGateFor(identity, syncPolicy),
          identity,
          syncPolicy,
+         localProfileOpenPermit,
        );
 
   static LocalMutationGate _mutationGateFor(
@@ -88,6 +95,7 @@ class AppDatabase extends _$AppDatabase {
     this.localMutations,
     this.identity,
     this.syncPolicy,
+    this._localProfileOpenPermit,
   ) : super(
         executor
             .interceptWith(LocalMutationInterceptor(localMutations))
@@ -97,6 +105,7 @@ class AppDatabase extends _$AppDatabase {
   final LocalMutationGate localMutations;
   final LocalDatabaseIdentity? identity;
   final DatabaseSyncPolicy syncPolicy;
+  final LocalProfileOpenPermit? _localProfileOpenPermit;
   bool get isLocalOnly => syncPolicy == DatabaseSyncPolicy.localOnly;
 
   @override
@@ -151,20 +160,70 @@ class AppDatabase extends _$AppDatabase {
   // =========================================================================
 
   @override
-  int get schemaVersion => currentSchemaVersion;
+  int get schemaVersion =>
+      isLocalOnly ? currentLocalSchemaVersion : currentSchemaVersion;
 
   static const currentSchemaVersion = 11;
+  static const currentLocalSchemaVersion = 12;
+
+  @override
+  List<DatabaseSchemaEntity> get allSchemaEntities => isLocalOnly
+      ? super.allSchemaEntities
+      : super.allSchemaEntities
+            .where(
+              (entity) => entity != marketItems && entity != marketPurchases,
+            )
+            .toList();
+
+  // Drift publishes user_version after onCreate/onUpgrade. Persist it with the
+  // local DDL so interruption cannot leave schema changes at the old version.
+  Future<void> _commitLocalSchema(Future<void> Function() create) async {
+    await customStatement('PRAGMA synchronous = FULL');
+    try {
+      await transaction(() async {
+        await create();
+        await customStatement(
+          'PRAGMA user_version = $currentLocalSchemaVersion',
+        );
+      });
+    } finally {
+      await customStatement('PRAGMA synchronous = NORMAL');
+    }
+  }
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
     onCreate: (Migrator migrator) async {
-      await migrator.createAll();
+      if (isLocalOnly) {
+        await _commitLocalSchema(migrator.createAll);
+      } else {
+        await migrator.createAll();
+      }
     },
     onUpgrade: (Migrator migrator, int from, int to) async {
-      // A local-only connection never silently upgrades an imported database.
-      // A separately qualified migration must authorize any existing schema.
-      if (isLocalOnly)
-        throw StateError('LOCAL_PROFILE_SCHEMA_MIGRATION_REQUIRED');
+      if (isLocalOnly) {
+        if (from != currentSchemaVersion ||
+            to != currentLocalSchemaVersion ||
+            _localProfileOpenPermit?.permitsUpgradeFor(identity!, from, to) !=
+                true) {
+          throw StateError('LOCAL_PROFILE_SCHEMA_MIGRATION_REQUIRED');
+        }
+        await _commitLocalSchema(() async {
+          final unexpected = await customSelect(
+            'SELECT name FROM sqlite_master WHERE lower(name) IN (?, ?)',
+            variables: [
+              Variable(marketPurchases.actualTableName),
+              Variable(marketItems.actualTableName),
+            ],
+          ).get();
+          if (unexpected.isNotEmpty) {
+            throw StateError('LOCAL_PROFILE_SCHEMA_MIGRATION_CONFLICT');
+          }
+          await migrator.createTable(marketPurchases);
+          await migrator.createTable(marketItems);
+        });
+        return;
+      }
       // -----------------------------------------------------------------
       // V1 -> V2
       // -----------------------------------------------------------------
@@ -246,6 +305,9 @@ class AppDatabase extends _$AppDatabase {
     },
     beforeOpen: (_) async {
       if (!isLocalOnly) return;
+      // A previously committed version may be ahead of the secure journal.
+      await (select(marketPurchases)..limit(0)).get();
+      await (select(marketItems)..limit(0)).get();
       // Per-connection SQLite enforcement also covers DAOs, raw SQL and batches.
       // Historical queue rows remain readable but cannot be changed or removed.
       // TEMP triggers do not modify the persisted schema or database version.

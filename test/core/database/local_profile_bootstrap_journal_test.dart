@@ -22,7 +22,7 @@ void main() {
   late Directory root;
   late FakeSecureStorage storage;
   late UserDbKeyManager keys;
-  const schema = AppDatabase.currentSchemaVersion;
+  const schema = AppDatabase.currentLocalSchemaVersion;
   const journalKey = LocalProfileBootstrapJournal.storageKey;
   setUp(() async {
     root = await Directory.systemTemp.createTemp('local-bootstrap-journal-');
@@ -261,7 +261,7 @@ void main() {
   test(
     'expired creation permit cannot authorize another file or later work',
     () async {
-      late LocalProfileCreationPermit captured;
+      late LocalProfileOpenPermit captured;
       await expectLater(
         LocalProfileAdmission(root).run(
           () => LocalProfileBootstrapJournal(storage).run<void>(

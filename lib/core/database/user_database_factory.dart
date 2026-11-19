@@ -41,7 +41,8 @@ class UserDatabaseFactory {
         () => _keyManager.localBootstrapJournal.run<AppDatabase>(
           identity: identity,
           databaseFile: identity.fileIn(directory),
-          schemaVersion: AppDatabase.currentSchemaVersion,
+          schemaVersion: AppDatabase.currentLocalSchemaVersion,
+          predecessorSchemaVersion: AppDatabase.currentSchemaVersion,
           open: (permit) =>
               _openInDirectory(identity, directory, creationPermit: permit),
           closeOnFailure: (database) => database.closeDatabase(),
@@ -54,7 +55,7 @@ class UserDatabaseFactory {
   Future<AppDatabase> _openInDirectory(
     LocalDatabaseIdentity identity,
     Directory directory, {
-    LocalProfileCreationPermit? creationPermit,
+    LocalProfileOpenPermit? creationPermit,
   }) async {
     final file = identity.fileIn(directory);
     if (!await file.exists() &&
@@ -90,7 +91,7 @@ class UserDatabaseFactory {
         ? await bootstrap.prepareLocalProfile(
             databaseFile: file,
             keyProvider: keyProvider,
-            expectedSchemaVersion: AppDatabase.currentSchemaVersion,
+            expectedSchemaVersion: AppDatabase.currentLocalSchemaVersion,
             creationPermit: creationPermit,
           )
         : await bootstrap.prepare(databaseFile: file, keyProvider: keyProvider);
@@ -98,6 +99,7 @@ class UserDatabaseFactory {
       identity: identity,
       executor: _openEncryptedDatabase(file, key),
       syncPolicy: syncPolicy,
+      localProfileOpenPermit: creationPermit,
     );
     // Complete schema creation while admission is still held, before another
     // engine can observe schema zero and before the journal becomes READY.

@@ -71,13 +71,14 @@ class DatabaseEncryptionBootstrap {
   }
 
   /// Fresh local profile provisioning or a read-only check of an already
-  /// encrypted, current-schema local profile. Never invokes legacy recovery,
+  /// encrypted local profile. An older schema needs an admitted journal.
+  /// Never invokes legacy recovery,
   /// plaintext conversion, WAL checkpointing or artifact cleanup.
   Future<String> prepareLocalProfile({
     required File databaseFile,
     required DatabaseKeyProvider keyProvider,
     required int expectedSchemaVersion,
-    LocalProfileCreationPermit? creationPermit,
+    LocalProfileOpenPermit? creationPermit,
   }) async {
     final exists = await assertLocalProfileFiles(databaseFile);
     final key = await keyProvider(allowCreate: !exists);
@@ -96,7 +97,14 @@ class DatabaseEncryptionBootstrap {
           .single
           .values
           .single;
-      if (version != expectedSchemaVersion) {
+      if (version != expectedSchemaVersion &&
+          !(version is int &&
+              creationPermit?.permitsUpgrade(
+                    databaseFile,
+                    version,
+                    expectedSchemaVersion,
+                  ) ==
+                  true)) {
         // Only resume our own interrupted new-file creation. An old schema,
         // an arbitrary schema-zero database or any schema objects are refused.
         if (version != 0 ||
