@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+import 'package:life_os/core/runtime/app_runtime_mode.dart';
+import 'local_analytics.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:intl/intl.dart';
@@ -11,6 +13,9 @@ class AnalyticsScreen extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    if (ref.watch(appRuntimeModeProvider) == AppRuntimeMode.localFirst) {
+      return const LocalAnalyticsScreen();
+    }
     final analyticsData = ref.watch(analyticsProvider);
     final premiumStatus = ref.watch(premiumProvider);
     const featureGate = FeatureGate();

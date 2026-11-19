@@ -1,4 +1,5 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:life_os/core/runtime/app_runtime_mode.dart';
 import 'package:life_os/features/dashboard/data/models/dashboard_model.dart';
 import 'package:life_os/features/dashboard/data/repositories/dashboard_repository.dart';
 import 'package:life_os/features/finance/presentation/providers/finance_provider.dart';
@@ -32,6 +33,8 @@ final dashboardLoadStateProvider = Provider<DashboardLoadState>((ref) {
     ref.watch(healthStreamProvider),
     ref.watch(tasksStreamProvider),
     ref.watch(medicationsStreamProvider),
+    if (ref.watch(appRuntimeModeProvider) == AppRuntimeMode.localFirst)
+      ref.watch(localWaterGoalProvider),
   ]);
 });
 
@@ -43,6 +46,10 @@ final dashboardStateProvider = Provider<DashboardModel>((ref) {
   final healthAsync = ref.watch(healthStreamProvider);
   final tasksAsync = ref.watch(tasksStreamProvider);
   final medicationsAsync = ref.watch(medicationsStreamProvider);
+  final waterGoal =
+      ref.watch(appRuntimeModeProvider) == AppRuntimeMode.localFirst
+      ? ref.watch(localWaterGoalProvider).value
+      : null;
 
   // 2. Extração segura de dados
   final transactions = financeAsync.value ?? [];
@@ -60,5 +67,6 @@ final dashboardStateProvider = Provider<DashboardModel>((ref) {
         healthData: healthData,
         taskList: taskList,
         medicationsList: medicationsList,
+        waterGoalMl: waterGoal ?? 3000,
       );
 });

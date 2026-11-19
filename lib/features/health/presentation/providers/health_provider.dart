@@ -95,3 +95,7 @@ final medicationsStreamProvider = StreamProvider.autoDispose<List<Medication>>((
       ]))
       .watch();
 });
+
+final localWaterGoalProvider = StreamProvider<int>(
+  (ref) => ref.watch(healthRepositoryProvider).watchLocalWaterGoal(),
+);

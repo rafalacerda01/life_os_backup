@@ -8,6 +8,7 @@ class DashboardRepository {
     required dynamic healthData,
     required List<dynamic> taskList,
     required List<dynamic> medicationsList,
+    int waterGoalMl = 3000,
   }) {
     try {
       // 1. Cálculos de Finanças
@@ -52,7 +53,7 @@ class DashboardRepository {
       }
 
       // 3. Cálculos de Saúde e Finanças (Scores)
-      final double waterScore = _calculateWaterScore(healthData);
+      final double waterScore = _calculateWaterScore(healthData, waterGoalMl);
       final double moodScore = _calculateMoodScore(healthData);
       final hasWaterData = _hasWaterData(healthData);
       final hasMoodData = _hasMoodData(healthData);
@@ -109,11 +110,12 @@ class DashboardRepository {
     }
   }
 
-  double _calculateWaterScore(dynamic healthData) {
+  double _calculateWaterScore(dynamic healthData, int waterGoalMl) {
     final rawWaterIntake = healthData?.waterIntakeMl;
     final waterIntakeMl = _readPositiveInt(rawWaterIntake, fallback: 0);
 
-    return ((waterIntakeMl.clamp(0, 3000) / 3000) * 50).toDouble();
+    final goal = waterGoalMl > 0 ? waterGoalMl : 3000;
+    return ((waterIntakeMl.clamp(0, goal) / goal) * 50).toDouble();
   }
 
   double _calculateMoodScore(dynamic healthData) {

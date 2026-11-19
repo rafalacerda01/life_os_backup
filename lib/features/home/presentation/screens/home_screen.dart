@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:life_os/core/runtime/app_runtime_mode.dart';
 import 'package:life_os/core/services/emulator_account_runtime.dart';
 
 import 'package:flutter/material.dart';
@@ -28,6 +29,18 @@ void _retryHomeData(WidgetRef ref) {
   ref.invalidate(medicationsStreamProvider);
   ref.invalidate(habitsStreamProvider);
   ref.invalidate(subjectsStreamProvider);
+  if (ref.read(appRuntimeModeProvider) == AppRuntimeMode.localFirst) {
+    ref.invalidate(localWaterGoalProvider);
+  }
+}
+
+void _openHomeRoute(BuildContext context, String path) {
+  final router = GoRouter.maybeOf(context);
+  if (router != null) {
+    router.push(path);
+  } else {
+    Navigator.of(context).pushNamed(path);
+  }
 }
 
 String _formatBrl(double value) => NumberFormat.currency(
@@ -120,45 +133,92 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
 
   @override
   Widget build(BuildContext context) {
-    if (ref.watch(emulatorAccountRuntimeProvider) != null) {
+    final offline =
+        ref.watch(appRuntimeModeProvider) == AppRuntimeMode.localFirst;
+    if (!offline && ref.watch(emulatorAccountRuntimeProvider) != null) {
       final tasks = ref.watch(tasksStreamProvider);
-      return Scaffold(body: SafeArea(child: Padding(padding: const EdgeInsets.all(24),
-        child: ListView(children: [
-          const Text('Home', style: TextStyle(fontSize: 28)),
-          const SizedBox(height: 16),
-          const Text('Módulos disponíveis nesta sessão local:'),
-          const SizedBox(height: 16),
-          Text(tasks.when(data: (items) => '${items.length} tarefas', loading: () => 'Carregando tarefas…', error: (error, stack) => 'Tarefas indisponíveis.')),
-          for (final entry in const {'tasks':'tarefas','habits':'hábitos','finance':'finanças','goals':'metas','study':'estudos','health':'saúde','focus':'Focus','checkin':'Check-in','notifications':'notificações'}.entries)
-            if (ref.watch(emulatorAccountRuntimeProvider)!.enabledModules.contains(entry.key))
-              ElevatedButton(key: ValueKey('open-${entry.key}'), onPressed: () => context.go('/${entry.key}'), child: Text('Abrir ${entry.value}')),
-          TextButton(onPressed: () => context.go('/circles'), child: const Text('Círculos: aguardando homologação')),
-          const Text('Premium e compras aguardam homologação. AI Companion indisponível.'),
-        ]))));
+      return Scaffold(
+        body: SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.all(24),
+            child: ListView(
+              children: [
+                const Text('Home', style: TextStyle(fontSize: 28)),
+                const SizedBox(height: 16),
+                const Text('Módulos disponíveis nesta sessão local:'),
+                const SizedBox(height: 16),
+                Text(
+                  tasks.when(
+                    data: (items) => '${items.length} tarefas',
+                    loading: () => 'Carregando tarefas…',
+                    error: (error, stack) => 'Tarefas indisponíveis.',
+                  ),
+                ),
+                for (final entry in const {
+                  'tasks': 'tarefas',
+                  'habits': 'hábitos',
+                  'finance': 'finanças',
+                  'goals': 'metas',
+                  'study': 'estudos',
+                  'health': 'saúde',
+                  'focus': 'Focus',
+                  'checkin': 'Check-in',
+                  'notifications': 'notificações',
+                }.entries)
+                  if (ref
+                      .watch(emulatorAccountRuntimeProvider)!
+                      .enabledModules
+                      .contains(entry.key))
+                    ElevatedButton(
+                      key: ValueKey('open-${entry.key}'),
+                      onPressed: () => context.go('/${entry.key}'),
+                      child: Text('Abrir ${entry.value}'),
+                    ),
+                TextButton(
+                  onPressed: () => context.go('/circles'),
+                  child: const Text('Círculos: aguardando homologação'),
+                ),
+                const Text(
+                  'Premium e compras aguardam homologação. AI Companion indisponível.',
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
     }
     final homeState = ref.watch(homeStateProvider);
-    final authState = ref.watch(authNotifierProvider);
 
     final now = _now;
     final formattedDate = DateFormat("dd/MM/yyyy - EEEE", "pt_BR").format(now);
 
-    final isPremium = homeState.isLoading || homeState.isUnavailable
-        ? false
-        : ref.watch(premiumProvider).isPremium;
+    final isPremium =
+        !offline &&
+        !homeState.isLoading &&
+        !homeState.isUnavailable &&
+        ref.watch(premiumProvider).isPremium;
 
-    final userName = authState.maybeWhen(
-      authenticated: (user) => _firstName(user.displayName),
-      orElse: () => "Usuário",
-    );
+    final userName = offline
+        ? 'Perfil local'
+        : ref
+              .watch(authNotifierProvider)
+              .maybeWhen(
+                authenticated: (user) => _firstName(user.displayName),
+                orElse: () => "Usuário",
+              );
 
     final greeting = homeGreetingFor(now);
 
     final content = homeState.isLoading
         ? const _HomeScreenSkeleton()
         : homeState.isUnavailable
-        ? _HomeUnavailableState(onRetry: () => _retryHomeData(ref))
+        ? _HomeUnavailableState(
+            offline: offline,
+            onRetry: () => _retryHomeData(ref),
+          )
         : _HomeReadyContent(
             homeState: homeState,
+            offline: offline,
             greeting: greeting,
             userName: userName,
             formattedDate: formattedDate,
@@ -174,6 +234,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
 
 class _HomeReadyContent extends StatelessWidget {
   final HomeStateData homeState;
+  final bool offline;
   final String greeting;
   final String userName;
   final String formattedDate;
@@ -181,6 +242,7 @@ class _HomeReadyContent extends StatelessWidget {
 
   const _HomeReadyContent({
     required this.homeState,
+    required this.offline,
     required this.greeting,
     required this.userName,
     required this.formattedDate,
@@ -227,12 +289,20 @@ class _HomeReadyContent extends StatelessWidget {
             const SizedBox(height: 12),
             _QuickSummaryGrid(homeState: homeState),
             const SizedBox(height: 26),
-            const _HomeSectionHeader(
-              eyebrow: 'LIFE OS INSIGHT',
-              title: 'Sugestão para você',
-            ),
-            const SizedBox(height: 12),
-            const PremiumInsightCard(),
+            if (offline)
+              OutlinedButton.icon(
+                onPressed: () => _openHomeRoute(context, '/analytics'),
+                icon: const Icon(Icons.analytics_outlined),
+                label: const Text('Ver análises'),
+              )
+            else ...[
+              const _HomeSectionHeader(
+                eyebrow: 'LIFE OS INSIGHT',
+                title: 'Sugestão para você',
+              ),
+              const SizedBox(height: 12),
+              const PremiumInsightCard(),
+            ],
           ],
         ),
       ),
@@ -255,7 +325,11 @@ class _HomeHeader extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final unreadCount = ref.watch(unreadNotificationsCountProvider);
+    final offline =
+        ref.watch(appRuntimeModeProvider) == AppRuntimeMode.localFirst;
+    final unreadCount = offline
+        ? 0
+        : ref.watch(unreadNotificationsCountProvider);
 
     return Row(
       children: [
@@ -317,26 +391,28 @@ class _HomeHeader extends ConsumerWidget {
             ],
           ),
         ),
-        const SizedBox(width: 12),
-        Material(
-          color: AppColors.cardBackground,
-          shape: CircleBorder(
-            side: BorderSide(color: Colors.white.withOpacity(0.07)),
-          ),
-          child: IconButton(
-            tooltip: 'Notificações',
-            onPressed: () => context.push('/notifications'),
-            icon: Badge(
-              isLabelVisible: unreadCount > 0,
-              label: Text('$unreadCount'),
-              backgroundColor: AppColors.primary,
-              child: const Icon(
-                Icons.notifications_none_rounded,
-                color: AppColors.textSecondary,
+        if (!offline) ...[
+          const SizedBox(width: 12),
+          Material(
+            color: AppColors.cardBackground,
+            shape: CircleBorder(
+              side: BorderSide(color: Colors.white.withOpacity(0.07)),
+            ),
+            child: IconButton(
+              tooltip: 'Notificações',
+              onPressed: () => context.push('/notifications'),
+              icon: Badge(
+                isLabelVisible: unreadCount > 0,
+                label: Text('$unreadCount'),
+                backgroundColor: AppColors.primary,
+                child: const Icon(
+                  Icons.notifications_none_rounded,
+                  color: AppColors.textSecondary,
+                ),
               ),
             ),
           ),
-        ),
+        ],
       ],
     );
   }
@@ -345,7 +421,8 @@ class _HomeHeader extends ConsumerWidget {
 class _HomeUnavailableState extends StatelessWidget {
   final VoidCallback onRetry;
 
-  const _HomeUnavailableState({required this.onRetry});
+  const _HomeUnavailableState({required this.onRetry, required this.offline});
+  final bool offline;
 
   @override
   Widget build(BuildContext context) {
@@ -370,8 +447,10 @@ class _HomeUnavailableState extends StatelessWidget {
               ),
             ),
             const SizedBox(height: 8),
-            const Text(
-              'Verifique sua conexão e tente novamente.',
+            Text(
+              offline
+                  ? 'Tente abrir os dados locais novamente.'
+                  : 'Verifique sua conexão e tente novamente.',
               textAlign: TextAlign.center,
               style: TextStyle(color: AppColors.textSecondary),
             ),
@@ -532,7 +611,7 @@ class _MetricsRow extends StatelessWidget {
             score: dashboard.productivityScore,
             hasData: dashboard.hasProductivityData,
             color: AppColors.primary,
-            onTap: () => context.push('/tasks'),
+            onTap: () => _openHomeRoute(context, '/tasks'),
           ),
         ),
         const SizedBox(width: 8),
@@ -543,7 +622,7 @@ class _MetricsRow extends StatelessWidget {
             score: dashboard.healthScore,
             hasData: dashboard.hasHealthData,
             color: AppColors.health,
-            onTap: () => context.push('/health'),
+            onTap: () => _openHomeRoute(context, '/health'),
           ),
         ),
         const SizedBox(width: 8),
@@ -554,7 +633,7 @@ class _MetricsRow extends StatelessWidget {
             score: dashboard.financialScore,
             hasData: dashboard.hasFinancialData,
             color: AppColors.finance,
-            onTap: () => context.push('/finance'),
+            onTap: () => _openHomeRoute(context, '/finance'),
           ),
         ),
       ],
@@ -800,7 +879,7 @@ void _showDayPlanner(BuildContext context, HomeStateData homeState) {
               ),
               onPressed: () {
                 Navigator.of(sheetContext).pop();
-                context.push('/focus');
+                _openHomeRoute(context, '/focus');
               },
               icon: const Icon(Icons.timer_rounded),
               label: const Text(
@@ -816,7 +895,7 @@ void _showDayPlanner(BuildContext context, HomeStateData homeState) {
                 child: OutlinedButton(
                   onPressed: () {
                     Navigator.of(sheetContext).pop();
-                    context.push('/tasks');
+                    _openHomeRoute(context, '/tasks');
                   },
                   child: const Text('Ver tarefas'),
                 ),
@@ -826,7 +905,7 @@ void _showDayPlanner(BuildContext context, HomeStateData homeState) {
                 child: OutlinedButton(
                   onPressed: () {
                     Navigator.of(sheetContext).pop();
-                    context.push('/study');
+                    _openHomeRoute(context, '/study');
                   },
                   child: const Text('Ver estudos'),
                 ),
@@ -948,7 +1027,7 @@ class _QuickSummaryGrid extends StatelessWidget {
               value:
                   '${homeState.completedHabitsToday}/${homeState.totalHabits}',
               detail: 'concluídos',
-              onTap: () => context.push('/habits'),
+              onTap: () => _openHomeRoute(context, '/habits'),
             ),
             _QuickSummaryCard(
               width: itemWidth,
@@ -957,7 +1036,7 @@ class _QuickSummaryGrid extends StatelessWidget {
               label: 'Revisões',
               value: '${dashboard.studyReviewQueue}',
               detail: _pendingLabel(dashboard.studyReviewQueue),
-              onTap: () => context.push('/study'),
+              onTap: () => _openHomeRoute(context, '/study'),
             ),
             _QuickSummaryCard(
               width: itemWidth,
@@ -966,7 +1045,7 @@ class _QuickSummaryGrid extends StatelessWidget {
               label: 'Medicamentos',
               value: '${homeState.medicationCount}',
               detail: _activeLabel(homeState.medicationCount),
-              onTap: () => context.push('/health'),
+              onTap: () => _openHomeRoute(context, '/health'),
             ),
             _QuickSummaryCard(
               key: const Key('home-summary-balance'),
@@ -976,7 +1055,7 @@ class _QuickSummaryGrid extends StatelessWidget {
               label: 'Saldo',
               value: _formatBrl(dashboard.financeBalance),
               detail: 'saldo atual',
-              onTap: () => context.push('/finance'),
+              onTap: () => _openHomeRoute(context, '/finance'),
             ),
           ],
         );

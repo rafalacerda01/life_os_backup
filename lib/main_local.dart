@@ -12,6 +12,8 @@ import 'package:life_os/core/database/local_device_session.dart';
 import 'package:life_os/core/database/local_installation_identity_provider.dart';
 import 'package:life_os/core/db/user_db_key_manager.dart';
 import 'package:life_os/core/runtime/app_runtime_mode.dart';
+import 'package:life_os/features/home/presentation/screens/home_screen.dart';
+import 'package:life_os/features/analytics/presentation/analytics_screen.dart';
 import 'package:life_os/features/health/presentation/health_screen.dart';
 import 'package:life_os/features/health/presentation/cycle/cycle_health_screen.dart';
 import 'package:life_os/features/focus/presentation/providers/screens/focus_screen.dart';
@@ -100,6 +102,14 @@ class _LocalFirstDevelopmentAppState extends State<LocalFirstDevelopmentApp> {
       routes: {
         '/focus': (context) => const FocusScreen(),
         '/health/cycle': (context) => const CycleHealthScreen(),
+        '/tasks': (context) => TasksScreen(
+          onOpenFocus: () => Navigator.of(context).pushNamed('/focus'),
+        ),
+        '/habits': (context) => const HabitsScreen(),
+        '/finance': (context) => const FinanceScreen(),
+        '/study': (context) => const StudyScreen(),
+        '/health': (context) => const HealthScreen(),
+        '/analytics': (context) => const AnalyticsScreen(),
       },
       title: 'Life OS Local',
       debugShowCheckedModeBanner: false,
@@ -123,7 +133,8 @@ class _LocalFirstDevelopmentAppState extends State<LocalFirstDevelopmentApp> {
           3 => const GoalsScreen(),
           4 => const CheckInScreen(),
           5 => const StudyScreen(),
-          _ => const HealthScreen(),
+          6 => const HealthScreen(),
+          _ => const HomeScreen(),
         },
         bottomNavigationBar: NavigationBar(
           selectedIndex: _selectedModule,
@@ -157,6 +168,10 @@ class _LocalFirstDevelopmentAppState extends State<LocalFirstDevelopmentApp> {
             NavigationDestination(
               icon: Icon(Icons.favorite_border),
               label: 'Saúde',
+            ),
+            NavigationDestination(
+              icon: Icon(Icons.home_outlined),
+              label: 'Início',
             ),
           ],
         ),

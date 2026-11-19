@@ -1209,10 +1209,6 @@ class CycleHealthSummaryCard extends StatelessWidget {
 
 enum CycleHealthDetailsPresentation { embedded, dedicated }
 
-final localWaterGoalProvider = StreamProvider<int>(
-  (ref) => ref.watch(healthRepositoryProvider).watchLocalWaterGoal(),
-);
-
 final healthWaterGoalProvider = Provider<AsyncValue<int>>((ref) {
   if (ref.watch(appRuntimeModeProvider) == AppRuntimeMode.localFirst) {
     return ref.watch(localWaterGoalProvider);
