@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:life_os/core/runtime/app_runtime_mode.dart';
 import 'dart:convert';
 import 'package:drift/native.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -77,6 +78,7 @@ void main() {
       final container = ProviderContainer(
         overrides: [
           databaseProvider.overrideWithValue(db),
+          appRuntimeModeProvider.overrideWithValue(AppRuntimeMode.localFirst),
           firebaseAuthProvider.overrideWith((ref) => remote()),
           firebaseFirestoreProvider.overrideWith((ref) => remote()),
           syncManagerProvider.overrideWith((ref) => remote()),

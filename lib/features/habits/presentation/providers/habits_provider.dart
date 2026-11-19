@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:life_os/core/runtime/app_runtime_mode.dart';
 import 'package:life_os/core/services/emulator_account_runtime.dart';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -33,9 +34,8 @@ typedef ManualHabitTodayToggle =
 
 final manualHabitTodayToggleProvider = Provider<ManualHabitTodayToggle>((ref) {
   final repository = ref.watch(habitsRepositoryProvider);
-  if (ref.watch(databaseProvider).isLocalOnly)
-    return (id, dates, wasDone) => repository.toggleHabitToday(id, dates);
-  if (ref.watch(emulatorAccountRuntimeProvider) != null)
+  if (ref.watch(appRuntimeModeProvider) == AppRuntimeMode.localFirst ||
+      ref.watch(emulatorAccountRuntimeProvider) != null)
     return (id, dates, wasDone) => repository.toggleHabitToday(id, dates);
   final analytics = ref.watch(analyticsServiceProvider);
   final isSessionActive = ref.watch(analyticsSessionActiveProvider);
