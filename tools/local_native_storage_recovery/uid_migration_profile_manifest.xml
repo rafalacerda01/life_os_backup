@@ -1,0 +1,9 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <meta-data android:name="io.flutter.embedding.android.EnableImpeller" android:value="false" />
+        <activity android:name="dev.lifeos.recovery.life_os.Stage19WriterActivity"
+            android:exported="true" android:process=":writer"
+            android:taskAffinity="dev.lifeos.recovery.life_os.custody.writer"
+            android:theme="@style/LaunchTheme" />
+    </application>
+</manifest>

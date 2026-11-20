@@ -1,4 +1,4 @@
-param([Parameter(Mandatory=$true)][string]$GateDirectory, [switch]$UidSnapshot)
+param([Parameter(Mandatory=$true)][string]$GateDirectory, [switch]$UidSnapshot, [switch]$UidMigrationPreparation)
 $ErrorActionPreference='Stop'
 $repo=(Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
 $gate=[IO.Path]::GetFullPath($GateDirectory)
@@ -78,6 +78,28 @@ if ($UidSnapshot) {
     </application>
 </manifest>
 "@ | Set-Content -LiteralPath "$probe/android/app/src/profile/AndroidManifest.xml" -Encoding utf8
+}
+if ($UidMigrationPreparation) {
+  Copy-Item -LiteralPath "$PSScriptRoot/uid_migration_preparation.dart","$PSScriptRoot/uid_migration_probe.dart" -Destination "$probe/lib"
+  Copy-Item -LiteralPath "$PSScriptRoot/uid_migration_profile_manifest.xml" -Destination "$probe/android/app/src/profile/AndroidManifest.xml"
+  $writerDirectory="$probe/android/app/src/profile/kotlin/dev/lifeos/recovery/life_os"
+  New-Item -ItemType Directory -Path $writerDirectory -Force | Out-Null
+  Copy-Item -LiteralPath "$PSScriptRoot/Stage19WriterActivity.kt" -Destination $writerDirectory
+  $labActivity="$probe/android/app/src/main/kotlin/dev/lifeos/recovery/life_os/MainActivity.kt"
+  $activityText=[IO.File]::ReadAllText($labActivity)
+  if (!$activityText.Contains('class MainActivity : FlutterActivity()')) { throw 'Missing synthetic Activity anchor' }
+  [IO.File]::WriteAllText($labActivity,$activityText.Replace('class MainActivity : FlutterActivity()','open class MainActivity : FlutterActivity()'))
+  $labGradle="$probe/android/app/build.gradle.kts"
+  $gradleText=[IO.File]::ReadAllText($labGradle)
+  $profileAnchor='android.buildTypes.matching { it.name == "profile" }.configureEach { isDebuggable = true }'
+  if (!$gradleText.Contains($profileAnchor)) { throw 'Missing synthetic profile anchor' }
+  $profileBlock=@"
+android.buildTypes.matching { it.name == "profile" }.configureEach {
+    isDebuggable = true
+    applicationIdSuffix = ".custody"
+}
+"@
+  [IO.File]::WriteAllText($labGradle,$gradleText.Replace($profileAnchor,$profileBlock))
 }
 Push-Location $probe
 try{& flutter pub get --offline;if($LASTEXITCODE){throw 'Local dependencies unavailable'}}finally{Pop-Location}

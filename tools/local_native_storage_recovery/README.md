@@ -55,3 +55,21 @@ Build `lib/uid_snapshot_probe.dart` as an x86_64 profile target. Check the manif
 The expected counts are 28 passing checks in `seed` and 30 in `verify`, with the same `sources` fields across the boots and no `fatal` field. The physical files kept by the archive include the main database, WAL and SHM. The query uses a second copy and rebuilding the WAL index there leaves the archived bytes intact. The test uses distinct native keys and compares only their fingerprints. The result covers encrypted synthetic sources with the current legacy schema and a committed queue row present solely in the WAL.
 
 Use this probe only to prepare the preservation gate. Migration requires independent proof of custody, source quiescence and a verified destination dataset before activation.
+
+## UID/P1 migration preparation
+
+Generate a separate lab with the custody probe and its second Android process.
+
+```powershell
+.\tools\local_native_storage_recovery\prepare.ps1 -GateDirectory <new-absolute-lab-path> -UidMigrationPreparation
+```
+
+Build `lib/uid_migration_probe.dart` as an x86_64 profile target. Check the APK for package `dev.lifeos.recovery.life_os.custody`, absence of `INTERNET` permission and the `Stage19WriterActivity` manifest entry with process `:writer`. Install in an offline Android lab with that package absent. Use the fully qualified Activity names in the `dev.lifeos.recovery.life_os` namespace.
+
+1. Launch `Stage19WriterActivity` with `gate_scenario=writer` and wait for `files/stage19-writer.json`.
+2. Launch `MainActivity` with `gate_scenario=blocked`, verify `files/stage19-blocked.json` and match both report PIDs to the live Android processes. Stop only the completed `blocked` process. Create the marker `files/stage19/release-writer` in the custody sandbox and wait for `files/stage19-writer-released.json`.
+3. Launch `MainActivity` with `gate_scenario=interrupt`. Collect `files/stage19-writer-blocked.json` and `files/stage19-interrupt.json`. Require `files/stage19/attempt-interrupted/staged.json` and an absent `ready.json` in that attempt.
+4. Sync the guest, force-stop the custody package and reboot. Compare `/proc/sys/kernel/random/boot_id` before and after. Launch `MainActivity` with `gate_scenario=resume` and collect `files/stage19-resume.json`.
+5. Require 88 distinct passing checks across the report stages, excluding the repeated checks in the writer reports. Compare the source proof and the file hashes of the interrupted attempt. Verify the ready receipt and the physical destination digests under `files/stage19/attempt-resumed`.
+
+The sources use schema 11. Each destination uses the actual blank Local-First schema 12 with a new native key and installation namespace. An extra archive table holds the historical queue and durable SQLite triggers block modifications. The active queue stays empty. The synthetic custody issuer and exclusive lock qualify the lab protocol. Any later migration needs authority and an exhaustive inventory of source writers in the real app.
