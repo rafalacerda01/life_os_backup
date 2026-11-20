@@ -1,0 +1,46 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+    <uses-permission android:name="android.permission.INTERNET" tools:node="remove" />
+    <application android:label="Life OS Fence (synthetic)"
+        android:appComponentFactory="com.rafalacerda.lifeos.fence.FenceComponentFactory"
+        tools:replace="android:label,android:appComponentFactory">
+        <meta-data android:name="io.flutter.embedding.android.EnableImpeller" android:value="false" />
+        <activity android:name=".MainActivity" tools:node="remove" />
+        <activity android:name=".fence.FenceLabActivity" android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+        <activity android:name=".fence.FenceLabEngineActivity" android:exported="false"
+            android:process=":fence_engine" android:taskAffinity="${applicationId}.engine"
+            android:theme="@style/LaunchTheme" />
+        <provider android:name="com.google.firebase.provider.FirebaseInitProvider" tools:node="remove" />
+        <provider android:name="androidx.startup.InitializationProvider" tools:node="remove" />
+        <provider android:name="io.flutter.plugins.imagepicker.ImagePickerFileProvider" tools:node="remove" />
+        <provider android:name="dev.fluttercommunity.plus.share.ShareFileProvider" tools:node="remove" />
+        <service android:name="com.google.firebase.components.ComponentDiscoveryService" tools:node="remove" />
+        <service android:name="com.google.firebase.sessions.SessionLifecycleService" tools:node="remove" />
+        <service android:name="com.google.android.gms.metadata.ModuleDependencies" tools:node="remove" />
+        <service android:name="androidx.credentials.playservices.CredentialProviderMetadataHolder" tools:node="remove" />
+        <service android:name="com.google.android.gms.auth.api.signin.RevocationBoundService" tools:node="remove" />
+        <service android:name="com.google.android.gms.measurement.AppMeasurementService" tools:node="remove" />
+        <service android:name="com.google.android.gms.measurement.AppMeasurementJobService" tools:node="remove" />
+        <service android:name="com.google.android.datatransport.runtime.backends.TransportBackendDiscovery" tools:node="remove" />
+        <service android:name="com.google.android.datatransport.runtime.scheduling.jobscheduling.JobInfoSchedulerService" tools:node="remove" />
+        <receiver android:name="com.google.android.gms.measurement.AppMeasurementReceiver" tools:node="remove" />
+        <receiver android:name="com.google.android.datatransport.runtime.scheduling.jobscheduling.AlarmManagerSchedulerBroadcastReceiver" tools:node="remove" />
+        <receiver android:name="androidx.profileinstaller.ProfileInstallReceiver" tools:node="remove" />
+        <receiver android:name="dev.fluttercommunity.plus.share.SharePlusPendingIntent" tools:node="remove" />
+        <activity android:name="io.flutter.plugins.urllauncher.WebViewActivity" tools:node="remove" />
+        <activity android:name="com.google.firebase.auth.internal.GenericIdpActivity" tools:node="remove" />
+        <activity android:name="com.google.firebase.auth.internal.RecaptchaActivity" tools:node="remove" />
+        <activity android:name="androidx.credentials.playservices.controllers.identityauth.HiddenActivity" tools:node="remove" />
+        <activity android:name="androidx.credentials.playservices.controllers.identitycredentials.IdentityCredentialApiHiddenActivity" tools:node="remove" />
+        <activity android:name="com.google.android.gms.auth.api.signin.internal.SignInHubActivity" tools:node="remove" />
+        <activity android:name="com.android.billingclient.api.ProxyBillingActivity" tools:node="remove" />
+        <activity android:name="com.android.billingclient.api.ProxyBillingActivityV2" tools:node="remove" />
+        <activity android:name="com.google.android.gms.common.api.GoogleApiActivity" tools:node="remove" />
+        <activity android:name="com.google.android.play.core.common.PlayCoreDialogWrapperActivity" tools:node="remove" />
+    </application>
+</manifest>

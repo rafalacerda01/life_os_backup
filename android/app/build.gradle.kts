@@ -52,6 +52,13 @@ plugins {
 // Explicit, non-publishable Android host for local module qualification.
 // Default builds retain the existing package, manifest and startup.
 val localLab = providers.gradleProperty("lifeOsLocalLab").orNull == "true"
+val fenceFixture = providers.gradleProperty("lifeOsFenceFixture").orNull
+require(fenceFixture == null || (!localLab && fenceFixture in listOf("uid", "p1", "local"))) {
+    "The native fence requires a dedicated Android fixture package."
+}
+val fenceLab = fenceFixture != null
+val fenceUpdate = providers.gradleProperty("lifeOsFenceUpdate").orNull == "true"
+require(!fenceUpdate || fenceLab)
 
 android {
     namespace = "com.rafalacerda.lifeos"
@@ -67,10 +74,11 @@ android {
     defaultConfig {
         applicationId = "com.rafalacerda.lifeos"
         if (localLab) applicationIdSuffix = ".localdev"
-        minSdk = 24 
+        if (fenceLab) applicationIdSuffix = ".fence$fenceFixture"
+        minSdk = if (fenceLab) 28 else 24
         targetSdk = 36 
         multiDexEnabled = true // Corrigido
-        versionCode = flutter.versionCode
+        versionCode = flutter.versionCode + if (fenceUpdate) 1 else 0
         versionName = flutter.versionName
     }
 
@@ -93,9 +101,20 @@ android {
         sourceSets.getByName("debug").manifest.srcFile("src/localLab/AndroidManifest.xml")
         sourceSets.getByName("profile").manifest.srcFile("src/localLabProfile/AndroidManifest.xml")
     }
+    if (fenceLab) {
+        buildTypes.getByName("profile").isDebuggable = true
+        sourceSets.getByName("profile").manifest.srcFile("src/fenceLab/AndroidManifest.xml")
+    }
 }
 
-if (localLab) {
+if (fenceLab) {
+    kotlin.sourceSets.getByName("profile").kotlin.srcDir("src/fenceLab/kotlin")
+    androidComponents.beforeVariants(androidComponents.selector()) {
+        if (it.buildType != "profile") it.enable = false
+    }
+}
+
+if (localLab || fenceLab) {
     androidComponents.beforeVariants(androidComponents.selector().withBuildType("release")) {
         it.enable = false
     }
@@ -109,6 +128,10 @@ tasks.matching { it.name.startsWith("compileFlutterBuild") }.configureEach {
         val target = project.findProperty("target")?.toString()?.replace('\\', '/') ?: "lib/main.dart"
         val allowed = listOf("lib/main_local.dart", "integration_test/local_tasks_native_test.dart", "integration_test/local_finance_native_test.dart", "integration_test/local_habits_native_test.dart", "integration_test/local_goals_native_test.dart", "integration_test/local_checkin_native_test.dart", "integration_test/local_study_native_test.dart", "integration_test/local_focus_native_test.dart", "integration_test/local_health_native_test.dart", "integration_test/local_home_native_test.dart", "integration_test/local_market_native_test.dart", "integration_test/local_profile_native_test.dart", "integration_test/local_task_reminder_native_test.dart", "integration_test/local_notification_center_native_test.dart")
         val localTarget = allowed.any { target == it || target.endsWith("/$it") }
+        val fenceTarget = "integration_test/native_writer_fence_probe.dart"
+        if (fenceLab != (target == fenceTarget || target.endsWith("/$fenceTarget"))) {
+            throw GradleException("The native writer fence probe requires its isolated package.")
+        }
         if (localLab && !localTarget) {
             throw GradleException("Local lab requires an explicitly qualified local entrypoint.")
         }
