@@ -16,12 +16,13 @@ import 'package:life_os/core/utils/app_logger.dart';
 import 'package:life_os/features/notifications/data/daos/notification_dao.dart';
 import 'package:life_os/features/notifications/domain/models/notification_model.dart';
 import 'package:life_os/features/notifications/domain/models/notification_occurrence.dart';
+import 'package:life_os/features/notifications/domain/services/notification_module_reconciler.dart';
 
 /// Repository Offline-First da Central de Notificações.
 ///
 /// A UI lê do Drift. O Firestore é utilizado para sincronização remota.
 /// Dispensas usam o Drift e a SyncQueue; demais efeitos preservam seu barrier.
-class NotificationsRepository {
+class NotificationsRepository implements NotificationDerivationStore {
   final LocalAccountLease? sessionLease;
   final bool readAndDismissOnly;
   final FirebaseFirestore firestore;
@@ -100,6 +101,7 @@ class NotificationsRepository {
     return NotificationModel.fromDrift(row);
   }
 
+  @override
   Future<List<NotificationModel>> getLocalNotifications() async {
     final dao = localDao;
     if (dao == null) return const [];
@@ -109,6 +111,7 @@ class NotificationsRepository {
   }
 
   /// Salva primeiro no Drift e sincroniza em background.
+  @override
   Future<void> saveLocalNotification(NotificationModel notification) {
     if (readAndDismissOnly) throw StateError('NOTIFICATION_WRITER_CLOSED');
     final expectedUid = auth.currentUser?.uid.trim();
@@ -213,6 +216,7 @@ class NotificationsRepository {
   }
 
   /// Derived invalid state/category disabled, without a user dismissal.
+  @override
   Future<void> deleteDerivedNotification(String id) {
     if (readAndDismissOnly) throw StateError('NOTIFICATION_WRITER_CLOSED');
     final expectedUid = auth.currentUser?.uid.trim();

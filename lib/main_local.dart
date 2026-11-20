@@ -18,6 +18,7 @@ import 'package:life_os/features/home/presentation/screens/home_screen.dart';
 import 'package:life_os/features/analytics/presentation/analytics_screen.dart';
 import 'package:life_os/features/market/presentation/market_screen.dart';
 import 'package:life_os/features/settings/presentation/local_profile_screen.dart';
+import 'package:life_os/features/notifications/presentation/screens/local_notification_center_screen.dart';
 import 'package:life_os/features/tasks/data/services/local_task_reminder.dart';
 import 'package:life_os/features/tasks/presentation/local_task_reminder_screen.dart';
 import 'package:life_os/features/health/presentation/health_screen.dart';
@@ -143,6 +144,7 @@ class _LocalFirstDevelopmentAppState extends State<LocalFirstDevelopmentApp> {
         '/analytics': (context) => const AnalyticsScreen(),
         '/market': (context) => const MarketScreen(),
         '/profile': (context) => const LocalProfileScreen(),
+        '/notifications': (context) => const LocalNotificationCenterScreen(),
         '/profile/task-reminder': (context) => const LocalTaskReminderScreen(),
       },
       title: 'Life OS Local',

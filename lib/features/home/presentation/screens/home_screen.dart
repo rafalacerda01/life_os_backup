@@ -297,6 +297,11 @@ class _HomeReadyContent extends StatelessWidget {
                     label: const Text('Mercado'),
                   ),
                   OutlinedButton.icon(
+                    onPressed: () => _openHomeRoute(context, '/notifications'),
+                    icon: const Icon(Icons.notifications_none_rounded),
+                    label: const Text('Notificações'),
+                  ),
+                  OutlinedButton.icon(
                     onPressed: () => _openHomeRoute(context, '/profile'),
                     icon: const Icon(Icons.person_outline_rounded),
                     label: const Text('Perfil e ajustes'),
