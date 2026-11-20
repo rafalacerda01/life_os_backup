@@ -22,6 +22,8 @@ object LocalLabHost {
         engine.plugins.add(com.github.dart_lang.jni_flutter.JniFlutterPlugin())
         engine.plugins.add(io.flutter.plugins.sharedpreferences.SharedPreferencesPlugin())
         engine.plugins.add(io.flutter.plugins.localauth.LocalAuthPlugin())
+        engine.plugins.add(com.dexterous.flutterlocalnotifications.FlutterLocalNotificationsPlugin())
+        engine.plugins.add(net.wolverinebeach.flutter_timezone.FlutterTimezonePlugin())
         // Dev dependency may be absent from a non-test bundle. Never needed by production.
         try {
             val type = Class.forName("dev.flutter.plugins.integration_test.IntegrationTestPlugin")
@@ -50,6 +52,7 @@ object LocalLabHost {
                         "firebaseApps" to FirebaseApp.getApps(context).size,
                         "forbiddenPluginsRegistered" to forbidden,
                         "internetPermission" to (context.checkSelfPermission(Manifest.permission.INTERNET) == PackageManager.PERMISSION_GRANTED),
+                        "notificationsPermission" to (context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED),
                         "processId" to android.os.Process.myPid(),
                     ))
                 }

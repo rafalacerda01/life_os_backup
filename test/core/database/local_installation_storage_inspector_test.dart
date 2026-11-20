@@ -1,6 +1,8 @@
 import 'dart:io';
+import 'dart:typed_data';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:life_os/core/database/local_installation_storage_inspector.dart';
+import 'package:life_os/core/services/native_notification_registry.dart';
 
 void main() {
   late Directory root, documents, support;
@@ -65,6 +67,66 @@ void main() {
       expect(await file.readAsString(), 'SYNTHETIC');
     },
   );
+  test(
+    'installation reminder host recognizes only its exact auxiliary files',
+    () async {
+      final allowed = LocalInstallationStorageInspector(
+        documentsDirectory: () async => documents,
+        supportDirectory: () async => support,
+        allowInstallationReminders: true,
+      );
+      final prefs = await Directory('${root.path}/shared_prefs').create();
+      final plugin = await File(
+        '${prefs.path}/scheduled_notifications.xml',
+      ).writeAsString('SYNTHETIC-ANDROID');
+      final metadata = await File(
+        '${support.path}/${NativeNotificationRegistry.installationFileName}',
+      ).writeAsString('SYNTHETIC-REGISTRY');
+      await allowed.assertNoUnqualifiedSecondaryStores();
+      await expectLater(
+        inspector.assertNoUnqualifiedSecondaryStores(),
+        throwsStateError,
+      );
+      await expectLater(allowed.assertFreshDirectories(), throwsStateError);
+      final legacy = await File(
+        '${support.path}/life_os_native_ownership_v1.sqlite',
+      ).writeAsString('SYNTHETIC-LEGACY');
+      await expectLater(
+        allowed.assertNoUnqualifiedSecondaryStores(),
+        throwsStateError,
+      );
+      expect(await legacy.readAsString(), 'SYNTHETIC-LEGACY');
+      expect(await metadata.readAsString(), 'SYNTHETIC-REGISTRY');
+      expect(await plugin.readAsString(), 'SYNTHETIC-ANDROID');
+    },
+  );
+
+  test(
+    'only the known AndroidX profile verifier cache is safe on fresh boot',
+    () async {
+      final isolated = LocalInstallationStorageInspector(
+        documentsDirectory: () async => documents,
+        supportDirectory: () async => support,
+        allowAndroidProfileVerifierCache: true,
+      );
+      final marker = File('${support.path}/profileInstalled');
+      final cache = ByteData(24)
+        ..setInt32(0, 1)
+        ..setInt32(4, 327680)
+        ..setInt64(8, 1234567890);
+      final bytes = cache.buffer.asUint8List();
+      await marker.writeAsBytes(bytes);
+      await isolated.assertFreshDirectories();
+      await expectLater(inspector.assertFreshDirectories(), throwsStateError);
+      expect(await marker.readAsBytes(), bytes);
+
+      cache.setInt32(0, 2);
+      await marker.writeAsBytes(bytes);
+      await expectLater(isolated.assertFreshDirectories(), throwsStateError);
+      expect(await marker.readAsBytes(), bytes);
+    },
+  );
+
   for (final location in [
     'files/datastore/state.pb',
     'no_backup/sdk',

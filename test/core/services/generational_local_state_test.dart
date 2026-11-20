@@ -28,6 +28,7 @@ import 'package:life_os/core/storage/ai_consent_local_cache.dart';
 import 'package:life_os/core/services/notification_preferences.dart';
 import 'package:life_os/core/services/notification_service.dart';
 import 'package:life_os/core/services/owned_notification_service.dart';
+import 'package:life_os/features/tasks/data/services/local_task_reminder.dart';
 import 'package:life_os/core/services/native_notification_registry.dart';
 import 'package:life_os/core/services/trusted_account_access.dart';
 import 'package:life_os/features/auth/data/local/auth_cleanup_barrier.dart';
@@ -104,6 +105,8 @@ class Native extends NotificationService {
   final tags = <int, String>{};
   final cancelled = <int>[];
   int ownedPermissionCalls = 0;
+  DateTime? lastScheduledDate;
+  bool? lastRepeatDaily;
   @override
   Future<bool> requestOwnedPermissions() async {
     ownedPermissionCalls++;
@@ -146,6 +149,8 @@ class Native extends NotificationService {
     if (canSend?.call() != true) return false;
     pending[id] = PendingNotificationRequest(id, title, body, payload);
     tags[id] = tag;
+    lastScheduledDate = scheduledDate;
+    lastRepeatDaily = repeatDaily;
     if (loseResponse) throw StateError('APPLIED_RESPONSE_UNKNOWN');
     return true;
   }
@@ -254,6 +259,115 @@ class HeldNotificationPreferences extends NotificationPreferencesStore {
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+  test(
+    'local reminder owns only its native ID and schedules the next civil day',
+    () async {
+      final registry = NativeNotificationRegistry(
+        sqlite3.openInMemory(),
+        installationOnly: true,
+      );
+      final previousRegistry = NativeNotificationRegistry(
+        sqlite3.openInMemory(),
+      );
+      addTearDown(registry.close);
+      addTearDown(previousRegistry.close);
+      final native = Native();
+      final installation = LocalDatabaseIdentity(
+        'local-v1-123e4567-e89b-42d3-a456-426614174000',
+      );
+      final other = scope(ga);
+      final authenticated = OwnedNotificationService(
+        identity: other,
+        native: native,
+        isCurrent: () => true,
+        registry: () async => previousRegistry,
+        android: true,
+        preferences: () async => const NotificationPreferences.enabled(),
+      );
+      await schedule(authenticated, logicalId: LocalTaskReminder.logicalId);
+      final authenticatedId = previousRegistry.records(other).single.id;
+      native.pending[44] = const PendingNotificationRequest(
+        44,
+        'Synthetic legacy',
+        null,
+        null,
+      );
+      final service = LocalTaskReminder(
+        identity: installation,
+        native: native,
+        isCurrent: () => true,
+        registry: () async => registry,
+        android: true,
+        now: () => DateTime(2026, 11, 19, 11),
+      );
+      expect(await service.status(), (minuteOfDay: null, needsRecovery: false));
+      expect(native.ownedPermissionCalls, 0);
+      expect(await service.create(9 * 60 + 12), isTrue);
+      expect(native.lastScheduledDate, DateTime(2026, 11, 20, 9, 12));
+      expect(native.lastRepeatDaily, isTrue);
+      expect(await service.status(), (minuteOfDay: 552, needsRecovery: false));
+      final ownedId = registry.records(installation).single.id;
+      expect(ownedId, isNot(authenticatedId));
+      expect(native.pending[ownedId]?.body, 'Revise suas tarefas no Life OS.');
+      await service.remove();
+      expect(registry.records(installation).single.state, 'RETIRED');
+      expect(native.pending.keys, unorderedEquals([44, authenticatedId]));
+      expect(native.cancelled, [ownedId]);
+    },
+  );
+
+  test('concurrent local reminders reserve only one logical alarm', () async {
+    final registry = NativeNotificationRegistry(
+      sqlite3.openInMemory(),
+      installationOnly: true,
+    );
+    addTearDown(registry.close);
+    final native = Native();
+    final installation = LocalDatabaseIdentity(
+      'local-v1-123e4567-e89b-42d3-a456-426614174000',
+    );
+    final service = LocalTaskReminder(
+      identity: installation,
+      native: native,
+      isCurrent: () => true,
+      registry: () async => registry,
+      android: true,
+    );
+    final first = service.create(20 * 60);
+    final second = service.create(21 * 60);
+    await expectLater(second, throwsStateError);
+    expect(await first, isTrue);
+    expect(native.pending, hasLength(1));
+    expect(registry.records(installation), hasLength(1));
+  });
+
+  test(
+    'invalid local identity or ended session cannot request permission',
+    () async {
+      final native = Native();
+      expect(
+        () => LocalTaskReminder(
+          identity: scope(ga),
+          native: native,
+          isCurrent: () => true,
+          android: true,
+        ),
+        throwsArgumentError,
+      );
+      final service = LocalTaskReminder(
+        identity: LocalDatabaseIdentity(
+          'local-v1-123e4567-e89b-42d3-a456-426614174000',
+        ),
+        native: native,
+        isCurrent: () => false,
+        android: true,
+      );
+      await expectLater(service.create(9 * 60), throwsStateError);
+      expect(native.ownedPermissionCalls, 0);
+      expect(native.pending, isEmpty);
+    },
+  );
+
   test(
     'full binding separates project/database/tenant/UID/generation and legacy/R1 drafts',
     () {

@@ -1,19 +1,25 @@
 import 'dart:io';
+import 'dart:typed_data';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'local_profile_admission.dart';
+import '../services/native_notification_registry.dart';
 
-/// Conservative pre-cutover inspection. It never opens, migrates or removes a
-/// secondary store. The P1 notification registry needs an ownership gate of its
-/// own before these staged primitives may replace the authenticated runtime.
+/// Conservative inspection before opening the local profile. It never opens,
+/// migrates or removes a secondary store. The isolated reminder host may
+/// recognize its own registry and Android plugin preferences.
 class LocalInstallationStorageInspector {
   LocalInstallationStorageInspector({
     required this.documentsDirectory,
     required this.supportDirectory,
+    this.allowInstallationReminders = false,
+    this.allowAndroidProfileVerifierCache = false,
   });
   final Future<Directory> Function() documentsDirectory;
   final Future<Directory> Function() supportDirectory;
+  final bool allowInstallationReminders;
+  final bool allowAndroidProfileVerifierCache;
   Never _blocked() => throw StateError('LOCAL_PROFILE_MIGRATION_REQUIRED');
 
   Future<void> assertNoUnqualifiedSecondaryStores() async {
@@ -24,6 +30,23 @@ class LocalInstallationStorageInspector {
         followLinks: false,
       )) {
         final name = p.basename(entry.path);
+        const reminderFile = NativeNotificationRegistry.installationFileName;
+        if (name.startsWith(reminderFile)) {
+          final exactFile = name == reminderFile;
+          final knownSidecar = const {
+            '-wal',
+            '-shm',
+            '-journal',
+          }.contains(name.substring(reminderFile.length));
+          if (!allowInstallationReminders ||
+              !p.equals(p.dirname(entry.path), support.path) ||
+              entry is! File ||
+              (!exactFile && !knownSidecar) ||
+              (!exactFile &&
+                  !await File(p.join(support.path, reminderFile)).exists())) {
+            _blocked();
+          }
+        }
         if (entry is Link ||
             name.startsWith('life_os_native_ownership_v1.sqlite') ||
             name.startsWith('PersistedInstallation') ||
@@ -43,8 +66,15 @@ class LocalInstallationStorageInspector {
     };
     if (await prefs.exists()) {
       await for (final entry in prefs.list(followLinks: false)) {
+        final name = p.basename(entry.path);
+        final knownReminderPreference =
+            allowInstallationReminders &&
+            const {
+              'notification_plugin_cache.xml',
+              'scheduled_notifications.xml',
+            }.contains(name);
         if (entry is! File ||
-            !qualifiedNames.contains(p.basename(entry.path))) {
+            (!knownReminderPreference && !qualifiedNames.contains(name))) {
           _blocked();
         }
       }
@@ -68,7 +98,14 @@ class LocalInstallationStorageInspector {
         recursive: true,
         followLinks: false,
       )) {
-        if (entry is! Directory) _blocked();
+        if (entry is Directory) continue;
+        if (allowAndroidProfileVerifierCache &&
+            entry is File &&
+            p.equals(entry.path, p.join(support.path, 'profileInstalled')) &&
+            await _isAndroidProfileVerifierCache(entry)) {
+          continue;
+        }
+        _blocked();
       }
     }
     final documents = await documentsDirectory();
@@ -82,6 +119,22 @@ class LocalInstallationStorageInspector {
           name.startsWith('res_timestamp-') && entry is File;
       if (!engineAsset && !engineTimestamp) _blocked();
     }
+  }
+
+  // AndroidX ProfileVerifier 1.4 writes two big-endian ints and two longs.
+  Future<bool> _isAndroidProfileVerifierCache(File file) async {
+    if (await FileSystemEntity.type(file.path, followLinks: false) !=
+            FileSystemEntityType.file ||
+        await file.length() != 24)
+      return false;
+    final bytes = await file.readAsBytes();
+    if (bytes.length != 24) return false;
+    final cache = ByteData.sublistView(bytes);
+    const outcomes = {0, 1, 2, 3, 65536, 131072, 196608, 262144, 327680};
+    return cache.getInt32(0) == 1 &&
+        outcomes.contains(cache.getInt32(4)) &&
+        cache.getInt64(8) > 0 &&
+        cache.getInt64(16) >= 0;
   }
 }
 

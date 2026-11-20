@@ -10,12 +10,16 @@ import 'package:intl/date_symbol_data_local.dart';
 import 'package:life_os/core/database/database_provider.dart';
 import 'package:life_os/core/database/local_device_session.dart';
 import 'package:life_os/core/database/local_installation_identity_provider.dart';
+import 'package:life_os/core/database/local_installation_storage_inspector.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:life_os/core/db/user_db_key_manager.dart';
 import 'package:life_os/core/runtime/app_runtime_mode.dart';
 import 'package:life_os/features/home/presentation/screens/home_screen.dart';
 import 'package:life_os/features/analytics/presentation/analytics_screen.dart';
 import 'package:life_os/features/market/presentation/market_screen.dart';
 import 'package:life_os/features/settings/presentation/local_profile_screen.dart';
+import 'package:life_os/features/tasks/data/services/local_task_reminder.dart';
+import 'package:life_os/features/tasks/presentation/local_task_reminder_screen.dart';
 import 'package:life_os/features/health/presentation/health_screen.dart';
 import 'package:life_os/features/health/presentation/cycle/cycle_health_screen.dart';
 import 'package:life_os/features/focus/presentation/providers/screens/focus_screen.dart';
@@ -47,7 +51,18 @@ Future<LocalDeviceSession> prepareLocalDevelopmentSession() async {
     throw StateError('LOCAL_DEVELOPMENT_ANDROID_HOST_REQUIRED');
   }
   await initializeDateFormatting('pt_BR');
-  final container = ProviderContainer();
+  final container = ProviderContainer(
+    overrides: [
+      localInstallationStorageInspectorProvider.overrideWith(
+        (ref) => LocalInstallationStorageInspector(
+          documentsDirectory: getApplicationDocumentsDirectory,
+          supportDirectory: getApplicationSupportDirectory,
+          allowInstallationReminders: true,
+          allowAndroidProfileVerifierCache: true,
+        ),
+      ),
+    ],
+  );
   final session = LocalDeviceSession(
     identityService: container.read(localInstallationIdentityServiceProvider),
     clearKeyCache: UserDbKeyManager.instance.clearCache,
@@ -94,11 +109,25 @@ class LocalFirstDevelopmentApp extends StatefulWidget {
 
 class _LocalFirstDevelopmentAppState extends State<LocalFirstDevelopmentApp> {
   int _selectedModule = 0;
+  late final _reminderDatabase = widget.session.requirePrepared();
+  late final _taskReminder = LocalTaskReminder(
+    identity: _reminderDatabase.identity!,
+    isCurrent: () {
+      if (!mounted) return false;
+      try {
+        return identical(widget.session.requirePrepared(), _reminderDatabase);
+      } catch (_) {
+        return false;
+      }
+    },
+  );
+
   @override
   Widget build(BuildContext context) => ProviderScope(
     overrides: [
       databaseProvider.overrideWithValue(widget.session.requirePrepared()),
       appRuntimeModeProvider.overrideWithValue(AppRuntimeMode.localFirst),
+      localTaskReminderProvider.overrideWithValue(_taskReminder),
     ],
     child: MaterialApp(
       routes: {
@@ -114,6 +143,7 @@ class _LocalFirstDevelopmentAppState extends State<LocalFirstDevelopmentApp> {
         '/analytics': (context) => const AnalyticsScreen(),
         '/market': (context) => const MarketScreen(),
         '/profile': (context) => const LocalProfileScreen(),
+        '/profile/task-reminder': (context) => const LocalTaskReminderScreen(),
       },
       title: 'Life OS Local',
       builder: (context, child) => LocalProfileAppLock(child: child!),

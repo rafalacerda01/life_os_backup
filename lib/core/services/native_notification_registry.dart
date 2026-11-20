@@ -27,7 +27,7 @@ class NativeNotificationOwnership {
 }
 
 class NativeNotificationRegistry {
-  NativeNotificationRegistry(this.database) {
+  NativeNotificationRegistry(this.database, {this.installationOnly = false}) {
     database.execute('PRAGMA busy_timeout=5000');
     database.execute('PRAGMA synchronous=FULL');
     database.execute(
@@ -38,6 +38,19 @@ class NativeNotificationRegistry {
     );
   }
   final Database database;
+  final bool installationOnly;
+  static const installationFileName =
+      'life_os_local_native_ownership_v1.sqlite';
+  static Future<NativeNotificationRegistry>? _installation;
+  static Future<NativeNotificationRegistry> openInstallation() =>
+      _installation ??= () async {
+        final directory = await getApplicationSupportDirectory();
+        await directory.create(recursive: true);
+        return NativeNotificationRegistry(
+          sqlite3.open(File('${directory.path}/$installationFileName').path),
+          installationOnly: true,
+        );
+      }();
   static Future<NativeNotificationRegistry>? _instance;
   static Future<NativeNotificationRegistry> open() => _instance ??= () async {
     final directory = await getApplicationSupportDirectory();
@@ -49,13 +62,17 @@ class NativeNotificationRegistry {
     );
   }();
   static const maxRecords = 10000;
-  void _bound(LocalDatabaseIdentity identity) {
-    if (!identity.isBound)
+  void _requireOwner(LocalDatabaseIdentity identity) {
+    if (installationOnly) {
+      if (!identity.isLocalInstallation)
+        throw StateError('LOCAL_PROFILE_IDENTITY_REQUIRED');
+    } else if (!identity.isBound) {
       throw StateError('LOCAL_GENERATION_BINDING_REQUIRED');
+    }
   }
 
   bool sealed(LocalDatabaseIdentity identity) {
-    _bound(identity);
+    _requireOwner(identity);
     return database.select(
       'SELECT owner FROM native_notification_seals WHERE owner=?',
       [identity.namespace],
@@ -66,9 +83,10 @@ class NativeNotificationRegistry {
     LocalDatabaseIdentity identity,
     int logicalId,
     String? originalPayload,
-    Set<int> occupied,
-  ) {
-    _bound(identity);
+    Set<int> occupied, {
+    bool requireUnusedLogicalId = false,
+  }) {
+    _requireOwner(identity);
     if (logicalId < 0 ||
         logicalId > 0x7fffffff ||
         originalPayload != null && originalPayload.length > 2048)
@@ -84,6 +102,13 @@ class NativeNotificationRegistry {
               as int;
       if (sealed(identity) || count >= maxRecords)
         throw StateError('NATIVE_OWNER_CLOSED_OR_LIMIT');
+      if (requireUnusedLogicalId &&
+          database.select(
+            "SELECT id FROM native_notification_owners WHERE owner=? AND logical_id=? AND state<>'RETIRED' LIMIT 1",
+            [identity.namespace, logicalId],
+          ).isNotEmpty) {
+        throw StateError('NATIVE_LOGICAL_ID_ALREADY_RESERVED');
+      }
       var id =
           (database
                       .select(
@@ -158,7 +183,7 @@ class NativeNotificationRegistry {
   }
 
   List<NativeNotificationOwnership> records(LocalDatabaseIdentity identity) {
-    _bound(identity);
+    _requireOwner(identity);
     return database
         .select(
           'SELECT * FROM native_notification_owners WHERE owner=? ORDER BY id',
@@ -198,7 +223,7 @@ class NativeNotificationRegistry {
   }
 
   void seal(LocalDatabaseIdentity identity) {
-    _bound(identity);
+    _requireOwner(identity);
     database.execute(
       'INSERT OR IGNORE INTO native_notification_seals VALUES (?)',
       [identity.namespace],

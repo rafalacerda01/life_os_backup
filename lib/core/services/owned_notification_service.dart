@@ -12,21 +12,74 @@ import 'native_notification_registry.dart';
 /// reserved durably; Android tags isolate legacy id-only cancellation too.
 class OwnedNotificationService implements NotificationService {
   OwnedNotificationService({
-    required this.identity,
+    required LocalDatabaseIdentity identity,
     required NotificationService native,
     required bool Function() isCurrent,
     Future<NativeNotificationRegistry> Function()? registry,
     bool? android,
     Future<NotificationPreferences> Function()? preferences,
+  }) : this._(
+         identity: identity,
+         native: native,
+         isCurrent: isCurrent,
+         registry: registry,
+         android: android,
+         preferences: preferences,
+         isInstallation: false,
+       );
+
+  OwnedNotificationService.forLocalInstallation({
+    required LocalDatabaseIdentity identity,
+    required NotificationService native,
+    required bool Function() isCurrent,
+    Future<NativeNotificationRegistry> Function()? registry,
+    bool? android,
+  }) : this._(
+         identity: identity,
+         native: native,
+         isCurrent: isCurrent,
+         registry: registry,
+         android: android,
+         preferences: _localRequestPreferences,
+         isInstallation: true,
+       );
+
+  OwnedNotificationService._({
+    required this.identity,
+    required NotificationService native,
+    required bool Function() isCurrent,
+    required Future<NativeNotificationRegistry> Function()? registry,
+    required bool? android,
+    required Future<NotificationPreferences> Function()? preferences,
+    required bool isInstallation,
   }) : _native = native,
        _isCurrent = isCurrent,
-       _registry = registry ?? NativeNotificationRegistry.open,
+       _registry =
+           registry ??
+           (isInstallation
+               ? NativeNotificationRegistry.openInstallation
+               : NativeNotificationRegistry.open),
        _android = android ?? Platform.isAndroid,
        _preferences =
            preferences ?? NotificationPreferencesStore.scoped(identity).load {
-    if (!identity.isBound)
+    if (isInstallation && !identity.isLocalInstallation) {
+      throw ArgumentError('LOCAL_PROFILE_IDENTITY_REQUIRED');
+    }
+    if (!isInstallation && !identity.isBound) {
       throw ArgumentError('LOCAL_GENERATION_BINDING_REQUIRED');
+    }
   }
+
+  // The installation owns an explicitly requested task reminder. Its facade
+  // never consults the global preferences of a previous authenticated account.
+  static Future<NotificationPreferences> _localRequestPreferences() async =>
+      const NotificationPreferences(
+        allNotifications: true,
+        studyReminders: false,
+        habitReminders: false,
+        medicationReminders: false,
+      );
+
   final LocalDatabaseIdentity identity;
   final NotificationService _native;
   final bool Function() _isCurrent;
@@ -90,6 +143,7 @@ class OwnedNotificationService implements NotificationService {
     bool snooze = false,
     bool immediate = false,
     String? preferenceKey,
+    bool requireUnusedLogicalId = false,
   }) => _serial(() async {
     _current();
     final registry = await _registry();
@@ -123,7 +177,7 @@ class OwnedNotificationService implements NotificationService {
     final row = registry.reserve(identity, logicalId, payload, {
       ...pending.map((p) => p.id),
       ...active.map((p) => p.id).whereType<int>(),
-    });
+    }, requireUnusedLogicalId: requireUnusedLogicalId);
     try {
       final ok = await _native.scheduleOwnedNotification(
         id: row.id,
@@ -177,6 +231,36 @@ class OwnedNotificationService implements NotificationService {
       throw StateError('NATIVE_CANCELLATION_UNKNOWN');
     }
     registry.state(row, 'RETIRED');
+  }
+
+  Future<bool> scheduleLocalTaskReminder({
+    required int id,
+    required DateTime scheduledDate,
+    required String payload,
+  }) {
+    if (!identity.isLocalInstallation)
+      throw StateError('LOCAL_PROFILE_IDENTITY_REQUIRED');
+    return _schedule(
+      id,
+      payload,
+      'general',
+      'Life OS',
+      'Revise suas tarefas no Life OS.',
+      scheduledDate,
+      repeatDaily: true,
+      requireUnusedLogicalId: true,
+    );
+  }
+
+  Future<bool> hasLocalReservation(int id) async {
+    if (!identity.isLocalInstallation)
+      throw StateError('LOCAL_PROFILE_IDENTITY_REQUIRED');
+    _current();
+    final registry = await _registry();
+    _current();
+    return registry
+        .records(identity)
+        .any((row) => row.logicalId == id && row.state != 'RETIRED');
   }
 
   @override

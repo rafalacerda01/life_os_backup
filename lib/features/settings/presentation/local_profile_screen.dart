@@ -82,6 +82,12 @@ class _LocalProfileScreenState extends ConsumerState<LocalProfileScreen> {
                             .setDeviceLock(enabled),
                       ),
               ),
+              ListTile(
+                leading: const Icon(Icons.notifications_outlined),
+                title: const Text('Lembrete de tarefas'),
+                onTap: () =>
+                    Navigator.of(context).pushNamed('/profile/task-reminder'),
+              ),
             ],
           ),
         ),
