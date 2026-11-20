@@ -41,3 +41,17 @@ Run secondary-guard on a fresh disposable package, then local-profile with label
 The local-profile probe now writes through transactionWithSync on an explicit localOnly connection, proves direct DAO enqueue is rejected by native SQLite TEMP triggers, and proves remote permits are refused. Run local-policy-historical on a fresh disposable package after the profile cold-boot reports: it seeds a synthetic historical queue through an explicitly remote-enabled fixture connection, reopens locally, and verifies that updates, deletion and bulk cleanup cannot change the historical row or partially erase the task. assert-local-profile.ps1 requires this fifth report. No real UID data is adopted, no app startup is switched, and module-level migration still requires separate tests.
 
 The fixtures use real native ESP/keysets and legacy cipher setup, actual current app UserDatabaseFactory/schema 11, read-only database integrity/content checks, hashes of stored files and KeyStore alias metadata. Corruption/missing material is injected only in this disposable package. No real key is exported or recovered from a missing KeyStore entry. WAL/SHM/journal/backup sentinels are not falsely presented as valid SQLite migration files.
+
+## UID and bound P1 snapshot
+
+Use a fresh lab directory and the offline profile manifest for the snapshot probe.
+
+```powershell
+.\tools\local_native_storage_recovery\prepare.ps1 -GateDirectory <new-absolute-lab-path> -UidSnapshot
+```
+
+Build `lib/uid_snapshot_probe.dart` as an x86_64 profile target. Check the manifest for `dev.lifeos.recovery.life_os` and confirm it has no `INTERNET` permission. Install on a dedicated offline AVD where this test package is absent. Use the `gate_scenario` Activity extra with `seed`, save `files/gate-result.json`, force-stop this package while its writers still hold the WAL, sync the guest and reboot. Check distinct `/proc/sys/kernel/random/boot_id` values. Archive the first report before replacing the harness output, then launch `verify` on the same data. Read the JSON with `ConvertFrom-Json -AsHashtable` because the primary-file digest uses an empty key.
+
+The expected counts are 28 passing checks in `seed` and 30 in `verify`, with the same `sources` fields across the boots and no `fatal` field. The physical files kept by the archive include the main database, WAL and SHM. The query uses a second copy and rebuilding the WAL index there leaves the archived bytes intact. The test uses distinct native keys and compares only their fingerprints. The result covers encrypted synthetic sources with the current legacy schema and a committed queue row present solely in the WAL.
+
+Use this probe only to prepare the preservation gate. Migration requires independent proof of custody, source quiescence and a verified destination dataset before activation.

@@ -1,4 +1,4 @@
-param([Parameter(Mandatory=$true)][string]$GateDirectory)
+param([Parameter(Mandatory=$true)][string]$GateDirectory, [switch]$UidSnapshot)
 $ErrorActionPreference='Stop'
 $repo=(Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
 $gate=[IO.Path]::GetFullPath($GateDirectory)
@@ -69,6 +69,16 @@ android.buildTypes.matching { it.name == "profile" }.configureEach { isDebuggabl
 '@ | Add-Content "$probe/android/app/build.gradle.kts"
 $manifest="$probe/android/app/src/main/AndroidManifest.xml"
 (Get-Content $manifest -Raw).Replace('<application','<application android:allowBackup="false"') | Set-Content -Encoding utf8 $manifest
+if ($UidSnapshot) {
+  Copy-Item -LiteralPath "$PSScriptRoot/uid_snapshot_probe.dart" -Destination "$probe/lib/uid_snapshot_probe.dart"
+  @"
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <meta-data android:name="io.flutter.embedding.android.EnableImpeller" android:value="false" />
+    </application>
+</manifest>
+"@ | Set-Content -LiteralPath "$probe/android/app/src/profile/AndroidManifest.xml" -Encoding utf8
+}
 Push-Location $probe
 try{& flutter pub get --offline;if($LASTEXITCODE){throw 'Local dependencies unavailable'}}finally{Pop-Location}
 Write-Output "Prepared isolated non-Firebase lab: $probe; copied libraries=$($visited.Count). No ADB or publication action."
