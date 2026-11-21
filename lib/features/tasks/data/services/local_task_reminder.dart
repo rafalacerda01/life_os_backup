@@ -5,7 +5,13 @@ import 'package:life_os/core/services/owned_notification_service.dart';
 
 typedef TaskReminderStatus = ({int? minuteOfDay, bool needsRecovery});
 
-class LocalTaskReminder {
+abstract interface class TaskReminder {
+  Future<TaskReminderStatus> status();
+  Future<bool> create(int minuteOfDay);
+  Future<void> remove();
+}
+
+class LocalTaskReminder implements TaskReminder {
   LocalTaskReminder({
     required LocalDatabaseIdentity identity,
     required bool Function() isCurrent,
@@ -27,6 +33,7 @@ class LocalTaskReminder {
   static const logicalId = 1;
   static const _payloadPrefix = 'local_task_daily_v1/';
 
+  @override
   Future<TaskReminderStatus> status() async {
     final pending = (await _native.pendingNotificationRequests())
         .where((request) => request.id == logicalId)
@@ -49,6 +56,7 @@ class LocalTaskReminder {
     );
   }
 
+  @override
   Future<bool> create(int minuteOfDay) async {
     if (!_validMinute(minuteOfDay))
       throw ArgumentError('LOCAL_TASK_REMINDER_TIME_INVALID');
@@ -67,6 +75,7 @@ class LocalTaskReminder {
     );
   }
 
+  @override
   Future<void> remove() => _native.cancelNotificationOrThrow(logicalId);
 
   bool _validMinute(int minute) => minute >= 0 && minute < 24 * 60;

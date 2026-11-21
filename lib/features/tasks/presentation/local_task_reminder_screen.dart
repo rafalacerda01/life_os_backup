@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:life_os/features/tasks/data/services/local_task_reminder.dart';
 
-final localTaskReminderProvider = Provider<LocalTaskReminder>((ref) {
+final localTaskReminderProvider = Provider<TaskReminder>((ref) {
   throw StateError('LOCAL_TASK_REMINDER_SCOPE_REQUIRED');
 });
 
@@ -22,9 +22,7 @@ class _LocalTaskReminderScreenState
     extends ConsumerState<LocalTaskReminderScreen> {
   bool _busy = false;
 
-  Future<void> _update(
-    Future<void> Function(LocalTaskReminder) operation,
-  ) async {
+  Future<void> _update(Future<void> Function(TaskReminder) operation) async {
     if (_busy) return;
     setState(() => _busy = true);
     try {

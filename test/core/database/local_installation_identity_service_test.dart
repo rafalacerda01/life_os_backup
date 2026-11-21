@@ -38,10 +38,12 @@ void main() {
 
   LocalInstallationIdentityService service({
     String Function()? generator,
+    String? expectedInstallationId,
     Future<String?> Function()? reader,
     Future<void> Function(String)? writer,
     Future<void> Function()? assertFreshInstall,
   }) => LocalInstallationIdentityService(
+    expectedInstallationId: expectedInstallationId,
     readSavedId: reader ?? () async => savedId,
     writeSavedId:
         writer ??
@@ -78,6 +80,21 @@ void main() {
       expect(writeCount, 1);
     },
   );
+
+  for (final marker in [null, anotherId]) {
+    test(
+      'native READY rejects missing or different identity ($marker)',
+      () async {
+        savedId = marker;
+        await expectLater(
+          service(expectedInstallationId: id).resolve(),
+          throwsStateError,
+        );
+        expect(writeCount, 0);
+        expect(savedId, marker);
+      },
+    );
+  }
 
   test('legacy UID-scoped database blocks silent identity reset', () async {
     await File(

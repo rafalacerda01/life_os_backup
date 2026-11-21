@@ -6,6 +6,8 @@ import 'package:uuid/uuid.dart';
 import 'local_installation_identity_service.dart';
 import 'local_installation_storage_inspector.dart';
 
+final localExpectedInstallationIdProvider = Provider<String?>((ref) => null);
+
 /// Prepared but intentionally NOT wired to the app's authenticated boot.
 /// An explicit migration gate must run before replacing Firebase sessions.
 final localInstallationIdentityServiceProvider =
@@ -24,6 +26,7 @@ final localInstallationIdentityServiceProvider =
         iOptions: IOSOptions(accessibility: KeychainAccessibility.first_unlock),
       );
       return LocalInstallationIdentityService(
+        expectedInstallationId: ref.watch(localExpectedInstallationIdProvider),
         readSavedId: () async {
           await inspector.assertNoUnqualifiedSecondaryStores();
           return storage.read(key: LocalInstallationIdentityService.storageKey);

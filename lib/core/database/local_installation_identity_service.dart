@@ -18,6 +18,7 @@ class LocalInstallationIdentityService {
     required this.documentsDirectory,
     required this.newId,
     required this.assertFreshInstall,
+    this.expectedInstallationId,
   });
 
   static const storageKey = 'life_os_local_installation_id_v1';
@@ -40,6 +41,7 @@ class LocalInstallationIdentityService {
   final Future<void> Function(String id) writeSavedId;
   final Future<Directory> Function() documentsDirectory;
   final String Function() newId;
+  final String? expectedInstallationId;
 
   /// Checks other persisted stores (preferences, secure storage, etc.) without
   /// mutating them. A failure must stop first-time local provisioning.
@@ -58,6 +60,9 @@ class LocalInstallationIdentityService {
 
   Future<LocalDatabaseIdentity> _resolve() async {
     final existing = await readSavedId();
+    if (expectedInstallationId != null && existing != expectedInstallationId) {
+      throw StateError('LOCAL_PROFILE_ADMISSION_ID_MISMATCH');
+    }
     if (existing != null &&
         !LocalDatabaseIdentity.isValidLocalInstallationId(existing)) {
       throw StateError('LOCAL_PROFILE_ID_INVALID');

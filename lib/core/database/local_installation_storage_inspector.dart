@@ -15,11 +15,13 @@ class LocalInstallationStorageInspector {
     required this.supportDirectory,
     this.allowInstallationReminders = false,
     this.allowAndroidProfileVerifierCache = false,
+    this.allowOfficialStartupCoordinator = false,
   });
   final Future<Directory> Function() documentsDirectory;
   final Future<Directory> Function() supportDirectory;
   final bool allowInstallationReminders;
   final bool allowAndroidProfileVerifierCache;
+  final bool allowOfficialStartupCoordinator;
   Never _blocked() => throw StateError('LOCAL_PROFILE_MIGRATION_REQUIRED');
 
   Future<void> assertNoUnqualifiedSecondaryStores() async {
@@ -99,6 +101,11 @@ class LocalInstallationStorageInspector {
         followLinks: false,
       )) {
         if (entry is Directory) continue;
+        if (allowOfficialStartupCoordinator &&
+            entry is File &&
+            await _isOfficialStartupFile(entry, support.parent)) {
+          continue;
+        }
         if (allowAndroidProfileVerifierCache &&
             entry is File &&
             p.equals(entry.path, p.join(support.path, 'profileInstalled')) &&
@@ -119,6 +126,21 @@ class LocalInstallationStorageInspector {
           name.startsWith('res_timestamp-') && entry is File;
       if (!engineAsset && !engineTimestamp) _blocked();
     }
+  }
+
+  Future<bool> _isOfficialStartupFile(File file, Directory dataRoot) async {
+    final path = p.join(
+      dataRoot.path,
+      'no_backup',
+      'life_os_native_startup_v1',
+    );
+    if (!p.equals(p.dirname(file.path), path)) return false;
+    final length = await file.length();
+    return switch (p.basename(file.path)) {
+      'session.lock' || 'writer.lock' => length == 0,
+      'startup.json' => length > 0 && length <= 1024,
+      _ => false,
+    };
   }
 
   // AndroidX ProfileVerifier 1.4 writes two big-endian ints and two longs.

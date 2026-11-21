@@ -26,6 +26,25 @@ void main() {
     expect(await file.readAsString(), 'ENGINE');
     expect(await support.list().isEmpty, true);
   });
+  test('candidate recognizes only the exact native startup files', () async {
+    final coordinator = await Directory(
+      '${root.path}/no_backup/life_os_native_startup_v1',
+    ).create(recursive: true);
+    await File('${coordinator.path}/session.lock').create();
+    await File('${coordinator.path}/writer.lock').create();
+    await File('${coordinator.path}/startup.json').writeAsString('{}');
+    await expectLater(inspector.assertFreshDirectories(), throwsStateError);
+
+    final candidate = LocalInstallationStorageInspector(
+      documentsDirectory: () async => documents,
+      supportDirectory: () async => support,
+      allowOfficialStartupCoordinator: true,
+    );
+    await candidate.assertFreshDirectories();
+    await File('${coordinator.path}/startup.pending').create();
+    await expectLater(candidate.assertFreshDirectories(), throwsStateError);
+  });
+
   for (final suffix in ['', '-wal', '-shm', '-journal', '.plaintext-backup']) {
     test(
       'P1 native registry$suffix blocks even with an existing marker',

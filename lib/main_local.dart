@@ -51,16 +51,26 @@ Future<LocalDeviceSession> prepareLocalDevelopmentSession() async {
       (audit?['forbiddenPluginsRegistered'] as List?)?.isEmpty != true) {
     throw StateError('LOCAL_DEVELOPMENT_ANDROID_HOST_REQUIRED');
   }
+  return prepareLocalDeviceSession(
+    inspector: LocalInstallationStorageInspector(
+      documentsDirectory: getApplicationDocumentsDirectory,
+      supportDirectory: getApplicationSupportDirectory,
+      allowInstallationReminders: true,
+      allowAndroidProfileVerifierCache: true,
+    ),
+  );
+}
+
+Future<LocalDeviceSession> prepareLocalDeviceSession({
+  required LocalInstallationStorageInspector inspector,
+  String? expectedInstallationId,
+}) async {
   await initializeDateFormatting('pt_BR');
   final container = ProviderContainer(
     overrides: [
-      localInstallationStorageInspectorProvider.overrideWith(
-        (ref) => LocalInstallationStorageInspector(
-          documentsDirectory: getApplicationDocumentsDirectory,
-          supportDirectory: getApplicationSupportDirectory,
-          allowInstallationReminders: true,
-          allowAndroidProfileVerifierCache: true,
-        ),
+      localInstallationStorageInspectorProvider.overrideWithValue(inspector),
+      localExpectedInstallationIdProvider.overrideWithValue(
+        expectedInstallationId,
       ),
     ],
   );
@@ -101,7 +111,12 @@ ThemeData _theme() => ThemeData(
 );
 
 class LocalFirstDevelopmentApp extends StatefulWidget {
-  const LocalFirstDevelopmentApp({required this.session, super.key});
+  const LocalFirstDevelopmentApp({
+    required this.session,
+    this.taskReminder,
+    super.key,
+  });
+  final TaskReminder? taskReminder;
   final LocalDeviceSession session;
   @override
   State<LocalFirstDevelopmentApp> createState() =>
@@ -128,7 +143,9 @@ class _LocalFirstDevelopmentAppState extends State<LocalFirstDevelopmentApp> {
     overrides: [
       databaseProvider.overrideWithValue(widget.session.requirePrepared()),
       appRuntimeModeProvider.overrideWithValue(AppRuntimeMode.localFirst),
-      localTaskReminderProvider.overrideWithValue(_taskReminder),
+      localTaskReminderProvider.overrideWithValue(
+        widget.taskReminder ?? _taskReminder,
+      ),
     ],
     child: MaterialApp(
       routes: {
