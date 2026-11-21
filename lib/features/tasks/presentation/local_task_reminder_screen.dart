@@ -45,6 +45,10 @@ class _LocalTaskReminderScreenState
     final time = await showTimePicker(
       context: context,
       initialTime: const TimeOfDay(hour: 9, minute: 0),
+      builder: (context, child) => MediaQuery(
+        data: MediaQuery.of(context).copyWith(alwaysUse24HourFormat: true),
+        child: child!,
+      ),
     );
     if (!mounted || time == null) return;
     await _update((service) async {
