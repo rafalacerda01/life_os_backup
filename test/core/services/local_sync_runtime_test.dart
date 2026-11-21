@@ -1,4 +1,7 @@
+import 'dart:convert';
 import 'dart:io';
+
+import 'package:drift/drift.dart';
 import 'package:drift/native.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -6,6 +9,9 @@ import 'package:life_os/core/database/app_database.dart';
 import 'package:life_os/core/database/database_provider.dart';
 import 'package:life_os/core/database/database_sync_policy.dart';
 import 'package:life_os/core/database/local_database_identity.dart';
+import 'package:life_os/core/database/local_profile_bootstrap_journal.dart';
+import 'package:life_os/core/database/user_database_factory.dart';
+import 'package:life_os/core/db/user_db_key_manager.dart';
 import 'package:life_os/core/services/firebase_auth_provider.dart';
 import 'package:life_os/core/services/sync_manager.dart';
 import 'package:life_os/core/services/sync_manager_provider.dart';
@@ -14,6 +20,8 @@ import 'package:life_os/core/services/sync_queue_store.dart';
 import 'package:life_os/core/services/sync_remote_data_source.dart';
 import 'package:life_os/features/auth/presentation/providers/auth_provider.dart'
     show firestoreProvider;
+
+import '../db/fake_secure_storage.dart';
 
 class _Remote implements SyncRemoteDataSource {
   int calls = 0;
@@ -113,26 +121,55 @@ void main() {
     () async {
       final root = await Directory.systemTemp.createTemp('lifeos-local-sync-');
       addTearDown(() => root.delete(recursive: true));
-      final file = File('${root.path}/synthetic.sqlite');
-      final seed = AppDatabase.forUser(
-        identity: identity,
-        executor: NativeDatabase(file),
-      );
-      await seed.insertSyncItem(
-        ownerUid: uid,
-        collection: 'tasks',
-        docId: 'historical',
-        operationType: 'create',
-        payloadJson: '{"preserve":true}',
-        createdAt: 123,
-      );
-      final original = (await seed.select(seed.syncQueueTable).get()).single;
-      await seed.close();
-      final db = AppDatabase.forUser(
-        identity: identity,
-        executor: NativeDatabase(file),
-        syncPolicy: DatabaseSyncPolicy.localOnly,
-      );
+      final storage = FakeSecureStorage();
+      final keys = UserDbKeyManager(storage: storage);
+      UserDatabaseFactory factory(DatabaseSyncPolicy syncPolicy) =>
+          UserDatabaseFactory(
+            keyManager: keys,
+            directoryProvider: () async => root,
+            syncPolicy: syncPolicy,
+          );
+      final seed = await factory(
+        DatabaseSyncPolicy.remoteEnabled,
+      ).open(identity);
+      final SyncQueueTableData original;
+      try {
+        await seed
+            .into(seed.syncQueueTable)
+            .insert(
+              SyncQueueTableCompanion.insert(
+                ownerUid: const Value(uid),
+                collection: 'tasks',
+                docId: 'historical',
+                operationType: 'create',
+                payloadJson: '{"preserve":true}',
+                createdAt: 123,
+                status: const Value(SyncQueuePersistenceStatus.rejected),
+                lastErrorCode: const Value('SYNTHETIC_REMOTE_FAILURE'),
+                attemptCount: const Value(3),
+                lastAttemptAt: const Value(456),
+              ),
+            );
+        original = (await seed.select(seed.syncQueueTable).get()).single;
+        expect(seed.schemaVersion, AppDatabase.currentSchemaVersion);
+      } finally {
+        await seed.closeDatabase();
+      }
+      // A predecessor schema requires a verified READY record before local
+      // admission will upgrade it. Only this encrypted fixture is enrolled.
+      storage.values[LocalProfileBootstrapJournal.storageKey] = jsonEncode({
+        'v': 1,
+        'profile': identity.uid,
+        'namespace': identity.namespace,
+        'file': identity.fileName,
+        'alias': identity.keyAlias,
+        'schema': AppDatabase.currentSchemaVersion,
+        'nonce': '123e4567-e89b-42d3-a456-426614174001',
+        'phase': 'READY',
+      });
+      final originalKey = storage.values[identity.keyAlias]!;
+      keys.clearAllCaches();
+      final db = await factory(DatabaseSyncPolicy.localOnly).open(identity);
       final store = _Store(db), remote = _Remote();
       final manager = SyncManager(
         queueStore: store,
@@ -140,6 +177,8 @@ void main() {
         currentUserId: () => uid,
       );
       try {
+        expect(db.schemaVersion, AppDatabase.currentLocalSchemaVersion);
+        expect(storage.values[identity.keyAlias], originalKey);
         expect(await manager.processPendingItems(), false);
         expect(await manager.prepareForLocalDataDiscard(), false);
         expect((await db.select(db.syncQueueTable).get()).single, original);
