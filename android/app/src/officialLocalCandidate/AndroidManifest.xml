@@ -1,0 +1,61 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+    <uses-permission android:name="android.permission.INTERNET" tools:node="remove" />
+    <uses-permission android:name="com.android.vending.BILLING" tools:node="remove" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" tools:node="remove" />
+    <uses-permission android:name="com.google.android.finsky.permission.BIND_GET_INSTALL_REFERRER_SERVICE" tools:node="remove" />
+    <uses-permission android:name="com.google.android.gms.permission.AD_ID" tools:node="remove" />
+    <uses-permission android:name="android.permission.ACCESS_ADSERVICES_ATTRIBUTION" tools:node="remove" />
+    <uses-permission android:name="android.permission.ACCESS_ADSERVICES_AD_ID" tools:node="remove" />
+    <uses-permission android:name="com.google.android.providers.gsf.permission.READ_GSERVICES" tools:node="remove" />
+    <application>
+        <meta-data android:name="io.flutter.embedding.android.EnableImpeller" android:value="false" />
+        <activity android:name=".MainActivity" tools:node="remove" />
+        <activity android:name=".candidate.OfficialStartupActivity" android:exported="true"
+            android:launchMode="singleTop" android:theme="@style/NormalTheme"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
+            android:hardwareAccelerated="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+        <receiver android:name=".candidate.OfficialTaskAlarmReceiver" android:exported="false"
+            android:process=":local_candidate_worker">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
+        <receiver android:name="com.dexterous.flutterlocalnotifications.ScheduledNotificationReceiver" tools:node="remove" />
+        <receiver android:name="com.dexterous.flutterlocalnotifications.ScheduledNotificationBootReceiver" tools:node="remove" />
+        <receiver android:name="com.dexterous.flutterlocalnotifications.ActionBroadcastReceiver" tools:node="remove" />
+        <provider android:name="com.google.firebase.provider.FirebaseInitProvider" tools:node="remove" />
+        <provider android:name="androidx.startup.InitializationProvider" tools:node="remove" />
+        <provider android:name="io.flutter.plugins.imagepicker.ImagePickerFileProvider" tools:node="remove" />
+        <provider android:name="dev.fluttercommunity.plus.share.ShareFileProvider" tools:node="remove" />
+        <service android:name="com.google.firebase.components.ComponentDiscoveryService" tools:node="remove" />
+        <service android:name="com.google.firebase.sessions.SessionLifecycleService" tools:node="remove" />
+        <service android:name="com.google.android.gms.metadata.ModuleDependencies" tools:node="remove" />
+        <service android:name="androidx.credentials.playservices.CredentialProviderMetadataHolder" tools:node="remove" />
+        <service android:name="com.google.android.gms.auth.api.signin.RevocationBoundService" tools:node="remove" />
+        <service android:name="com.google.android.gms.measurement.AppMeasurementService" tools:node="remove" />
+        <service android:name="com.google.android.gms.measurement.AppMeasurementJobService" tools:node="remove" />
+        <service android:name="com.google.android.datatransport.runtime.backends.TransportBackendDiscovery" tools:node="remove" />
+        <service android:name="com.google.android.datatransport.runtime.scheduling.jobscheduling.JobInfoSchedulerService" tools:node="remove" />
+        <receiver android:name="com.google.android.gms.measurement.AppMeasurementReceiver" tools:node="remove" />
+        <receiver android:name="com.google.android.datatransport.runtime.scheduling.jobscheduling.AlarmManagerSchedulerBroadcastReceiver" tools:node="remove" />
+        <receiver android:name="androidx.profileinstaller.ProfileInstallReceiver" tools:node="remove" />
+        <receiver android:name="dev.fluttercommunity.plus.share.SharePlusPendingIntent" tools:node="remove" />
+        <activity android:name="io.flutter.plugins.urllauncher.WebViewActivity" tools:node="remove" />
+        <activity android:name="com.google.firebase.auth.internal.GenericIdpActivity" tools:node="remove" />
+        <activity android:name="com.google.firebase.auth.internal.RecaptchaActivity" tools:node="remove" />
+        <activity android:name="androidx.credentials.playservices.controllers.identityauth.HiddenActivity" tools:node="remove" />
+        <activity android:name="androidx.credentials.playservices.controllers.identitycredentials.IdentityCredentialApiHiddenActivity" tools:node="remove" />
+        <activity android:name="com.google.android.gms.auth.api.signin.internal.SignInHubActivity" tools:node="remove" />
+        <activity android:name="com.android.billingclient.api.ProxyBillingActivity" tools:node="remove" />
+        <activity android:name="com.android.billingclient.api.ProxyBillingActivityV2" tools:node="remove" />
+        <activity android:name="com.google.android.gms.common.api.GoogleApiActivity" tools:node="remove" />
+        <activity android:name="com.google.android.play.core.common.PlayCoreDialogWrapperActivity" tools:node="remove" />
+    </application>
+</manifest>

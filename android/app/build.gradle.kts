@@ -57,6 +57,10 @@ require(fenceFixture == null || (!localLab && fenceFixture in listOf("uid", "p1"
     "The native fence requires a dedicated Android fixture package."
 }
 val fenceLab = fenceFixture != null
+val officialCandidate = providers.gradleProperty("lifeOsOfficialLocalCandidate").orNull == "true"
+val candidateUpdate = providers.gradleProperty("lifeOsOfficialCandidateUpdate").orNull == "true"
+require(!officialCandidate || (!localLab && !fenceLab))
+require(!candidateUpdate || officialCandidate)
 val fenceUpdate = providers.gradleProperty("lifeOsFenceUpdate").orNull == "true"
 require(!fenceUpdate || fenceLab)
 
@@ -78,7 +82,7 @@ android {
         minSdk = if (fenceLab) 28 else 24
         targetSdk = 36 
         multiDexEnabled = true // Corrigido
-        versionCode = flutter.versionCode + if (fenceUpdate) 1 else 0
+        versionCode = flutter.versionCode + if (fenceUpdate || candidateUpdate) 1 else 0
         versionName = flutter.versionName
     }
 
@@ -105,6 +109,13 @@ android {
         buildTypes.getByName("profile").isDebuggable = true
         sourceSets.getByName("profile").manifest.srcFile("src/fenceLab/AndroidManifest.xml")
     }
+    if (officialCandidate) {
+        buildTypes.getByName("profile").apply {
+            isDebuggable = true
+            signingConfig = signingConfigs.getByName("debug")
+        }
+        sourceSets.getByName("profile").manifest.srcFile("src/officialLocalCandidate/AndroidManifest.xml")
+    }
 }
 
 if (fenceLab) {
@@ -114,7 +125,14 @@ if (fenceLab) {
     }
 }
 
-if (localLab || fenceLab) {
+if (officialCandidate) {
+    kotlin.sourceSets.getByName("profile").kotlin.srcDir("src/officialLocalCandidate/kotlin")
+    androidComponents.beforeVariants(androidComponents.selector()) {
+        if (it.buildType != "profile") it.enable = false
+    }
+}
+
+if (localLab || fenceLab || officialCandidate) {
     androidComponents.beforeVariants(androidComponents.selector().withBuildType("release")) {
         it.enable = false
     }
@@ -128,6 +146,10 @@ tasks.matching { it.name.startsWith("compileFlutterBuild") }.configureEach {
         val target = project.findProperty("target")?.toString()?.replace('\\', '/') ?: "lib/main.dart"
         val allowed = listOf("lib/main_local.dart", "integration_test/local_tasks_native_test.dart", "integration_test/local_finance_native_test.dart", "integration_test/local_habits_native_test.dart", "integration_test/local_goals_native_test.dart", "integration_test/local_checkin_native_test.dart", "integration_test/local_study_native_test.dart", "integration_test/local_focus_native_test.dart", "integration_test/local_health_native_test.dart", "integration_test/local_home_native_test.dart", "integration_test/local_market_native_test.dart", "integration_test/local_profile_native_test.dart", "integration_test/local_task_reminder_native_test.dart", "integration_test/local_notification_center_native_test.dart")
         val localTarget = allowed.any { target == it || target.endsWith("/$it") }
+        val candidateTarget = "lib/main_official_local_candidate.dart"
+        if (officialCandidate != (target == candidateTarget || target.endsWith("/$candidateTarget"))) {
+            throw GradleException("The official Local-First candidate requires its explicit profile target.")
+        }
         val fenceTarget = "integration_test/native_writer_fence_probe.dart"
         if (fenceLab != (target == fenceTarget || target.endsWith("/$fenceTarget"))) {
             throw GradleException("The native writer fence probe requires its isolated package.")
