@@ -58,7 +58,7 @@ require(fenceFixture == null || (!localLab && fenceFixture in listOf("uid", "p1"
 }
 val fenceLab = fenceFixture != null
 val officialCandidate = providers.gradleProperty("lifeOsOfficialLocalCandidate").orNull == "true"
-val candidateUpdate = providers.gradleProperty("lifeOsOfficialCandidateUpdate").orNull == "true"
+val candidateUpdate = providers.gradleProperty("lifeOsOfficialLocalCandidateUpdate").orNull == "true"
 require(!officialCandidate || (!localLab && !fenceLab))
 require(!candidateUpdate || officialCandidate)
 val fenceUpdate = providers.gradleProperty("lifeOsFenceUpdate").orNull == "true"
